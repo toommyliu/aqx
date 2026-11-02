@@ -88,6 +88,19 @@ struct Prompt {
     ask: Ask,
     input: String,
     pick: Option<usize>,
+    matches: Vec<String>,
+}
+
+impl Prompt {
+    fn new(ask: Ask) -> Self {
+        let mut prompt = Prompt { ask, input: String::new(), pick: None, matches: Vec::new() };
+        prompt.find_matches();
+        prompt
+    }
+
+    fn find_matches(&mut self) {
+        self.matches = if self.ask == Ask::Run { scripts_matching(&self.input) } else { Vec::new() };
+    }
 }
 
 #[derive(Default)]
@@ -210,8 +223,16 @@ impl App {
                     prompt.pick = Some(at);
                     prompt.input.clone_from(&self.recent[n - 1 - at]);
                 }
+                KeyCode::Tab => match prompt.matches.as_slice() {
+                    [] => {}
+                    [only] if !only.ends_with('/') => prompt.input = format!("{only} "),
+                    many => prompt.input = shared_prefix(many).to_string(),
+                },
                 KeyCode::Char(c) => prompt.input.push(c),
                 _ => {}
+            }
+            if let Some(prompt) = &mut self.prompt {
+                prompt.find_matches();
             }
             return false;
         }
@@ -242,8 +263,8 @@ impl App {
                 self.filter = self.filter.next();
                 self.scroll = 0;
             }
-            KeyCode::Char('o') => self.prompt = Some(Prompt { ask: Ask::Run, input: String::new(), pick: None }),
-            KeyCode::Char('c') => self.prompt = Some(Prompt { ask: Ask::Chat, input: String::new(), pick: None }),
+            KeyCode::Char('o') => self.prompt = Some(Prompt::new(Ask::Run)),
+            KeyCode::Char('c') => self.prompt = Some(Prompt::new(Ask::Chat)),
             KeyCode::Char('s') => self.act(fleet, Command::Stop, "stopping the script"),
             KeyCode::Char('r') => self.act(fleet, Command::Restart, "restarting the script"),
             KeyCode::Char('x') => self.act(fleet, Command::Logout, "logging out"),
@@ -288,18 +309,77 @@ impl App {
 }
 
 fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
-    let [body, footer] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(f.area());
+    let matches = app.prompt.as_ref().map_or(&[][..], |p| &p.matches);
+    let [body, suggestions, footer] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(u16::from(!matches.is_empty())), Constraint::Length(1)]).areas(f.area());
     match app.open.and_then(|i| shown.get(i)) {
         Some(bot) => draw_bot(f, body, bot, app),
         None => draw_fleet(f, body, fleet, app, shown),
     }
+    draw_matches(f, suggestions, matches);
     draw_footer(f, footer, fleet, app);
+}
+
+fn scripts_matching(input: &str) -> Vec<String> {
+    let input = input.trim_start();
+    if input.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    let (dir, prefix) = input.split_at(input.rfind('/').map_or(0, |i| i + 1));
+    let Ok(entries) = std::fs::read_dir(if dir.is_empty() { "." } else { dir }) else { return Vec::new() };
+    let mut matches: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            if !name.starts_with(prefix) || (name.starts_with('.') && !prefix.starts_with('.')) || name.contains(char::is_whitespace) {
+                return None;
+            }
+            let kind = entry.file_type().ok()?;
+            if kind.is_dir() || (kind.is_symlink() && entry.path().is_dir()) {
+                Some(format!("{dir}{name}/"))
+            } else if [".ts", ".js", ".mjs"].iter().any(|ext| name.ends_with(ext)) && !name.ends_with(".d.ts") {
+                Some(format!("{dir}{name}"))
+            } else {
+                None
+            }
+        })
+        .collect();
+    if prefix == "." || prefix == ".." {
+        matches.push(format!("{dir}../"));
+    }
+    matches.sort();
+    matches
+}
+
+fn shared_prefix(sorted: &[String]) -> &str {
+    let (Some(first), Some(last)) = (sorted.first(), sorted.last()) else { return "" };
+    let end = first.char_indices().zip(last.chars()).find(|((_, a), b)| a != b).map_or(first.len(), |((i, _), _)| i);
+    &first[..end]
+}
+
+fn draw_matches(f: &mut Frame, area: Rect, matches: &[String]) {
+    let mut spans = vec![Span::raw(" ")];
+    let mut used = 1;
+    for (i, path) in matches.iter().enumerate() {
+        let name = &path[path.trim_end_matches('/').rfind('/').map_or(0, |at| at + 1)..];
+        let span = if name.ends_with('/') { Span::raw(name).blue() } else { Span::raw(name) };
+        let gap = if i == 0 { "" } else { "  " };
+        let after = matches.len() - i - 1;
+        let reserve = if after == 0 { 0 } else { format!("  +{after} more").len() };
+        if used + gap.len() + span.width() + reserve > usize::from(area.width) {
+            spans.push(Span::raw(format!("{gap}+{} more", matches.len() - i)).dark_gray());
+            break;
+        }
+        used += gap.len() + span.width();
+        spans.extend([Span::raw(gap), span]);
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App) {
     if let Some(prompt) = &app.prompt {
         let label = match prompt.ask {
-            Ask::Run => " run (script.ts KEY=VALUE…, ↑↓ recent): ",
+            Ask::Run => " run (script.ts KEY=VALUE…, tab complete, ↑↓ recent): ",
             Ask::Chat => " zone chat: ",
         };
         return f.render_widget(Paragraph::new(Line::from(vec![Span::raw(label).bold(), Span::raw(prompt.input.as_str()), Span::raw("█")])), area);
@@ -710,6 +790,58 @@ mod tests {
         publish(&hub, &fleet.cells[0], &farm_world());
         let shown = screen(&fleet, &mut App { open: Some(0), ..App::default() }, 110);
         assert!(shown.contains(" hero · Twilly · farm-1"), "{shown}");
+    }
+
+    #[test]
+    fn tab_completes_script_paths_and_lists_the_matches() {
+        let dir = std::env::temp_dir().join(format!("aqx-tui-tests-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("quests")).unwrap();
+        for file in ["farm.ts", "fight.js", "loop.mjs", "aqx.d.ts", "my farm.ts", "notes.md", ".secret.ts", "quests/daily.ts"] {
+            std::fs::write(dir.join(file), "").unwrap();
+        }
+        let root = format!("{}/", dir.display());
+        let (fleet, _hub) = fleet(&["main"]);
+        let mut app = App { open: Some(0), ..App::default() };
+        let press = |app: &mut App, code: KeyCode| app.handle(KeyEvent::from(code), &fleet, &[]);
+        let typed = |app: &mut App, text: &str| text.chars().for_each(|c| _ = press(app, KeyCode::Char(c)));
+        let input = |app: &App| app.prompt.as_ref().unwrap().input.clone();
+
+        press(&mut app, KeyCode::Char('o'));
+        typed(&mut app, &format!(" {root}"));
+        let shown = screen(&fleet, &mut app, 100);
+        assert!(shown.contains(" farm.ts  fight.js  loop.mjs  quests/"), "{shown}");
+        for hidden in ["aqx.d.ts", "my farm.ts", "notes.md", ".secret.ts"] {
+            assert!(!shown.contains(hidden), "{hidden} is listed: {shown}");
+        }
+        let narrow = screen(&fleet, &mut app, 20);
+        assert!(narrow.contains(" farm.ts  +3 more"), "{narrow}");
+
+        typed(&mut app, "f");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(input(&app), format!("{root}f"));
+        typed(&mut app, "a");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(input(&app), format!("{root}farm.ts "));
+        assert!(!screen(&fleet, &mut app, 100).contains("fight.js"));
+
+        app.prompt = Some(Prompt::new(Ask::Run));
+        typed(&mut app, &format!("{root}q"));
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(input(&app), format!("{root}quests/"));
+        typed(&mut app, "..");
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(input(&app), format!("{root}quests/../"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_last_match_takes_no_gap_after_it() {
+        let matches = ["farm.ts".to_string(), "fight.js".to_string()];
+        let mut terminal = Terminal::new(TestBackend::new(18, 1)).unwrap();
+        terminal.draw(|f| draw_matches(f, f.area(), &matches)).unwrap();
+        let row: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert_eq!(row, " farm.ts  fight.js");
     }
 
     #[test]
