@@ -1,21 +1,26 @@
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
-use aqx_protocol::{Decoder, Framer, Message, Out};
+use aqx_protocol::{Decoder, Framer, Message, MonMapId, Out};
 use mio::net::TcpStream;
 use mio::{Events, Interest, Token};
 
 use crate::api::Server;
 use crate::control::Control;
 use crate::event::Event;
+use crate::pacer::{Kind, Pacer};
 use crate::record::Recorder;
-use crate::world::{self, World};
+use crate::world::{self, State, World};
 
 pub const CLIENT_VERSION: &str = "5.31";
 
 const SOCKET: Token = Token(0);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const RESPAWN_DELAY: Duration = Duration::from_secs(11);
+const RESPAWN_RETRY: Duration = Duration::from_secs(10);
+const SLOW_DOWN: [&str; 3] = ["slow down", "too soon", "spamming"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
@@ -62,6 +67,14 @@ pub struct Login<'a> {
     pub version: &'a str,
 }
 
+type WatchFn = Box<dyn FnMut(&Phase, &World)>;
+
+struct Watcher {
+    every: Duration,
+    next: Instant,
+    f: WatchFn,
+}
+
 pub struct Session {
     control: Control,
     events: Events,
@@ -73,6 +86,13 @@ pub struct Session {
     sink: fn(&Event),
     login: (String, String, String),
     inventory_requested: bool,
+    pacer: Pacer,
+    counter: u32,
+    respawn_at: Option<Instant>,
+    respawn_sent: bool,
+    watcher: Option<Watcher>,
+    pub(crate) casts: HashMap<String, Instant>,
+    pub(crate) joined: Option<aqx_protocol::AreaId>,
     pub world: World,
     pub phase: Phase,
 }
@@ -105,6 +125,13 @@ impl Session {
             sink,
             login: (login.user.into(), login.token.into(), login.version.into()),
             inventory_requested: false,
+            pacer: Pacer::new(Instant::now()),
+            counter: 0,
+            respawn_at: None,
+            respawn_sent: false,
+            watcher: None,
+            casts: HashMap::new(),
+            joined: None,
             world: World::default(),
             phase: Phase::Handshaking,
         };
@@ -117,24 +144,30 @@ impl Session {
         (self.control, self.recorder)
     }
 
+    pub fn watch(&mut self, every: Duration, f: impl FnMut(&Phase, &World) + 'static) {
+        self.watcher = Some(Watcher { every, next: Instant::now(), f: Box::new(f) });
+    }
+
     pub fn pump_until<T>(&mut self, deadline: Option<Instant>, mut done: impl FnMut(&Session) -> Option<T>) -> Result<T, Halt> {
         loop {
             if let Some(v) = done(self) {
                 return Ok(v);
             }
             if let Phase::Closed(why) = &self.phase {
-                return Err(Halt::Closed(why.clone()));
+                let why = why.clone();
+                self.fire_watcher(Instant::now(), true);
+                return Err(Halt::Closed(why));
             }
             if self.control.stop_requested() {
                 return Err(Halt::Stopped);
             }
-            let timeout = match deadline {
-                Some(d) => match d.checked_duration_since(Instant::now()) {
-                    Some(left) if !left.is_zero() => Some(left),
-                    _ => return Err(Halt::Timeout),
-                },
-                None => None,
-            };
+            let now = Instant::now();
+            self.run_timers(now);
+            if deadline.is_some_and(|d| now >= d) {
+                return Err(Halt::Timeout);
+            }
+            let wake = [deadline, self.respawn_at, self.watcher.as_ref().map(|w| w.next)].into_iter().flatten().min();
+            let timeout = wake.map(|w| w.saturating_duration_since(now));
             match self.control.poll.poll(&mut self.events, timeout) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -142,6 +175,56 @@ impl Session {
             }
             self.read_socket();
             self.flush();
+        }
+    }
+
+    pub(crate) fn idle_until(&mut self, at: Instant) -> Result<(), Halt> {
+        match self.pump_until(Some(at), |_| None::<()>) {
+            Err(Halt::Timeout) => Ok(()),
+            other => other,
+        }
+    }
+
+    pub(crate) fn send_paced(&mut self, out: Out, kind: Kind) -> Result<(), Halt> {
+        let ready = self.pacer.ready_at(kind, Instant::now());
+        self.idle_until(ready)?;
+        self.pacer.sent(kind, Instant::now());
+        self.send(out);
+        Ok(())
+    }
+
+    pub(crate) fn pacer_ready_at(&self, kind: Kind, now: Instant) -> Instant {
+        self.pacer.ready_at(kind, now)
+    }
+
+    pub(crate) fn next_counter(&mut self) -> u32 {
+        self.counter += 1;
+        self.counter - 1
+    }
+
+    fn run_timers(&mut self, now: Instant) {
+        if self.respawn_at.is_some_and(|at| now >= at) {
+            match (&self.world.me, &self.world.area) {
+                (Some(me), Some(area)) if me.vitals.state == State::Dead => {
+                    let (room, eid) = (area.id, me.eid);
+                    self.send(Out::Respawn { room, eid });
+                    self.respawn_sent = true;
+                    self.respawn_at = Some(now + RESPAWN_RETRY);
+                }
+                (Some(me), _) if me.vitals.state != State::Dead => self.respawn_at = None,
+                _ => self.respawn_at = Some(now + Duration::from_secs(1)),
+            }
+        }
+        self.fire_watcher(now, false);
+    }
+
+    fn fire_watcher(&mut self, now: Instant, force: bool) {
+        if let Some(mut watcher) = self.watcher.take() {
+            if force || now >= watcher.next {
+                (watcher.f)(&self.phase, &self.world);
+                watcher.next = now + watcher.every;
+            }
+            self.watcher = Some(watcher);
         }
     }
 
@@ -154,7 +237,7 @@ impl Session {
         let _ = self.pump_until(Some(Instant::now() + Duration::from_secs(3)), |_| None::<()>);
     }
 
-    fn send(&mut self, out: Out) {
+    pub(crate) fn send(&mut self, out: Out) {
         let start = self.outbox.len();
         out.encode(&mut self.outbox);
         let sent = String::from_utf8_lossy(&self.outbox[start..self.outbox.len() - 1]).into_owned();
@@ -247,7 +330,21 @@ impl Session {
             }
             Event::LoginRejected { reason } => self.close(Disconnect::Rejected(reason.clone())),
             Event::LoggedInElsewhere => self.close(Disconnect::LoggedInElsewhere),
-            Event::Joined { .. } => self.on_joined(),
+            Event::Joined { .. } => {
+                self.on_joined();
+                self.joined = self.world.area.as_ref().map(|a| a.id);
+            }
+            Event::Died => self.respawn_at = Some(Instant::now() + RESPAWN_DELAY),
+            Event::Respawned => {
+                self.respawn_at = None;
+                if std::mem::take(&mut self.respawn_sent)
+                    && let Some(room) = self.world.area.as_ref().map(|a| a.id)
+                {
+                    self.send(Out::MoveToCell { room, cell: "Enter", pad: "Spawn" });
+                    self.moved_to("Enter", "Spawn");
+                }
+            }
+            Event::Warning { text } if SLOW_DOWN.iter().any(|w| text.to_lowercase().contains(w)) => self.pacer.warned(Instant::now()),
             Event::InventoryLoaded { items } if self.phase == Phase::Loading => {
                 self.phase = Phase::Ready;
                 (self.sink)(&Event::Ready { items: *items });
@@ -256,13 +353,26 @@ impl Session {
         }
     }
 
+    pub(crate) fn moved_to(&mut self, cell: &str, pad: &str) {
+        if let Some(me) = &mut self.world.me {
+            me.cell = cell.into();
+            me.pad = pad.into();
+        }
+        self.world.rev += 1;
+        let (Some(me), Some(area)) = (&self.world.me, &self.world.area) else { return };
+        let aggressive: Vec<MonMapId> = area.monsters.iter().filter(|m| m.cell == me.cell && m.aggressive && m.alive()).map(|m| m.map_id).collect();
+        if !aggressive.is_empty() {
+            let room = area.id;
+            self.send(Out::Aggro { room, monsters: &aggressive });
+        }
+    }
+
     fn on_joined(&mut self) {
-        let (Some(me), Some(area)) = (&mut self.world.me, &self.world.area) else { return };
-        me.cell = "Enter".into();
-        me.pad = "Spawn".into();
+        let (Some(me), Some(area)) = (&self.world.me, &self.world.area) else { return };
         let (eid, room) = (me.eid, area.id);
         let others: Vec<_> = area.players.iter().map(|p| p.eid).collect();
         self.send(Out::MoveToCell { room, cell: "Enter", pad: "Spawn" });
+        self.moved_to("Enter", "Spawn");
         self.send(Out::RetrieveUserData { room, eid });
         if !others.is_empty() {
             self.send(Out::RetrieveUserDatas { room, others: &others });

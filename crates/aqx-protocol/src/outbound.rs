@@ -1,6 +1,12 @@
 use std::io::Write;
 
-use crate::{AreaId, EntityId};
+use crate::{AreaId, EntityId, ItemId, MonMapId};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Aim {
+    Monster(MonMapId),
+    Player(EntityId),
+}
 
 pub enum Out<'a> {
     VerChk,
@@ -13,6 +19,12 @@ pub enum Out<'a> {
     RetrieveUserDatas { room: AreaId, others: &'a [EntityId] },
     RetrieveInventory { room: AreaId, eid: EntityId },
     Logout,
+    Skill { counter: u32, slot: &'a str, targets: &'a [Aim] },
+    Rest,
+    Emote(&'a str),
+    Respawn { room: AreaId, eid: EntityId },
+    PickUp { room: AreaId, item: ItemId },
+    Aggro { room: AreaId, monsters: &'a [MonMapId] },
     Raw(&'a str),
 }
 
@@ -38,6 +50,27 @@ impl Out<'_> {
             }
             Out::RetrieveInventory { room, eid } => write!(buf, "%xt%zm%retrieveInventory%{room}%{eid}%").unwrap(),
             Out::Logout => buf.extend_from_slice(b"%xt%zm%cmd%1%logout%"),
+            Out::Skill { counter, slot, targets } => {
+                write!(buf, "%xt%zm%gar%1%{counter}%").unwrap();
+                for (i, aim) in targets.iter().enumerate() {
+                    let sep = if i == 0 { "" } else { "," };
+                    match aim {
+                        Aim::Monster(id) => write!(buf, "{sep}{slot}>m:{id}").unwrap(),
+                        Aim::Player(eid) => write!(buf, "{sep}{slot}>p:{eid}").unwrap(),
+                    }
+                }
+                buf.extend_from_slice(b"%wvz%");
+            }
+            Out::Rest => buf.extend_from_slice(b"%xt%zm%restRequest%1%%"),
+            Out::Emote(name) => write!(buf, "%xt%zm%emotea%1%{name}%").unwrap(),
+            Out::Respawn { room, eid } => write!(buf, "%xt%zm%resPlayerTimed%{room}%{eid}%").unwrap(),
+            Out::PickUp { room, item } => write!(buf, "%xt%zm%getDrop%{room}%{item}%").unwrap(),
+            Out::Aggro { room, monsters } => {
+                write!(buf, "%xt%zm%aggroMon%{room}%").unwrap();
+                for id in *monsters {
+                    write!(buf, "{id}%").unwrap();
+                }
+            }
             Out::Raw(text) => buf.extend_from_slice(text.as_bytes()),
         }
         buf.push(0);
@@ -64,6 +97,25 @@ mod tests {
         assert_eq!(encoded(Out::FirstJoin), "%xt%zm%firstJoin%1%\0");
         assert_eq!(encoded(Out::ClearIgnoreList), "%xt%zm%cmd%1%ignoreList%$clearAll%\0");
         assert_eq!(encoded(Out::Logout), "%xt%zm%cmd%1%logout%\0");
+    }
+
+    #[test]
+    fn encodes_combat_and_upkeep_as_the_client_sends_them() {
+        let room = AreaId(168500);
+        assert_eq!(
+            encoded(Out::Skill { counter: 14, slot: "aa", targets: &[Aim::Monster(MonMapId(48))] }),
+            "%xt%zm%gar%1%14%aa>m:48%wvz%\0"
+        );
+        assert_eq!(
+            encoded(Out::Skill { counter: 3, slot: "a2", targets: &[Aim::Monster(MonMapId(1)), Aim::Monster(MonMapId(2))] }),
+            "%xt%zm%gar%1%3%a2>m:1,a2>m:2%wvz%\0"
+        );
+        assert_eq!(encoded(Out::Skill { counter: 0, slot: "a4", targets: &[Aim::Player(EntityId(1001))] }), "%xt%zm%gar%1%0%a4>p:1001%wvz%\0");
+        assert_eq!(encoded(Out::Rest), "%xt%zm%restRequest%1%%\0");
+        assert_eq!(encoded(Out::Emote("rest")), "%xt%zm%emotea%1%rest%\0");
+        assert_eq!(encoded(Out::Respawn { room, eid: EntityId(1001) }), "%xt%zm%resPlayerTimed%168500%1001%\0");
+        assert_eq!(encoded(Out::PickUp { room, item: ItemId(1528) }), "%xt%zm%getDrop%168500%1528%\0");
+        assert_eq!(encoded(Out::Aggro { room, monsters: &[MonMapId(1), MonMapId(2)] }), "%xt%zm%aggroMon%168500%1%2%\0");
     }
 
     #[test]

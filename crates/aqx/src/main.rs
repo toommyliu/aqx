@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use aqx_core::{CLIENT_VERSION, Control, Disconnect, Halt, Login, Phase, Recorder, Server, Session, login};
+use aqx_core::{ActError, CLIENT_VERSION, Control, Disconnect, Fight, Halt, Login, Phase, Recorder, Server, Session, login};
 use clap::{Args, Parser, Subcommand};
 use output::{Mode, say};
 
@@ -60,6 +60,55 @@ struct RunArgs {
     json: bool,
     #[arg(long, help = "Print one line per event instead of the TUI")]
     plain: bool,
+    #[arg(
+        long = "do",
+        value_name = "STEP",
+        value_parser = parse_task,
+        help = "Run a step once ready: \"join MAP [CELL PAD]\", \"jump CELL [PAD]\", \"kill NAME [COUNT]\", \"pickup ITEM\" or \"rest\". Repeatable"
+    )]
+    tasks: Vec<Task>,
+}
+
+#[derive(Clone, Debug)]
+enum Task {
+    Join { map: String, cell: Option<(String, String)> },
+    Jump { cell: String, pad: String },
+    Kill { name: String, count: u32 },
+    Pickup(String),
+    Rest,
+}
+
+impl std::fmt::Display for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Task::Join { map, cell: None } => write!(f, "join {map}"),
+            Task::Join { map, cell: Some((cell, pad)) } => write!(f, "join {map} {cell} {pad}"),
+            Task::Jump { cell, pad } => write!(f, "jump {cell} {pad}"),
+            Task::Kill { name, count: 1 } => write!(f, "kill {name}"),
+            Task::Kill { name, count } => write!(f, "kill {name} {count}"),
+            Task::Pickup(item) => write!(f, "pickup {item}"),
+            Task::Rest => write!(f, "rest"),
+        }
+    }
+}
+
+fn parse_task(step: &str) -> Result<Task, String> {
+    let words: Vec<&str> = step.split_whitespace().collect();
+    let text = |ws: &[&str]| ws.join(" ");
+    Ok(match words.as_slice() {
+        ["join", map] => Task::Join { map: map.to_string(), cell: None },
+        ["join", map, cell, pad] => Task::Join { map: map.to_string(), cell: Some((cell.to_string(), pad.to_string())) },
+        ["jump", cell] => Task::Jump { cell: cell.to_string(), pad: "Left".into() },
+        ["jump", cell, pad] => Task::Jump { cell: cell.to_string(), pad: pad.to_string() },
+        ["kill", rest @ ..] if !rest.is_empty() => match rest.split_last().map(|(last, name)| (last.parse::<u32>(), name)) {
+            Some((Ok(0), _)) => return Err("kill needs a count of at least 1".into()),
+            Some((Ok(count), name)) if !name.is_empty() => Task::Kill { name: text(name), count },
+            _ => Task::Kill { name: text(rest), count: 1 },
+        },
+        ["pickup", item @ ..] if !item.is_empty() => Task::Pickup(text(item)),
+        ["rest"] => Task::Rest,
+        _ => return Err("expected join MAP [CELL PAD], jump CELL [PAD], kill NAME [COUNT], pickup ITEM or rest".into()),
+    })
 }
 
 struct Setup {
@@ -91,7 +140,7 @@ fn main() -> ExitCode {
 }
 
 fn run(args: RunArgs) -> Result<(), String> {
-    let RunArgs { script, account, config, server, record, client_version, json, plain } = args;
+    let RunArgs { script, account, config, server, record, client_version, json, plain, tasks } = args;
     if let Some(script) = script {
         return Err(format!("can't run {}: scripts aren't supported yet. Run without one to log in", script.display()));
     }
@@ -115,7 +164,7 @@ fn run(args: RunArgs) -> Result<(), String> {
 
     if json || plain || !std::io::stdout().is_terminal() {
         output::init(if json { Mode::Json } else { Mode::Plain });
-        return run_bot(setup, control, recorder, Watch::Status);
+        return run_bot(setup, control, recorder, Watch::Status, tasks);
     }
     let (tx, rx) = mpsc::sync_channel(1024);
     output::init(Mode::Tui(tx));
@@ -123,12 +172,12 @@ fn run(args: RunArgs) -> Result<(), String> {
     let watch = Watch::Snapshots(slot.clone());
     let bot = std::thread::Builder::new()
         .name("bot".into())
-        .spawn(move || run_bot(setup, control, recorder, watch))
+        .spawn(move || run_bot(setup, control, recorder, watch, tasks))
         .map_err(|e| e.to_string())?;
     tui::run(rx, slot, stop, bot)
 }
 
-fn run_bot(setup: Setup, mut control: Control, mut recorder: Option<Recorder>, watch: Watch) -> Result<(), String> {
+fn run_bot(setup: Setup, mut control: Control, mut recorder: Option<Recorder>, watch: Watch, tasks: Vec<Task>) -> Result<(), String> {
     let mut version = setup.version.clone();
     loop {
         say("aqx", format_args!("logging in as {} at {}, config {}", setup.user, setup.api, setup.config.display()));
@@ -138,11 +187,8 @@ fn run_bot(setup: Setup, mut control: Control, mut recorder: Option<Recorder>, w
         let login = Login { user: &setup.user, token: &account.token, version: &version };
         let mut session =
             Session::connect(control, server, login, recorder, output::event).map_err(|e| format!("can't reach {}: {e}", server.name))?;
-        let outcome = watch_until(&mut session, &server.name, &watch, Some(Instant::now() + READY_TIMEOUT), |s| {
-            (s.phase == Phase::Ready).then_some(())
-        })
-        .and_then(|()| watch_until(&mut session, &server.name, &watch, None, |_| None::<()>));
-        match outcome {
+        watch_session(&mut session, &watch, &server.name);
+        match live(&mut session, &tasks) {
             Ok(()) => return Ok(()),
             Err(Halt::Stopped) => {
                 say("aqx", "logging out");
@@ -156,6 +202,68 @@ fn run_bot(setup: Setup, mut control: Control, mut recorder: Option<Recorder>, w
             }
             Err(Halt::Closed(why)) => return Err(why.to_string()),
             Err(Halt::Timeout) => return Err(format!("not ready after {} s, stuck in {:?}", READY_TIMEOUT.as_secs(), session.phase)),
+        }
+    }
+}
+
+fn live(session: &mut Session, tasks: &[Task]) -> Result<(), Halt> {
+    session.pump_until(Some(Instant::now() + READY_TIMEOUT), |s| (s.phase == Phase::Ready).then_some(()))?;
+    for task in tasks {
+        say("aqx", format_args!("{task}"));
+        match run_task(session, task) {
+            Ok(()) => {}
+            Err(ActError::Halted(halt)) => return Err(halt),
+            Err(e) => {
+                say("aqx", format_args!("{task} failed: {e}"));
+                break;
+            }
+        }
+    }
+    session.pump_until(None, |_| None::<()>)
+}
+
+fn run_task(session: &mut Session, task: &Task) -> Result<(), ActError> {
+    match task {
+        Task::Join { map, cell } => {
+            session.join(map)?;
+            match cell {
+                Some((cell, pad)) => session.jump(cell, pad),
+                None => Ok(()),
+            }
+        }
+        Task::Jump { cell, pad } => session.jump(cell, pad),
+        Task::Kill { name, count } => {
+            let matches = |m: &aqx_core::Monster| name == "*" || m.name.eq_ignore_ascii_case(name);
+            let mut fight = Fight::default();
+            for _ in 0..*count {
+                session.kill(&matches, &mut fight, None, None)?;
+            }
+            Ok(())
+        }
+        Task::Pickup(item) => session.pickup(item),
+        Task::Rest => session.rest(),
+    }
+}
+
+fn watch_session(session: &mut Session, watch: &Watch, server: &str) {
+    match watch {
+        Watch::Status => session.watch(STATUS_EVERY, |phase, world| {
+            if *phase == Phase::Ready {
+                output::status(world);
+            }
+        }),
+        Watch::Snapshots(slot) => {
+            let (slot, server) = (slot.clone(), server.to_string());
+            let mut published = None;
+            session.watch(SNAPSHOT_EVERY, move |phase, world| {
+                let version = (world.rev, phase.clone());
+                if published.as_ref() != Some(&version)
+                    && let Ok(mut view) = slot.lock()
+                {
+                    *view = Some(Arc::new(tui::View { phase: phase.clone(), server: server.clone(), world: world.clone() }));
+                    published = Some(version);
+                }
+            });
         }
     }
 }
@@ -180,45 +288,15 @@ fn pick_server<'a>(servers: &'a [Server], name: Option<&str>, member: bool) -> R
     }
 }
 
-fn watch_until<T>(
-    session: &mut Session,
-    server: &str,
-    watch: &Watch,
-    deadline: Option<Instant>,
-    mut done: impl FnMut(&Session) -> Option<T>,
-) -> Result<T, Halt> {
-    let mut published = None;
-    let mut publish = |session: &Session| {
-        if let Watch::Snapshots(slot) = watch {
-            let version = (session.world.rev, session.phase.clone());
-            if published.as_ref() != Some(&version)
-                && let Ok(mut view) = slot.lock()
-            {
-                *view = Some(Arc::new(tui::View { phase: session.phase.clone(), server: server.into(), world: session.world.clone() }));
-                published = Some(version);
-            }
-        }
-    };
-    let tick = match watch {
-        Watch::Status => STATUS_EVERY,
-        Watch::Snapshots(_) => SNAPSHOT_EVERY,
-    };
-    loop {
-        publish(session);
-        let wake = Instant::now() + tick;
-        let outcome = session.pump_until(Some(deadline.map_or(wake, |d| d.min(wake))), &mut done);
-        match outcome {
-            Err(Halt::Timeout) if deadline.is_none_or(|d| Instant::now() < d) => {
-                if let Watch::Status = watch
-                    && session.phase == Phase::Ready
-                {
-                    output::status(&session.world);
-                }
-            }
-            other => {
-                publish(session);
-                return other;
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kill_steps_take_an_optional_count_of_at_least_one() {
+        assert!(matches!(parse_task("kill Lava Golem 3"), Ok(Task::Kill { name, count: 3 }) if name == "Lava Golem"));
+        assert!(matches!(parse_task("kill Lava Golem"), Ok(Task::Kill { name, count: 1 }) if name == "Lava Golem"));
+        assert!(matches!(parse_task("kill 7"), Ok(Task::Kill { name, count: 1 }) if name == "7"));
+        assert!(parse_task("kill Treeant 0").is_err());
     }
 }

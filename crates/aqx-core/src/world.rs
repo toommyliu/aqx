@@ -11,6 +11,9 @@ use crate::event::{Event, Place};
 
 const RANK_REP: [u32; 9] = [900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500];
 const GOLD_CAP: i64 = 100_000_000;
+const COUNTER_AURA: &str = "Counter Attack";
+const COUNTER_WARNING: &str = "prepares a counter attack";
+const COUNTER_WINDOW: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Default)]
 pub struct World {
@@ -73,6 +76,8 @@ pub struct Monster {
     pub cell: String,
     pub vitals: Vitals,
     pub auras: Vec<Aura>,
+    pub counter_warned: Option<Instant>,
+    pub aggressive: bool,
 }
 
 #[derive(Clone)]
@@ -127,6 +132,15 @@ pub struct Skill {
     pub name: String,
     pub cooldown: Duration,
     pub mana: i32,
+    pub target: SkillTarget,
+    pub max_targets: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkillTarget {
+    Hostile,
+    Friendly,
+    Myself,
 }
 
 pub fn reduce(world: &mut World, msg: &Message, now: Instant) -> Vec<Event> {
@@ -176,10 +190,21 @@ impl Patch {
 }
 
 impl Monster {
+    pub fn alive(&self) -> bool {
+        self.vitals.state != State::Dead
+    }
+
+    pub fn countering(&self, now: Instant) -> bool {
+        self.alive()
+            && (self.counter_warned.is_some_and(|at| now < at + COUNTER_WINDOW)
+                || self.auras.iter().any(|a| a.name == COUNTER_AURA && a.until.is_none_or(|until| now < until)))
+    }
+
     fn apply(&mut self, patch: &Patch) {
         self.vitals.apply(patch);
         if self.vitals.state == State::Dead {
             self.auras.clear();
+            self.counter_warned = None;
         }
     }
 }
@@ -285,6 +310,16 @@ struct Tick {
     m: HashMap<String, Patch>,
     #[serde(default)]
     a: Vec<AuraChange>,
+    #[serde(default)]
+    anims: Vec<Anim>,
+}
+
+#[derive(Deserialize)]
+struct Anim {
+    #[serde(rename = "cInf", default, deserialize_with = "text")]
+    caster: String,
+    #[serde(default, deserialize_with = "text")]
+    msg: String,
 }
 
 fn qty(n: i64) -> u32 {
@@ -444,6 +479,11 @@ impl World {
                 }
                 for change in tick.a {
                     self.aura(change, now);
+                }
+                for anim in tick.anims.iter().filter(|a| a.msg.contains(COUNTER_WARNING)) {
+                    if let Some(m) = self.monster_ref(&anim.caster) {
+                        m.counter_warned = Some(now);
+                    }
                 }
             }
             "aura+" | "aura++" | "aura-" | "aura--" => self.aura(json.decode()?, now),
@@ -645,6 +685,10 @@ impl World {
                     cd: i64,
                     #[serde(default, deserialize_with = "int")]
                     mp: i64,
+                    #[serde(default, deserialize_with = "text")]
+                    tgt: String,
+                    #[serde(rename = "tgtMax", default, deserialize_with = "int")]
+                    max_targets: i64,
                 }
                 let skills = json.decode::<Actions>()?.actions.active;
                 if let Some(me) = &mut self.me {
@@ -655,6 +699,12 @@ impl World {
                             name: s.nam,
                             cooldown: Duration::from_millis(s.cd.max(0) as u64),
                             mana: s.mp as i32,
+                            target: match s.tgt.as_str() {
+                                "f" => SkillTarget::Friendly,
+                                "s" => SkillTarget::Myself,
+                                _ => SkillTarget::Hostile,
+                            },
+                            max_targets: qty(s.max_targets).max(1),
                         })
                         .collect();
                 }
@@ -725,6 +775,8 @@ impl World {
                     cell: spot.cell,
                     vitals,
                     auras: Vec::new(),
+                    counter_warned: None,
+                    aggressive: spot.aggressive,
                 }
             })
             .collect();
@@ -796,15 +848,20 @@ impl World {
         self.area.as_mut()?.monsters.iter_mut().find(|m| m.map_id == id)
     }
 
+    fn monster_ref(&mut self, entity: &str) -> Option<&mut Monster> {
+        let id = entity.strip_prefix("m:")?.parse().ok()?;
+        self.monster(MonMapId(id))
+    }
+
     fn auras_of(&mut self, target: &str) -> Option<&mut Vec<Aura>> {
-        let (kind, id) = target.split_once(':')?;
-        let id: u32 = id.parse().ok()?;
-        match kind {
-            "m" => self.monster(MonMapId(id)).map(|m| &mut m.auras),
-            "p" if self.me.as_ref().is_some_and(|m| m.eid == EntityId(id)) => self.me.as_mut().map(|m| &mut m.auras),
-            "p" => self.area.as_mut()?.players.iter_mut().find(|p| p.eid == EntityId(id)).map(|p| &mut p.auras),
-            _ => None,
+        if target.starts_with("m:") {
+            return self.monster_ref(target).map(|m| &mut m.auras);
         }
+        let eid = EntityId(target.strip_prefix("p:")?.parse().ok()?);
+        if self.me.as_ref().is_some_and(|m| m.eid == eid) {
+            return self.me.as_mut().map(|m| &mut m.auras);
+        }
+        self.area.as_mut()?.players.iter_mut().find(|p| p.eid == eid).map(|p| &mut p.auras)
     }
 
     fn aura(&mut self, change: AuraChange, now: Instant) {
@@ -827,6 +884,11 @@ impl World {
             "aura-" | "aura--" => {
                 let gone: Vec<String> = change.auras.into_iter().map(|a| a.nam).chain(change.aura.map(|a| a.nam)).collect();
                 auras.retain(|a| !gone.contains(&a.name));
+                if gone.iter().any(|name| name == COUNTER_AURA)
+                    && let Some(m) = self.monster_ref(&change.target)
+                {
+                    m.counter_warned = None;
+                }
             }
             _ => {}
         }
@@ -924,6 +986,8 @@ struct MonSpot {
     map_id: MonMapId,
     #[serde(rename = "MonID")]
     mon_id: MonId,
+    #[serde(rename = "bRed", default, deserialize_with = "flag")]
+    aggressive: bool,
     #[serde(rename = "strFrame", default, deserialize_with = "text")]
     cell: String,
 }
@@ -1130,6 +1194,29 @@ mod tests {
 
         feed(&mut world, &json(r#"{"cmd":"ct","m":{"1":{"intHP":0,"intState":0}}}"#));
         assert!(world.area.as_ref().unwrap().monsters[0].auras.is_empty());
+    }
+
+    #[test]
+    fn counters_end_with_the_monster_or_the_aura() {
+        let mut world = joined();
+        let t0 = Instant::now();
+        reduce(
+            &mut world,
+            &Message::parse(&json(
+                r#"{"cmd":"ct","anims":[{"cInf":"m:1","msg":"Mosquito prepares a counter attack!!"}],
+                "a":[{"cmd":"aura++","tInf":"m:1","auras":[{"nam":"Counter Attack","dur":6}]}]}"#,
+            ))
+            .unwrap(),
+            t0,
+        );
+        let mosquito = |w: &World| w.area.as_ref().unwrap().monsters[0].countering(t0 + Duration::from_secs(1));
+        assert!(mosquito(&world));
+        let late = |w: &World| w.area.as_ref().unwrap().monsters[0].countering(t0 + Duration::from_secs(11));
+        assert!(!late(&world));
+        feed(&mut world, &json(r#"{"cmd":"ct","m":{"1":{"intHP":0,"intState":0}}}"#));
+        assert!(!mosquito(&world));
+        feed(&mut world, &json(r#"{"cmd":"mtls","id":1,"o":{"intHP":540,"intState":1}}"#));
+        assert!(!mosquito(&world));
     }
 
     #[test]
