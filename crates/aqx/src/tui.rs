@@ -396,7 +396,8 @@ fn draw_header(f: &mut Frame, area: Rect, bot: &Shown) {
     let Some(s) = &bot.snapshot else {
         return f.render_widget(Paragraph::new(Line::from(vec![Span::raw(format!(" {} · ", bot.name)).bold(), "STARTING".yellow().bold()])), area);
     };
-    let mut spans = vec![Span::raw(format!(" {} · {} · {} · ", bot.name, s.user, s.server)).bold()];
+    let who = if s.user.is_empty() || s.user.eq_ignore_ascii_case(&bot.name) { bot.name.clone() } else { format!("{} ({})", bot.name, s.user) };
+    let mut spans = vec![Span::raw(format!(" {who} · {} · ", s.server)).bold()];
     if let Some(g) = &s.game {
         spans.push(Span::raw(format!("{} · {}/{} · ", g.area, g.cell, g.pad)));
     }
@@ -607,7 +608,7 @@ mod tests {
         let shown = screen(&fleet, &mut app, 110);
         println!("{shown}");
         for expected in [
-            "main · hero · Twilly · farm-1 · Enter/Spawn · READY · up 1m",
+            "main (hero) · Twilly · farm-1 · Enter/Spawn · READY · up 1m",
             "Astral Ephemerite Essence in timespace",
             "Void Aura",
             "4120/7500",
@@ -688,5 +689,13 @@ mod tests {
         assert_eq!(snapshot("RECONNECTING").state(), "RECONNECTING");
         assert_eq!(snapshot("LOGGED OUT").state(), "LOGGED OUT");
         assert_eq!(Snapshot { phase: "READY".into(), stalled: true, ..Snapshot::default() }.state(), "STALLED");
+    }
+
+    #[test]
+    fn the_header_names_the_account_only_when_it_differs_from_the_bot() {
+        let (fleet, hub) = fleet(&["hero"]);
+        publish(&hub, &fleet.cells[0], &farm_world());
+        let shown = screen(&fleet, &mut App { open: Some(0), ..App::default() }, 110);
+        assert!(shown.contains(" hero · Twilly · farm-1"), "{shown}");
     }
 }
