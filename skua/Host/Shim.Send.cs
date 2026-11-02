@@ -13,7 +13,7 @@ public sealed partial class Shim
         });
         On("IScriptSend.ClientPacket(String, String)", _ => null);
         foreach (string channel in new[] { "Event", "Guild", "Moderator", "Server", "Warning", "Whisper", "Zone" })
-            On($"IScriptSend.Client{channel}(String, String)", args => Aqx.Call("log", "debug", $"[{channel.ToLowerInvariant()}] {args[0]}"));
+            On($"IScriptSend.Client{channel}(String, String)", _ => null);
     }
 
     void Services()
