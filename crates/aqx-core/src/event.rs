@@ -1,4 +1,4 @@
-use aqx_protocol::{EntityId, QuestId};
+use aqx_protocol::{EntityId, ItemId, MonMapId, QuestId};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -21,11 +21,13 @@ pub enum Event {
     Ready { items: usize },
     Died,
     Respawned,
-    Killed { monster: String },
-    DropOffered { item: String, qty: u32 },
+    Killed { id: MonMapId, monster: String },
+    DropOffered { id: ItemId, item: String, qty: u32 },
     ItemChanged { item: String, qty: u32, place: Place },
     Chat { channel: String, sender: String, text: String },
     Progress { label: String, current: u32, total: u32 },
+    Status { text: String },
+    ScriptLog { level: String, text: String },
     QuestAccepted { id: QuestId, name: String },
     QuestCompleted { id: QuestId, name: String },
     QuestRejected { id: QuestId, reason: String },

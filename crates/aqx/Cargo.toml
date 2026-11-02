@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 aqx-core.workspace = true
 aqx-protocol.workspace = true
+aqx-script.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
 ratatui.workspace = true

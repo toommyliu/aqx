@@ -99,8 +99,8 @@ pub fn describe(event: &Event) -> Option<(&'static str, String)> {
         Event::BankLoaded { items } => ("aqx", format!("bank loaded, {items} items")),
         Event::Died => ("aqx", "died".into()),
         Event::Respawned => ("aqx", "respawned".into()),
-        Event::Killed { monster } => ("aqx", format!("killed {monster}")),
-        Event::DropOffered { item, qty } => ("aqx", format!("drop offered: {item} x{qty}")),
+        Event::Killed { monster, .. } => ("aqx", format!("killed {monster}")),
+        Event::DropOffered { item, qty, .. } => ("aqx", format!("drop offered: {item} x{qty}")),
         Event::ItemChanged { item, qty, place } => {
             let place = match place {
                 Place::Inventory => "inventory",
@@ -111,6 +111,9 @@ pub fn describe(event: &Event) -> Option<(&'static str, String)> {
         }
         Event::Chat { channel, sender, text } => ("server", format!("[{channel}] {sender}: {text}")),
         Event::Progress { label, current, total } => ("aqx", format!("{label} {current}/{total}")),
+        Event::Status { text } => ("script", text.clone()),
+        Event::ScriptLog { level, text } if level == "log" || level == "info" => ("script", text.clone()),
+        Event::ScriptLog { level, text } => ("script", format!("{level}: {text}")),
         Event::QuestAccepted { name, .. } => ("aqx", format!("accepted {name}")),
         Event::QuestCompleted { name, .. } => ("aqx", format!("completed {name}")),
         Event::QuestRejected { id, reason } => ("aqx", format!("quest {id} refused: {reason}")),

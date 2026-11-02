@@ -2,7 +2,7 @@ mod server;
 
 use std::time::{Duration, Instant};
 
-use aqx_core::{Fight, ItemRef};
+use aqx_core::{Fight, ItemRef, Monster, World};
 use server::{FARM, Fake, Wire};
 
 fn killed_on(cast: usize) -> impl FnMut(&str, &mut Wire) + Send {
@@ -22,7 +22,7 @@ fn killed_on(cast: usize) -> impl FnMut(&str, &mut Wire) + Send {
     }
 }
 
-fn treeant(m: &aqx_core::Monster) -> bool {
+fn treeant(_: &World, m: &Monster) -> bool {
     m.name == "Treeant"
 }
 

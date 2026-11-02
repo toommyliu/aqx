@@ -11,6 +11,7 @@ use serde_json::Value;
 use crate::event::{Event, Place};
 use crate::quests::{Quest, QuestData, set_quest_value};
 
+const HASTE_CAP: f64 = 0.5;
 const RANK_REP: [u32; 9] = [900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500];
 const GOLD_CAP: i64 = 100_000_000;
 const COUNTER_AURA: &str = "Counter Attack";
@@ -650,7 +651,7 @@ impl World {
                 for (key, data) in json.decode::<Dropped>()?.items {
                     let Some((id, data)) = data.keyed(&key) else { continue };
                     let item = data.into_item(id);
-                    events.push(Event::DropOffered { item: item.name.clone(), qty: item.qty });
+                    events.push(Event::DropOffered { id: item.id, item: item.name.clone(), qty: item.qty });
                     match self.drops.iter_mut().find(|d| d.id == item.id) {
                         Some(d) => d.qty += item.qty,
                         None => self.drops.push(item),
@@ -727,7 +728,7 @@ impl World {
                 }
                 if let ("m", Some(id)) = (reward.typ.as_str(), reward.id) {
                     let monster = self.monster(id).map_or_else(|| format!("monster {id}"), |m| m.name.clone());
-                    events.push(Event::Killed { monster });
+                    events.push(Event::Killed { id, monster });
                 }
             }
             "getQuests" => {
@@ -1313,6 +1314,14 @@ impl Me {
     fn apply(&mut self, patch: &Patch) {
         patch.place(&mut self.vitals, &mut self.cell, &mut self.pad);
     }
+
+    pub fn haste(&self) -> f64 {
+        self.stats.get("$tha").copied().unwrap_or(0.0).clamp(-1.0, HASTE_CAP)
+    }
+
+    pub fn cooldown(&self, skill: &Skill) -> Duration {
+        skill.cooldown.mul_f64(1.0 - self.haste())
+    }
 }
 
 impl Player {
@@ -1517,7 +1526,7 @@ mod tests {
 
         assert_eq!(
             feed(&mut world, &json(r#"{"cmd":"dropItem","items":{"1528":{"ItemID":1528,"sName":"Defeated Makai","iQty":1}}}"#)),
-            [Event::DropOffered { item: "Defeated Makai".into(), qty: 1 }]
+            [Event::DropOffered { id: ItemId(1528), item: "Defeated Makai".into(), qty: 1 }]
         );
         assert_eq!(
             feed(&mut world, &json(r#"{"cmd":"getDrop","bSuccess":1,"ItemID":1528,"CharItemID":77,"iQty":1,"iQtyNow":4,"bBank":0}"#)),
@@ -1559,7 +1568,7 @@ mod tests {
         let mut world = joined();
         assert_eq!(
             feed(&mut world, &json(r#"{"cmd":"addGoldExp","intGold":25,"intExp":10,"typ":"m","id":1}"#)),
-            [Event::Killed { monster: "Mosquito".into() }]
+            [Event::Killed { id: MonMapId(1), monster: "Mosquito".into() }]
         );
         assert_eq!(feed(&mut world, &json(r#"{"cmd":"addGoldExp","intGold":100,"intExp":100,"typ":"q"}"#)), []);
         assert_eq!(world.me.as_ref().unwrap().gold, 125);

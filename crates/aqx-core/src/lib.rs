@@ -14,5 +14,5 @@ pub use control::{Control, StopHandle};
 pub use event::{Event, Place};
 pub use quests::{Need, Quest, QuestStatus, Reward, RewardKind};
 pub use record::Recorder;
-pub use session::{CLIENT_VERSION, Disconnect, Halt, Login, Phase, Session};
+pub use session::{CLIENT_VERSION, Disconnect, Goal, Halt, Hook, Login, Phase, Session};
 pub use world::{Area, Aura, Faction, Item, ItemRef, Me, Monster, Player, Shop, ShopItem, Skill, SkillTarget, State, Vitals, World, reduce};

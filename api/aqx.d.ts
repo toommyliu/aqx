@@ -1,28 +1,27 @@
 /*
  * Every function in this module blocks until it is done. While a call blocks,
  * the client keeps reading the socket, fighting and running event handlers.
- * Functions passed as predicates (`until`, `when`, `hold`, `DropRule`s, `once`
- * filters) must not call anything that blocks; doing so throws.
+ * Predicates (`when`, `hold`, `until`, `wait.until`, function `Target`s) must not call
+ * anything that blocks; doing so throws. A predicate that throws aborts the
+ * blocking call it runs under with that error, and so does an event handler.
  *
- * Everything a script sets up (handlers, registered quests and drops, aggro,
- * settings) ends with the script. The bot stays logged in for the next one.
+ * Everything a script sets up (handlers, registered quests and drops,
+ * settings) ends with the script.
  */
 declare module "aqx" {
   /** Item name (case-insensitive, exact) or ItemID. */
   export type ItemRef = string | number;
 
-  /**
-   * Monster name (case-insensitive, `"*"` = any), MonMapID, an ordered list of
-   * those (earlier entries are attacked first), or a predicate.
-   */
+  /** Monster name (case-insensitive, `"*"` = any), MonMapID, a list of those, or a predicate. */
   export type Target = string | number | readonly (string | number)[] | ((m: Monster) => boolean);
 
-  /** 0 = auto attack, 1-4 = class skills, 5 = equipped consumable. */
+  /** 0 = auto attack, 1-4 = class skills, 5 = equipped consumable, which a fight can't use yet. */
   export type Slot = 0 | 1 | 2 | 3 | 4 | 5;
 
   export type State = "dead" | "idle" | "combat";
 
-  export type ErrorCode = "timeout" | "rejected" | "not_found" | "inventory_full" | "cancelled";
+  /** `cancelled`: the script is being stopped or the connection closed. */
+  export type ErrorCode = "timeout" | "rejected" | "not_found" | "cancelled";
 
   export interface Stats {
     readonly str: number;
@@ -41,8 +40,8 @@ declare module "aqx" {
   export interface Aura {
     readonly name: string;
     readonly stacks: number;
-    /** `Date.now()` timestamp. */
-    readonly expiresAt: number;
+    /** `Date.now()` timestamp, `null` for auras without a duration. */
+    readonly expiresAt: number | null;
   }
 
   export interface Faction {
@@ -73,7 +72,6 @@ declare module "aqx" {
     readonly hp: number;
     readonly maxHp: number;
     readonly state: State;
-    readonly afk: boolean;
   }
 
   export interface Skill {
@@ -82,8 +80,6 @@ declare module "aqx" {
     readonly mana: number;
     /** Effective cooldown in ms after haste. */
     readonly cooldown: number;
-    /** 0 when castable now. */
-    readonly readyIn: number;
     readonly kind: "hostile" | "friendly" | "self";
     readonly maxTargets: number;
   }
@@ -159,15 +155,7 @@ declare module "aqx" {
     readonly items: readonly ShopItem[];
   }
 
-  export interface Server {
-    readonly name: string;
-    readonly online: boolean;
-    readonly players: number;
-    readonly max: number;
-    readonly member: boolean;
-  }
-
-  export type Step = Slot | { readonly slot: Slot; readonly when: () => boolean };
+  export type Step = Exclude<Slot, 5> | { readonly slot: Exclude<Slot, 5>; readonly when: () => boolean };
 
   export interface Fight {
     /** Default `[1, 2, 3, 4]`. When several steps are ready, the earliest wins. */
@@ -181,8 +169,9 @@ declare module "aqx" {
   export interface KillOptions extends Fight {
     /** Fight in this cell. Without it, the bot hunts across cells for live targets. */
     readonly cell?: string;
+    /** Default `"Left"`. */
     readonly pad?: string;
-    /** Keep killing matching monsters until this returns true. */
+    /** Keep killing matching monsters until this returns true. It is checked continuously, so the fight stops as soon as it holds. */
     readonly until?: () => boolean;
     readonly timeout?: number;
   }
@@ -195,27 +184,15 @@ declare module "aqx" {
     readonly timeout?: number;
   }
 
-  export type Packet =
-    | { readonly kind: "json"; readonly cmd: string; readonly data: unknown }
-    | { readonly kind: "xt"; readonly cmd: string; readonly args: readonly string[] }
-    | { readonly kind: "xml"; readonly cmd: string; readonly xml: string };
-
-  export type AuraHolder =
-    | { readonly kind: "self" }
-    | { readonly kind: "monster"; readonly monster: Monster }
-    | { readonly kind: "player"; readonly name: string };
-
   export interface EventMap {
     death: undefined;
     respawn: undefined;
     map: { readonly name: string; readonly room: number };
-    cell: { readonly cell: string; readonly pad: string };
     kill: Monster;
     drop: Drop;
-    item: { readonly item: Item; readonly delta: number; readonly where: "inventory" | "temp" | "bank" };
+    /** `qty` is the new total in that place, 0 once the item is gone. */
+    item: { readonly name: string; readonly qty: number; readonly where: "inventory" | "temp" | "bank" };
     quest: { readonly id: number; readonly change: "accepted" | "completed" };
-    aura: { readonly on: AuraHolder; readonly aura: Aura; readonly change: "added" | "removed" };
-    counter: { readonly active: boolean };
     chat: {
       readonly from: string;
       readonly text: string;
@@ -232,19 +209,16 @@ declare module "aqx" {
     readonly mp: number;
     readonly maxMp: number;
     readonly state: State;
-    readonly afk: boolean;
     readonly cell: string;
     readonly pad: string;
-    readonly x: number;
-    readonly y: number;
     readonly gold: number;
     readonly member: boolean;
-    readonly class: { readonly name: string; readonly rank: number } | null;
-    readonly target: Monster | null;
+    /** Name of the equipped class, `""` before the server sends it. */
+    readonly class: string;
     readonly stats: Stats;
     readonly auras: readonly Aura[];
     readonly factions: readonly Faction[];
-    /** Returns when HP and MP are full. Throws `rejected` if combat starts. */
+    /** Returns when HP and MP are full. Throws `timeout` after 30 s. */
     rest(): void;
   };
 
@@ -255,21 +229,16 @@ declare module "aqx" {
     readonly players: readonly OtherPlayer[];
     find(target: Target): Monster[];
     /**
-     * `name` may carry a room suffix, as in `join("timespace-12345")`. No-op if
-     * already there. Returns once the map's monsters are known and the player
-     * stands in `cell`. Throws `rejected` with the server's text for locked or
-     * full maps.
+     * `name` may carry a room suffix, as in `join("timespace-12345")`. Without
+     * one, `settings.room` is used. No-op if already there. Returns once the
+     * player stands in `cell`. `pad` defaults to `"Left"`.
      */
     join(name: string, cell?: string, pad?: string): void;
     jump(cell: string, pad?: string): void;
-    walk(x: number, y: number): void;
-    goto(player: string): void;
-    /** Picks up a map item until the temp inventory gains `qty` of it. */
-    collect(mapItemId: number, qty?: number): void;
   };
 
   export const combat: {
-    /** Returns after one matching monster dies, or when `opts.until` returns true. */
+    /** Returns after one matching monster dies, or, with `opts.until`, once that returns true. */
     kill(target: Target, opts?: KillOptions): void;
     /**
      * Withdraws the items from the bank, picks up their drops, shows a progress
@@ -277,27 +246,21 @@ declare module "aqx" {
      */
     farm(item: ItemRef, qty: number, opts?: FarmOptions): void;
     farm(goals: readonly Goal[], opts?: FarmOptions): void;
-    /** Keeps matching monsters in the current map aggroed. Returns a function that stops it. */
-    aggro(target: Target): () => void;
-    exit(): void;
   };
 
   export const skills: {
     readonly slots: readonly Skill[];
-    /** Waits until the slot is castable, then casts it. */
-    use(slot: Slot, target?: Target): void;
   };
 
   export const inventory: Items & {
     readonly temp: Items;
     readonly slots: number;
     readonly used: number;
-    /** Withdraws from the bank first if needed. Leaves combat first. */
+    /** Withdraws from the bank first if needed. */
     equip(item: ItemRef): void;
-    /** Uses a consumable such as a boost. */
-    use(item: ItemRef): void;
   };
 
+  /** Reading `items` loads the bank on first use, except inside a predicate. */
   export const bank: Items & {
     readonly slots: number;
     readonly used: number;
@@ -308,14 +271,18 @@ declare module "aqx" {
   };
 
   export const quests: {
-    /** Loads the quest on first call. Later calls return its current status without blocking. */
+    /** Loads the quest on first call. Later calls, and calls inside predicates, return its current status without blocking. */
     get(id: number): Quest;
     /** Skips quests already active. */
     accept(...ids: number[]): void;
     /** `times` turns in that many completions at once when the quest allows it. */
     complete(id: number, opts?: { readonly reward?: number; readonly times?: number }): void;
     readonly registered: readonly number[];
-    /** Accepts, completes and re-accepts in the background. Registering a quest again replaces its reward. */
+    /**
+     * Accepts, completes and re-accepts in the background whenever an item
+     * changes. Registering a quest again replaces its reward. A quest that
+     * fails to accept or complete is logged and unregistered.
+     */
     register(...quests: (number | { readonly id: number; readonly reward: number })[]): void;
     unregister(...ids: number[]): void;
   };
@@ -339,21 +306,17 @@ declare module "aqx" {
   };
 
   export const events: {
-    /** Handlers run while the script is inside a blocking call. Events that arrive during a handler queue until it returns. */
+    /**
+     * Handlers run while the script is inside a blocking call, and the events
+     * a call causes reach them before that call returns. Events that arrive
+     * during a handler queue until it returns.
+     */
     on<K extends keyof EventMap>(event: K, handler: (e: EventMap[K]) => void): () => void;
     /** Throws `timeout` if `opts.timeout` elapses first. */
     once<K extends keyof EventMap>(
       event: K,
       opts?: { readonly timeout?: number; readonly filter?: (e: EventMap[K]) => boolean },
     ): EventMap[K];
-  };
-
-  export const packet: {
-    /** Raw `%xt%zm%...%` packet. Goes through the same rate limiter as built-in actions. */
-    send(raw: string): void;
-    /** Sends, then returns the next packet whose cmd is `reply`. */
-    request(raw: string, reply: string, timeout?: number): Packet;
-    on(cmd: string, handler: (p: Packet) => void): () => void;
   };
 
   export const wait: {
@@ -365,23 +328,16 @@ declare module "aqx" {
   export const script: {
     /**
      * Script inputs. Each key's default fixes its type; `--arg key=value` on
-     * the CLI or `args` in aqx.toml overrides it. Throws on unknown keys or
-     * values that don't parse as the default's type.
+     * the CLI overrides it. Throws on unknown keys or values that don't parse
+     * as the default's type.
      */
     args<T extends Record<string, string | number | boolean>>(defaults: T): T;
     /** One line describing what the script is doing. Shown in the TUI and logs. */
     status(text: string): void;
     /** Named progress bar with rate and ETA. `current` is absolute, not a delta. */
     progress(label: string, current: number, total?: number): void;
-    /** Ends the script. The bot stays logged in. Catching the error it throws does not keep the script alive. */
+    /** Ends the script. Catching the error it throws does not keep the script alive. */
     stop(reason?: string): never;
-  };
-
-  export const session: {
-    readonly server: string;
-    servers(): Server[];
-    /** Reconnects, optionally to another server, and returns once the character is loaded. */
-    relogin(server?: string): void;
   };
 
   /** Reverts to the bot's defaults when the script ends. */
@@ -396,15 +352,8 @@ declare module "aqx" {
 
   export class AqxError extends Error {
     readonly code: ErrorCode;
-    /** The server's text, set when `code` is `rejected`. */
-    readonly serverMessage: string | null;
   }
 }
-
-declare function setTimeout(fn: () => void, ms?: number): number;
-declare function clearTimeout(id: number): void;
-declare function setInterval(fn: () => void, ms: number): number;
-declare function clearInterval(id: number): void;
 
 declare const console: {
   debug(...args: unknown[]): void;

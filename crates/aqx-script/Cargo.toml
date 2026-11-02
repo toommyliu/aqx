@@ -1,0 +1,13 @@
+[package]
+name = "aqx-script"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+aqx-core.workspace = true
+aqx-protocol.workspace = true
+rquickjs.workspace = true
+serde_json.workspace = true
+swc_common.workspace = true
+swc_ts_fast_strip.workspace = true

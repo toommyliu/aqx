@@ -5,7 +5,7 @@ use aqx_protocol::{Aim, AreaId, ItemId, MonMapId, Out, QuestId, ShopId};
 
 use crate::pacer::Kind;
 use crate::quests::{QuestStatus, RewardKind};
-use crate::session::{Halt, Phase, Session};
+use crate::session::{Goal, Halt, Phase, Session};
 use crate::event::Event;
 use crate::world::{Item, ItemRef, Monster, SkillTarget, State, World, items_from};
 
@@ -18,7 +18,6 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const JUMP_SETTLE: Duration = Duration::from_millis(500);
 const SERVER_MARGIN: Duration = Duration::from_millis(200);
 const HOLD_RECHECK: Duration = Duration::from_millis(200);
-const HASTE_CAP: f64 = 0.5;
 const AUTO_ATTACK: usize = 0;
 
 #[derive(Debug)]
@@ -39,6 +38,8 @@ impl fmt::Display for ActError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ActError::Halted(Halt::Stopped) => write!(f, "stopped"),
+            ActError::Halted(Halt::Interrupted) => write!(f, "interrupted"),
+            ActError::Halted(Halt::GoalMet) => write!(f, "the goal was met"),
             ActError::Halted(Halt::Timeout) => write!(f, "timed out"),
             ActError::Halted(Halt::Closed(why)) => write!(f, "{why}"),
             ActError::Timeout(what) => write!(f, "timed out {what}"),
@@ -167,7 +168,7 @@ impl Session {
             _ => {}
         }
         let room = self.room()?;
-        self.quest_outcome = None;
+        self.quest_outcomes.remove(&id);
         self.send_paced(Out::AcceptQuest { room, quest: id }, Kind::Locked("acceptQuest"))?;
         self.quest_verdict(id, "accepting")
     }
@@ -193,16 +194,16 @@ impl Session {
         }
         let room = self.room()?;
         let reward = if choices.is_empty() { None } else { reward };
-        self.quest_outcome = None;
+        self.quest_outcomes.remove(&id);
         self.send_paced(Out::CompleteQuest { room, quest: id, reward, times: times.max(1) }, Kind::Locked("tryQuestComplete"))?;
         self.quest_verdict(id, "completing")
     }
 
     fn quest_verdict(&mut self, id: QuestId, what: &str) -> Result<(), ActError> {
-        let heard = |s: &Session| s.quest_outcome.as_ref().is_some_and(|(q, _)| *q == id);
+        let heard = |s: &Session| s.quest_outcomes.contains_key(&id);
         self.wait_for(Some(Instant::now() + QUEST_TIMEOUT), &format!("{what} quest {id}"), heard)?;
-        match self.quest_outcome.take() {
-            Some((_, Err(reason))) => Err(ActError::Rejected(reason)),
+        match self.quest_outcomes.remove(&id) {
+            Some(Err(reason)) => Err(ActError::Rejected(reason)),
             _ => Ok(()),
         }
     }
@@ -210,21 +211,63 @@ impl Session {
     pub fn farm(
         &mut self,
         goals: &[(ItemRef, u32)],
-        target: &dyn Fn(&Monster) -> bool,
+        target: &dyn Fn(&World, &Monster) -> bool,
+        fight: &mut Fight,
+        cell: Option<(&str, &str)>,
+        timeout: Option<Duration>,
+    ) -> Result<(), ActError> {
+        let wanted = goals.to_vec();
+        let met: Goal = Box::new(move |w| wanted.iter().all(|(item, total)| w.count_of(item) >= *total));
+        self.with_goal(met, |s| s.farm_until_met(goals, target, fight, cell, timeout))
+    }
+
+    pub fn kill_until(
+        &mut self,
+        until: Goal,
+        target: &dyn Fn(&World, &Monster) -> bool,
+        fight: &mut Fight,
+        cell: Option<(&str, &str)>,
+        timeout: Option<Duration>,
+    ) -> Result<(), ActError> {
+        let deadline = timeout.map(|t| Instant::now() + t);
+        self.with_goal(until, |s| {
+            while !s.goal_met() {
+                let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+                if left.is_some_and(|l| l.is_zero()) {
+                    return Err(ActError::Timeout("killing".into()));
+                }
+                unless_met(s.kill(target, fight, cell, left))?;
+            }
+            Ok(())
+        })
+    }
+
+    fn with_goal<T>(&mut self, goal: Goal, f: impl FnOnce(&mut Self) -> Result<T, ActError>) -> Result<T, ActError> {
+        let outer = self.goal.replace(goal);
+        let result = f(self);
+        self.goal = outer;
+        result
+    }
+
+    fn farm_until_met(
+        &mut self,
+        goals: &[(ItemRef, u32)],
+        target: &dyn Fn(&World, &Monster) -> bool,
         fight: &mut Fight,
         cell: Option<(&str, &str)>,
         timeout: Option<Duration>,
     ) -> Result<(), ActError> {
         let deadline = timeout.map(|t| Instant::now() + t);
         let mut shown: Vec<Option<u32>> = vec![None; goals.len()];
+        let labels: Vec<String> = goals.iter().map(|(item, _)| self.world.name_of(item)).collect();
         loop {
-            self.pick_up_goals(goals)?;
+            unless_met(self.pick_up_goals(goals))?;
             let mut done = true;
-            for ((item, total), last) in goals.iter().zip(&mut shown) {
+            for (((item, total), last), label) in goals.iter().zip(&mut shown).zip(&labels) {
                 let current = self.world.count_of(item);
                 if *last != Some(current) {
                     *last = Some(current);
-                    (self.sink)(&Event::Progress { label: item.to_string(), current: current.min(*total), total: *total });
+                    (self.sink)(&Event::Progress { label: label.clone(), current: current.min(*total), total: *total });
                 }
                 done &= current >= *total;
             }
@@ -235,7 +278,7 @@ impl Session {
             if left.is_some_and(|l| l.is_zero()) {
                 return Err(ActError::Timeout("farming".into()));
             }
-            self.kill(target, fight, cell, left)?;
+            unless_met(self.kill(target, fight, cell, left))?;
         }
     }
 
@@ -267,18 +310,15 @@ impl Session {
     }
 
     fn send_expecting(&mut self, action: &str, out: Out, kind: Kind) -> Result<(), ActError> {
-        if self.refusal.as_ref().is_some_and(|(a, _)| a == action) {
-            self.refusal = None;
-        }
+        self.refusals.remove(action);
         Ok(self.send_paced(out, kind)?)
     }
 
     fn refused_or(&mut self, action: &str, what: &str, mut done: impl FnMut(&Session) -> bool) -> Result<(), ActError> {
-        let refused = |s: &Session| s.refusal.as_ref().is_some_and(|(a, _)| a == action);
+        let refused = |s: &Session| s.refusals.contains_key(action);
         self.wait_for(Some(Instant::now() + REPLY_TIMEOUT), what, |s| refused(s) || done(s))?;
         if refused(self) {
-            let (_, reason) = self.refusal.take().unwrap_or_default();
-            return Err(ActError::Rejected(reason));
+            return Err(ActError::Rejected(self.refusals.remove(action).unwrap_or_default()));
         }
         Ok(())
     }
@@ -440,7 +480,7 @@ impl Session {
 
     pub fn kill(
         &mut self,
-        target: &dyn Fn(&Monster) -> bool,
+        target: &dyn Fn(&World, &Monster) -> bool,
         fight: &mut Fight,
         cell: Option<(&str, &str)>,
         timeout: Option<Duration>,
@@ -530,12 +570,10 @@ impl Session {
     fn castable_at(&self, slot: usize, now: Instant) -> Option<Instant> {
         let me = self.world.me.as_ref()?;
         let skill = me.skills.get(slot).filter(|s| !s.slot.starts_with('i'))?;
-        let stat = |name: &str, default: f64| me.stats.get(name).copied().unwrap_or(default);
-        if f64::from(skill.mana) * stat("$cmc", 1.0) > f64::from(me.vitals.mp) {
+        if f64::from(skill.mana) * me.stats.get("$cmc").copied().unwrap_or(1.0) > f64::from(me.vitals.mp) {
             return None;
         }
-        let cooldown = skill.cooldown.mul_f64(1.0 - stat("$tha", 0.0).clamp(-1.0, HASTE_CAP));
-        let own = self.casts.get(&skill.slot).map_or(now, |last| *last + cooldown + SERVER_MARGIN);
+        let own = self.casts.get(&skill.slot).map_or(now, |last| *last + me.cooldown(skill) + SERVER_MARGIN);
         let kind = if slot == AUTO_ATTACK { Kind::AutoAttack } else { Kind::ClassSkill };
         Some(own.max(self.pacer_ready_at(kind, now)))
     }
@@ -559,19 +597,19 @@ impl Session {
         Ok(())
     }
 
-    fn live_target_anywhere(&self, target: &dyn Fn(&Monster) -> bool) -> bool {
-        self.world.area.as_ref().is_some_and(|a| a.monsters.iter().any(|m| m.alive() && target(m)))
+    fn live_target_anywhere(&self, target: &dyn Fn(&World, &Monster) -> bool) -> bool {
+        self.world.area.as_ref().is_some_and(|a| a.monsters.iter().any(|m| m.alive() && target(&self.world, m)))
     }
 
-    fn target_in_cell(&self, target: &dyn Fn(&Monster) -> bool) -> Option<MonMapId> {
+    fn target_in_cell(&self, target: &dyn Fn(&World, &Monster) -> bool) -> Option<MonMapId> {
         let (me, area) = (self.world.me.as_ref()?, self.world.area.as_ref()?);
-        area.monsters.iter().filter(|m| m.cell == me.cell && m.alive() && target(m)).min_by_key(|m| m.vitals.hp).map(|m| m.map_id)
+        area.monsters.iter().filter(|m| m.cell == me.cell && m.alive() && target(&self.world, m)).min_by_key(|m| m.vitals.hp).map(|m| m.map_id)
     }
 
-    fn best_cell(&self, target: &dyn Fn(&Monster) -> bool) -> Option<String> {
+    fn best_cell(&self, target: &dyn Fn(&World, &Monster) -> bool) -> Option<String> {
         let area = self.world.area.as_ref()?;
         let mut cells: Vec<(&str, usize, usize)> = Vec::new();
-        for m in area.monsters.iter().filter(|m| target(m)) {
+        for m in area.monsters.iter().filter(|m| target(&self.world, m)) {
             match cells.iter_mut().find(|(c, _, _)| *c == m.cell) {
                 Some((_, alive, total)) => {
                     *alive += usize::from(m.alive());
@@ -586,6 +624,13 @@ impl Session {
 
 fn consumable(item: &Item) -> bool {
     item.kind == "Item" && !item.link.is_empty() && !item.link.eq_ignore_ascii_case("none")
+}
+
+fn unless_met(result: Result<(), ActError>) -> Result<(), ActError> {
+    match result {
+        Err(ActError::Halted(Halt::GoalMet)) => Ok(()),
+        other => other,
+    }
 }
 
 fn cap(at: Instant, deadline: Option<Instant>) -> Instant {

@@ -392,7 +392,7 @@ mod tests {
         let view = View { phase: Phase::Ready, server: "Twilly".into(), world };
         let mut app = App::default();
         app.push(Update::Say { t: 0, source: "aqx", text: "logging in as hero".into() });
-        app.push(Update::Event { t: 30_000, event: Event::Killed { monster: "Mosquito".into() } });
+        app.push(Update::Event { t: 30_000, event: Event::Killed { id: aqx_protocol::MonMapId(1), monster: "Mosquito".into() } });
         app.push(Update::Event { t: 31_000, event: Event::ServerText { text: "Profanity filter On.".into() } });
 
         let shown = screen(&app, Some(&view), 100);

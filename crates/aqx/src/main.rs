@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use aqx_core::{ActError, CLIENT_VERSION, Control, Disconnect, Fight, Halt, ItemRef, Login, Phase, Recorder, Server, Session, login};
-use aqx_protocol::{ItemId, QuestId, ShopId};
+use aqx_core::{CLIENT_VERSION, Control, Disconnect, Halt, Login, Phase, Recorder, Server, Session, login};
+use aqx_script::{Outcome, ScriptError};
 use clap::{Args, Parser, Subcommand};
 use output::{Mode, say};
 
@@ -28,7 +28,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    #[command(about = "Log in and stay online until Ctrl-C")]
+    #[command(about = "Log in and run a script, or stay online until Ctrl-C")]
     Run(RunArgs),
     #[command(about = "Print a --record file one packet per line")]
     View(ViewArgs),
@@ -45,8 +45,10 @@ struct ViewArgs {
 
 #[derive(Args)]
 struct RunArgs {
-    #[arg(help = "Script to run. Not supported yet")]
+    #[arg(help = "Script to run once logged in. Without one, aqx stays online until Ctrl-C")]
     script: Option<PathBuf>,
+    #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = parse_arg, help = "Script input read by script.args(). Repeatable")]
+    args: Vec<(String, String)>,
     #[arg(short, long, value_name = "NAME", help = "The [[bot]] to use from the config")]
     account: Option<String>,
     #[arg(short, long, value_name = "FILE", help = "Config file")]
@@ -61,108 +63,18 @@ struct RunArgs {
     json: bool,
     #[arg(long, help = "Print one line per event instead of the TUI")]
     plain: bool,
-    #[arg(
-        long = "do",
-        value_name = "STEP",
-        value_parser = parse_task,
-        help = "Run a step once ready: \"join MAP [CELL PAD]\", \"jump CELL [PAD]\", \"kill NAME [COUNT]\", \"farm ITEM COUNT [from NAME]\", \"accept QUEST\", \"complete QUEST [REWARD]\", \"withdraw ITEM\", \"deposit ITEM\", \"buy SHOP ITEM [QTY]\", \"sell ITEM [QTY]\", \"equip ITEM\", \"pickup ITEM\" or \"rest\". Repeatable"
-    )]
-    tasks: Vec<Task>,
 }
 
-#[derive(Clone, Debug)]
-enum Task {
-    Join { map: String, cell: Option<(String, String)> },
-    Jump { cell: String, pad: String },
-    Kill { name: String, count: u32 },
-    Farm { item: String, count: u32, from: Option<String> },
-    Accept(u32),
-    Complete { quest: u32, reward: Option<u32> },
-    Withdraw(String),
-    Deposit(String),
-    Buy { shop: u32, item: String, qty: u32 },
-    Sell { item: String, qty: u32 },
-    Equip(String),
-    Pickup(String),
-    Rest,
-}
-
-impl std::fmt::Display for Task {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Task::Join { map, cell: None } => write!(f, "join {map}"),
-            Task::Join { map, cell: Some((cell, pad)) } => write!(f, "join {map} {cell} {pad}"),
-            Task::Jump { cell, pad } => write!(f, "jump {cell} {pad}"),
-            Task::Kill { name, count: 1 } => write!(f, "kill {name}"),
-            Task::Kill { name, count } => write!(f, "kill {name} {count}"),
-            Task::Farm { item, count, from: None } => write!(f, "farm {item} {count}"),
-            Task::Farm { item, count, from: Some(monster) } => write!(f, "farm {item} {count} from {monster}"),
-            Task::Accept(quest) => write!(f, "accept {quest}"),
-            Task::Complete { quest, reward: None } => write!(f, "complete {quest}"),
-            Task::Complete { quest, reward: Some(item) } => write!(f, "complete {quest} {item}"),
-            Task::Withdraw(item) => write!(f, "withdraw {item}"),
-            Task::Deposit(item) => write!(f, "deposit {item}"),
-            Task::Buy { shop, item, qty } => write!(f, "buy {shop} {item} {qty}"),
-            Task::Sell { item, qty } => write!(f, "sell {item} {qty}"),
-            Task::Equip(item) => write!(f, "equip {item}"),
-            Task::Pickup(item) => write!(f, "pickup {item}"),
-            Task::Rest => write!(f, "rest"),
-        }
+fn parse_arg(arg: &str) -> Result<(String, String), String> {
+    match arg.split_once('=') {
+        Some((key, value)) if !key.is_empty() => Ok((key.into(), value.into())),
+        _ => Err("expected KEY=VALUE".into()),
     }
 }
 
-fn name_and_count(words: &[&str]) -> Result<(String, u32), String> {
-    match words.split_last().map(|(last, name)| (last.parse::<u32>(), name)) {
-        Some((Ok(0), _)) => Err("the count must be at least 1".into()),
-        Some((Ok(count), name)) if !name.is_empty() => Ok((name.join(" "), count)),
-        _ => Ok((words.join(" "), 1)),
-    }
-}
-
-fn parse_task(step: &str) -> Result<Task, String> {
-    if let Some(rest) = step.strip_prefix("farm ") {
-        let (goal, from) = match rest.split_once(" from ") {
-            Some((goal, monster)) => (goal, Some(monster.trim().to_string())),
-            None => (rest, None),
-        };
-        let words: Vec<&str> = goal.split_whitespace().collect();
-        return match words.split_last().map(|(last, item)| (last.parse::<u32>(), item)) {
-            Some((Ok(count), item)) if count > 0 && !item.is_empty() => Ok(Task::Farm { item: item.join(" "), count, from }),
-            _ => Err("expected farm ITEM COUNT [from NAME], with COUNT at least 1".into()),
-        };
-    }
-    let words: Vec<&str> = step.split_whitespace().collect();
-    let text = |ws: &[&str]| ws.join(" ");
-    Ok(match words.as_slice() {
-        ["join", map] => Task::Join { map: map.to_string(), cell: None },
-        ["join", map, cell, pad] => Task::Join { map: map.to_string(), cell: Some((cell.to_string(), pad.to_string())) },
-        ["jump", cell] => Task::Jump { cell: cell.to_string(), pad: "Left".into() },
-        ["jump", cell, pad] => Task::Jump { cell: cell.to_string(), pad: pad.to_string() },
-        ["kill", rest @ ..] if !rest.is_empty() => {
-            let (name, count) = name_and_count(rest)?;
-            Task::Kill { name, count }
-        }
-        ["pickup", item @ ..] if !item.is_empty() => Task::Pickup(text(item)),
-        ["withdraw", item @ ..] if !item.is_empty() => Task::Withdraw(text(item)),
-        ["deposit", item @ ..] if !item.is_empty() => Task::Deposit(text(item)),
-        ["equip", item @ ..] if !item.is_empty() => Task::Equip(text(item)),
-        ["buy", shop, rest @ ..] if !rest.is_empty() => {
-            let shop = shop.parse().map_err(|_| format!("{shop} is not a shop id"))?;
-            let (item, qty) = name_and_count(rest)?;
-            Task::Buy { shop, item, qty }
-        }
-        ["sell", rest @ ..] if !rest.is_empty() => {
-            let (item, qty) = name_and_count(rest)?;
-            Task::Sell { item, qty }
-        }
-        ["rest"] => Task::Rest,
-        ["accept", quest] => Task::Accept(quest.parse().map_err(|_| format!("{quest} is not a quest id"))?),
-        ["complete", quest, reward @ ..] if reward.len() <= 1 => Task::Complete {
-            quest: quest.parse().map_err(|_| format!("{quest} is not a quest id"))?,
-            reward: reward.first().map(|r| r.parse().map_err(|_| format!("{r} is not an item id"))).transpose()?,
-        },
-        _ => return Err("expected join MAP [CELL PAD], jump CELL [PAD], kill NAME [COUNT], farm ITEM COUNT [from NAME], accept QUEST, complete QUEST [REWARD], withdraw ITEM, deposit ITEM, buy SHOP ITEM [QTY], sell ITEM [QTY], equip ITEM, pickup ITEM or rest".into()),
-    })
+struct Script {
+    path: PathBuf,
+    args: Vec<(String, String)>,
 }
 
 struct Setup {
@@ -194,10 +106,11 @@ fn main() -> ExitCode {
 }
 
 fn run(args: RunArgs) -> Result<(), String> {
-    let RunArgs { script, account, config, server, record, client_version, json, plain, tasks } = args;
-    if let Some(script) = script {
-        return Err(format!("can't run {}: scripts aren't supported yet. Run without one to log in", script.display()));
+    let RunArgs { script, args, account, config, server, record, client_version, json, plain } = args;
+    if script.is_none() && !args.is_empty() {
+        return Err("--arg needs a script".into());
     }
+    let script = script.map(|path| Script { path, args });
     let (config, path) = config::load(config.as_deref())?;
     let bot = config.bot(account.as_deref()).map_err(|e| format!("{}: {e}", path.display()))?;
     let setup = Setup {
@@ -218,7 +131,7 @@ fn run(args: RunArgs) -> Result<(), String> {
 
     if json || plain || !std::io::stdout().is_terminal() {
         output::init(if json { Mode::Json } else { Mode::Plain });
-        return run_bot(setup, control, recorder, Watch::Status, tasks);
+        return run_bot(setup, control, recorder, Watch::Status, script);
     }
     let (tx, rx) = mpsc::sync_channel(1024);
     output::init(Mode::Tui(tx));
@@ -226,12 +139,12 @@ fn run(args: RunArgs) -> Result<(), String> {
     let watch = Watch::Snapshots(slot.clone());
     let bot = std::thread::Builder::new()
         .name("bot".into())
-        .spawn(move || run_bot(setup, control, recorder, watch, tasks))
+        .spawn(move || run_bot(setup, control, recorder, watch, script))
         .map_err(|e| e.to_string())?;
     tui::run(rx, slot, stop, bot)
 }
 
-fn run_bot(setup: Setup, mut control: Control, mut recorder: Option<Recorder>, watch: Watch, tasks: Vec<Task>) -> Result<(), String> {
+fn run_bot(setup: Setup, mut control: Control, mut recorder: Option<Recorder>, watch: Watch, script: Option<Script>) -> Result<(), String> {
     let mut version = setup.version.clone();
     loop {
         say("aqx", format_args!("logging in as {} at {}, config {}", setup.user, setup.api, setup.config.display()));
@@ -242,9 +155,13 @@ fn run_bot(setup: Setup, mut control: Control, mut recorder: Option<Recorder>, w
         let mut session =
             Session::connect(control, server, login, recorder, output::event).map_err(|e| format!("can't reach {}: {e}", server.name))?;
         watch_session(&mut session, &watch, &server.name);
-        match live(&mut session, &tasks) {
-            Ok(()) => return Ok(()),
-            Err(Halt::Stopped) => {
+        match live(&mut session, script.as_ref()) {
+            Ok(result) => {
+                say("aqx", "logging out");
+                session.logout();
+                return result;
+            }
+            Err(Halt::Stopped | Halt::Interrupted) => {
                 say("aqx", "logging out");
                 session.logout();
                 return Ok(());
@@ -255,59 +172,27 @@ fn run_bot(setup: Setup, mut control: Control, mut recorder: Option<Recorder>, w
                 (control, recorder) = session.into_parts();
             }
             Err(Halt::Closed(why)) => return Err(why.to_string()),
-            Err(Halt::Timeout) => return Err(format!("not ready after {} s, stuck in {:?}", READY_TIMEOUT.as_secs(), session.phase)),
+            Err(Halt::Timeout | Halt::GoalMet) => return Err(format!("not ready after {} s, stuck in {:?}", READY_TIMEOUT.as_secs(), session.phase)),
         }
     }
 }
 
-fn live(session: &mut Session, tasks: &[Task]) -> Result<(), Halt> {
+fn live(session: &mut Session, script: Option<&Script>) -> Result<Result<(), String>, Halt> {
     session.pump_until(Some(Instant::now() + READY_TIMEOUT), |s| (s.phase == Phase::Ready).then_some(()))?;
-    for task in tasks {
-        say("aqx", format_args!("{task}"));
-        match run_task(session, task) {
-            Ok(()) => {}
-            Err(ActError::Halted(halt)) => return Err(halt),
-            Err(e) => {
-                say("aqx", format_args!("{task} failed: {e}"));
-                break;
-            }
-        }
-    }
-    session.pump_until(None, |_| None::<()>)
-}
-
-fn run_task(session: &mut Session, task: &Task) -> Result<(), ActError> {
-    match task {
-        Task::Join { map, cell } => {
-            session.join(map)?;
-            match cell {
-                Some((cell, pad)) => session.jump(cell, pad),
-                None => Ok(()),
-            }
-        }
-        Task::Jump { cell, pad } => session.jump(cell, pad),
-        Task::Kill { name, count } => {
-            let matches = |m: &aqx_core::Monster| name == "*" || m.name.eq_ignore_ascii_case(name);
-            let mut fight = Fight::default();
-            for _ in 0..*count {
-                session.kill(&matches, &mut fight, None, None)?;
-            }
+    let Some(script) = script else { return session.pump_until(None, |_| None) };
+    say("aqx", format_args!("running {}", script.path.display()));
+    Ok(match aqx_script::run(session, &script.path, &script.args) {
+        Ok(Outcome::Finished) => {
+            say("aqx", "the script finished");
             Ok(())
         }
-        Task::Farm { item, count, from } => {
-            let matches = |m: &aqx_core::Monster| from.as_ref().is_none_or(|name| m.name.eq_ignore_ascii_case(name));
-            session.farm(&[(ItemRef::Name(item.clone()), *count)], &matches, &mut Fight::default(), None, None)
+        Ok(Outcome::Stopped(reason)) => {
+            say("aqx", format_args!("the script stopped: {}", reason.as_deref().unwrap_or("no reason given")));
+            Ok(())
         }
-        Task::Accept(quest) => session.accept(QuestId(*quest)),
-        Task::Complete { quest, reward } => session.complete(QuestId(*quest), reward.map(ItemId), 1),
-        Task::Withdraw(item) => session.withdraw(&ItemRef::Name(item.clone())),
-        Task::Deposit(item) => session.deposit(&ItemRef::Name(item.clone())),
-        Task::Buy { shop, item, qty } => session.buy(ShopId(*shop), &ItemRef::Name(item.clone()), *qty),
-        Task::Sell { item, qty } => session.sell(&ItemRef::Name(item.clone()), *qty),
-        Task::Equip(item) => session.equip(&ItemRef::Name(item.clone())),
-        Task::Pickup(item) => session.pickup(item),
-        Task::Rest => session.rest(),
-    }
+        Err(ScriptError::Halted(halt)) => return Err(halt),
+        Err(e) => Err(format!("{}: {e}", script.path.display())),
+    })
 }
 
 fn watch_session(session: &mut Session, watch: &Watch, server: &str) {
@@ -350,33 +235,5 @@ fn pick_server<'a>(servers: &'a [Server], name: Option<&str>, member: bool) -> R
         Err(format!("{} is for members only", server.name))
     } else {
         Ok(server)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn kill_steps_take_an_optional_count_of_at_least_one() {
-        assert!(matches!(parse_task("kill Lava Golem 3"), Ok(Task::Kill { name, count: 3 }) if name == "Lava Golem"));
-        assert!(matches!(parse_task("kill Lava Golem"), Ok(Task::Kill { name, count: 1 }) if name == "Lava Golem"));
-        assert!(matches!(parse_task("kill 7"), Ok(Task::Kill { name, count: 1 }) if name == "7"));
-        assert!(parse_task("kill Treeant 0").is_err());
-    }
-
-    #[test]
-    fn farm_steps_name_an_item_a_count_and_maybe_a_monster() {
-        assert!(matches!(parse_task("farm Treeant Branch 3 from Treeant"), Ok(Task::Farm { item, count: 3, from: Some(m) }) if item == "Treeant Branch" && m == "Treeant"));
-        assert!(matches!(parse_task("farm Bone Dust 10"), Ok(Task::Farm { item, count: 10, from: None }) if item == "Bone Dust"));
-        assert!(parse_task("farm Bone Dust").is_err());
-    }
-
-    #[test]
-    fn shop_steps_name_a_shop_an_item_and_maybe_a_quantity() {
-        assert!(matches!(parse_task("buy 1348 Health Potion 5"), Ok(Task::Buy { shop: 1348, item, qty: 5 }) if item == "Health Potion"));
-        assert!(matches!(parse_task("sell Sword"), Ok(Task::Sell { item, qty: 1 }) if item == "Sword"));
-        assert!(parse_task("buy shop Sword").is_err());
-        assert!(parse_task("sell Sword 0").is_err());
     }
 }

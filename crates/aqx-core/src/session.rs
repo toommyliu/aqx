@@ -58,6 +58,8 @@ impl std::fmt::Display for Disconnect {
 pub enum Halt {
     Timeout,
     Stopped,
+    Interrupted,
+    GoalMet,
     Closed(Disconnect),
 }
 
@@ -69,6 +71,8 @@ pub struct Login<'a> {
 }
 
 type WatchFn = Box<dyn FnMut(&Phase, &World)>;
+pub type Goal = Box<dyn Fn(&World) -> bool>;
+pub type Hook = Box<dyn FnMut(&mut Session)>;
 
 struct Watcher {
     every: Duration,
@@ -87,16 +91,22 @@ pub struct Session {
     pub(crate) sink: fn(&Event),
     login: (String, String, String),
     pub(crate) api: String,
-    pub(crate) refusal: Option<(String, String)>,
+    pub(crate) refusals: HashMap<String, String>,
     inventory_requested: bool,
     pacer: Pacer,
     counter: u32,
     respawn_at: Option<Instant>,
     respawn_sent: bool,
     watcher: Option<Watcher>,
+    hook: Option<Hook>,
+    pub(crate) goal: Option<Goal>,
+    script_events: Option<std::collections::VecDeque<Event>>,
+    events_queued: u64,
+    pub respawn_to: Option<(String, String)>,
+    died_in: Option<(String, String)>,
     pub(crate) casts: HashMap<String, Instant>,
     pub(crate) joined: Option<aqx_protocol::AreaId>,
-    pub(crate) quest_outcome: Option<(aqx_protocol::QuestId, Result<(), String>)>,
+    pub(crate) quest_outcomes: HashMap<aqx_protocol::QuestId, Result<(), String>>,
     pub world: World,
     pub phase: Phase,
 }
@@ -129,16 +139,22 @@ impl Session {
             sink,
             login: (login.user.into(), login.token.into(), login.version.into()),
             api: login.api.into(),
-            refusal: None,
+            refusals: HashMap::new(),
             inventory_requested: false,
             pacer: Pacer::new(Instant::now()),
             counter: 0,
             respawn_at: None,
             respawn_sent: false,
             watcher: None,
+            hook: None,
+            goal: None,
+            script_events: None,
+            events_queued: 0,
+            respawn_to: None,
+            died_in: None,
             casts: HashMap::new(),
             joined: None,
-            quest_outcome: None,
+            quest_outcomes: HashMap::new(),
             world: World::default(),
             phase: Phase::Handshaking,
         };
@@ -168,10 +184,19 @@ impl Session {
             if self.control.stop_requested() {
                 return Err(Halt::Stopped);
             }
+            if self.control.take_interrupt() {
+                return Err(Halt::Interrupted);
+            }
+            if self.goal_met() {
+                return Err(Halt::GoalMet);
+            }
             let now = Instant::now();
             self.run_timers(now);
             if deadline.is_some_and(|d| now >= d) {
                 return Err(Halt::Timeout);
+            }
+            if self.run_hook() {
+                continue;
             }
             let wake = [deadline, self.respawn_at, self.watcher.as_ref().map(|w| w.next)].into_iter().flatten().min();
             let timeout = wake.map(|w| w.saturating_duration_since(now));
@@ -185,6 +210,47 @@ impl Session {
         }
     }
 
+    pub fn set_hook(&mut self, hook: Option<Hook>) {
+        self.script_events = hook.as_ref().map(|_| std::collections::VecDeque::new());
+        self.hook = hook;
+    }
+
+    pub(crate) fn goal_met(&self) -> bool {
+        self.goal.as_ref().is_some_and(|met| met(&self.world))
+    }
+
+    pub fn run_handlers(&mut self) {
+        self.run_hook();
+    }
+
+    pub fn events_queued(&self) -> u64 {
+        self.events_queued
+    }
+
+    pub fn take_script_events(&mut self) -> Vec<Event> {
+        self.script_events.as_mut().map(|q| q.drain(..).collect()).unwrap_or_default()
+    }
+
+    fn run_hook(&mut self) -> bool {
+        if self.script_events.as_ref().is_none_or(|q| q.is_empty()) {
+            return false;
+        }
+        let Some(mut hook) = self.hook.take() else { return false };
+        let goal = self.goal.take();
+        hook(self);
+        self.goal = goal;
+        self.hook = Some(hook);
+        true
+    }
+
+    pub fn sink(&self) -> fn(&Event) {
+        self.sink
+    }
+
+    pub fn stop_handle(&self) -> crate::control::StopHandle {
+        self.control.stop_handle()
+    }
+
     pub(crate) fn idle_until(&mut self, at: Instant) -> Result<(), Halt> {
         match self.pump_until(Some(at), |_| None::<()>) {
             Err(Halt::Timeout) => Ok(()),
@@ -194,7 +260,10 @@ impl Session {
 
     pub(crate) fn send_paced(&mut self, out: Out, kind: Kind) -> Result<(), Halt> {
         let ready = self.pacer.ready_at(kind, Instant::now());
-        self.idle_until(ready)?;
+        let hook = self.hook.take();
+        let waited = self.idle_until(ready);
+        self.hook = hook;
+        waited?;
         self.pacer.sent(kind, Instant::now());
         self.send(out);
         Ok(())
@@ -330,6 +399,10 @@ impl Session {
         for event in world::reduce(&mut self.world, &msg, Instant::now()) {
             (self.sink)(&event);
             self.react(&event);
+            if let Some(queue) = &mut self.script_events {
+                self.events_queued += 1;
+                queue.push_back(event);
+            }
         }
     }
 
@@ -349,10 +422,19 @@ impl Session {
                 self.on_joined();
                 self.joined = self.world.area.as_ref().map(|a| a.id);
             }
-            Event::Died => self.respawn_at = Some(Instant::now() + RESPAWN_DELAY),
-            Event::QuestAccepted { id, .. } | Event::QuestCompleted { id, .. } => self.quest_outcome = Some((*id, Ok(()))),
-            Event::QuestRejected { id, reason } => self.quest_outcome = Some((*id, Err(reason.clone()))),
-            Event::Refused { action, reason } => self.refusal = Some((action.clone(), reason.clone())),
+            Event::Died => {
+                self.respawn_at = Some(Instant::now() + RESPAWN_DELAY);
+                self.died_in = self.world.me.as_ref().map(|m| (m.cell.clone(), m.pad.clone()));
+            }
+            Event::QuestAccepted { id, .. } | Event::QuestCompleted { id, .. } => {
+                self.quest_outcomes.insert(*id, Ok(()));
+            }
+            Event::QuestRejected { id, reason } => {
+                self.quest_outcomes.insert(*id, Err(reason.clone()));
+            }
+            Event::Refused { action, reason } => {
+                self.refusals.insert(action.clone(), reason.clone());
+            }
             Event::Respawned => {
                 self.respawn_at = None;
                 if std::mem::take(&mut self.respawn_sent)
@@ -360,6 +442,11 @@ impl Session {
                 {
                     self.send(Out::MoveToCell { room, cell: "Enter", pad: "Spawn" });
                     self.moved_to("Enter", "Spawn");
+                    let died_in = self.died_in.take();
+                    if let Some((cell, pad)) = self.respawn_to.clone().or(died_in).filter(|(cell, _)| cell != "Enter") {
+                        self.send(Out::MoveToCell { room, cell: &cell, pad: &pad });
+                        self.moved_to(&cell, &pad);
+                    }
                 }
             }
             Event::Warning { text } if SLOW_DOWN.iter().any(|w| text.to_lowercase().contains(w)) => self.pacer.warned(Instant::now()),

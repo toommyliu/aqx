@@ -65,6 +65,13 @@ impl World {
         self.inventory.iter().chain(&self.temp).filter(|i| item.matches(i)).map(|i| i.qty).sum()
     }
 
+    pub fn name_of(&self, item: &crate::world::ItemRef) -> String {
+        let crate::world::ItemRef::Id(id) = item else { return item.to_string() };
+        let held = self.inventory.iter().chain(&self.temp).chain(&self.drops).chain(self.bank.iter()).find(|i| i.id == *id).map(|i| i.name.clone());
+        held.or_else(|| self.quests.values().flat_map(|q| q.turn_in.iter().chain(&q.hold)).find(|n| n.item == *id).map(|n| n.name.clone()))
+            .unwrap_or_else(|| item.to_string())
+    }
+
     pub fn quest_status(&self, id: QuestId) -> Option<QuestStatus> {
         let quest = self.quests.get(&id)?;
         let me = self.me.as_ref()?;
@@ -228,7 +235,7 @@ mod tests {
 
     use super::*;
     use crate::event::Event;
-    use crate::world::reduce;
+    use crate::world::{ItemRef, reduce};
 
     fn json(o: &str) -> String {
         format!(r#"{{"t":"xt","b":{{"r":-1,"o":{o}}}}}"#)
@@ -278,6 +285,14 @@ mod tests {
             ("Shark Bait's Armor", RewardKind::Choice),
             ("Shark Sabre", RewardKind::Choice)
         ]);
+    }
+
+    #[test]
+    fn item_ids_are_named_from_what_the_world_has_seen() {
+        let world = hero(0, '0');
+        assert_eq!(world.name_of(&ItemRef::Id(ItemId(87))), "Treeant Branch");
+        assert_eq!(world.name_of(&ItemRef::Id(ItemId(5))), "item 5");
+        assert_eq!(world.name_of(&ItemRef::Name("Bone Dust".into())), "Bone Dust");
     }
 
     #[test]
