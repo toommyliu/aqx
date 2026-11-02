@@ -190,7 +190,8 @@ fn run(args: RunArgs) -> Result<(), String> {
     let recorder = record.map(|p| Recorder::create(&p).map_err(|e| format!("{}: {e}", p.display()))).transpose()?;
     let mut settings = bot.settings(&config.defaults);
     settings.server = server.or(settings.server);
-    let launch = Launch { name: bot.name().into(), spec: spec(bot, settings, &client_version, script, true), recorder };
+    let exit_when_done = script.is_some();
+    let launch = Launch { name: bot.name().into(), spec: spec(bot, settings, &client_version, script, exit_when_done), recorder };
     let print = if json {
         Print::Json
     } else if plain || !std::io::stdout().is_terminal() {
