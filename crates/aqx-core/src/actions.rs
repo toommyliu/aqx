@@ -88,6 +88,12 @@ enum Choice {
     Wait(Instant),
 }
 
+enum TargetState {
+    Alive,
+    Dead,
+    Gone,
+}
+
 impl Session {
     fn ready(&mut self, deadline: Option<Instant>) -> Result<(), ActError> {
         self.wait_for(deadline, "waiting to be alive and ready", |s| {
@@ -532,23 +538,14 @@ impl Session {
                 self.wait_for(deadline, "waiting to resume", |s| !s.paused())?;
                 continue;
             }
-            let (Some(me), Some(area)) = (&self.world.me, &self.world.area) else { return Ok(false) };
-            let Some(monster) = area.monsters.iter().find(|m| m.map_id == id) else { return Ok(false) };
-            if !monster.alive() {
-                return Ok(true);
-            }
-            if me.vitals.state == State::Dead || me.cell != monster.cell {
-                return Ok(false);
+            match self.target_state(id) {
+                TargetState::Dead => return Ok(true),
+                TargetState::Gone => return Ok(false),
+                TargetState::Alive => {}
             }
             let now = Instant::now();
             if deadline.is_some_and(|d| now >= d) {
                 return Err(ActError::Timeout("killing".into()));
-            }
-            let countering = fight.anti_counter && area.monsters.iter().any(|m| m.cell == me.cell && m.countering(now));
-            let holding = fight.hold.as_mut().is_some_and(|hold| hold(&self.world));
-            if countering || holding {
-                self.idle_until(cap(now + HOLD_RECHECK, deadline))?;
-                continue;
             }
             match self.choose(fight, now) {
                 Choice::Cast(slot) => self.cast(slot, Some(id))?,
@@ -557,7 +554,26 @@ impl Session {
         }
     }
 
+    fn target_state(&self, id: MonMapId) -> TargetState {
+        let (Some(me), Some(area)) = (&self.world.me, &self.world.area) else { return TargetState::Gone };
+        let Some(monster) = area.monsters.iter().find(|m| m.map_id == id) else { return TargetState::Gone };
+        if !monster.alive() {
+            TargetState::Dead
+        } else if me.vitals.state == State::Dead || me.cell != monster.cell {
+            TargetState::Gone
+        } else {
+            TargetState::Alive
+        }
+    }
+
     fn choose(&self, fight: &mut Fight, now: Instant) -> Choice {
+        let (me, area) = (self.world.me.as_ref(), self.world.area.as_ref());
+        let countering = fight.anti_counter
+            && me.zip(area).is_some_and(|(me, area)| area.monsters.iter().any(|m| m.cell == me.cell && m.countering(now)));
+        let holding = fight.hold.as_mut().is_some_and(|hold| hold(&self.world));
+        if countering || holding {
+            return Choice::Wait(now + HOLD_RECHECK);
+        }
         let mut earliest = now + HOLD_RECHECK;
         let order: Vec<usize> = if fight.strict && !fight.steps.is_empty() { vec![fight.next % fight.steps.len()] } else { (0..fight.steps.len()).collect() };
         for i in order {
