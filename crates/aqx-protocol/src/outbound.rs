@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::{AreaId, EntityId, ItemId, MonMapId};
+use crate::{AreaId, EntityId, ItemId, MonMapId, QuestId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Aim {
@@ -25,6 +25,9 @@ pub enum Out<'a> {
     Respawn { room: AreaId, eid: EntityId },
     PickUp { room: AreaId, item: ItemId },
     Aggro { room: AreaId, monsters: &'a [MonMapId] },
+    LoadQuests { room: AreaId, quests: &'a [QuestId] },
+    AcceptQuest { room: AreaId, quest: QuestId },
+    CompleteQuest { room: AreaId, quest: QuestId, reward: Option<ItemId>, times: u32 },
     Raw(&'a str),
 }
 
@@ -71,6 +74,17 @@ impl Out<'_> {
                     write!(buf, "{id}%").unwrap();
                 }
             }
+            Out::LoadQuests { room, quests } => {
+                write!(buf, "%xt%zm%getQuests%{room}%").unwrap();
+                for id in *quests {
+                    write!(buf, "{id}%").unwrap();
+                }
+            }
+            Out::AcceptQuest { room, quest } => write!(buf, "%xt%zm%acceptQuest%{room}%{quest}%").unwrap(),
+            Out::CompleteQuest { room, quest, reward, times } => {
+                let reward = reward.map_or(-1, |id| i64::from(id.0));
+                write!(buf, "%xt%zm%tryQuestComplete%{room}%{quest}%{reward}%false%{times}%wvz%").unwrap()
+            }
             Out::Raw(text) => buf.extend_from_slice(text.as_bytes()),
         }
         buf.push(0);
@@ -116,6 +130,24 @@ mod tests {
         assert_eq!(encoded(Out::Respawn { room, eid: EntityId(1001) }), "%xt%zm%resPlayerTimed%168500%1001%\0");
         assert_eq!(encoded(Out::PickUp { room, item: ItemId(1528) }), "%xt%zm%getDrop%168500%1528%\0");
         assert_eq!(encoded(Out::Aggro { room, monsters: &[MonMapId(1), MonMapId(2)] }), "%xt%zm%aggroMon%168500%1%2%\0");
+    }
+
+    #[test]
+    fn encodes_quest_requests_as_the_client_sends_them() {
+        let room = AreaId(167928);
+        assert_eq!(
+            encoded(Out::LoadQuests { room, quests: &[QuestId(11), QuestId(407)] }),
+            "%xt%zm%getQuests%167928%11%407%\0"
+        );
+        assert_eq!(encoded(Out::AcceptQuest { room, quest: QuestId(11) }), "%xt%zm%acceptQuest%167928%11%\0");
+        assert_eq!(
+            encoded(Out::CompleteQuest { room: AreaId(167964), quest: QuestId(11), reward: None, times: 1 }),
+            "%xt%zm%tryQuestComplete%167964%11%-1%false%1%wvz%\0"
+        );
+        assert_eq!(
+            encoded(Out::CompleteQuest { room, quest: QuestId(445), reward: Some(ItemId(2481)), times: 5 }),
+            "%xt%zm%tryQuestComplete%167928%445%2481%false%5%wvz%\0"
+        );
     }
 
     #[test]

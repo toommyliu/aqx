@@ -83,7 +83,7 @@ pub struct Session {
     decoder: Decoder,
     outbox: Vec<u8>,
     recorder: Option<Recorder>,
-    sink: fn(&Event),
+    pub(crate) sink: fn(&Event),
     login: (String, String, String),
     inventory_requested: bool,
     pacer: Pacer,
@@ -93,6 +93,7 @@ pub struct Session {
     watcher: Option<Watcher>,
     pub(crate) casts: HashMap<String, Instant>,
     pub(crate) joined: Option<aqx_protocol::AreaId>,
+    pub(crate) quest_outcome: Option<(aqx_protocol::QuestId, Result<(), String>)>,
     pub world: World,
     pub phase: Phase,
 }
@@ -132,6 +133,7 @@ impl Session {
             watcher: None,
             casts: HashMap::new(),
             joined: None,
+            quest_outcome: None,
             world: World::default(),
             phase: Phase::Handshaking,
         };
@@ -335,6 +337,8 @@ impl Session {
                 self.joined = self.world.area.as_ref().map(|a| a.id);
             }
             Event::Died => self.respawn_at = Some(Instant::now() + RESPAWN_DELAY),
+            Event::QuestAccepted { id, .. } | Event::QuestCompleted { id, .. } => self.quest_outcome = Some((*id, Ok(()))),
+            Event::QuestRejected { id, reason } => self.quest_outcome = Some((*id, Err(reason.clone()))),
             Event::Respawned => {
                 self.respawn_at = None;
                 if std::mem::take(&mut self.respawn_sent)

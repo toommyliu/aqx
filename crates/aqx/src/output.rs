@@ -109,6 +109,10 @@ pub fn describe(event: &Event) -> Option<(&'static str, String)> {
             ("aqx", format!("{item}: {qty} in the {place}"))
         }
         Event::Chat { channel, sender, text } => ("server", format!("[{channel}] {sender}: {text}")),
+        Event::Progress { label, current, total } => ("aqx", format!("{label} {current}/{total}")),
+        Event::QuestAccepted { name, .. } => ("aqx", format!("accepted {name}")),
+        Event::QuestCompleted { name, .. } => ("aqx", format!("completed {name}")),
+        Event::QuestRejected { id, reason } => ("aqx", format!("quest {id} refused: {reason}")),
         Event::ServerText { text } | Event::Warning { text } => ("server", text.clone()),
         Event::Unreadable { what } => ("aqx", format!("unreadable message: {what}")),
         Event::RecordingFailed { error } => ("aqx", format!("recording stopped: {error}")),

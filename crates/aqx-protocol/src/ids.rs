@@ -23,4 +23,4 @@ macro_rules! ids {
     )*};
 }
 
-ids!(AreaId, EntityId, ItemId, CharItemId, MonMapId, MonId, FactionId);
+ids!(AreaId, EntityId, ItemId, CharItemId, MonMapId, MonId, FactionId, QuestId, ShopId, ShopItemId);

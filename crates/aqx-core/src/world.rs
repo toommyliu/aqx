@@ -2,12 +2,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use aqx_protocol::de::{flag, int, text};
-use aqx_protocol::{AreaId, CharItemId, EntityId, FactionId, ItemId, Json, Message, MonId, MonMapId, Xml, Xt};
+use aqx_protocol::{AreaId, CharItemId, EntityId, FactionId, ItemId, Json, Message, MonId, MonMapId, QuestId, Xml, Xt};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::event::{Event, Place};
+use crate::quests::{Quest, QuestData, set_quest_value};
 
 const RANK_REP: [u32; 9] = [900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500];
 const GOLD_CAP: i64 = 100_000_000;
@@ -23,6 +24,8 @@ pub struct World {
     pub temp: Vec<Item>,
     pub factions: Vec<Faction>,
     pub drops: Vec<Item>,
+    pub quests: HashMap<QuestId, Quest>,
+    pub active: Vec<QuestId>,
     pub rev: u64,
 }
 
@@ -40,6 +43,9 @@ pub struct Me {
     pub auras: Vec<Aura>,
     pub skills: Vec<Skill>,
     pub stats: BTreeMap<String, f64>,
+    pub member: bool,
+    pub quest_slots: Vec<String>,
+    pub achievements: HashMap<String, i64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -89,6 +95,30 @@ pub struct Player {
     pub level: u32,
     pub vitals: Vitals,
     pub auras: Vec<Aura>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ItemRef {
+    Id(ItemId),
+    Name(String),
+}
+
+impl ItemRef {
+    pub fn matches(&self, item: &Item) -> bool {
+        match self {
+            ItemRef::Id(id) => item.id == *id,
+            ItemRef::Name(name) => item.name.eq_ignore_ascii_case(name),
+        }
+    }
+}
+
+impl std::fmt::Display for ItemRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ItemRef::Id(id) => write!(f, "item {id}"),
+            ItemRef::Name(name) => f.write_str(name),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -399,6 +429,11 @@ impl World {
             "warning" => events.push(Event::Warning { text: xt.arg(0).unwrap_or_default().into() }),
             "notify" | "logoutWarning" => events.push(Event::ServerText { text: xt.arg(0).unwrap_or_default().into() }),
             "multiLoginWarning" => events.push(Event::LoggedInElsewhere),
+            "zm" if matches!(xt.room, "tryQuestComplete" | "acceptQuest") => {
+                if let Some(id) = xt.arg(1).and_then(|s| s.parse().ok()).map(QuestId) {
+                    events.push(Event::QuestRejected { id, reason: "the server refused it".into() });
+                }
+            }
             "chatm" => {
                 let payload = xt.arg(0).unwrap_or_default();
                 let (channel, text) = payload.split_once('~').unwrap_or(("zone", payload));
@@ -630,6 +665,82 @@ impl World {
                     events.push(Event::Killed { monster });
                 }
             }
+            "getQuests" => {
+                #[derive(Deserialize)]
+                struct Loaded {
+                    #[serde(default)]
+                    quests: HashMap<String, Value>,
+                }
+                let loaded = json.decode::<Loaded>()?.quests.into_values().collect();
+                for data in each::<QuestData>(loaded, "quest", events) {
+                    let quest = data.into_quest();
+                    self.quests.insert(quest.id, quest);
+                }
+            }
+            "acceptQuest" | "ccqr" => {
+                #[derive(Deserialize)]
+                struct Outcome {
+                    #[serde(rename = "bSuccess", default, deserialize_with = "flag")]
+                    ok: bool,
+                    #[serde(rename = "QuestID")]
+                    id: QuestId,
+                    #[serde(default, deserialize_with = "text")]
+                    msg: String,
+                }
+                let Outcome { ok, id, msg } = json.decode()?;
+                let name = self.quests.get(&id).map_or_else(|| format!("quest {id}"), |q| q.name.clone());
+                match (json.cmd, ok) {
+                    ("acceptQuest", true) => {
+                        if !self.active.contains(&id) {
+                            self.active.push(id);
+                        }
+                        events.push(Event::QuestAccepted { id, name });
+                    }
+                    (_, true) => {
+                        self.active.retain(|q| *q != id);
+                        events.push(Event::QuestCompleted { id, name });
+                    }
+                    (_, false) => {
+                        let reason = if msg.is_empty() { "the server refused it".into() } else { msg };
+                        events.push(Event::QuestRejected { id, reason });
+                    }
+                }
+            }
+            "updateQuest" => {
+                #[derive(Deserialize)]
+                struct Update {
+                    #[serde(rename = "iIndex", deserialize_with = "int")]
+                    slot: i64,
+                    #[serde(rename = "iValue", deserialize_with = "int")]
+                    value: i64,
+                }
+                let update: Update = json.decode()?;
+                if let Some(me) = &mut self.me {
+                    set_quest_value(me, update.slot as i32, update.value.max(0) as u32);
+                }
+            }
+            "setAchievement" => {
+                #[derive(Deserialize)]
+                struct Achievement {
+                    #[serde(deserialize_with = "text")]
+                    field: String,
+                    #[serde(deserialize_with = "int")]
+                    index: i64,
+                    #[serde(deserialize_with = "int")]
+                    value: i64,
+                }
+                let a: Achievement = json.decode()?;
+                if let Some(me) = &mut self.me
+                    && (0..64).contains(&a.index)
+                {
+                    let bits = me.achievements.entry(a.field).or_insert(0);
+                    if a.value != 0 {
+                        *bits |= 1 << a.index;
+                    } else {
+                        *bits &= !(1 << a.index);
+                    }
+                }
+            }
             "sellItem" => {
                 #[derive(Deserialize)]
                 struct Sold {
@@ -813,6 +924,25 @@ impl World {
             if let Some(class) = data.class {
                 me.class = class;
             }
+            if let Some(member) = data.member {
+                me.member = member.as_i64().unwrap_or(0) > 0 || member.as_bool() == Some(true);
+            }
+            for (key, value) in data.rest {
+                let as_int = || value.as_i64().or_else(|| value.as_str()?.parse().ok());
+                if let Some(n) = key.strip_prefix("strQuests") {
+                    let index = if n.is_empty() { Some(0) } else { n.parse::<usize>().ok().map(|n| n - 1) };
+                    if let (Some(index), Some(slots)) = (index, value.as_str()) {
+                        if me.quest_slots.len() <= index {
+                            me.quest_slots.resize(index + 1, String::new());
+                        }
+                        me.quest_slots[index] = slots.to_string();
+                    }
+                } else if ["ia", "id", "iw", "im"].iter().any(|p| key.strip_prefix(p).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())))
+                    && let Some(bits) = as_int()
+                {
+                    me.achievements.insert(key, bits);
+                }
+            }
         } else if let Some(player) = self.area.as_mut().and_then(|a| a.players.iter_mut().find(|p| p.eid == uid)) {
             player.level = qty(data.level);
         }
@@ -910,6 +1040,9 @@ impl Me {
             auras: Vec::new(),
             skills: Vec::new(),
             stats: BTreeMap::new(),
+            member: false,
+            quest_slots: Vec::new(),
+            achievements: HashMap::new(),
         }
     }
 
@@ -952,6 +1085,10 @@ struct UserData {
     gold: Option<i64>,
     #[serde(rename = "strClassName")]
     class: Option<String>,
+    #[serde(rename = "iUpg")]
+    member: Option<Value>,
+    #[serde(flatten)]
+    rest: HashMap<String, Value>,
 }
 
 #[derive(Deserialize)]

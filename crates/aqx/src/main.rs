@@ -9,7 +9,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use aqx_core::{ActError, CLIENT_VERSION, Control, Disconnect, Fight, Halt, Login, Phase, Recorder, Server, Session, login};
+use aqx_core::{ActError, CLIENT_VERSION, Control, Disconnect, Fight, Halt, ItemRef, Login, Phase, Recorder, Server, Session, login};
+use aqx_protocol::{ItemId, QuestId};
 use clap::{Args, Parser, Subcommand};
 use output::{Mode, say};
 
@@ -64,7 +65,7 @@ struct RunArgs {
         long = "do",
         value_name = "STEP",
         value_parser = parse_task,
-        help = "Run a step once ready: \"join MAP [CELL PAD]\", \"jump CELL [PAD]\", \"kill NAME [COUNT]\", \"pickup ITEM\" or \"rest\". Repeatable"
+        help = "Run a step once ready: \"join MAP [CELL PAD]\", \"jump CELL [PAD]\", \"kill NAME [COUNT]\", \"farm ITEM COUNT [from NAME]\", \"accept QUEST\", \"complete QUEST [REWARD]\", \"pickup ITEM\" or \"rest\". Repeatable"
     )]
     tasks: Vec<Task>,
 }
@@ -74,6 +75,9 @@ enum Task {
     Join { map: String, cell: Option<(String, String)> },
     Jump { cell: String, pad: String },
     Kill { name: String, count: u32 },
+    Farm { item: String, count: u32, from: Option<String> },
+    Accept(u32),
+    Complete { quest: u32, reward: Option<u32> },
     Pickup(String),
     Rest,
 }
@@ -86,6 +90,11 @@ impl std::fmt::Display for Task {
             Task::Jump { cell, pad } => write!(f, "jump {cell} {pad}"),
             Task::Kill { name, count: 1 } => write!(f, "kill {name}"),
             Task::Kill { name, count } => write!(f, "kill {name} {count}"),
+            Task::Farm { item, count, from: None } => write!(f, "farm {item} {count}"),
+            Task::Farm { item, count, from: Some(monster) } => write!(f, "farm {item} {count} from {monster}"),
+            Task::Accept(quest) => write!(f, "accept {quest}"),
+            Task::Complete { quest, reward: None } => write!(f, "complete {quest}"),
+            Task::Complete { quest, reward: Some(item) } => write!(f, "complete {quest} {item}"),
             Task::Pickup(item) => write!(f, "pickup {item}"),
             Task::Rest => write!(f, "rest"),
         }
@@ -93,6 +102,17 @@ impl std::fmt::Display for Task {
 }
 
 fn parse_task(step: &str) -> Result<Task, String> {
+    if let Some(rest) = step.strip_prefix("farm ") {
+        let (goal, from) = match rest.split_once(" from ") {
+            Some((goal, monster)) => (goal, Some(monster.trim().to_string())),
+            None => (rest, None),
+        };
+        let words: Vec<&str> = goal.split_whitespace().collect();
+        return match words.split_last().map(|(last, item)| (last.parse::<u32>(), item)) {
+            Some((Ok(count), item)) if count > 0 && !item.is_empty() => Ok(Task::Farm { item: item.join(" "), count, from }),
+            _ => Err("expected farm ITEM COUNT [from NAME], with COUNT at least 1".into()),
+        };
+    }
     let words: Vec<&str> = step.split_whitespace().collect();
     let text = |ws: &[&str]| ws.join(" ");
     Ok(match words.as_slice() {
@@ -107,7 +127,12 @@ fn parse_task(step: &str) -> Result<Task, String> {
         },
         ["pickup", item @ ..] if !item.is_empty() => Task::Pickup(text(item)),
         ["rest"] => Task::Rest,
-        _ => return Err("expected join MAP [CELL PAD], jump CELL [PAD], kill NAME [COUNT], pickup ITEM or rest".into()),
+        ["accept", quest] => Task::Accept(quest.parse().map_err(|_| format!("{quest} is not a quest id"))?),
+        ["complete", quest, reward @ ..] if reward.len() <= 1 => Task::Complete {
+            quest: quest.parse().map_err(|_| format!("{quest} is not a quest id"))?,
+            reward: reward.first().map(|r| r.parse().map_err(|_| format!("{r} is not an item id"))).transpose()?,
+        },
+        _ => return Err("expected join MAP [CELL PAD], jump CELL [PAD], kill NAME [COUNT], farm ITEM COUNT [from NAME], accept QUEST, complete QUEST [REWARD], pickup ITEM or rest".into()),
     })
 }
 
@@ -240,6 +265,12 @@ fn run_task(session: &mut Session, task: &Task) -> Result<(), ActError> {
             }
             Ok(())
         }
+        Task::Farm { item, count, from } => {
+            let matches = |m: &aqx_core::Monster| from.as_ref().is_none_or(|name| m.name.eq_ignore_ascii_case(name));
+            session.farm(&[(ItemRef::Name(item.clone()), *count)], &matches, &mut Fight::default(), None, None)
+        }
+        Task::Accept(quest) => session.accept(QuestId(*quest)),
+        Task::Complete { quest, reward } => session.complete(QuestId(*quest), reward.map(ItemId), 1),
         Task::Pickup(item) => session.pickup(item),
         Task::Rest => session.rest(),
     }
@@ -298,5 +329,12 @@ mod tests {
         assert!(matches!(parse_task("kill Lava Golem"), Ok(Task::Kill { name, count: 1 }) if name == "Lava Golem"));
         assert!(matches!(parse_task("kill 7"), Ok(Task::Kill { name, count: 1 }) if name == "7"));
         assert!(parse_task("kill Treeant 0").is_err());
+    }
+
+    #[test]
+    fn farm_steps_name_an_item_a_count_and_maybe_a_monster() {
+        assert!(matches!(parse_task("farm Treeant Branch 3 from Treeant"), Ok(Task::Farm { item, count: 3, from: Some(m) }) if item == "Treeant Branch" && m == "Treeant"));
+        assert!(matches!(parse_task("farm Bone Dust 10"), Ok(Task::Farm { item, count: 10, from: None }) if item == "Bone Dust"));
+        assert!(parse_task("farm Bone Dust").is_err());
     }
 }

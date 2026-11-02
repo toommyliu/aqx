@@ -1,15 +1,18 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use aqx_protocol::{Aim, MonMapId, Out};
+use aqx_protocol::{Aim, AreaId, ItemId, MonMapId, Out, QuestId};
 
 use crate::pacer::Kind;
+use crate::quests::{QuestStatus, RewardKind};
 use crate::session::{Halt, Phase, Session};
-use crate::world::{Monster, SkillTarget, State, World};
+use crate::event::Event;
+use crate::world::{ItemRef, Monster, SkillTarget, State, World};
 
 const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 const REST_TIMEOUT: Duration = Duration::from_secs(30);
 const PICKUP_TIMEOUT: Duration = Duration::from_secs(5);
+const QUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const JUMP_SETTLE: Duration = Duration::from_millis(500);
 const SERVER_MARGIN: Duration = Duration::from_millis(200);
 const HOLD_RECHECK: Duration = Duration::from_millis(200);
@@ -21,6 +24,7 @@ pub enum ActError {
     Halted(Halt),
     Timeout(String),
     NotFound(String),
+    Rejected(String),
 }
 
 impl From<Halt> for ActError {
@@ -37,6 +41,7 @@ impl fmt::Display for ActError {
             ActError::Halted(Halt::Closed(why)) => write!(f, "{why}"),
             ActError::Timeout(what) => write!(f, "timed out {what}"),
             ActError::NotFound(what) => write!(f, "{what} not found"),
+            ActError::Rejected(why) => write!(f, "{why}"),
         }
     }
 }
@@ -133,6 +138,117 @@ impl Session {
         let Some(room) = self.world.area.as_ref().map(|a| a.id) else { return Err(ActError::NotFound("a map".into())) };
         self.send_paced(Out::PickUp { room, item }, Kind::Free)?;
         self.wait_for(Some(Instant::now() + PICKUP_TIMEOUT), &format!("picking up {name}"), |s| s.world.drops.iter().all(|d| d.id != item))
+    }
+
+    fn room(&self) -> Result<AreaId, ActError> {
+        self.world.area.as_ref().map(|a| a.id).ok_or_else(|| ActError::NotFound("a map".into()))
+    }
+
+    pub fn load_quests(&mut self, ids: &[QuestId]) -> Result<(), ActError> {
+        self.ready(None)?;
+        let missing: Vec<QuestId> = ids.iter().copied().filter(|id| !self.world.quests.contains_key(id)).collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let room = self.room()?;
+        self.send_paced(Out::LoadQuests { room, quests: &missing }, Kind::Free)?;
+        self.wait_for(Some(Instant::now() + QUEST_TIMEOUT), "loading quests", |s| missing.iter().all(|id| s.world.quests.contains_key(id)))
+    }
+
+    pub fn accept(&mut self, id: QuestId) -> Result<(), ActError> {
+        self.load_quests(&[id])?;
+        let name = self.world.quests.get(&id).map_or_else(|| format!("quest {id}"), |q| q.name.clone());
+        match self.world.quest_status(id) {
+            Some(QuestStatus::Active | QuestStatus::Completable) => return Ok(()),
+            Some(QuestStatus::Done) => return Err(ActError::Rejected(format!("{name} is already done"))),
+            Some(QuestStatus::Locked) => return Err(ActError::Rejected(format!("{name} is locked"))),
+            _ => {}
+        }
+        let room = self.room()?;
+        self.quest_outcome = None;
+        self.send_paced(Out::AcceptQuest { room, quest: id }, Kind::Locked("acceptQuest"))?;
+        self.quest_verdict(id, "accepting")
+    }
+
+    pub fn complete(&mut self, id: QuestId, reward: Option<ItemId>, times: u32) -> Result<(), ActError> {
+        self.load_quests(&[id])?;
+        let Some(quest) = self.world.quests.get(&id).cloned() else { return Err(ActError::NotFound(format!("quest {id}"))) };
+        if quest.once && self.world.quest_status(id) == Some(QuestStatus::Done) {
+            return Ok(());
+        }
+        if !self.world.active.contains(&id) {
+            self.accept(id)?;
+        }
+        let choices: Vec<_> = quest.rewards.iter().filter(|r| r.kind == RewardKind::Choice).collect();
+        if !choices.is_empty() && !reward.is_some_and(|item| choices.iter().any(|c| c.item == item)) {
+            let names: Vec<&str> = choices.iter().map(|c| c.name.as_str()).collect();
+            return Err(ActError::Rejected(format!("{} needs a reward chosen from {}", quest.name, names.join(", "))));
+        }
+        if self.world.quest_status(id) != Some(QuestStatus::Completable) {
+            let missing: Vec<String> =
+                quest.turn_in.iter().filter(|n| self.world.count(n.item) < n.qty).map(|n| format!("{} {}/{}", n.name, self.world.count(n.item), n.qty)).collect();
+            return Err(ActError::Rejected(format!("{} still needs {}", quest.name, missing.join(", "))));
+        }
+        let room = self.room()?;
+        let reward = if choices.is_empty() { None } else { reward };
+        self.quest_outcome = None;
+        self.send_paced(Out::CompleteQuest { room, quest: id, reward, times: times.max(1) }, Kind::Locked("tryQuestComplete"))?;
+        self.quest_verdict(id, "completing")
+    }
+
+    fn quest_verdict(&mut self, id: QuestId, what: &str) -> Result<(), ActError> {
+        let heard = |s: &Session| s.quest_outcome.as_ref().is_some_and(|(q, _)| *q == id);
+        self.wait_for(Some(Instant::now() + QUEST_TIMEOUT), &format!("{what} quest {id}"), heard)?;
+        match self.quest_outcome.take() {
+            Some((_, Err(reason))) => Err(ActError::Rejected(reason)),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn farm(
+        &mut self,
+        goals: &[(ItemRef, u32)],
+        target: &dyn Fn(&Monster) -> bool,
+        fight: &mut Fight,
+        cell: Option<(&str, &str)>,
+        timeout: Option<Duration>,
+    ) -> Result<(), ActError> {
+        let deadline = timeout.map(|t| Instant::now() + t);
+        let mut shown: Vec<Option<u32>> = vec![None; goals.len()];
+        loop {
+            self.pick_up_goals(goals)?;
+            let mut done = true;
+            for ((item, total), last) in goals.iter().zip(&mut shown) {
+                let current = self.world.count_of(item);
+                if *last != Some(current) {
+                    *last = Some(current);
+                    (self.sink)(&Event::Progress { label: item.to_string(), current: current.min(*total), total: *total });
+                }
+                done &= current >= *total;
+            }
+            if done {
+                return Ok(());
+            }
+            let left = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+            if left.is_some_and(|l| l.is_zero()) {
+                return Err(ActError::Timeout("farming".into()));
+            }
+            self.kill(target, fight, cell, left)?;
+        }
+    }
+
+    fn pick_up_goals(&mut self, goals: &[(ItemRef, u32)]) -> Result<(), ActError> {
+        let wanted: Vec<String> = self
+            .world
+            .drops
+            .iter()
+            .filter(|d| goals.iter().any(|(item, total)| item.matches(d) && self.world.count_of(item) < *total))
+            .map(|d| d.name.clone())
+            .collect();
+        for name in wanted {
+            self.pickup(&name)?;
+        }
+        Ok(())
     }
 
     pub fn kill(
