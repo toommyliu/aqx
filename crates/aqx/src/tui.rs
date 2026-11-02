@@ -1,20 +1,55 @@
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
 use ratatui::crossterm::event::{self, Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Cell as TableCell, Padding, Paragraph, Row, Table};
-use crate::hub::{BotCell, Command, LOG_LINES, LogLine, Snapshot};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
+use unicode_width::UnicodeWidthChar;
+
+use crate::bot::{expand_home, script_path};
+use crate::hub::{Bar, BotCell, Command, Game, LOG_LINES, LogLine, Snapshot};
 use crate::output::{clock, span};
 use crate::socket;
 
 const WIDE: u16 = 90;
 const NOTE_FOR: Duration = Duration::from_secs(4);
+const STATE_WIDTH: usize = 12;
+const ACCENT: Color = Color::Blue;
+
+type Field = Vec<Span<'static>>;
+
+const BOT_KEYS: [(&str, &str); 9] = [
+    ("", "Bots"),
+    ("↑ ↓", "pick"),
+    ("tab", "next"),
+    ("space", "mark"),
+    ("a", "mark all / none"),
+    ("esc", "clear marks"),
+    ("i", "log in"),
+    ("x", "log out"),
+    ("q", "detach"),
+];
+
+const SCRIPT_KEYS: [(&str, &str); 12] = [
+    ("", "Scripts"),
+    ("o", "run a script"),
+    ("s", "stop"),
+    ("r", "restart"),
+    ("p", "pause / resume"),
+    ("c", "zone chat"),
+    ("", "View"),
+    ("d", "more details"),
+    ("l", "filter the log"),
+    ("⇧↑ ⇧↓", "scroll a line"),
+    ("PgUp PgDn", "scroll a page"),
+    ("End", "newest lines"),
+];
 
 pub struct Fleet {
     pub title: String,
@@ -87,11 +122,14 @@ impl Prompt {
 
 #[derive(Default)]
 struct App {
-    open: Option<usize>,
     selected: usize,
+    marked: BTreeSet<usize>,
+    details: bool,
+    keys: bool,
     filter: Filter,
     scroll: usize,
     max_scroll: Cell<usize>,
+    list_top: Cell<usize>,
     prompt: Option<Prompt>,
     recent: Vec<String>,
     note: Option<(String, Instant)>,
@@ -106,7 +144,7 @@ struct Shown {
 
 pub fn run(fleet: &Fleet, done: impl Fn() -> bool) -> Result<(), String> {
     let mut terminal = ratatui::init();
-    let mut app = App { open: (fleet.cells.len() == 1).then_some(0), ..App::default() };
+    let mut app = App::default();
     loop {
         let shown = gather(fleet, &mut app);
         for script in shown.iter().filter_map(|s| s.snapshot.as_ref()?.script.clone()) {
@@ -134,9 +172,9 @@ pub fn run(fleet: &Fleet, done: impl Fn() -> bool) -> Result<(), String> {
 }
 
 fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
-    if app.log_of != app.open {
+    if app.log_of != Some(app.selected) {
         app.log.clear();
-        app.log_of = app.open;
+        app.log_of = Some(app.selected);
     }
     fleet
         .cells
@@ -144,7 +182,7 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
         .enumerate()
         .map(|(i, cell)| {
             let board = cell.board();
-            if app.open == Some(i) {
+            if i == app.selected {
                 let from = app.log.last().map_or(0, |l| l.seq + 1);
                 let fresh = board.log.iter().rev().take_while(|l| l.seq >= from).count();
                 app.log.extend(board.log.iter().skip(board.log.len() - fresh).cloned());
@@ -156,9 +194,34 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
         .collect()
 }
 
+fn snapshot(shown: &[Shown], i: usize) -> Option<&Snapshot> {
+    shown.get(i)?.snapshot.as_ref()
+}
+
+fn is_offline(s: &Snapshot) -> bool {
+    s.phase == "OFFLINE"
+}
+
 impl App {
-    fn current(&self) -> usize {
-        self.open.unwrap_or(self.selected)
+    fn targets(&self) -> Vec<usize> {
+        if self.marked.is_empty() { vec![self.selected] } else { self.marked.iter().copied().collect() }
+    }
+
+    fn all(&self, shown: &[Shown], test: impl Fn(&Snapshot) -> bool) -> bool {
+        self.targets().iter().all(|&i| snapshot(shown, i).is_some_and(&test))
+    }
+
+    fn who(&self, shown: &[Shown], room: usize) -> String {
+        let targets = self.targets();
+        let names = targets.iter().filter_map(|&i| shown.get(i)).map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ");
+        if names.chars().count() <= room { names } else { format!("{} bots", targets.len()) }
+    }
+
+    fn pick(&mut self, i: usize) {
+        if i != self.selected {
+            self.selected = i;
+            self.scroll = 0;
+        }
     }
 
     fn say(&mut self, text: impl Into<String>) {
@@ -166,16 +229,31 @@ impl App {
     }
 
     fn act(&mut self, fleet: &Fleet, command: Command, done: &str) {
-        let Some(cell) = fleet.cells.get(self.current()) else { return };
-        match socket::ctl(&fleet.socket, &cell.name, &command) {
-            Ok(()) => self.say(format!("{}: {done}", cell.name)),
-            Err(e) => self.say(e),
+        let (mut sent, mut same, mut said) = (Vec::new(), Vec::new(), Vec::new());
+        for i in self.targets() {
+            let Some(cell) = fleet.cells.get(i) else { continue };
+            match socket::ctl(&fleet.socket, &cell.name, &command) {
+                Ok(true) => sent.push(cell.name.as_str()),
+                Ok(false) => same.push(cell.name.as_str()),
+                Err(e) => said.push(e),
+            }
         }
+        if !same.is_empty() {
+            said.insert(0, format!("{}: {}", same.join(", "), command.unchanged()));
+        }
+        if !sent.is_empty() {
+            said.insert(0, format!("{}: {done}", sent.join(", ")));
+        }
+        self.say(said.join("; "));
     }
 
     fn handle(&mut self, key: KeyEvent, fleet: &Fleet, shown: &[Shown]) -> bool {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return true;
+        }
+        if self.keys {
+            self.keys = false;
+            return false;
         }
         if let Some(prompt) = &mut self.prompt {
             match key.code {
@@ -210,47 +288,43 @@ impl App {
             }
             return false;
         }
-        let many = fleet.cells.len() > 1;
+        let bots = fleet.cells.len();
+        let last = bots.saturating_sub(1);
+        let line = bots < 2 || key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Char('q') => return true,
-            KeyCode::Enter if self.open.is_none() => {
-                self.open = Some(self.selected);
-                self.scroll = 0;
-            }
-            KeyCode::Esc if many => self.open = None,
-            KeyCode::Tab if many => {
-                let next = (self.current() + 1) % fleet.cells.len();
-                self.selected = next;
-                if self.open.is_some() {
-                    self.open = Some(next);
-                    self.scroll = 0;
+            KeyCode::Char('?') => self.keys = true,
+            KeyCode::Up if line => self.scroll = (self.scroll + 1).min(self.max_scroll.get()),
+            KeyCode::Down if line => self.scroll = self.scroll.saturating_sub(1),
+            KeyCode::Up => self.pick(self.selected.saturating_sub(1)),
+            KeyCode::Down => self.pick((self.selected + 1).min(last)),
+            KeyCode::Tab => self.pick(if self.selected >= last { 0 } else { self.selected + 1 }),
+            KeyCode::BackTab => self.pick(if self.selected == 0 { last } else { self.selected - 1 }),
+            KeyCode::Char(' ') => {
+                if !self.marked.remove(&self.selected) {
+                    self.marked.insert(self.selected);
                 }
             }
-            KeyCode::Up if self.open.is_none() => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down if self.open.is_none() => self.selected = (self.selected + 1).min(fleet.cells.len().saturating_sub(1)),
-            KeyCode::Up => self.scroll = (self.scroll + 1).min(self.max_scroll.get()),
-            KeyCode::Down => self.scroll = self.scroll.saturating_sub(1),
+            KeyCode::Char('a') if self.marked.len() == bots => self.marked.clear(),
+            KeyCode::Char('a') => self.marked = (0..bots).collect(),
+            KeyCode::Esc => self.marked.clear(),
             KeyCode::PageUp => self.scroll = (self.scroll + 10).min(self.max_scroll.get()),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
+            KeyCode::Home => self.scroll = self.max_scroll.get(),
             KeyCode::End => self.scroll = 0,
             KeyCode::Char('l') => {
                 self.filter = self.filter.next();
                 self.scroll = 0;
             }
+            KeyCode::Char('d') => self.details = !self.details,
             KeyCode::Char('o') => self.prompt = Some(Prompt::new(Ask::Run)),
             KeyCode::Char('c') => self.prompt = Some(Prompt::new(Ask::Chat)),
             KeyCode::Char('s') => self.act(fleet, Command::Stop, "stopping the script"),
             KeyCode::Char('r') => self.act(fleet, Command::Restart, "restarting the script"),
             KeyCode::Char('i') => self.act(fleet, Command::Login, "logging in"),
             KeyCode::Char('x') => self.act(fleet, Command::Logout, "logging out"),
-            KeyCode::Char('p') => {
-                let paused = shown.get(self.current()).and_then(|s| s.snapshot.as_ref()).is_some_and(|s| s.paused);
-                if paused {
-                    self.act(fleet, Command::Resume, "resumed");
-                } else {
-                    self.act(fleet, Command::Pause, "paused");
-                }
-            }
+            KeyCode::Char('p') if self.all(shown, |s| s.paused) => self.act(fleet, Command::Resume, "resumed"),
+            KeyCode::Char('p') => self.act(fleet, Command::Pause, "paused"),
             _ => {}
         }
         false
@@ -265,8 +339,10 @@ impl App {
             Ask::Chat => self.act(fleet, Command::Chat { text: input }, "said it in zone chat"),
             Ask::Run => {
                 let mut words = input.split_whitespace();
-                let path = PathBuf::from(words.next().unwrap_or_default());
-                let path = std::path::absolute(&path).unwrap_or(path);
+                let path = match script_path(words.next().unwrap_or_default().as_ref()) {
+                    Ok(path) => path,
+                    Err(e) => return self.say(e),
+                };
                 let mut args = Vec::new();
                 for word in words {
                     match word.trim_start_matches("--arg=").split_once('=') {
@@ -285,14 +361,31 @@ impl App {
 
 fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
     let matches = app.prompt.as_ref().map_or(&[][..], |p| &p.matches);
-    let [body, suggestions, footer] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(u16::from(!matches.is_empty())), Constraint::Length(1)]).areas(f.area());
-    match app.open.and_then(|i| shown.get(i)) {
-        Some(bot) => draw_bot(f, body, bot, app),
-        None => draw_fleet(f, body, fleet, app, shown),
-    }
+    let [header, body, suggestions, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(u16::from(!matches.is_empty())),
+        Constraint::Length(1),
+    ])
+    .areas(f.area());
     draw_matches(f, suggestions, matches);
-    draw_footer(f, footer, fleet, app);
+    let list = body.width >= WIDE && shown.len() > 1;
+    draw_header(f, header, fleet, app, shown, list);
+    let pane = if list {
+        let width = (3 + name_width(shown) + 1 + STATE_WIDTH) as u16;
+        let [left, _, pane] = Layout::horizontal([Constraint::Length(width + 1), Constraint::Length(1), Constraint::Min(0)]).areas(body);
+        draw_list(f, left, app, shown);
+        pane
+    } else {
+        body.inner(Margin::new(1, 0))
+    };
+    if let Some(bot) = shown.get(app.selected) {
+        draw_bot(f, pane, bot, app);
+    }
+    draw_footer(f, footer, app, shown);
+    if app.keys {
+        draw_keys(f, body);
+    }
 }
 
 fn scripts_matching(input: &str) -> Vec<String> {
@@ -301,7 +394,7 @@ fn scripts_matching(input: &str) -> Vec<String> {
         return Vec::new();
     }
     let (dir, prefix) = input.split_at(input.rfind('/').map_or(0, |i| i + 1));
-    let Ok(entries) = std::fs::read_dir(if dir.is_empty() { "." } else { dir }) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(expand_home(std::path::Path::new(if dir.is_empty() { "." } else { dir }))) else { return Vec::new() };
     let mut matches: Vec<String> = entries
         .flatten()
         .filter_map(|entry| {
@@ -351,250 +444,485 @@ fn draw_matches(f: &mut Frame, area: Rect, matches: &[String]) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_footer(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App) {
+fn draw_header(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App, shown: &[Shown], list: bool) {
+    let mut left = vec![Span::raw(format!(" {}", fleet.title)).bold()];
+    if list {
+        let online = shown.iter().filter(|s| s.snapshot.as_ref().is_some_and(|s| s.phase != "OFFLINE")).count();
+        left.push(Span::raw(format!("  {online} of {} online", shown.len())).dark_gray());
+    } else if let Some(bot) = shown.get(app.selected).filter(|_| shown.len() > 1) {
+        left.push(Span::raw(format!("  {} {}/{}", bot.name, app.selected + 1, shown.len())).dark_gray());
+    }
+    if !app.marked.is_empty() {
+        left.push(Span::raw(format!(" · {} marked", app.marked.len())).dark_gray());
+    }
+    let mut keys = Vec::new();
+    if !list && shown.len() > 1 {
+        keys.push(("tab", "next"));
+    }
+    keys.extend([("?", "keys"), ("q", "detach")]);
+    f.render_widget(Paragraph::new(spread(left, hints(&keys), area.width.saturating_sub(1) as usize)), area);
+}
+
+fn name_width(shown: &[Shown]) -> usize {
+    shown.iter().map(|s| s.name.chars().count()).max().unwrap_or(0).clamp(4, 14)
+}
+
+fn draw_list(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
+    let width = name_width(shown);
+    let height = (area.height as usize).max(1);
+    let top = app.list_top.get().min(app.selected).max((app.selected + 1).saturating_sub(height));
+    app.list_top.set(top);
+    let lines: Vec<Line> = shown
+        .iter()
+        .enumerate()
+        .skip(top)
+        .take(height)
+        .map(|(i, bot)| {
+            let selected = i == app.selected;
+            let name: String = bot.name.chars().take(width).collect();
+            let name = Span::raw(format!("{name:<width$} "));
+            let (state, style) = state_of(bot.snapshot.as_ref());
+            Line::from(vec![
+                Span::raw(if selected { "▌" } else { " " }).fg(ACCENT),
+                Span::raw(if app.marked.contains(&i) { "●" } else { " " }).fg(ACCENT),
+                Span::raw(" "),
+                if selected { name.bold() } else { name },
+                Span::styled(state, if selected { style.bold() } else { style }),
+            ])
+        })
+        .collect();
+    let rule = Block::new().borders(Borders::RIGHT).border_style(Style::new().dark_gray());
+    f.render_widget(Paragraph::new(lines).block(rule), area);
+}
+
+fn state_of(snapshot: Option<&Snapshot>) -> (String, Style) {
+    let Some(s) = snapshot else { return ("STARTING".into(), Style::new().fg(Color::Yellow)) };
+    let state = s.state();
+    let color = match state {
+        "READY" => Color::Green,
+        "OFFLINE" if s.detail.is_empty() => Color::DarkGray,
+        "CLOSED" | "OFFLINE" => Color::Red,
+        _ => Color::Yellow,
+    };
+    (state.to_string(), Style::new().fg(color))
+}
+
+fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
+    let width = area.width as usize;
+    let who = app.who(shown, width / 3);
     if let Some(prompt) = &app.prompt {
-        let label = match prompt.ask {
-            Ask::Run => " run (script.ts KEY=VALUE…, tab complete, ↑↓ recent): ",
-            Ask::Chat => " zone chat: ",
+        let (label, keys) = match prompt.ask {
+            Ask::Run => (format!(" run on {who}: "), hints(&[("tab", "complete"), ("↑↓", "recent"), ("esc", "cancel")])),
+            Ask::Chat => (format!(" zone chat as {who}: "), hints(&[("esc", "cancel")])),
         };
-        return f.render_widget(Paragraph::new(Line::from(vec![Span::raw(label).bold(), Span::raw(prompt.input.as_str()), Span::raw("█")])), area);
+        let typed = vec![Span::raw(label).bold(), Span::raw(prompt.input.clone()), Span::raw("█")];
+        return f.render_widget(Paragraph::new(spread(typed, keys, width.saturating_sub(1))), area);
     }
     if let Some((note, until)) = &app.note
         && Instant::now() < *until
     {
         return f.render_widget(Paragraph::new(format!(" {note}")).yellow(), area);
     }
-    let keys = match (app.open, fleet.cells.len() > 1) {
-        (None, _) => " q detach · ↑↓ pick · enter open · o run · s stop · r restart · p pause · i login · x logout · c chat",
-        (Some(_), true) => " q detach · esc fleet · tab next · o run · s stop · r restart · p pause · i login · x logout · l log · c chat",
-        (Some(_), false) => " q detach · o run · s stop · r restart · p pause · i login · x logout · l log · c chat · ↑↓ scroll",
+    let details = if app.details { "less" } else { "details" };
+    let keys: Vec<(&str, &str)> = if app.all(shown, is_offline) {
+        vec![("i", "log in"), ("o", "log in and run"), ("space", "mark"), ("d", details)]
+    } else {
+        let pause = if app.all(shown, |s| s.paused) { "resume" } else { "pause" };
+        vec![("o", "run"), ("s", "stop"), ("r", "restart"), ("p", pause), ("x", "log out"), ("c", "chat"), ("space", "mark"), ("d", details), ("l", "filter")]
     };
-    f.render_widget(Paragraph::new(keys).dark_gray(), area);
-}
-
-fn state_style(snapshot: &Snapshot) -> (String, Style) {
-    let state = snapshot.state();
-    let color = match state {
-        "READY" => Color::Green,
-        "OFFLINE" if snapshot.detail.is_empty() => Color::DarkGray,
-        "CLOSED" | "OFFLINE" => Color::Red,
-        _ => Color::Yellow,
-    };
-    (state.to_string(), Style::new().bold().fg(color))
-}
-
-fn draw_fleet(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App, shown: &[Shown]) {
-    let [header, table] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    f.render_widget(Paragraph::new(format!(" {} · {}", fleet.title, count(shown.len(), "bot"))).bold(), header);
-    let rows = shown.iter().enumerate().map(|(i, bot)| {
-        let Some(s) = &bot.snapshot else {
-            return Row::new(vec![TableCell::from(bot.name.clone()), TableCell::from("STARTING").yellow()]);
-        };
-        let (state, style) = state_style(s);
-        let place = s.game.as_ref().map_or(String::new(), |g| format!("{} {}", g.area, g.cell));
-        let progress = s.progress.first().map_or(String::new(), |b| {
-            let pct = if b.total == 0 { 0 } else { u64::from(b.current.min(b.total)) * 100 / u64::from(b.total) };
-            format!("{} {pct:>3}% {}", bar(b.current, b.total, 8), b.eta_secs.map(span).unwrap_or_default())
-        });
-        let quiet = if s.run == "running" { span(s.quiet_secs) } else { String::new() };
-        let row = Row::new(vec![
-            TableCell::from(bot.name.clone()),
-            TableCell::from(state).style(style),
-            TableCell::from(s.script_label()),
-            TableCell::from(place),
-            TableCell::from(s.status.clone()),
-            TableCell::from(progress),
-            TableCell::from(s.kills_h.map_or("-".into(), |k| k.to_string())),
-            TableCell::from(quiet),
-        ]);
-        if i == app.selected { row.reversed() } else { row }
-    });
-    let widths = [
-        Constraint::Length(12),
-        Constraint::Length(12),
-        Constraint::Length(20),
-        Constraint::Length(22),
-        Constraint::Min(16),
-        Constraint::Length(24),
-        Constraint::Length(8),
-        Constraint::Length(7),
-    ];
-    let head = Row::new(["BOT", "STATE", "SCRIPT", "WHERE", "STATUS", "PROGRESS", "KILLS/H", "QUIET"]).dark_gray();
-    f.render_widget(Table::new(rows, widths).header(head).block(panel(" Fleet ")), table);
+    let mut line = vec![Span::raw(" → ").fg(ACCENT), Span::raw(who).bold(), Span::raw("   ")];
+    let used = spans_width(&line);
+    if used + spans_width(&hints(&keys)) <= width {
+        line.extend(hints(&keys));
+    } else {
+        let more = spans_width(&hints(&[("?", "more")])) + 2;
+        let fit = (0..keys.len()).rev().find(|&n| used + spans_width(&hints(&keys[..n])) + more <= width).unwrap_or(0);
+        line.extend(hints(&keys[..fit]));
+        if fit > 0 {
+            line.push(Span::raw("  "));
+        }
+        line.extend(hints(&[("?", "more")]));
+    }
+    f.render_widget(Paragraph::new(Line::from(line)), area);
 }
 
 fn draw_bot(f: &mut Frame, area: Rect, bot: &Shown, app: &App) {
-    let [header, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    draw_header(f, header, bot);
-    let s = bot.snapshot.as_ref();
-    let bars = s.map_or(0, |s| s.progress.len()) as u16;
-    if body.width >= WIDE {
-        let [left, right] = Layout::horizontal([Constraint::Min(40), Constraint::Length(32)]).areas(body);
-        let [task, combat, log] = Layout::vertical([Constraint::Length(3 + bars), Constraint::Length(7), Constraint::Min(3)]).areas(left);
-        let [vitals, rates, place] = Layout::vertical([Constraint::Length(7), Constraint::Length(6), Constraint::Min(3)]).areas(right);
-        draw_task(f, task, s);
-        draw_combat(f, combat, s);
-        draw_log(f, log, app);
-        draw_vitals(f, vitals, s);
-        draw_rates(f, rates, s);
-        draw_area(f, place, s);
-    } else {
-        let [vitals, task, log] = Layout::vertical([Constraint::Length(7), Constraint::Length(3 + bars), Constraint::Min(3)]).areas(body);
-        draw_vitals(f, vitals, s);
-        draw_task(f, task, s);
-        draw_log(f, log, app);
+    let width = area.width as usize;
+    let mut lines = detail(bot, app.details, width);
+    let log = log_lines(app, (area.height as usize).saturating_sub(lines.len() + 1), width);
+    let mut rule = format!("── log · {}", app.filter.label());
+    let scrolled = app.scroll.min(app.max_scroll.get());
+    if scrolled > 0 {
+        rule.push_str(&format!(" · ↑{scrolled}"));
     }
+    let fill = width.saturating_sub(rule.chars().count() + 1);
+    lines.push(Line::raw(format!("{rule} {}", "─".repeat(fill))).dark_gray());
+    lines.extend(log);
+    f.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_header(f: &mut Frame, area: Rect, bot: &Shown) {
+fn detail(bot: &Shown, full: bool, width: usize) -> Vec<Line<'static>> {
     let Some(s) = &bot.snapshot else {
-        return f.render_widget(Paragraph::new(Line::from(vec![Span::raw(format!(" {} · ", bot.name)).bold(), "STARTING".yellow().bold()])), area);
+        let (state, style) = state_of(None);
+        return vec![
+            spread(vec![Span::raw(bot.name.clone()).bold()], vec![Span::styled(state, style.bold())], width),
+            Line::raw("waiting for the server").dark_gray(),
+        ];
     };
-    let who = if s.user.is_empty() || s.user.eq_ignore_ascii_case(&bot.name) { bot.name.clone() } else { format!("{} ({})", bot.name, s.user) };
-    let mut spans = vec![Span::raw(format!(" {who} · {} · ", s.server)).bold()];
+    let online = s.phase != "OFFLINE";
+    let mut lines = vec![identity(bot, s, width)];
+    if s.phase != "READY" && !s.detail.is_empty() {
+        let color = if online { Color::Yellow } else { Color::Red };
+        lines.push(fit(vec![Span::raw(s.detail.clone()).fg(color)], width));
+    }
+    let script = match &s.script {
+        Some(_) => Span::raw(s.script_label()).fg(if online { Color::Cyan } else { Color::DarkGray }),
+        None => Span::raw("idle").dark_gray(),
+    };
+    let mut task = vec![script];
+    if online && !s.status.is_empty() {
+        task.push(Span::raw(format!("  {}", s.status)));
+    }
+    lines.push(fit(task, width));
+    if online {
+        lines.extend(s.progress.iter().map(|b| progress(b, width)));
+    }
     if let Some(g) = &s.game {
-        spans.push(Span::raw(format!("{} · {}/{} · ", g.area, g.cell, g.pad)));
+        lines.push(Line::default());
+        lines.extend(flow(if full { everything(s, g, width) } else { summary(s, g) }, width));
     }
-    let (state, style) = state_style(s);
-    spans.push(Span::styled(state, style));
-    spans.push(Span::raw(format!(" · up {}", span(s.up_secs))));
-    f.render_widget(Paragraph::new(Line::from(spans)), area);
+    lines
 }
 
-fn waiting<'a>(title: &'a str) -> Paragraph<'a> {
-    Paragraph::new("waiting for the server").dark_gray().block(panel(format!(" {title} ")))
-}
-
-fn draw_task(f: &mut Frame, area: Rect, s: Option<&Snapshot>) {
-    let Some(s) = s else { return f.render_widget(waiting("Task"), area) };
-    let headline = if s.phase != "READY" && !s.detail.is_empty() {
-        Line::raw(s.detail.clone()).yellow()
-    } else if !s.status.is_empty() {
-        Line::raw(s.status.clone())
-    } else {
-        Line::raw(s.script_label()).dark_gray()
-    };
-    let width = area.width.saturating_sub(4) as usize;
-    let mut lines = vec![headline];
-    for b in &s.progress {
-        let eta = b.eta_secs.map(span).unwrap_or_default();
-        let label: String = b.label.chars().take(18).collect();
-        let bar_width = width.saturating_sub(18 + 1 + 1 + 14 + 7).clamp(4, 24) as u32;
-        lines.push(Line::raw(format!("{label:<18} {} {:>13} {eta:>6}", bar(b.current, b.total, bar_width), format!("{}/{}", b.current, b.total))));
+fn identity(bot: &Shown, s: &Snapshot, width: usize) -> Line<'static> {
+    let mut left = vec![Span::raw(bot.name.clone()).bold()];
+    if !s.user.is_empty() && !s.user.eq_ignore_ascii_case(&bot.name) {
+        left.push(Span::raw(format!(" ({})", s.user)));
     }
-    f.render_widget(Paragraph::new(lines).block(panel(" Task ")), area);
+    if !s.server.is_empty() {
+        left.push(Span::raw(format!(" · {}", s.server)));
+    }
+    if let Some(g) = &s.game {
+        left.push(Span::raw(format!(" · {} {}/{}", g.area, g.cell, g.pad)));
+    }
+    let (state, style) = state_of(Some(s));
+    let mut right = vec![Span::styled(state, style.bold())];
+    if !is_offline(s) && s.up_secs > 0 {
+        right.push(Span::raw(format!("  up {}", span(s.up_secs))).dark_gray());
+    }
+    let left = clip(left, width.saturating_sub(spans_width(&right) + 2));
+    spread(left, right, width)
 }
 
-fn draw_vitals(f: &mut Frame, area: Rect, s: Option<&Snapshot>) {
-    let Some(g) = s.and_then(|s| s.game.as_ref()) else { return f.render_widget(waiting("Vitals"), area) };
-    let hp_color = match () {
+fn progress(b: &Bar, width: usize) -> Line<'static> {
+    let label: String = b.label.chars().take(15).collect();
+    let count = format!("{}/{}", b.current, b.total);
+    let eta = b.eta_secs.map(span).unwrap_or_default();
+    let mut spans = vec![Span::raw(format!("{label:<16}"))];
+    spans.extend(meter(b.current, b.total, width.saturating_sub(16 + 11 + 6).clamp(4, 30), Color::Green));
+    spans.push(Span::raw(format!("{count:>11}")));
+    spans.push(Span::raw(format!("{eta:>6}")).dark_gray());
+    fit(spans, width)
+}
+
+fn summary(s: &Snapshot, g: &Game) -> Vec<Vec<Field>> {
+    let mut fields = vec![hp(g)];
+    if let Some(t) = &g.target {
+        fields.push(labeled("Target", vec![Span::raw(t.name.clone())]));
+    }
+    fields.push(amount(s.kills, "kill"));
+    if let Some(gold) = s.gold_gained {
+        fields.push(gained(gold));
+    }
+    vec![fields]
+}
+
+fn everything(s: &Snapshot, g: &Game, width: usize) -> Vec<Vec<Field>> {
+    let class = if g.class.is_empty() { "no class" } else { &g.class };
+    let mut you = vec![
+        hp(g),
+        vitals("MP", g.mp, g.max_mp, Color::Blue),
+        vec![Span::raw(format!("Lv {} {class}", g.level))],
+        vec![Span::raw(short(g.gold)), Span::raw(" gold").dark_gray()],
+    ];
+    if g.afk {
+        you.push(vec![Span::raw("away from keyboard").yellow()]);
+    }
+    let target = g.target.iter().map(|t| {
+        let mut field = labeled("Target", vec![Span::raw(format!("{} ", t.name))]);
+        field.extend(meter(t.hp, t.max_hp, 8, Color::Red));
+        field.push(Span::raw(format!(" {}/{}", t.hp, t.max_hp)));
+        field
+    });
+    let mut combat = Vec::new();
+    if !g.skills.is_empty() {
+        combat.push(skills(g));
+    }
+    if !g.auras.is_empty() {
+        combat.push(listed("Auras", g.auras.iter().map(|a| (a.name.clone(), (a.stacks > 1).then(|| format!("x{}", a.stacks)))), width));
+    }
+    let mut around = Vec::new();
+    if !g.cell_players.is_empty() {
+        around.push(listed("Here", g.cell_players.iter().map(|p| (p.name.clone(), Some(p.level.to_string()))), width));
+    }
+    if !g.drops.is_empty() {
+        around.push(listed("Offered", g.drops.iter().map(|d| (d.name.clone(), Some(format!("x{}", d.qty)))), width));
+    }
+    let mut stats = vec![labeled("Stats", amount(s.kills, "kill")), amount(s.drops, "drop")];
+    stats.extend(s.gold_gained.map(gained));
+    stats.push(amount(s.deaths, "death"));
+    vec![you, target.collect(), combat, around, stats]
+}
+
+fn hp(g: &Game) -> Field {
+    let color = match () {
         _ if g.dead => Color::DarkGray,
         _ if g.max_hp > 0 && g.hp * 4 < g.max_hp => Color::Red,
         _ => Color::Green,
     };
-    let mut lines = vec![
-        Line::from(vec![Span::raw("HP "), Span::styled(bar(g.hp, g.max_hp, 10), Style::new().fg(hp_color)), Span::raw(format!(" {}/{}", g.hp, g.max_hp))]),
-        Line::from(vec![Span::raw("MP "), Span::styled(bar(g.mp, g.max_mp, 10), Style::new().fg(Color::Blue)), Span::raw(format!(" {}/{}", g.mp, g.max_mp))]),
-        Line::raw(format!("{} · Lv {}", if g.class.is_empty() { "no class" } else { &g.class }, g.level)),
-        Line::raw(format!("Gold {}", short(g.gold))),
-    ];
-    if g.afk {
-        lines.push(Line::raw("away from keyboard").yellow());
-    }
-    f.render_widget(Paragraph::new(lines).block(panel(" Vitals ")), area);
+    vitals("HP", g.hp, g.max_hp, color)
 }
 
-fn draw_combat(f: &mut Frame, area: Rect, s: Option<&Snapshot>) {
-    let Some(g) = s.and_then(|s| s.game.as_ref()) else { return f.render_widget(waiting("Combat"), area) };
-    let mut skills = vec![Span::raw("Skills  ")];
-    if g.skills.is_empty() {
-        skills.push(Span::raw("none"));
-    }
+fn vitals(label: &str, current: u32, max: u32, color: Color) -> Field {
+    let mut field = vec![Span::raw(format!("{label} ")).dark_gray()];
+    field.extend(meter(current, max, 8, color));
+    field.push(Span::raw(format!(" {current}/{max}")));
+    field
+}
+
+fn meter(current: u32, max: u32, width: usize, color: Color) -> Field {
+    let filled = if max == 0 { 0 } else { (u64::from(current.min(max)) * width as u64 / u64::from(max)) as usize };
+    vec![Span::raw("█".repeat(filled)).fg(color), Span::raw("░".repeat(width - filled)).dark_gray()]
+}
+
+fn labeled(label: &str, mut value: Field) -> Field {
+    value.insert(0, Span::raw(format!("{label} ")).dark_gray());
+    value
+}
+
+fn amount(n: u64, noun: &str) -> Field {
+    let noun = if n == 1 { noun.to_string() } else { format!("{noun}s") };
+    vec![Span::raw(grouped(n)), Span::raw(format!(" {noun}")).dark_gray()]
+}
+
+fn gained(gold: i64) -> Field {
+    let text = if gold >= 0 { format!("+{}", short(gold)) } else { short(gold) };
+    vec![Span::raw(text), Span::raw(" gold").dark_gray()]
+}
+
+fn skills(g: &Game) -> Field {
+    let mut field = vec![Span::raw("Skills ").dark_gray()];
     for (i, s) in g.skills.iter().enumerate() {
         if i > 0 {
-            skills.push(Span::raw("  "));
+            field.push(Span::raw("  "));
         }
         let label = format!("{} {}", i + 1, s.name);
         let lit = label.chars().count() * usize::from(s.ready_pct.min(100)) / 100;
         let (ready, cooling) = label.split_at(label.char_indices().nth(lit).map_or(label.len(), |(at, _)| at));
-        skills.push(Span::raw(ready.to_owned()));
-        skills.push(Span::raw(cooling.to_owned()).dark_gray());
+        field.push(Span::raw(ready.to_owned()));
+        field.push(Span::raw(cooling.to_owned()).dark_gray());
     }
-    let lines = vec![
-        Line::raw(format!("Target  {}", g.target.as_deref().unwrap_or("none"))),
-        Line::raw(format!("Cell    {}", monsters(g.cell_monsters))),
-        Line::raw(format!("Map     {}", monsters(g.map_monsters))),
-        Line::from(skills),
-        Line::raw(format!("Auras   {}", if g.auras.is_empty() { "none".into() } else { g.auras.join(", ") })),
-    ];
-    f.render_widget(Paragraph::new(lines).block(panel(" Combat ")), area);
+    field
 }
 
-fn draw_rates(f: &mut Frame, area: Rect, s: Option<&Snapshot>) {
-    let Some(s) = s else { return f.render_widget(waiting("Last 10 min"), area) };
-    let row = |label: &str, value: String| Line::raw(format!("{label:<12}{value:>14}"));
-    let rate = |n: Option<u64>| n.map_or("-".into(), |n| short(n as i64));
-    let lines = vec![
-        row("kills/h", rate(s.kills_h)),
-        row("drops/h", rate(s.drops_h)),
-        row("gold/h", s.gold_h.map_or("-".into(), short)),
-        row("deaths", s.deaths.to_string()),
-    ];
-    f.render_widget(Paragraph::new(lines).block(panel(" Last 10 min ")), area);
-}
-
-fn draw_area(f: &mut Frame, area: Rect, s: Option<&Snapshot>) {
-    let Some(g) = s.and_then(|s| s.game.as_ref()) else { return f.render_widget(waiting("Area"), area) };
-    let mut lines = vec![Line::raw(format!("{}, {} in your cell", count(g.players, "player"), g.cell_players.len() + 1))];
-    lines.extend(g.cell_players.iter().map(|p| Line::raw(format!("  {p}")).dark_gray()));
-    if !g.drops.is_empty() {
-        lines.push(Line::raw("Drops on offer"));
-        lines.extend(g.drops.iter().map(|d| Line::raw(format!("  {d}"))));
+fn listed(label: &str, items: impl ExactSizeIterator<Item = (String, Option<String>)>, width: usize) -> Field {
+    let total = items.len();
+    let mut field = vec![Span::raw(format!("{label} ")).dark_gray()];
+    for (i, (name, qualifier)) in items.enumerate() {
+        let gap = if i == 0 { "" } else { "  " };
+        let mut piece = vec![Span::raw(format!("{gap}{name}"))];
+        piece.extend(qualifier.map(|q| Span::raw(format!(" {q}")).dark_gray()));
+        let rest = total - i - 1;
+        let more = if rest == 0 { 0 } else { format!("  +{rest}").len() };
+        if spans_width(&field) + spans_width(&piece) + more > width {
+            field.push(Span::raw(format!("{gap}+{}", total - i)).dark_gray());
+            break;
+        }
+        field.extend(piece);
     }
-    f.render_widget(Paragraph::new(lines).block(panel(" Area ")), area);
+    field
 }
 
-fn draw_log(f: &mut Frame, area: Rect, app: &App) {
-    let shown: Vec<&LogLine> = app.log.iter().filter(|l| app.filter.shows(&l.source)).collect();
-    let height = area.height.saturating_sub(2) as usize;
-    app.max_scroll.set(shown.len().saturating_sub(height));
-    let end = shown.len().saturating_sub(app.scroll.min(app.max_scroll.get()));
+fn flow(groups: Vec<Vec<Field>>, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for group in groups.into_iter().filter(|g| !g.is_empty()) {
+        let mut line: Field = Vec::new();
+        for field in group {
+            if !line.is_empty() && spans_width(&line) + 2 + spans_width(&field) > width {
+                lines.push(fit(std::mem::take(&mut line), width));
+            }
+            if !line.is_empty() {
+                line.push(Span::raw("  "));
+            }
+            line.extend(field);
+        }
+        lines.push(fit(line, width));
+    }
+    lines
+}
+
+fn fit(spans: Field, width: usize) -> Line<'static> {
+    Line::from(clip(spans, width))
+}
+
+fn clip(spans: Field, width: usize) -> Field {
+    if spans_width(&spans) <= width {
+        return spans;
+    }
+    let mut room = width.saturating_sub(1);
+    let mut cut = Vec::new();
+    for span in spans {
+        let mut text = String::new();
+        for c in span.content.chars() {
+            let w = c.width().unwrap_or(0);
+            if w > room {
+                room = 0;
+                break;
+            }
+            room -= w;
+            text.push(c);
+        }
+        cut.push(Span::styled(text, span.style));
+        if room == 0 {
+            break;
+        }
+    }
+    cut.push(Span::raw("…"));
+    cut
+}
+
+fn spread(mut left: Field, right: Field, width: usize) -> Line<'static> {
+    let gap = width.saturating_sub(spans_width(&left) + spans_width(&right)).max(2);
+    left.push(Span::raw(" ".repeat(gap)));
+    left.extend(right);
+    Line::from(left)
+}
+
+fn hints(keys: &[(&str, &str)]) -> Field {
+    let mut spans = Vec::new();
+    for (i, (key, word)) in keys.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::raw(key.to_string()).bold());
+        spans.push(Span::raw(format!(" {word}")).dark_gray());
+    }
+    spans
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(Span::width).sum()
+}
+
+fn log_lines(app: &App, height: usize, width: usize) -> Vec<Line<'static>> {
+    let lines: Vec<&LogLine> = app.log.iter().filter(|l| app.filter.shows(&l.source)).collect();
+    let sizes: Vec<usize> = lines.iter().map(|l| pieces(l, width).1.len()).collect();
+    let total: usize = sizes.iter().sum();
+    app.max_scroll.set(total.saturating_sub(height));
+    let end = total - app.scroll.min(app.max_scroll.get());
     let start = end.saturating_sub(height);
-    let lines: Vec<Line> = shown[start..end]
-        .iter()
-        .map(|l| {
-            let color = match l.source.as_str() {
-                "server" => Color::Yellow,
-                "script" => Color::Magenta,
-                _ => Color::Cyan,
-            };
-            Line::from(vec![
-                Span::raw(clock(l.t)).dark_gray(),
-                Span::raw("  "),
-                Span::styled(format!("{:<6}", l.source), Style::new().fg(color)),
-                Span::raw("  "),
-                Span::raw(l.text.as_str()),
-            ])
+    let mut rows = Vec::new();
+    let mut at = 0;
+    for (line, size) in lines.into_iter().zip(sizes) {
+        let (first, last) = (at.max(start), (at + size).min(end));
+        if first < last {
+            rows.extend(log_rows(line, width).into_iter().skip(first - at).take(last - first));
+        }
+        at += size;
+        if at >= end {
+            break;
+        }
+    }
+    rows
+}
+
+fn pieces(l: &LogLine, width: usize) -> (String, Vec<&str>) {
+    let prefix = clock(l.t);
+    let room = width.saturating_sub(prefix.len() + 10).max(10);
+    let mut pieces: Vec<&str> = l.text.lines().flat_map(|line| wrap(line, room)).collect();
+    if pieces.is_empty() {
+        pieces.push("");
+    }
+    (prefix, pieces)
+}
+
+fn log_rows(l: &LogLine, width: usize) -> Vec<Line<'static>> {
+    let color = match l.source.as_str() {
+        "server" => Color::Yellow,
+        "script" => Color::Magenta,
+        _ => Color::Cyan,
+    };
+    let (prefix, pieces) = pieces(l, width);
+    let indent = " ".repeat(prefix.len() + 10);
+    let mut pieces = pieces.into_iter();
+    let mut rows = vec![Line::from(vec![
+        Span::raw(prefix).dark_gray(),
+        Span::raw("  "),
+        Span::styled(format!("{:<6}", l.source), Style::new().fg(color)),
+        Span::raw("  "),
+        Span::raw(pieces.next().unwrap_or_default().to_string()),
+    ])];
+    rows.extend(pieces.map(|piece| Line::from(vec![Span::raw(indent.clone()), Span::raw(piece.to_string())])));
+    rows
+}
+
+fn wrap(text: &str, room: usize) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    loop {
+        let mut used = 0;
+        let cut = rest.char_indices().find_map(|(at, c)| {
+            used += c.width().unwrap_or(0);
+            (used > room).then_some(at)
+        });
+        let Some(cut) = cut.filter(|&cut| cut > 0) else {
+            pieces.push(rest);
+            return pieces;
+        };
+        let at = rest[..cut].rfind(' ').filter(|&at| at > 0).unwrap_or(cut);
+        pieces.push(&rest[..at]);
+        rest = rest[at..].trim_start();
+        if rest.is_empty() {
+            return pieces;
+        }
+    }
+}
+
+fn draw_keys(f: &mut Frame, area: Rect) {
+    f.buffer_mut().set_style(area, Style::new().fg(Color::DarkGray));
+    let cell = |(key, word): (&str, &str), width: usize| -> Field {
+        if key.is_empty() {
+            return vec![Span::raw(format!("{word:<width$}")).bold()];
+        }
+        vec![Span::raw(format!("{key:<11}")).bold(), Span::raw(format!("{word:<w$}", w = width - 11))]
+    };
+    let rows = BOT_KEYS.len().max(SCRIPT_KEYS.len());
+    let mut lines: Vec<Line> = (0..rows)
+        .map(|i| {
+            let mut spans = BOT_KEYS.get(i).map_or_else(|| vec![Span::raw(" ".repeat(30))], |&k| cell(k, 30));
+            spans.extend(SCRIPT_KEYS.get(i).map(|&k| cell(k, 27)).unwrap_or_default());
+            Line::from(spans)
         })
         .collect();
-    f.render_widget(Paragraph::new(lines).block(panel(format!(" Log · {} ", app.filter.label()))), area);
+    lines.push(Line::default());
+    lines.push(Line::raw("Keys act on the marked bots, or the selected one.").dark_gray());
+    let width = 61.min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let rect = Rect { x: area.x + (area.width - width) / 2, y: area.y + area.height.saturating_sub(height) / 2, width, height };
+    f.render_widget(Clear, rect);
+    f.render_widget(Paragraph::new(lines).block(Block::bordered().title(" keys ").padding(Padding::horizontal(1))), rect);
 }
 
-fn monsters((total, alive): (usize, usize)) -> String {
-    format!("{}, {alive} alive", count(total, "monster"))
-}
-
-fn panel<'a>(title: impl Into<Line<'a>>) -> Block<'a> {
-    Block::bordered().title(title).padding(Padding::horizontal(1))
-}
-
-fn count(n: usize, noun: &str) -> String {
-    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
-}
-
-fn bar(current: u32, max: u32, width: u32) -> String {
-    let filled = if max == 0 { 0 } else { (u64::from(current.min(max)) * u64::from(width) / u64::from(max)) as usize };
-    format!("{}{}", "█".repeat(filled), "░".repeat(width as usize - filled))
+fn grouped(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn short(n: i64) -> String {
@@ -615,14 +943,22 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::hub::{Board, Hub, Print};
+    use crate::hub::{Board, Hub, Player, Print, SkillState};
 
-    fn screen(fleet: &Fleet, app: &mut App, width: u16) -> String {
+    fn rows(fleet: &Fleet, app: &mut App, width: u16) -> Vec<Vec<ratatui::buffer::Cell>> {
         let shown = gather(fleet, app);
         let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
         terminal.draw(|f| draw(f, fleet, app, &shown)).unwrap();
-        let buffer = terminal.backend().buffer();
-        buffer.content.chunks(width as usize).map(|row| row.iter().map(|c| c.symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+        terminal.backend().buffer().content.chunks(width as usize).map(<[_]>::to_vec).collect()
+    }
+
+    fn screen(fleet: &Fleet, app: &mut App, width: u16) -> String {
+        rows(fleet, app, width).iter().map(|row| row.iter().map(|c| c.symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    fn press(fleet: &Fleet, app: &mut App, code: KeyCode) {
+        let shown = gather(fleet, app);
+        app.handle(KeyEvent::from(code), fleet, &shown);
     }
 
     fn farm_world() -> World {
@@ -657,7 +993,6 @@ mod tests {
         board.server = "Twilly".into();
         board.online = true;
         board.ready_since = Some(now - Duration::from_secs(90));
-        board.first_ready = board.ready_since;
         board.start_script("/srv/void-aura.ts".into(), now);
         drop(board);
         hub.record(cell, &Event::Status { text: "Astral Ephemerite Essence in timespace".into() });
@@ -668,50 +1003,118 @@ mod tests {
         board.snapshot = Some(board.snapshot(&cell.name, "hero", &Phase::Ready, world, now));
     }
 
-    #[test]
-    fn the_bot_view_shows_the_task_player_map_and_log() {
-        let (fleet, hub) = fleet(&["main"]);
-        publish(&hub, &fleet.cells[0], &farm_world());
-        let mut app = App { open: Some(0), ..App::default() };
-        let shown = screen(&fleet, &mut app, 110);
-        println!("{shown}");
-        for expected in [
-            "main (hero) · Twilly · farm-1 · Enter/Spawn · READY · up 1m",
-            "Astral Ephemerite Essence in timespace",
-            "Void Aura",
-            "4120/7500",
-            "HP █████░░░░░ 2000/4000",
-            "Barber · Lv 100",
-            "Gold 12.3M",
-            "Cell    1 monster, 1 alive",
-            "Map     2 monsters, 1 alive",
-            "Auras   Corruption x2",
-            "2 players, 2 in your cell",
-            "aqx     killed Mosquito",
-            "server  Profanity filter On.",
-        ] {
-            assert!(shown.contains(expected), "missing {expected:?}");
-        }
-        let narrow = screen(&fleet, &mut app, 60);
-        for expected in ["HP █████░░░░░ 2000/4000", "Void Aura", "killed Mosquito", "q detach"] {
-            assert!(narrow.contains(expected), "narrow screen is missing {expected:?}");
-        }
-        app.filter = Filter::Server;
-        let shown = screen(&fleet, &mut app, 110);
-        assert!(shown.contains("Profanity filter On.") && !shown.contains("killed Mosquito"));
+    fn show(cell: &BotCell, snapshot: Snapshot) {
+        cell.board().snapshot = Some(snapshot);
+    }
+
+    fn row<'a>(screen: &'a str, has: &str) -> &'a str {
+        screen.lines().find(|l| l.contains(has)).unwrap_or_else(|| panic!("no row has {has:?}:\n{screen}"))
     }
 
     #[test]
-    fn the_fleet_view_has_a_row_per_bot() {
+    fn the_selected_bot_shows_its_task_a_summary_and_its_log() {
+        let (fleet, hub) = fleet(&["main"]);
+        publish(&hub, &fleet.cells[0], &farm_world());
+        let mut app = App::default();
+        let shown = screen(&fleet, &mut app, 110);
+        println!("{shown}");
+        assert!(row(&shown, "main (hero) · Twilly · farm-1 Enter/Spawn").contains("READY  up 1m"));
+        for expected in [
+            "void-aura.ts  Astral Ephemerite Essence in timespace",
+            "4120/7500",
+            "HP ████░░░░ 2000/4000  1 kill",
+            "aqx     killed Mosquito",
+            "server  Profanity filter On.",
+            "q detach",
+        ] {
+            assert!(shown.contains(expected), "missing {expected:?}");
+        }
+        assert!(!shown.contains("Barber"), "details stay hidden until d");
+        let narrow = screen(&fleet, &mut app, 60);
+        for expected in ["HP ████░░░░ 2000/4000", "Void Aura", "killed Mosquito", "q detach"] {
+            assert!(narrow.contains(expected), "narrow screen is missing {expected:?}");
+        }
+        for _ in 0..3 {
+            press(&fleet, &mut app, KeyCode::Char('l'));
+        }
+        let shown = screen(&fleet, &mut app, 110);
+        assert!(shown.contains("── log · server") && shown.contains("Profanity filter On.") && !shown.contains("killed Mosquito"));
+    }
+
+    #[test]
+    fn d_shows_every_detail() {
+        let (fleet, hub) = fleet(&["main"]);
+        publish(&hub, &fleet.cells[0], &farm_world());
+        let mut app = App::default();
+        press(&fleet, &mut app, KeyCode::Char('d'));
+        let shown = screen(&fleet, &mut app, 110);
+        println!("{shown}");
+        for expected in [
+            "MP ████████ 100/100  Lv 100 Barber  12.3M gold",
+            "Auras Corruption x2",
+            "Here ally 40",
+            "Stats 1 kill  0 drops  0 deaths",
+            "d less",
+        ] {
+            assert!(shown.contains(expected), "missing {expected:?}");
+        }
+    }
+
+    #[test]
+    fn the_list_shows_each_bot_and_who_keys_act_on() {
         let (fleet, hub) = fleet(&["main", "healer"]);
         publish(&hub, &fleet.cells[0], &farm_world());
-        let shown = screen(&fleet, &mut App::default(), 140);
+        let mut app = App::default();
+        let shown = screen(&fleet, &mut app, 120);
         println!("{shown}");
-        let main = shown.lines().find(|l| l.contains("main")).expect("a row for main");
-        for expected in ["READY", "void-aura.ts", "farm-1 Enter", "Astral Ephemerite", "54%"] {
-            assert!(main.contains(expected), "main's row is missing {expected:?}: {main}");
-        }
-        assert!(shown.lines().any(|l| l.contains("healer") && l.contains("STARTING")));
+        assert!(row(&shown, "1 of 2 online").contains("? keys  q detach"));
+        assert!(row(&shown, "▌  main").contains("READY"));
+        assert!(row(&shown, "healer").contains("STARTING"));
+        assert!(row(&shown, " → ").contains("→ main"));
+        press(&fleet, &mut app, KeyCode::Char(' '));
+        press(&fleet, &mut app, KeyCode::Down);
+        press(&fleet, &mut app, KeyCode::Char(' '));
+        let shown = screen(&fleet, &mut app, 120);
+        assert!(shown.contains("2 marked") && shown.contains("→ main, healer"), "{shown}");
+        press(&fleet, &mut app, KeyCode::Char('a'));
+        assert!(screen(&fleet, &mut app, 120).contains("→ healer"), "a with everything marked clears the marks");
+    }
+
+    #[test]
+    fn a_narrow_terminal_hides_the_list_and_tab_switches_bots() {
+        let (fleet, hub) = fleet(&["main", "healer"]);
+        publish(&hub, &fleet.cells[0], &farm_world());
+        let mut app = App::default();
+        let shown = screen(&fleet, &mut app, 80);
+        assert!(row(&shown, "main 1/2").contains("tab next"), "{shown}");
+        assert!(!shown.contains("healer"));
+        press(&fleet, &mut app, KeyCode::Tab);
+        assert!(screen(&fleet, &mut app, 80).contains("healer 2/2"));
+    }
+
+    #[test]
+    fn an_offline_bot_shows_why_and_offers_to_log_in() {
+        let (fleet, _hub) = fleet(&["spare"]);
+        let detail = "this account logged in somewhere else";
+        show(&fleet.cells[0], Snapshot { bot: "spare".into(), phase: "OFFLINE".into(), detail: detail.into(), ..Snapshot::default() });
+        let shown = screen(&fleet, &mut App::default(), 100);
+        assert!(row(&shown, "spare").contains("OFFLINE"));
+        assert!(shown.contains(detail) && shown.contains("i log in"), "{shown}");
+    }
+
+    #[test]
+    fn a_crowded_cell_fits_one_line_and_counts_the_rest() {
+        let (fleet, _hub) = fleet(&["main"]);
+        let players = (0..11).map(|i| Player { name: format!("player{i}"), level: 40 + i }).collect();
+        let game = Game { cell_players: players, ..Game::default() };
+        show(&fleet.cells[0], Snapshot { phase: "READY".into(), game: Some(game), ..Snapshot::default() });
+        let mut app = App { details: true, ..App::default() };
+        let shown = screen(&fleet, &mut app, 60);
+        let here = row(&shown, "Here").trim_end();
+        let named = here.matches("player").count();
+        let rest: usize = here.rsplit('+').next().and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("no count: {here}"));
+        assert_eq!(named + rest, 11, "{here}");
+        assert!(here.chars().count() <= 60);
     }
 
     #[test]
@@ -720,25 +1123,136 @@ mod tests {
         for i in 0..5 {
             hub.say(&fleet.cells[0], "aqx", format!("line {i}"));
         }
-        let mut app = App { open: Some(0), scroll: 500, ..App::default() };
+        let mut app = App { scroll: 500, ..App::default() };
         let shown = screen(&fleet, &mut app, 100);
         assert!(shown.contains("line 0") && shown.contains("line 4"));
     }
 
     #[test]
-    fn draws_every_panel_before_the_server_answers() {
-        let (fleet, _hub) = fleet(&["main"]);
-        let shown = screen(&fleet, &mut App { open: Some(0), ..App::default() }, 100);
-        assert!(shown.contains("STARTING"));
-        for title in ["Task", "Combat", "Vitals", "Last 10 min", "Area", "Log"] {
-            assert!(shown.contains(title), "missing panel {title}");
+    fn long_log_lines_wrap_under_the_message() {
+        let (fleet, hub) = fleet(&["main"]);
+        let long = format!("error: {}the end", "word ".repeat(30));
+        hub.say(&fleet.cells[0], "script", format!("{long}\n    at main (farm.ts:2:5)"));
+        let shown = screen(&fleet, &mut App::default(), 80);
+        println!("{shown}");
+        let rows: Vec<&str> = shown.lines().filter(|l| l.contains("word") || l.contains("at main")).collect();
+        assert!(rows[0].contains("script  error: word"), "{shown}");
+        let indent = " ".repeat(1 + clock(0).len() + 10);
+        assert!(rows.len() >= 3 && rows[1..].iter().all(|r| r.starts_with(&indent)), "{shown}");
+        assert!(shown.contains("the end") && shown.contains("    at main (farm.ts:2:5)"), "{shown}");
+    }
+
+    #[test]
+    fn a_long_running_session_keeps_every_character_of_a_wrapped_line() {
+        let ten_hours = 36_000_000;
+        let line = LogLine { seq: 0, t: ten_hours, source: "script".into(), text: format!("error: {}the end", "word ".repeat(30)) };
+        let rows: Vec<Line> = log_rows(&line, 60);
+        let text: Vec<String> = rows.iter().map(Line::to_string).collect();
+        assert!(text[0].starts_with("10:00:00.000  script  error: word"), "{text:#?}");
+        assert!(text[1..].iter().all(|r| r.starts_with(&" ".repeat(22)) && !r.starts_with(&" ".repeat(23))), "{text:#?}");
+        assert!(rows.iter().all(|r| r.width() <= 60), "{text:#?}");
+        assert_eq!(text.join(" ").matches("word").count(), 30);
+        assert!(text.last().unwrap().ends_with("the end"));
+    }
+
+    #[test]
+    fn wide_characters_wrap_by_display_width() {
+        let line = LogLine { seq: 0, t: 0, source: "server".into(), text: "漢".repeat(50) };
+        let rows = log_rows(&line, 60);
+        assert!(rows.len() > 1 && rows.iter().all(|r| r.width() <= 60));
+        assert_eq!(rows.iter().map(|r| r.to_string().matches('漢').count()).sum::<usize>(), 50);
+    }
+
+    #[test]
+    fn the_list_follows_the_selection_past_the_bottom() {
+        let names: Vec<String> = (0..30).map(|i| format!("bot{i:02}")).collect();
+        let (fleet, _hub) = fleet(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut app = App::default();
+        for _ in 0..25 {
+            press(&fleet, &mut app, KeyCode::Down);
         }
+        let shown = screen(&fleet, &mut app, 100);
+        assert!(row(&shown, "▌  bot25").contains("STARTING"), "{shown}");
+        assert!(!shown.contains("bot00"));
+    }
+
+    #[test]
+    fn many_targets_collapse_to_a_count() {
+        let names: Vec<String> = (0..12).map(|i| format!("account{i:03}")).collect();
+        let (fleet, _hub) = fleet(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut app = App::default();
+        press(&fleet, &mut app, KeyCode::Char('a'));
+        assert!(screen(&fleet, &mut app, 100).contains("→ 12 bots   o run"));
+        press(&fleet, &mut app, KeyCode::Char('o'));
+        assert!(screen(&fleet, &mut app, 100).contains(" run on 12 bots: █"));
+    }
+
+    #[test]
+    fn the_state_stays_on_screen_when_the_location_is_long() {
+        let (fleet, _hub) = fleet(&["main"]);
+        let game = Game { area: "battleon-123456789012345678901234567890".into(), cell: "Enter".into(), pad: "Spawn".into(), ..Game::default() };
+        show(&fleet.cells[0], Snapshot { phase: "READY".into(), server: "Twilight".into(), up_secs: 3720, game: Some(game), ..Snapshot::default() });
+        let shown = screen(&fleet, &mut App::default(), 60);
+        assert!(row(&shown, "main").contains("…  READY  up 1h02m"), "{shown}");
+    }
+
+    #[test]
+    fn arrows_scroll_the_log_when_there_is_nothing_to_pick() {
+        let (one, hub) = fleet(&["main"]);
+        for i in 0..50 {
+            hub.say(&one.cells[0], "aqx", format!("line {i}"));
+        }
+        let mut app = App::default();
+        screen(&one, &mut app, 100);
+        for _ in 0..3 {
+            press(&one, &mut app, KeyCode::Up);
+        }
+        assert_eq!(app.scroll, 3);
+        let (two, _hub) = fleet(&["main", "healer"]);
+        let mut app = App { max_scroll: Cell::new(10), ..App::default() };
+        let shown = gather(&two, &mut app);
+        app.handle(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT), &two, &shown);
+        assert_eq!((app.scroll, app.selected), (1, 0));
+    }
+
+    #[test]
+    fn the_run_prompt_expands_home_and_refuses_a_missing_file() {
+        let (fleet, _hub) = fleet(&["main"]);
+        let mut app = App::default();
+        press(&fleet, &mut app, KeyCode::Char('o'));
+        for c in "~/aqx-no-such-script.ts".chars() {
+            press(&fleet, &mut app, KeyCode::Char(c));
+        }
+        press(&fleet, &mut app, KeyCode::Enter);
+        let home = std::env::var("HOME").unwrap();
+        let note = app.note.map(|(text, _)| text).unwrap_or_default();
+        assert_eq!(note, format!("{home}/aqx-no-such-script.ts isn't a file"));
+    }
+
+    #[test]
+    fn a_bot_shows_starting_before_the_server_answers() {
+        let (fleet, _hub) = fleet(&["main"]);
+        let shown = screen(&fleet, &mut App::default(), 100);
+        for expected in ["STARTING", "waiting for the server", "── log · all"] {
+            assert!(shown.contains(expected), "missing {expected:?}");
+        }
+    }
+
+    #[test]
+    fn question_mark_opens_the_key_list_and_any_key_closes_it() {
+        let (fleet, _hub) = fleet(&["main"]);
+        let mut app = App::default();
+        press(&fleet, &mut app, KeyCode::Char('?'));
+        assert!(screen(&fleet, &mut app, 100).contains("filter the log"));
+        press(&fleet, &mut app, KeyCode::Char('x'));
+        assert!(!screen(&fleet, &mut app, 100).contains("filter the log"));
+        assert!(app.note.is_none(), "closing the list doesn't also log out");
     }
 
     #[test]
     fn the_log_copies_only_new_lines_and_keeps_a_ring() {
         let (fleet, hub) = fleet(&["main"]);
-        let mut app = App { open: Some(0), ..App::default() };
+        let mut app = App::default();
         hub.say(&fleet.cells[0], "aqx", "first");
         gather(&fleet, &mut app);
         for i in 0..LOG_LINES {
@@ -763,7 +1277,7 @@ mod tests {
     fn the_header_names_the_account_only_when_it_differs_from_the_bot() {
         let (fleet, hub) = fleet(&["hero"]);
         publish(&hub, &fleet.cells[0], &farm_world());
-        let shown = screen(&fleet, &mut App { open: Some(0), ..App::default() }, 110);
+        let shown = screen(&fleet, &mut App::default(), 110);
         assert!(shown.contains(" hero · Twilly · farm-1"), "{shown}");
     }
 
@@ -776,7 +1290,7 @@ mod tests {
         }
         let root = format!("{}/", dir.display());
         let (fleet, _hub) = fleet(&["main"]);
-        let mut app = App { open: Some(0), ..App::default() };
+        let mut app = App::default();
         let press = |app: &mut App, code: KeyCode| app.handle(KeyEvent::from(code), &fleet, &[]);
         let typed = |app: &mut App, text: &str| text.chars().for_each(|c| _ = press(app, KeyCode::Char(c)));
         let input = |app: &App| app.prompt.as_ref().unwrap().input.clone();
@@ -785,6 +1299,7 @@ mod tests {
         typed(&mut app, &format!(" {root}"));
         let shown = screen(&fleet, &mut app, 100);
         assert!(shown.contains(" farm.ts  fight.js  loop.mjs  quests/"), "{shown}");
+        assert!(shown.contains("tab complete"), "{shown}");
         for hidden in ["aqx.d.ts", "my farm.ts", "notes.md", ".secret.ts"] {
             assert!(!shown.contains(hidden), "{hidden} is listed: {shown}");
         }
@@ -811,6 +1326,17 @@ mod tests {
     }
 
     #[test]
+    fn tab_completes_under_the_home_directory() {
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let name = format!("aqx-tui-home-test-{}", std::process::id());
+        std::fs::create_dir_all(home.join(&name)).unwrap();
+        std::fs::write(home.join(&name).join("farm.ts"), "").unwrap();
+        let matches = scripts_matching(&format!("~/{name}/f"));
+        std::fs::remove_dir_all(home.join(&name)).unwrap();
+        assert_eq!(matches, [format!("~/{name}/farm.ts")]);
+    }
+
+    #[test]
     fn the_last_match_takes_no_gap_after_it() {
         let matches = ["farm.ts".to_string(), "fight.js".to_string()];
         let mut terminal = Terminal::new(TestBackend::new(18, 1)).unwrap();
@@ -821,17 +1347,16 @@ mod tests {
 
     #[test]
     fn a_recharging_skill_lights_up_from_the_left() {
-        use crate::hub::{Game, SkillState};
+        let (fleet, _hub) = fleet(&["main"]);
         let skill = |name: &str, ready_pct| SkillState { name: name.into(), ready_pct };
         let game = Game { skills: vec![skill("Slash", 100), skill("Blur", 50), skill("Rend", 0)], ..Game::default() };
-        let snapshot = Snapshot { game: Some(game), ..Snapshot::default() };
-        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
-        terminal.draw(|f| draw_combat(f, f.area(), Some(&snapshot))).unwrap();
-        let rows: Vec<_> = terminal.backend().buffer().content.chunks(60).map(<[_]>::to_vec).collect();
+        show(&fleet.cells[0], Snapshot { phase: "READY".into(), game: Some(game), ..Snapshot::default() });
+        let mut app = App { details: true, ..App::default() };
+        let rows = rows(&fleet, &mut app, 60);
         let row = rows.iter().find(|r| r.iter().map(|c| c.symbol()).collect::<String>().contains("Skills")).unwrap();
         let text: String = row.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("Skills  1 Slash  2 Blur  3 Rend"), "{text}");
+        assert!(text.contains("Skills 1 Slash  2 Blur  3 Rend"), "{text}");
         let dim: String = row.iter().filter(|c| c.fg == Color::DarkGray).map(|c| c.symbol()).collect();
-        assert_eq!(dim, "lur3 Rend");
+        assert_eq!(dim, "Skills lur3 Rend");
     }
 }

@@ -227,6 +227,7 @@ fn open(wanted: &Wanted) -> Result<(), String> {
     let command = command(wanted)?;
     let session = match socket::session_for(&path)? {
         Some(session) => {
+            socket::check(&session)?;
             if bots.is_empty() && wanted.script.is_some() {
                 return Err("aqx is already running for this config; name the bots to run the script on".into());
             }
@@ -253,11 +254,7 @@ fn named(config: &Config, names: &[String]) -> Result<Vec<String>, String> {
 
 fn command(wanted: &Wanted) -> Result<Command, String> {
     let Some(script) = &wanted.script else { return Ok(Command::Login) };
-    let script = std::path::absolute(script).map_err(|e| format!("{}: {e}", script.display()))?;
-    if !script.is_file() {
-        return Err(format!("{} isn't a file", script.display()));
-    }
-    Ok(Command::Run { script, args: wanted.args.clone() })
+    Ok(Command::Run { script: bot::script_path(script)?, args: wanted.args.clone() })
 }
 
 fn start_session(config: &Path, bots: &[String], command: &Command) -> Result<PathBuf, String> {
@@ -382,7 +379,7 @@ fn start(name: &str, config: Option<&Path>, launches: Vec<Launch>, print: Print,
             Ok((launch.name, thread))
         })
         .collect::<Result<_, String>>()?;
-    while !hub.cells.iter().all(|c| c.offline()) {
+    while !hub.end_if_idle() {
         std::thread::sleep(Duration::from_millis(250));
     }
     for cell in &hub.cells {
@@ -401,6 +398,7 @@ fn attach(path: &Path) -> Result<(), String> {
     let mut conn = Conn::open(path)?;
     conn.send(&json!({ "op": "subscribe" }))?;
     let hello = conn.recv().ok_or("the aqx process closed the connection")?;
+    socket::same_build(&hello)?;
     let name = hello["name"].as_str().unwrap_or("aqx").to_string();
     let bots: Vec<String> = serde_json::from_value(hello["bots"].clone()).map_err(|e| e.to_string())?;
     let cells: Vec<Arc<BotCell>> = bots.iter().map(|b| Arc::new(BotCell::mirror(b))).collect();
@@ -503,13 +501,7 @@ fn logs(bot: Option<&str>, follow: bool) -> Result<(), String> {
 fn ctl(bot: &str, action: Ctl) -> Result<(), String> {
     let command = match action {
         Ctl::Login => Command::Login,
-        Ctl::Run { script, args } => {
-            let script = std::path::absolute(&script).map_err(|e| format!("{}: {e}", script.display()))?;
-            if !script.is_file() {
-                return Err(format!("{} isn't a file", script.display()));
-            }
-            Command::Run { script, args }
-        }
+        Ctl::Run { script, args } => Command::Run { script: bot::script_path(&script)?, args },
         Ctl::Stop => Command::Stop,
         Ctl::Restart => Command::Restart,
         Ctl::Pause => Command::Pause,
@@ -517,7 +509,10 @@ fn ctl(bot: &str, action: Ctl) -> Result<(), String> {
         Ctl::Relogin => Command::Relogin,
         Ctl::Logout => Command::Logout,
     };
-    socket::ctl(&socket::find_bot(bot)?, bot, &command)
+    if !socket::ctl(&socket::find_bot(bot)?, bot, &command)? {
+        println!("{bot}: {}", command.unchanged());
+    }
+    Ok(())
 }
 
 fn servers(config: Option<&Path>) -> Result<(), String> {

@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use crate::hub::{Command, Hub, LogLine, Snapshot};
 
+pub const PROTOCOL: u32 = 1;
 const TICK: Duration = Duration::from_millis(250);
 const FRESH: Duration = Duration::from_millis(300);
 const NAME_TRIES: usize = 100;
@@ -117,14 +118,11 @@ fn serve_client(hub: &Arc<Hub>, config: Option<&Path>, conn: UnixStream) {
         let Ok(line) = line else { return };
         let reply = match serde_json::from_str::<Request>(&line) {
             Err(e) => json!({ "type": "error", "message": format!("unreadable request: {e}") }),
-            Ok(Request::Info) => json!({ "type": "info", "name": hub.name, "config": config, "bots": names(hub) }),
-            Ok(Request::Snapshot) => json!({ "type": "snapshot", "name": hub.name, "bots": snapshots(hub) }),
-            Ok(Request::Ctl { bot, command }) => match hub.cell(&bot) {
-                None => json!({ "type": "error", "message": format!("no bot named {bot} in {}", hub.name) }),
-                Some(cell) => match cell.send(command) {
-                    Ok(()) => json!({ "type": "ok" }),
-                    Err(e) => json!({ "type": "error", "message": e }),
-                },
+            Ok(Request::Info) => json!({ "type": "info", "protocol": PROTOCOL, "name": hub.name, "config": config, "bots": names(hub) }),
+            Ok(Request::Snapshot) => json!({ "type": "snapshot", "protocol": PROTOCOL, "name": hub.name, "bots": snapshots(hub) }),
+            Ok(Request::Ctl { bot, command }) => match hub.send(&bot, command) {
+                Ok(changed) => json!({ "type": "ok", "changed": changed }),
+                Err(e) => json!({ "type": "error", "message": e }),
             },
             Ok(Request::Subscribe) => return subscribe(hub, &mut out),
             Ok(Request::Logs { bot, follow }) => return logs(hub, bot.as_deref(), follow, &mut out),
@@ -150,7 +148,7 @@ fn names(hub: &Hub) -> Vec<&str> {
 
 fn subscribe(hub: &Arc<Hub>, out: &mut UnixStream) {
     let _watching = hub.watch();
-    if !send(out, &json!({ "type": "hello", "name": hub.name, "bots": names(hub) })) {
+    if !send(out, &json!({ "type": "hello", "protocol": PROTOCOL, "name": hub.name, "bots": names(hub) })) {
         return;
     }
     let mut shown: Vec<Option<Snapshot>> = vec![None; hub.cells.len()];
@@ -287,16 +285,29 @@ pub fn bots(path: &Path) -> Result<Vec<String>, String> {
     serde_json::from_value(info["bots"].clone()).map_err(|e| e.to_string())
 }
 
+pub fn same_build(reply: &Value) -> Result<(), String> {
+    if reply["protocol"] == PROTOCOL {
+        return Ok(());
+    }
+    let name = reply["name"].as_str().unwrap_or("the session");
+    Err(format!("{name} was started by a different build of aqx; run aqx down and start it again"))
+}
+
+pub fn check(path: &Path) -> Result<(), String> {
+    same_build(&Conn::ask(path, &json!({ "op": "info" }))?)
+}
+
 pub fn snapshot(path: &Path) -> Result<Vec<Snapshot>, String> {
     let reply = Conn::ask(path, &json!({ "op": "snapshot" }))?;
+    same_build(&reply)?;
     serde_json::from_value(reply["bots"].clone()).map_err(|e| e.to_string())
 }
 
-pub fn ctl(path: &Path, bot: &str, command: &Command) -> Result<(), String> {
+pub fn ctl(path: &Path, bot: &str, command: &Command) -> Result<bool, String> {
     let mut request = serde_json::to_value(command).map_err(|e| e.to_string())?;
     request["op"] = json!("ctl");
     request["bot"] = json!(bot);
-    Conn::ask(path, &request).map(|_| ())
+    Conn::ask(path, &request).map(|reply| reply["changed"].as_bool().unwrap_or(true))
 }
 
 pub fn find_bot(bot: &str) -> Result<PathBuf, String> {
@@ -305,7 +316,7 @@ pub fn find_bot(bot: &str) -> Result<PathBuf, String> {
         return Err("no aqx process is running".into());
     }
     for (_, path) in &all {
-        if snapshot(path).is_ok_and(|bots| bots.iter().any(|b| b.bot == bot)) {
+        if bots(path).is_ok_and(|bots| bots.iter().any(|b| b == bot)) {
             return Ok(path.clone());
         }
     }
@@ -318,6 +329,72 @@ mod tests {
 
     use super::*;
     use crate::hub::{BotCell, Print};
+
+    fn keys(value: &Value, at: &str, out: &mut Vec<String>) {
+        match value {
+            Value::Object(fields) => {
+                for (key, inner) in fields {
+                    let path = if at.is_empty() { key.clone() } else { format!("{at}.{key}") };
+                    keys(inner, &path, out);
+                    out.push(path);
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|item| keys(item, at, out)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn an_ending_session_refuses_commands() {
+        let control = Control::new().unwrap();
+        let hub = Hub::new("ending", vec![Arc::new(BotCell::local("main", control.stop_handle()))], Print::Quiet);
+        assert!(hub.end_if_idle());
+        assert_eq!(hub.send("main", Command::Login), Err("ending is ending".to_string()));
+    }
+
+    #[test]
+    fn a_session_from_another_build_is_named_with_the_way_out() {
+        assert_eq!(same_build(&json!({ "type": "info", "protocol": PROTOCOL, "name": "farm" })), Ok(()));
+        let before_protocols = json!({ "type": "info", "name": "farm", "bots": ["hero"] });
+        assert_eq!(same_build(&before_protocols), Err("farm was started by a different build of aqx; run aqx down and start it again".into()));
+    }
+
+    #[test]
+    fn the_wire_format_matches_its_protocol_number() {
+        use crate::hub::{Aura, Bar, Game, Offer, Player, SkillState, Snapshot, Target};
+        let game = Game {
+            skills: vec![SkillState::default()],
+            auras: vec![Aura::default()],
+            target: Some(Target::default()),
+            cell_players: vec![Player::default()],
+            drops: vec![Offer::default()],
+            ..Game::default()
+        };
+        let snapshot = Snapshot {
+            script: Some(String::new()),
+            progress: vec![Bar { eta_secs: Some(0), ..Bar::default() }],
+            gold_gained: Some(0),
+            game: Some(game),
+            ..Snapshot::default()
+        };
+        let line = LogLine { seq: 0, t: 0, source: String::new(), text: String::new() };
+        let mut shape = Vec::new();
+        keys(&json!({ "snapshot": snapshot, "log": line }), "", &mut shape);
+        shape.sort();
+        let pinned = "log log.seq log.source log.t log.text snapshot snapshot.bot snapshot.deaths snapshot.detail \
+             snapshot.drops snapshot.game snapshot.game.afk snapshot.game.area snapshot.game.auras \
+             snapshot.game.auras.name snapshot.game.auras.stacks snapshot.game.cell snapshot.game.cell_players \
+             snapshot.game.cell_players.level snapshot.game.cell_players.name snapshot.game.class \
+             snapshot.game.dead snapshot.game.drops snapshot.game.drops.name snapshot.game.drops.qty \
+             snapshot.game.gold snapshot.game.hp snapshot.game.level snapshot.game.max_hp snapshot.game.max_mp \
+             snapshot.game.mp snapshot.game.pad snapshot.game.skills snapshot.game.skills.name \
+             snapshot.game.skills.ready_pct snapshot.game.target snapshot.game.target.hp \
+             snapshot.game.target.max_hp snapshot.game.target.name snapshot.gold_gained snapshot.kills \
+             snapshot.paused snapshot.phase snapshot.progress snapshot.progress.current \
+             snapshot.progress.eta_secs snapshot.progress.label snapshot.progress.total snapshot.run \
+             snapshot.script snapshot.server snapshot.stalled snapshot.status snapshot.up_secs snapshot.user";
+        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (1, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
+    }
 
     #[test]
     fn answers_snapshots_logs_and_commands() {
@@ -351,6 +428,7 @@ mod tests {
 
         let ctl = |request: Value| Conn::ask(&path, &request);
         super::ctl(&path, "main", &Command::Pause).unwrap();
+        assert_eq!(super::ctl(&path, "main", &Command::Login), Ok(false), "an online bot is already logged in");
         assert!(cell.board().paused);
         ctl(json!({ "op": "ctl", "bot": "main", "cmd": "run", "script": "/x.ts", "args": [["n", "3"]] })).unwrap();
         assert!(matches!(cell.take_command(), Some(Command::Run { script, args }) if script == Path::new("/x.ts") && args == [("n".to_string(), "3".to_string())]));

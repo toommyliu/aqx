@@ -13,7 +13,6 @@ use crate::output::{self, clock};
 
 pub const LOG_LINES: usize = 1000;
 const WINDOW: Duration = Duration::from_secs(600);
-const GOLD_EVERY: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogLine {
@@ -43,6 +42,16 @@ pub enum Command {
     },
 }
 
+impl Command {
+    pub fn unchanged(&self) -> &'static str {
+        match self {
+            Command::Login => "already online",
+            Command::Logout => "already offline",
+            _ => "nothing to do",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Print {
     Quiet,
@@ -63,12 +72,11 @@ pub struct Snapshot {
     pub stalled: bool,
     pub status: String,
     pub progress: Vec<Bar>,
-    pub quiet_secs: u64,
     pub up_secs: u64,
-    pub kills_h: Option<u64>,
-    pub drops_h: Option<u64>,
-    pub gold_h: Option<i64>,
-    pub deaths: usize,
+    pub kills: u64,
+    pub drops: u64,
+    pub deaths: u64,
+    pub gold_gained: Option<i64>,
     pub game: Option<Game>,
 }
 
@@ -114,13 +122,35 @@ pub struct Game {
     pub level: u32,
     pub gold: i64,
     pub skills: Vec<SkillState>,
-    pub auras: Vec<String>,
-    pub target: Option<String>,
-    pub cell_monsters: (usize, usize),
-    pub map_monsters: (usize, usize),
-    pub players: usize,
-    pub cell_players: Vec<String>,
-    pub drops: Vec<String>,
+    pub auras: Vec<Aura>,
+    pub target: Option<Target>,
+    pub cell_players: Vec<Player>,
+    pub drops: Vec<Offer>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Aura {
+    pub name: String,
+    pub stacks: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Target {
+    pub name: String,
+    pub hp: u32,
+    pub max_hp: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Player {
+    pub name: String,
+    pub level: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Offer {
+    pub name: String,
+    pub qty: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -156,15 +186,16 @@ pub struct Board {
     pub paused: bool,
     pub stalled: bool,
     pub online: bool,
+    pub leaving: bool,
     pub server: String,
     pub ready_since: Option<Instant>,
-    pub first_ready: Option<Instant>,
     pub last_progress: Instant,
     bars: Vec<Rate>,
-    kills: VecDeque<Instant>,
-    drops: VecDeque<Instant>,
-    deaths: VecDeque<Instant>,
-    gold: VecDeque<(Instant, i64)>,
+    kills: u64,
+    drops: u64,
+    deaths: u64,
+    gold_from: Option<i64>,
+    gold_now: i64,
 }
 
 impl Default for Board {
@@ -179,15 +210,16 @@ impl Default for Board {
             paused: false,
             stalled: false,
             online: false,
+            leaving: false,
             server: String::new(),
             ready_since: None,
-            first_ready: None,
             last_progress: Instant::now(),
             bars: Vec::new(),
-            kills: VecDeque::new(),
-            drops: VecDeque::new(),
-            deaths: VecDeque::new(),
-            gold: VecDeque::new(),
+            kills: 0,
+            drops: 0,
+            deaths: 0,
+            gold_from: None,
+            gold_now: 0,
         }
     }
 }
@@ -219,21 +251,15 @@ impl Board {
     fn note(&mut self, event: &Event, now: Instant) {
         match event {
             Event::Killed { .. } => {
-                self.kills.push_back(now);
+                self.kills += 1;
                 self.progressed(now);
             }
-            Event::DropOffered { .. } => self.drops.push_back(now),
-            Event::Died => self.deaths.push_back(now),
+            Event::DropOffered { .. } => self.drops += 1,
+            Event::Died => self.deaths += 1,
             Event::ItemChanged { .. } | Event::QuestCompleted { .. } | Event::Joined { .. } => self.progressed(now),
             Event::Status { text } => self.status.clone_from(text),
             Event::Progress { label, current, total } => self.advance(label, *current, *total, now),
             _ => {}
-        }
-        let cutoff = now.checked_sub(WINDOW).unwrap_or(now);
-        for times in [&mut self.kills, &mut self.drops, &mut self.deaths] {
-            while times.front().is_some_and(|t| *t < cutoff) {
-                times.pop_front();
-            }
         }
     }
 
@@ -257,26 +283,21 @@ impl Board {
         bar.total = total;
     }
 
-    pub fn sample_gold(&mut self, world: &World, now: Instant) {
-        let Some(me) = &world.me else { return };
-        if self.gold.back().is_none_or(|(t, _)| now.saturating_duration_since(*t) >= GOLD_EVERY) {
-            self.gold.push_back((now, me.gold));
-        }
-        let cutoff = now.checked_sub(WINDOW).unwrap_or(now);
-        while self.gold.front().is_some_and(|(t, _)| *t < cutoff) {
-            self.gold.pop_front();
+    pub fn sample_gold(&mut self, world: &World) {
+        if let Some(me) = &world.me {
+            self.gold_from.get_or_insert(me.gold);
+            self.gold_now = me.gold;
         }
     }
 
+    pub fn reset_stats(&mut self) {
+        self.kills = 0;
+        self.drops = 0;
+        self.deaths = 0;
+        self.gold_from = None;
+    }
+
     pub fn snapshot(&self, bot: &str, user: &str, phase: &Phase, world: &World, now: Instant) -> Snapshot {
-        let window = self.first_ready.map_or(Duration::ZERO, |t| now.saturating_duration_since(t)).min(WINDOW);
-        let per_hour = |n: usize| (window >= Duration::from_secs(60)).then(|| (n as f64 * 3600.0 / window.as_secs_f64()) as u64);
-        let gold_h = match (self.gold.front(), self.gold.back()) {
-            (Some((t0, g0)), Some((t1, g1))) if t1.saturating_duration_since(*t0) >= Duration::from_secs(60) => {
-                Some(((g1 - g0) as f64 * 3600.0 / t1.saturating_duration_since(*t0).as_secs_f64()) as i64)
-            }
-            _ => None,
-        };
         let (phase, detail) = describe_phase(phase, now);
         Snapshot {
             bot: bot.into(),
@@ -306,12 +327,11 @@ impl Board {
                     eta_secs: (b.per_sec > 0.0 && b.total > b.current).then(|| (f64::from(b.total - b.current) / b.per_sec) as u64),
                 })
                 .collect(),
-            quiet_secs: now.saturating_duration_since(self.last_progress).as_secs(),
             up_secs: self.ready_since.filter(|_| self.online).map_or(0, |t| now.saturating_duration_since(t).as_secs()),
-            kills_h: per_hour(self.kills.len()),
-            drops_h: per_hour(self.drops.len()),
-            gold_h,
-            deaths: self.deaths.len(),
+            kills: self.kills,
+            drops: self.drops,
+            deaths: self.deaths,
+            gold_gained: self.gold_from.map(|from| self.gold_now - from),
             game: if self.online { game(world, now) } else { None },
         }
     }
@@ -333,14 +353,10 @@ fn describe_phase(phase: &Phase, now: Instant) -> (String, String) {
 fn game(world: &World, now: Instant) -> Option<Game> {
     let me = world.me.as_ref()?;
     let area = world.area.as_ref();
-    let count = |cell: Option<&str>| {
-        let monsters = area.into_iter().flat_map(|a| &a.monsters).filter(|m| cell.is_none_or(|c| m.cell == c));
-        monsters.fold((0, 0), |(total, alive), m| (total + 1, alive + usize::from(m.alive())))
-    };
-    let target = world.target.and_then(|id| area?.monsters.iter().find(|m| m.map_id == id)).map(|m| {
-        let pct = if m.vitals.max_hp == 0 { 0 } else { u64::from(m.vitals.hp) * 100 / u64::from(m.vitals.max_hp) };
-        format!("{} #{} {pct}%", m.name, m.map_id)
-    });
+    let target = world
+        .target
+        .and_then(|id| area?.monsters.iter().find(|m| m.map_id == id))
+        .map(|m| Target { name: m.name.clone(), hp: m.vitals.hp, max_hp: m.vitals.max_hp });
     Some(Game {
         area: area.map(|a| a.name.clone()).unwrap_or_default(),
         cell: me.cell.clone(),
@@ -361,13 +377,15 @@ fn game(world: &World, now: Instant) -> Option<Game> {
             .take(4)
             .map(|s| SkillState { name: s.name.clone(), ready_pct: (world.recharged(s, now) * 100.0) as u8 })
             .collect(),
-        auras: me.auras.iter().map(|a| if a.stacks > 1 { format!("{} x{}", a.name, a.stacks) } else { a.name.clone() }).collect(),
+        auras: me.auras.iter().map(|a| Aura { name: a.name.clone(), stacks: a.stacks }).collect(),
         target,
-        cell_monsters: count(Some(&me.cell)),
-        map_monsters: count(None),
-        players: area.map_or(0, |a| a.players.len()) + 1,
-        cell_players: area.into_iter().flat_map(|a| &a.players).filter(|p| p.cell == me.cell).map(|p| format!("{} Lv {}", p.name, p.level)).collect(),
-        drops: world.drops.iter().map(|d| format!("{} x{}", d.name, d.qty)).collect(),
+        cell_players: area
+            .into_iter()
+            .flat_map(|a| &a.players)
+            .filter(|p| p.cell == me.cell)
+            .map(|p| Player { name: p.name.clone(), level: p.level })
+            .collect(),
+        drops: world.drops.iter().map(|d| Offer { name: d.name.clone(), qty: d.qty }).collect(),
     })
 }
 
@@ -402,32 +420,39 @@ impl BotCell {
         self.inbox.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn send(&self, command: Command) -> Result<(), String> {
+    pub fn send(&self, command: Command) -> Result<bool, String> {
         let Some(stop) = &self.stop else { return Err(format!("{} runs in another process", self.name)) };
         let mut board = self.board();
+        let mut inbox = self.inbox();
         match &command {
-            Command::Login if board.online => return Ok(()),
-            Command::Logout if !board.online => return Ok(()),
+            Command::Login if board.online => {
+                let leaving = board.leaving || inbox.commands.iter().any(|c| matches!(c, Command::Logout));
+                if leaving {
+                    inbox.commands.push_back(command);
+                }
+                return Ok(leaving);
+            }
+            Command::Logout if !board.online => return Ok(false),
             Command::Login | Command::Run { .. } => board.online = true,
             _ if !board.online => return Err(format!("{} is offline", self.name)),
             Command::Pause | Command::Resume => {
                 let paused = matches!(command, Command::Pause);
                 board.paused = paused;
                 stop.post(move |s| s.set_paused(paused));
-                return Ok(());
+                return Ok(true);
             }
             Command::Chat { text } => {
                 let text = text.clone();
                 stop.post(move |s| s.chat(&text));
-                return Ok(());
+                return Ok(true);
             }
             _ => {}
         }
-        drop(board);
-        self.inbox().commands.push_back(command);
+        inbox.commands.push_back(command);
+        drop((board, inbox));
         self.wake.notify_one();
         stop.stop();
-        Ok(())
+        Ok(true)
     }
 
     pub fn take_command(&self) -> Option<Command> {
@@ -445,13 +470,21 @@ impl BotCell {
                 return None;
             }
             match inbox.commands.pop_front() {
-                Some(command @ (Command::Login | Command::Run { .. })) => {
-                    self.board().online = true;
-                    return Some(command);
-                }
+                Some(command @ (Command::Login | Command::Run { .. })) => return Some(command),
                 Some(_) => {}
                 None => inbox = self.wake.wait(inbox).unwrap_or_else(|e| e.into_inner()),
             }
+        }
+    }
+
+    pub fn go_offline(&self) {
+        let mut board = self.board();
+        board.online = self.inbox().commands.iter().any(|c| matches!(c, Command::Login | Command::Run { .. }));
+        board.leaving = false;
+        board.stalled = false;
+        board.paused = false;
+        if board.run == Run::Running {
+            board.run = Run::Stopped;
         }
     }
 
@@ -475,16 +508,28 @@ pub struct Hub {
     pub name: String,
     pub cells: Vec<Arc<BotCell>>,
     watchers: AtomicUsize,
+    ending: Mutex<bool>,
     print: Print,
 }
 
 impl Hub {
     pub fn new(name: &str, cells: Vec<Arc<BotCell>>, print: Print) -> Self {
-        Hub { name: name.into(), cells, watchers: AtomicUsize::new(0), print }
+        Hub { name: name.into(), cells, watchers: AtomicUsize::new(0), ending: Mutex::new(false), print }
     }
 
-    pub fn cell(&self, name: &str) -> Option<&Arc<BotCell>> {
-        self.cells.iter().find(|c| c.name == name)
+    pub fn send(&self, bot: &str, command: Command) -> Result<bool, String> {
+        let ending = self.ending.lock().unwrap_or_else(|e| e.into_inner());
+        if *ending {
+            return Err(format!("{} is ending", self.name));
+        }
+        let cell = self.cells.iter().find(|c| c.name == bot).ok_or_else(|| format!("no bot named {bot} in {}", self.name))?;
+        cell.send(command)
+    }
+
+    pub fn end_if_idle(&self) -> bool {
+        let mut ending = self.ending.lock().unwrap_or_else(|e| e.into_inner());
+        *ending |= self.cells.iter().all(|c| c.offline());
+        *ending
     }
 
     pub fn watched(&self) -> bool {
@@ -578,5 +623,34 @@ pub struct Watching(Arc<Hub>);
 impl Drop for Watching {
     fn drop(&mut self) {
         self.0.watchers.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aqx_protocol::Message;
+
+    use super::*;
+
+    fn world(gold: Option<i64>) -> World {
+        let mut world = World::default();
+        let mut feed = vec!["%xt%loginResponse%-1%true%1001%hero%Welcome!%".to_string()];
+        feed.extend(gold.map(|g| format!(r#"{{"t":"xt","b":{{"r":-1,"o":{{"cmd":"initUserData","uid":1001,"data":{{"intGold":{g}}}}}}}}}"#)));
+        for text in feed {
+            aqx_core::reduce(&mut world, &Message::parse(&text).unwrap(), Instant::now());
+        }
+        world
+    }
+
+    #[test]
+    fn gold_gained_holds_its_last_value_while_reconnecting() {
+        let now = Instant::now();
+        let mut board = Board { online: true, ..Board::default() };
+        board.sample_gold(&world(Some(1000)));
+        let reloading = world(None);
+        assert_eq!(reloading.me.as_ref().map(|m| m.gold), Some(0));
+        assert_eq!(board.snapshot("main", "hero", &Phase::Loading, &reloading, now).gold_gained, Some(0));
+        board.sample_gold(&world(Some(1500)));
+        assert_eq!(board.snapshot("main", "hero", &Phase::Ready, &world(Some(1500)), now).gold_gained, Some(500));
     }
 }
