@@ -1075,7 +1075,7 @@ mod tests {
         board.server = "Twilly".into();
         board.online = true;
         board.ready_since = Some(now - Duration::from_secs(90));
-        board.start_script("/srv/void-aura.ts".into(), now);
+        board.start_script("/srv/void-aura.ts".into(), Vec::new(), now);
         drop(board);
         hub.record(cell, &Event::Status { text: "Astral Ephemerite Essence in timespace".into() });
         hub.record(cell, &Event::Progress { label: "Void Aura".into(), current: 4120, total: 7500 });

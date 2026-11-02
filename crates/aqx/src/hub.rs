@@ -64,6 +64,8 @@ pub struct Snapshot {
     pub phase: String,
     pub detail: String,
     pub script: Option<String>,
+    #[serde(default)]
+    pub args: Vec<(String, String)>,
     pub run: String,
     pub paused: bool,
     pub stalled: bool,
@@ -179,6 +181,7 @@ pub struct Board {
     pub next_seq: u64,
     pub run: Run,
     pub script: Option<String>,
+    pub args: Vec<(String, String)>,
     pub status: String,
     pub paused: bool,
     pub stalled: bool,
@@ -203,6 +206,7 @@ impl Default for Board {
             next_seq: 0,
             run: Run::Idle,
             script: None,
+            args: Vec::new(),
             status: String::new(),
             paused: false,
             stalled: false,
@@ -237,8 +241,9 @@ impl Board {
         self.stalled = false;
     }
 
-    pub fn start_script(&mut self, script: String, now: Instant) {
+    pub fn start_script(&mut self, script: String, args: Vec<(String, String)>, now: Instant) {
         self.script = Some(script);
+        self.args = args;
         self.run = Run::Running;
         self.status.clear();
         self.bars.clear();
@@ -303,6 +308,7 @@ impl Board {
             phase: if self.online { phase } else { "OFFLINE".into() },
             detail,
             script: self.script.clone(),
+            args: self.args.clone(),
             run: match self.run {
                 Run::Idle => "idle",
                 Run::Running => "running",

@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 
 use crate::hub::{Command, Hub, LogLine, Snapshot};
 
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
+const BUILD: &str = env!("AQX_BUILD");
 const TICK: Duration = Duration::from_millis(250);
 const FRESH: Duration = Duration::from_millis(300);
 const NAME_TRIES: usize = 100;
@@ -118,7 +119,7 @@ fn serve_client(hub: &Arc<Hub>, config: Option<&Path>, conn: UnixStream) {
         let Ok(line) = line else { return };
         let reply = match serde_json::from_str::<Request>(&line) {
             Err(e) => json!({ "type": "error", "message": format!("unreadable request: {e}") }),
-            Ok(Request::Info) => json!({ "type": "info", "protocol": PROTOCOL, "name": hub.name, "config": config, "bots": names(hub) }),
+            Ok(Request::Info) => json!({ "type": "info", "protocol": PROTOCOL, "build": BUILD, "name": hub.name, "config": config, "bots": names(hub) }),
             Ok(Request::Snapshot) => json!({ "type": "snapshot", "protocol": PROTOCOL, "name": hub.name, "bots": snapshots(hub) }),
             Ok(Request::Ctl { bot, command }) => match hub.send(&bot, command) {
                 Ok(changed) => json!({ "type": "ok", "changed": changed }),
@@ -280,6 +281,29 @@ pub fn session_for(config: &Path) -> Result<Option<PathBuf>, String> {
     Ok(processes()?.into_iter().map(|(_, path)| path).find(|path| Conn::ask(path, &json!({ "op": "info" })).is_ok_and(|info| info["config"] == config)))
 }
 
+#[derive(Deserialize)]
+struct Resumable {
+    bot: String,
+    phase: String,
+    run: String,
+    script: Option<String>,
+    #[serde(default)]
+    args: Vec<(String, String)>,
+}
+
+pub fn to_resume(path: &Path) -> Result<Vec<(String, Command)>, String> {
+    let reply = Conn::ask(path, &json!({ "op": "snapshot" }))?;
+    let bots: Vec<Resumable> = serde_json::from_value(reply["bots"].clone()).map_err(|e| format!("unreadable snapshot: {e}"))?;
+    Ok(bots
+        .into_iter()
+        .filter(|b| b.phase != "OFFLINE")
+        .map(|b| match (b.run.as_str(), b.script) {
+            ("running", Some(script)) => (b.bot, Command::Run { script: script.into(), args: b.args }),
+            _ => (b.bot, Command::Login),
+        })
+        .collect())
+}
+
 pub fn bots(path: &Path) -> Result<Vec<String>, String> {
     let info = Conn::ask(path, &json!({ "op": "info" }))?;
     serde_json::from_value(info["bots"].clone()).map_err(|e| e.to_string())
@@ -293,8 +317,12 @@ pub fn same_build(reply: &Value) -> Result<(), String> {
     Err(format!("{name} was started by a different build of aqx; run aqx down and start it again"))
 }
 
-pub fn check(path: &Path) -> Result<(), String> {
-    same_build(&Conn::ask(path, &json!({ "op": "info" }))?)
+pub fn info(path: &Path) -> Result<Value, String> {
+    Conn::ask(path, &json!({ "op": "info" }))
+}
+
+pub fn other_build(info: &Value) -> bool {
+    info["protocol"] != PROTOCOL || info["build"] != BUILD
 }
 
 pub fn snapshot(path: &Path) -> Result<Vec<Snapshot>, String> {
@@ -360,6 +388,34 @@ mod tests {
     }
 
     #[test]
+    fn a_session_is_another_build_when_its_sources_or_protocol_differ() {
+        assert!(!other_build(&json!({ "protocol": PROTOCOL, "build": BUILD })));
+        assert!(other_build(&json!({ "protocol": PROTOCOL, "build": "0000000000000000" })));
+        assert!(other_build(&json!({ "protocol": PROTOCOL - 1, "build": BUILD })));
+        assert!(other_build(&json!({ "protocol": PROTOCOL })), "a session from before builds were reported");
+    }
+
+    #[test]
+    fn a_restart_resumes_online_bots_and_their_scripts() {
+        let controls: Vec<Control> = (0..3).map(|_| Control::new().unwrap()).collect();
+        let cells: Vec<Arc<BotCell>> = ["farmer", "idler", "away"].iter().zip(&controls).map(|(b, c)| Arc::new(BotCell::local(b, c.stop_handle()))).collect();
+        let show = |cell: &BotCell, phase: &str, run: &str, script: Option<&str>| {
+            let args = vec![("rounds".to_string(), "3".to_string())];
+            cell.board().snapshot = Some(Snapshot { bot: cell.name.clone(), phase: phase.into(), run: run.into(), script: script.map(Into::into), args, ..Snapshot::default() });
+        };
+        show(&cells[0], "READY", "running", Some("/srv/farm.ts"));
+        show(&cells[1], "READY", "done", Some("/srv/farm.ts"));
+        show(&cells[2], "OFFLINE", "running", Some("/srv/farm.ts"));
+        let name = format!("resume-{}", std::process::id());
+        let hub = Arc::new(Hub::new(&name, cells, Print::Quiet));
+        let (_, listener, _listening) = bind(&name, false).unwrap();
+        serve(listener, hub, None).unwrap();
+        let resume = to_resume(&pick(Some(&name)).unwrap().1).unwrap();
+        let shown: Vec<String> = resume.iter().map(|(bot, command)| format!("{bot} {}", serde_json::to_string(command).unwrap())).collect();
+        assert_eq!(shown, [r#"farmer {"cmd":"run","script":"/srv/farm.ts","args":[["rounds","3"]]}"#, r#"idler {"cmd":"login"}"#]);
+    }
+
+    #[test]
     fn the_wire_format_matches_its_protocol_number() {
         use crate::hub::{Aura, Bar, Game, Offer, Player, SkillState, Snapshot, Target};
         let game = Game {
@@ -381,7 +437,7 @@ mod tests {
         let mut shape = Vec::new();
         keys(&json!({ "snapshot": snapshot, "log": line }), "", &mut shape);
         shape.sort();
-        let pinned = "log log.seq log.source log.t log.text snapshot snapshot.bot snapshot.deaths snapshot.detail \
+        let pinned = "log log.seq log.source log.t log.text snapshot snapshot.args snapshot.bot snapshot.deaths snapshot.detail \
              snapshot.drops snapshot.game snapshot.game.afk snapshot.game.area snapshot.game.auras \
              snapshot.game.auras.name snapshot.game.auras.stacks snapshot.game.cell snapshot.game.cell_players \
              snapshot.game.cell_players.level snapshot.game.cell_players.name snapshot.game.class \
@@ -393,7 +449,7 @@ mod tests {
              snapshot.paused snapshot.phase snapshot.progress snapshot.progress.current \
              snapshot.progress.eta_secs snapshot.progress.label snapshot.progress.total snapshot.run \
              snapshot.script snapshot.server snapshot.stalled snapshot.status snapshot.up_secs snapshot.user";
-        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (1, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
+        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (2, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
     }
 
     #[test]

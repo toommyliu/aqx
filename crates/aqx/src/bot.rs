@@ -231,7 +231,7 @@ impl Bot {
         self.wanted = Some(script.clone());
         self.last = Some(script.clone());
         let shown = script.path.display().to_string();
-        self.cell.board().start_script(shown.clone(), Instant::now());
+        self.cell.board().start_script(shown.clone(), script.args.clone(), Instant::now());
         self.say(format!("running {shown}"));
         let started = Instant::now();
         match aqx_script::run(session, &script.path, &script.args, self.spec.room) {

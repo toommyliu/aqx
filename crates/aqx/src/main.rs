@@ -226,19 +226,49 @@ fn open(wanted: &Wanted) -> Result<(), String> {
     let bots = named(&config, &wanted.bots)?;
     let command = command(wanted)?;
     let session = match socket::session_for(&path)? {
-        Some(session) => {
-            socket::check(&session)?;
-            if bots.is_empty() && wanted.script.is_some() {
-                return Err("aqx is already running for this config; name the bots to run the script on".into());
-            }
-            for bot in &bots {
-                socket::ctl(&session, bot, &command)?;
-            }
-            session
-        }
         None => start_session(&path, &bots, &command)?,
+        Some(session) => {
+            let info = socket::info(&session)?;
+            if socket::other_build(&info) && restart_wanted(&info)? {
+                restart_session(&session, &path, &bots, &command)?
+            } else {
+                socket::same_build(&info)?;
+                if bots.is_empty() && wanted.script.is_some() {
+                    return Err("aqx is already running for this config; name the bots to run the script on".into());
+                }
+                for bot in &bots {
+                    socket::ctl(&session, bot, &command)?;
+                }
+                session
+            }
+        }
     };
     attach(&session)
+}
+
+fn restart_wanted(info: &serde_json::Value) -> Result<bool, String> {
+    if !std::io::stdin().is_terminal() {
+        socket::same_build(info)?;
+        return Err("aqx is already running for this config from a different build; run aqx down and start it again".into());
+    }
+    eprint!("aqx is already running for this config from a different build. Restart it with this one? Its bots log out and back in. [y/N] ");
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).map_err(|e| e.to_string())?;
+    Ok(answer.trim().eq_ignore_ascii_case("y"))
+}
+
+fn restart_session(session: &Path, config: &Path, bots: &[String], command: &Command) -> Result<PathBuf, String> {
+    let mut resume = socket::to_resume(session)?;
+    resume.retain(|(bot, _)| !bots.contains(bot));
+    resume.extend(bots.iter().map(|bot| (bot.clone(), command.clone())));
+    end_session(session)?;
+    let mut resume = resume.into_iter();
+    let Some((first, command)) = resume.next() else { return start_session(config, bots, command) };
+    let session = start_session(config, &[first], &command)?;
+    for (bot, command) in resume {
+        socket::ctl(&session, &bot, &command)?;
+    }
+    Ok(session)
 }
 
 fn named(config: &Config, names: &[String]) -> Result<Vec<String>, String> {
@@ -262,6 +292,8 @@ fn start_session(config: &Path, bots: &[String], command: &Command) -> Result<Pa
     let mut hasher = std::hash::DefaultHasher::new();
     config.hash(&mut hasher);
     let log = socket::prepare_dir()?.join(format!("{stem}-{:016x}.log", hasher.finish()));
+    // The session being replaced can still hold this log open; a fresh file keeps its last writes out.
+    let _ = std::fs::remove_file(&log);
     let errors = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut serve = std::process::Command::new(exe);
@@ -327,11 +359,15 @@ fn serve(wanted: &Wanted, json: bool, quiet: bool) -> Result<(), String> {
 fn down(config: Option<&Path>) -> Result<(), String> {
     let (_, path) = config::load(config)?;
     let session = socket::session_for(&path)?.ok_or_else(|| format!("aqx isn't running for {}", path.display()))?;
-    for bot in socket::bots(&session)? {
-        socket::ctl(&session, &bot, &Command::Logout)?;
+    end_session(&session)
+}
+
+fn end_session(session: &Path) -> Result<(), String> {
+    for bot in socket::bots(session)? {
+        socket::ctl(session, &bot, &Command::Logout)?;
     }
     let deadline = Instant::now() + DOWN_TIMEOUT;
-    while std::os::unix::net::UnixStream::connect(&session).is_ok() {
+    while std::os::unix::net::UnixStream::connect(session).is_ok() {
         if Instant::now() >= deadline {
             return Err(format!("the session is still logging out after {}s", DOWN_TIMEOUT.as_secs()));
         }
