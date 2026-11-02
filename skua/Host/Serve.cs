@@ -1,9 +1,12 @@
+using Skua.Core.Models;
+
 namespace Aqx.Skua;
 
 public static class Serve
 {
     public static int Run(ScriptCompiler compiler, string script, IReadOnlyDictionary<string, string> overrides)
     {
+        Directory.CreateDirectory(ClientFileSources.SkuaOptionsDIR);
         Stream protocol = Console.OpenStandardOutput();
         Console.SetOut(Console.Error);
         AqxClient aqx = new(protocol, new StreamReader(Console.OpenStandardInput()));
@@ -15,6 +18,9 @@ public static class Serve
             return 1;
         }
 
+        string skills = Path.Combine(compiler.Root, "Skills", "AdvancedSkills.json");
+        if (File.Exists(skills) && !File.Exists(ClientFileSources.SkuaAdvancedSkillsFile))
+            File.Copy(skills, ClientFileSources.SkuaAdvancedSkillsFile);
         Shim shim = new(aqx, new ScriptConfig(overrides), Path.GetFullPath(script));
         (string Outcome, string? Detail) end = ("finished", null);
         Thread thread = new(() => end = Execute((Built)compiled, shim)) { Name = Shim.ScriptThread };
@@ -30,14 +36,17 @@ public static class Serve
         try
         {
             Runner.Start(built, shim);
+            shim.ScriptStopping(null);
             return (shim.StopRequested ? "stopped" : "finished", null);
         }
         catch (Exception e) when (shim.ShouldExit && e is OperationCanceledException or AqxException { Code: "cancelled" })
         {
+            shim.ScriptStopping(null);
             return ("stopped", null);
         }
         catch (Exception e)
         {
+            shim.ScriptStopping(e);
             return ("failed", e.ToString());
         }
     }

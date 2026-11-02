@@ -1,0 +1,62 @@
+using System.Collections.Concurrent;
+using Newtonsoft.Json;
+
+namespace Aqx.Skua;
+
+public sealed partial class Shim
+{
+    readonly ConcurrentDictionary<string, bool> preferences = new();
+
+    void Flash()
+    {
+        On("IFlashUtil.Call(String, Object[])", args => FlashCall((string)args[0]!, (object?[])args[1]!));
+        On("IFlashUtil.Call`1(String, Object[])", (args, returns) => FromJson(FlashCall((string)args[0]!, (object?[])args[1]!), returns));
+        On("IFlashUtil.Call(String, Type, Object[])", args => FromJson(FlashCall((string)args[0]!, (object?[])args[2]!), (Type)args[1]!));
+        On("IFlashUtil.add_FlashCall(FlashCallHandler)", _ => null);
+        On("IFlashUtil.remove_FlashCall(FlashCallHandler)", _ => null);
+        On("IFlashUtil.InitializeFlash()", _ => null);
+        On("IFlashUtil.Dispose()", _ => null);
+    }
+
+    string? FlashCall(string function, object?[] args) => (function, args) switch
+    {
+        ("getGameObject" or "getGameObjectS", [string path]) => GameObject(path),
+        ("setGameObject" or "setGameObjectKey", _) => null,
+        ("callGameFunction0", ["world.toggleMonsters"]) => null,
+        ("canUseSkill", [int slot]) => JsonConvert.SerializeObject((bool?)Aqx.Call("can_cast", slot) ?? false),
+        ("useSkill", [int slot]) => JsonConvert.SerializeObject((bool?)Aqx.Call("cast", slot) ?? false),
+        ("isNull", [string path]) => JsonConvert.SerializeObject(GameObject(path) is null),
+        _ => Missing($"Flash.Call(\"{function}\", {string.Join(", ", args.Select(a => $"{a}"))})"),
+    };
+
+    string? GameObject(string path) => path switch
+    {
+        _ when path.StartsWith("uoPref.") => JsonConvert.SerializeObject(preferences.GetValueOrDefault(path["uoPref.".Length..], true)),
+        _ when path.StartsWith("world.lock.") => "{\"TS\":0,\"CD\":0}",
+        "ui.mcPopup.currentLabel" => "\"\"",
+        "ui.monsterIcon.redX.visible" => "false",
+        "world.myAvatar.objData.guild.Name" => "\"\"",
+        "sfc.myUserName" => JsonConvert.SerializeObject((string?)Me["name"] ?? ""),
+        "world.myAvatar.objData.iUpgDays" => JsonConvert.SerializeObject((bool?)Me["member"] == true ? 0 : -1),
+        "world.myAvatar.objData.intLevel" => JsonConvert.SerializeObject(Int(Me["level"])),
+        "world.myAvatar.objData.intGold" => JsonConvert.SerializeObject(Int(Me["gold"])),
+        "world.myAvatar.objData.strClassName" => JsonConvert.SerializeObject((string?)Me["class"] ?? ""),
+        "world.strMapName" or "world.strMapFileName" => JsonConvert.SerializeObject(MapName),
+        _ => Missing($"Flash game object {path}"),
+    };
+
+    string? Missing(string what)
+    {
+        Aqx.Call("log", "warn", $"{what} is not implemented");
+        throw new NotImplementedException($"{what} is not implemented");
+    }
+
+    static object? FromJson(string? json, Type type) =>
+        json is null ? (type.IsValueType ? Activator.CreateInstance(type) : null) : type == typeof(string) ? json : JsonConvert.DeserializeObject(json, type);
+
+    void Remember(string packet)
+    {
+        if (packet.Split('%') is [_, "xt", "zm", "cmd", _, "uopref", string key, string value, ..] && bool.TryParse(value, out bool on))
+            preferences[key] = on;
+    }
+}

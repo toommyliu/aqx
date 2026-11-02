@@ -10,15 +10,19 @@ public class BotProxy : DispatchProxy
     static readonly ConcurrentDictionary<MethodInfo, Func<object, object?[], object?>> Defaults = new();
 
     string path = "Bot";
+    Type type = typeof(IScriptInterface);
     Shim shim = null!;
     readonly ConcurrentDictionary<string, object> children = new();
 
     public static IScriptInterface Create(Shim shim) => (IScriptInterface)Make(typeof(IScriptInterface), "Bot", shim);
 
+    public static object Service(Type type, Shim shim) => Make(type, $"Services.{type.Name}", shim);
+
     static object Make(Type type, string path, Shim shim)
     {
         object proxy = Create(type, typeof(BotProxy));
         ((BotProxy)proxy).path = path;
+        ((BotProxy)proxy).type = type;
         ((BotProxy)proxy).shim = shim;
         return proxy;
     }
@@ -26,8 +30,8 @@ public class BotProxy : DispatchProxy
     protected override object? Invoke(MethodInfo? method, object?[]? args)
     {
         MethodInfo called = method!;
-        if (shim.TryGet(called, out Handler? handler))
-            return handler(args ?? []);
+        if (shim.TryGet(type, called, out Func<object?[], MethodInfo, object?>? handler))
+            return handler(args ?? [], called);
         if (!called.IsAbstract)
             return Defaults.GetOrAdd(called, DefaultBody)(this, args ?? []);
 

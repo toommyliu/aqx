@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using System.Text.Json.Nodes;
 using Skua.Core.Interfaces;
 using Skua.Core.Models;
 
@@ -8,11 +9,13 @@ namespace Aqx.Skua;
 
 public delegate object? Handler(object?[] args);
 
-public sealed class Shim
+public delegate object? TypedHandler(object?[] args, Type returns);
+
+public sealed partial class Shim
 {
     public const string ScriptThread = "Script Thread";
 
-    static readonly ConcurrentDictionary<MethodInfo, string> Keys = new();
+    static readonly ConcurrentDictionary<(Type Owner, MethodInfo Method), string> Keys = new();
 
     static readonly Dictionary<string, object> SkuaDefaults = new()
     {
@@ -30,7 +33,7 @@ public sealed class Shim
         ["IScriptOption.LoginTimeout"] = 30000,
     };
 
-    readonly Dictionary<string, Handler> handlers = [];
+    readonly Dictionary<string, Func<object?[], MethodInfo, object?>> handlers = [];
     readonly ConcurrentDictionary<string, object?> settings = new();
     Random random = new();
     volatile bool stopRequested;
@@ -43,6 +46,22 @@ public sealed class Shim
         Infrastructure();
         Settings(typeof(IScriptOption));
         Settings(typeof(IScriptLite));
+        Player();
+        Map();
+        Monsters();
+        Combat();
+        Items();
+        Handlers();
+        Events();
+        Send();
+        Services();
+        Servers();
+        Ultra();
+        Flash();
+        Wait();
+        Drops();
+        Accounts();
+        Skills();
         Validate();
     }
 
@@ -52,16 +71,24 @@ public sealed class Shim
     public bool StopRequested => stopRequested;
     public bool ShouldExit => stopRequested || Aqx.Stopping.IsCancellationRequested;
 
-    public bool TryGet(MethodInfo method, [MaybeNullWhen(false)] out Handler handler) => handlers.TryGetValue(Key(method), out handler);
+    public bool TryGet(Type owner, MethodInfo method, [MaybeNullWhen(false)] out Func<object?[], MethodInfo, object?> handler) =>
+        handlers.TryGetValue(Key(owner, method), out handler);
 
-    public static string Key(MethodInfo method) =>
-        Keys.GetOrAdd(method, m => $"{m.DeclaringType!.Name}.{m.Name}({string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name))})");
+    public static string Key(Type owner, MethodInfo method) =>
+        Keys.GetOrAdd((owner, method), k =>
+        {
+            MethodInfo m = k.Method.IsGenericMethod ? k.Method.GetGenericMethodDefinition() : k.Method;
+            string arity = m.IsGenericMethodDefinition ? $"`{m.GetGenericArguments().Length}" : "";
+            return $"{k.Owner.Name}.{m.Name}{arity}({string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name))})";
+        });
 
-    void On(string key, Handler handler) => handlers.Add(key, handler);
+    void On(string key, Handler handler) => handlers.Add(key, (args, _) => handler(args));
+
+    void On(string key, TypedHandler handler) => handlers.Add(key, (args, method) => handler(args, method.ReturnType));
 
     void Infrastructure()
     {
-        On("IScriptInterface.get_Version()", _ => typeof(IScriptInterface).Assembly.GetName().Version);
+        On("IScriptInterface.get_Version()", _ => null);
         On("IScriptInterface.get_ShouldExit()", _ => ShouldExit);
         On("IScriptInterface.Sleep(Int32)", args =>
         {
@@ -69,14 +96,14 @@ public sealed class Shim
             return null;
         });
         On("IScriptInterface.Log(String)", args => Aqx.Call("log", "info", args[0] ?? ""));
-        On("IScriptInterface.Stop(Boolean)", _ =>
+        On("IScriptInterface.Stop(Boolean)", args =>
         {
-            stopRequested = true;
+            Stop((bool)args[0]!);
             return null;
         });
-        On("IScriptInterface.StopAsync(Boolean)", _ =>
+        On("IScriptInterface.StopAsync(Boolean)", args =>
         {
-            stopRequested = true;
+            Stop((bool)args[0]!);
             return Task.CompletedTask;
         });
         On("IScriptInterface.get_Random()", _ => random);
@@ -85,6 +112,32 @@ public sealed class Shim
         On("IScriptInterface.ShowMessageBox(String, String, Boolean)", args => Dismiss(args, null));
         On("IScriptInterface.ShowMessageBox(String, String, String[])", args => Dismiss(args, DialogResult.Cancelled));
         On("IScriptStatus.get_LoadedScript()", _ => Script);
+    }
+
+    JsonNode? View(string name) => Aqx.Call("view", name);
+
+    JsonObject Me => Aqx.Call("view", "player") as JsonObject ?? [];
+
+    string Phase => (string?)Aqx.Call("session")?["phase"] ?? "";
+
+    bool Act(string call, params object?[] args)
+    {
+        try
+        {
+            Aqx.Call(call, args);
+            return true;
+        }
+        catch (AqxException e) when (e.Code != "cancelled")
+        {
+            Aqx.Call("log", "warn", $"{call} failed: {e.Message}");
+            return false;
+        }
+    }
+
+    void Stop(bool runScriptStoppingEvent)
+    {
+        runStopping = runScriptStoppingEvent;
+        stopRequested = true;
     }
 
     public void Sleep(int ms)
@@ -107,18 +160,17 @@ public sealed class Shim
             string name = $"{type.Name}.{property.Name}";
             object? fallback = SkuaDefaults.GetValueOrDefault(name) ?? (property.PropertyType.IsValueType ? Activator.CreateInstance(property.PropertyType) : null);
             if (property.GetMethod is { } get)
-                On(Key(get), _ => settings.GetValueOrDefault(name, fallback));
+                On(Key(type, get), _ => settings.GetValueOrDefault(name, fallback));
             if (property.SetMethod is { } set)
-                On(Key(set), args => settings[name] = args[0]);
+                On(Key(type, set), args => settings[name] = args[0]);
         }
     }
 
     void Validate()
     {
         HashSet<string> members = typeof(IScriptInterface).Assembly.GetTypes()
-            .Where(t => t.IsInterface)
-            .SelectMany(t => t.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly))
-            .Select(Key)
+            .Where(t => t.IsInterface && !t.IsGenericTypeDefinition)
+            .SelectMany(t => t.GetInterfaces().Prepend(t).SelectMany(i => i.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.DeclaredOnly)).Select(m => Key(t, m)))
             .ToHashSet();
         string[] unknown = handlers.Keys.Where(k => !members.Contains(k)).ToArray();
         if (unknown.Length > 0)

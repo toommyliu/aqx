@@ -1,0 +1,48 @@
+using System.Text.Json.Nodes;
+using Newtonsoft.Json.Linq;
+using Skua.Core.Models.Servers;
+
+namespace Aqx.Skua;
+
+public sealed partial class Shim
+{
+    List<Server>? cachedServers;
+    string? lastIP;
+    string? lastName;
+
+    void Servers()
+    {
+        On("IScriptServers.get_CachedServers()", _ => CachedServers());
+        On("IScriptServers.get_ServerList()", _ => CachedServers());
+        On("IScriptServers.GetServers(Boolean)", args => new ValueTask<List<Server>>((bool)args[0]! ? FetchServers() : CachedServers()));
+        On("IScriptServers.get_IsConnected()", _ => Phase is "loading" or "ready");
+        On("IScriptServers.get_LastIP()", _ => lastIP ?? (string?)Aqx.Call("session")?["host"] ?? "");
+        On("IScriptServers.set_LastIP(String)", args => lastIP = (string?)args[0]);
+        On("IScriptServers.get_LastName()", _ => lastName ?? (string?)Aqx.Call("session")?["server"]?["name"] ?? "");
+        On("IScriptServers.set_LastName(String)", args => lastName = (string?)args[0]);
+        On("IScriptServers.SetLoginInfo(String, String)", _ => null);
+        On("IScriptServers.Relogin(String)", args => Act("relogin", args[0]));
+        On("IScriptServers.Relogin(Server)", args => Act("relogin", ((Server?)args[0])?.Name));
+        On("IScriptServers.EnsureRelogin(String)", args => Act("relogin", args[0]));
+        On("IScriptServers.EnsureRelogin(CancellationToken)", _ => Task.FromResult(Act("relogin", (object?)null)));
+        On("IScriptServers.EnsureRelogin(String, CancellationToken)", args => Task.FromResult(Act("relogin", args[0])));
+        On("IScriptServers.add_PropertyChanged(PropertyChangedEventHandler)", _ => null);
+        On("IScriptServers.remove_PropertyChanged(PropertyChangedEventHandler)", _ => null);
+    }
+
+    List<Server> CachedServers() => cachedServers ??= FetchServers();
+
+    List<Server> FetchServers() =>
+        cachedServers = Aqx.Call("servers") is JsonArray servers
+            ? servers.Select(server => new JObject
+            {
+                ["sName"] = (string?)server!["name"],
+                ["sIP"] = (string?)server["host"],
+                ["iPort"] = (int?)server["port"] ?? 0,
+                ["bOnline"] = (bool?)server["online"] ?? false,
+                ["bUpg"] = (bool?)server["members"] ?? false,
+                ["iCount"] = (int?)server["players"] ?? 0,
+                ["iMax"] = (int?)server["capacity"] ?? 0,
+            }.ToObject<Server>()!).ToList()
+            : [];
+}
