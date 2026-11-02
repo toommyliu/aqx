@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Skua.Core</AssemblyName>
+    <RootNamespace>Skua.Core</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <WeaverConfiguration>
+      <Weavers>
+        <Caseless />
+      </Weavers>
+    </WeaverConfiguration>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../vendor/Skua/Skua.Core/Options/Option.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Caseless.Fody" Version="1.9.1" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Interfaces/Interfaces.csproj" />
+  </ItemGroup>
+
+</Project>

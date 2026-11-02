@@ -1,0 +1,8 @@
+[submodule "skua/vendor/Skua"]
+	path = skua/vendor/Skua
+	url = https://github.com/auqw/Skua
+	shallow = true
+[submodule "skua/vendor/Scripts"]
+	path = skua/vendor/Scripts
+	url = https://github.com/auqw/Scripts
+	shallow = true
