@@ -22,7 +22,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 
 use bot::{Backoff, Script, Spec};
-use config::{BotConfig, Config};
+use config::{BotConfig, Settings};
 use hub::{BotCell, Command, Hub, Print};
 use socket::Conn;
 
@@ -38,7 +38,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    #[command(about = "Log one bot in and run a script, or stay online until Ctrl-C")]
+    #[command(about = "Log one bot in and run its script, or stay online until Ctrl-C")]
     Run(RunArgs),
     #[command(about = "Log in every bot in the config and run its script")]
     Up(UpArgs),
@@ -98,11 +98,13 @@ struct ViewArgs {
 
 #[derive(Args)]
 struct RunArgs {
-    #[arg(help = "Script to run once logged in. Without one, aqx stays online until Ctrl-C")]
+    #[arg(help = "Script to run instead of the bot's own. A bot without one stays online until Ctrl-C")]
     script: Option<PathBuf>,
-    #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = parse_arg, help = "Script input read by script.args(). Repeatable")]
+    #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = parse_arg, help = "Script input read by script.args(), over the bot's args. Repeatable")]
     args: Vec<(String, String)>,
-    #[arg(short, long, value_name = "NAME", help = "The [[bot]] to use from the config")]
+    #[arg(long, conflicts_with_all = ["script", "args"], help = "Log in without running the bot's script")]
+    idle: bool,
+    #[arg(short, long, value_name = "NAME", help = "The [[bot]] to use from the config, by name or user")]
     account: Option<String>,
     #[arg(short, long, value_name = "FILE", help = "Config file")]
     config: Option<PathBuf>,
@@ -164,21 +166,16 @@ struct Launch {
     recorder: Option<Recorder>,
 }
 
-fn spec(config: &Config, bot: &BotConfig, server: Option<String>, version: &str, script: Option<Script>, exit_when_done: bool) -> Spec {
-    let d = &config.defaults;
+fn spec(bot: &BotConfig, settings: Settings, version: &str, script: Option<Script>, exit_when_done: bool) -> Spec {
     Spec {
-        creds: Credentials {
-            api: d.api.clone().unwrap_or_else(|| DEFAULT_API.into()),
-            user: bot.user.clone(),
-            password: bot.password.clone(),
-        },
-        server: server.or_else(|| bot.server.clone()).or_else(|| d.server.clone()),
+        creds: Credentials { api: settings.api.unwrap_or_else(|| DEFAULT_API.into()), user: bot.user.clone(), password: bot.password.clone() },
+        server: settings.server,
         version: version.into(),
         script,
-        room: d.room,
-        restart: d.restart,
-        stall_after: d.stall_after.unwrap_or(STALL_AFTER),
-        on_stall: d.on_stall,
+        room: settings.room,
+        restart: settings.restart.unwrap_or_default(),
+        stall_after: settings.stall_after.unwrap_or(STALL_AFTER),
+        on_stall: settings.on_stall.unwrap_or_default(),
         exit_when_done,
         relogin: Backoff::new(bot::RELOGIN_FIRST, bot::RELOGIN_MAX),
         restarts: Backoff::new(bot::RESTART_FIRST, bot::RELOGIN_MAX),
@@ -186,15 +183,14 @@ fn spec(config: &Config, bot: &BotConfig, server: Option<String>, version: &str,
 }
 
 fn run(args: RunArgs) -> Result<(), String> {
-    let RunArgs { script, args, account, config, server, record, client_version, json, plain } = args;
-    if script.is_none() && !args.is_empty() {
-        return Err("--arg needs a script".into());
-    }
+    let RunArgs { script, args, idle, account, config, server, record, client_version, json, plain } = args;
     let (config, path) = config::load(config.as_deref())?;
     let bot = config.bot(account.as_deref()).map_err(|e| format!("{}: {e}", path.display()))?;
+    let script = bot.run_script(&path, script, args, idle)?;
     let recorder = record.map(|p| Recorder::create(&p).map_err(|e| format!("{}: {e}", p.display()))).transpose()?;
-    let script = script.map(|path| Script { path: std::path::absolute(&path).unwrap_or(path), args });
-    let launch = Launch { name: bot.name.clone(), spec: spec(&config, bot, server, &client_version, script, true), recorder };
+    let mut settings = bot.settings(&config.defaults);
+    settings.server = server.or(settings.server);
+    let launch = Launch { name: bot.name().into(), spec: spec(bot, settings, &client_version, script, true), recorder };
     let print = if json {
         Print::Json
     } else if plain || !std::io::stdout().is_terminal() {
@@ -202,7 +198,7 @@ fn run(args: RunArgs) -> Result<(), String> {
     } else {
         Print::Quiet
     };
-    let results = start(&bot.name, true, vec![launch], print)?;
+    let results = start(bot.name(), true, vec![launch], print)?;
     results.into_iter().next().map_or(Ok(()), |(_, r)| r)
 }
 
@@ -213,12 +209,8 @@ fn up(args: UpArgs) -> Result<(), String> {
     }
     let mut launches = Vec::new();
     for bot in &config.bots {
-        let script = match bot.script_path(&path) {
-            Some(script) => Some(Script { path: std::path::absolute(&script).unwrap_or(script), args: bot.script_args()? }),
-            None if bot.args.is_empty() => None,
-            None => return Err(format!("bot {} has args but no script", bot.name)),
-        };
-        launches.push(Launch { name: bot.name.clone(), spec: spec(&config, bot, None, CLIENT_VERSION, script, false), recorder: None });
+        let spec = spec(bot, bot.settings(&config.defaults), CLIENT_VERSION, bot.script(&path)?, false);
+        launches.push(Launch { name: bot.name().into(), spec, recorder: None });
     }
     let name = args.name.unwrap_or_else(|| path.file_stem().map_or("aqx".into(), |s| s.to_string_lossy().into_owned()));
     let print = if args.json {
