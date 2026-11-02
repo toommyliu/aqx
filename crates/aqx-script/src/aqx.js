@@ -166,10 +166,11 @@ export const combat = {
   },
   farm(item, qty, opts) {
     const [goals, o = {}] = Array.isArray(item) ? [item, qty] : [[{ item, qty }], opts];
+    const here = o.target === undefined && o.cell === undefined ? { cell: player.cell, pad: player.pad } : {};
     native.farm(
       goals.map((goal) => [goal.item, goal.qty]),
       targetOf(o.target ?? "*"),
-      { ...fightOf(o), timeout: o.timeout },
+      { ...fightOf({ ...o, ...here }), timeout: o.timeout },
     );
   },
 };

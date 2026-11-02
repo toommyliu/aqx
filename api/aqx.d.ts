@@ -177,7 +177,7 @@ declare module "aqx" {
   }
 
   export interface FarmOptions extends Fight {
-    /** Default `"*"`. */
+    /** Without it, the bot fights any monster in the cell and pad it stands on when `farm` starts, and never leaves. */
     readonly target?: Target;
     readonly cell?: string;
     readonly pad?: string;
