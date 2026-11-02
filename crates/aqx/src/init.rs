@@ -58,7 +58,7 @@ pub fn ask() -> Result<Option<Account>, String> {
 
 fn create_config(path: &Path, account: &Account) -> Result<(), String> {
     let text = format!(
-        "#:schema ./aqx.schema.json\n\n[[bot]]\nuser = {}\npassword = {}\nscript = \"farm.ts\"\n",
+        "#:schema ./aqx.schema.json\n\n[[account]]\nuser = {}\npassword = {}\nscript = \"farm.ts\"\n",
         toml::Value::from(account.user.as_str()),
         toml::Value::from(account.password.as_str()),
     );
@@ -108,9 +108,9 @@ mod tests {
         let path = dir.join("aqx.toml");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         let (config, path) = crate::config::load(Some(&path)).unwrap();
-        let bot = config.bot(None).unwrap();
-        assert_eq!((bot.user.as_str(), bot.password.as_str()), ("Hero", r#"p"a\ss"#));
-        let script = bot.script(&path).unwrap().unwrap().path;
+        let account = config.account(None).unwrap();
+        assert_eq!((account.user.as_str(), account.password.as_str()), ("Hero", r#"p"a\ss"#));
+        let script = account.script(&path).unwrap().unwrap().path;
         assert_eq!(aqx_script::check(&script), Ok(()));
         assert_eq!(std::fs::read_to_string(dir.join("aqx.schema.json")).unwrap(), crate::config::schema());
     }

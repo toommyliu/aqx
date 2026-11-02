@@ -167,7 +167,7 @@ declare module "aqx" {
   }
 
   export interface KillOptions extends Fight {
-    /** Fight in this cell. Without it, the bot hunts across cells for live targets. */
+    /** Fight in this cell. Without it, the player hunts across cells for live targets. */
     readonly cell?: string;
     /** Default `"Left"`. */
     readonly pad?: string;
@@ -177,7 +177,7 @@ declare module "aqx" {
   }
 
   export interface FarmOptions extends Fight {
-    /** Without it, the bot fights any monster in the cell and pad it stands on when `farm` starts, and never leaves. */
+    /** Without it, the player fights any monster in the cell and pad it stands on when `farm` starts, and never leaves. */
     readonly target?: Target;
     readonly cell?: string;
     readonly pad?: string;
@@ -278,7 +278,7 @@ declare module "aqx" {
     jump(cell: string, pad?: string): void;
     /** Walks to a point in the current cell. Returns once sent; the server doesn't acknowledge it. */
     walk(x: number, y: number): void;
-    /** Goes to a player's map and cell. Throws `timeout` when the server doesn't move the bot, as when the player is offline. */
+    /** Goes to another player's map and cell. Throws `timeout` when the server doesn't move the player there, as when the other player is offline. */
     goto(player: string): void;
     /** Picks up a map item until the inventories hold `qty` of `item`. Throws `rejected` after 3 tries that give nothing. */
     collect(mapItem: number, item: ItemRef, qty?: number): void;
@@ -393,13 +393,13 @@ declare module "aqx" {
   };
 
   export const session: {
-    /** The server the bot is on. */
+    /** The server the account is on. */
     readonly server: string;
     servers(): Server[];
     /**
      * Logs out and back in, to `server` if given, else to the current one.
      * Returns once the character has loaded. The game state starts over: the
-     * bot is back in its home map, and the bank and shops load again.
+     * player is back in its home map, and the bank and shops load again.
      */
     relogin(server?: string): void;
   };
@@ -425,7 +425,7 @@ declare module "aqx" {
     stop(reason?: string): never;
   };
 
-  /** Reverts to the bot's defaults when the script ends. */
+  /** Reverts to the account's defaults when the script ends. */
   export const settings: {
     /** Room used by `map.join` when the name has no `-room` suffix. */
     room: number | null;

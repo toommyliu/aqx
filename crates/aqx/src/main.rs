@@ -1,4 +1,4 @@
-mod bot;
+mod account;
 mod config;
 #[cfg(test)]
 #[path = "../../aqx-core/tests/server/mod.rs"]
@@ -25,9 +25,9 @@ use aqx_core::{CLIENT_VERSION, Control, Credentials, Recorder};
 use clap::{Args, Parser, Subcommand};
 use serde_json::json;
 
-use bot::{Backoff, Script, Spec};
-use config::{BotConfig, Config, Settings};
-use hub::{BotCell, Command, Hub, Print};
+use account::{Backoff, Script, Spec};
+use config::{AccountConfig, Config, Settings};
+use hub::{AccountCell, Command, Hub, Print};
 use socket::Conn;
 
 const DEFAULT_API: &str = "https://game.aq.com";
@@ -46,7 +46,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    #[command(about = "Log one bot in and print what it does until its script ends, or until Ctrl-C without one")]
+    #[command(about = "Log one account in and print what it does until its script ends, or until Ctrl-C without one")]
     Run(RunArgs),
     #[command(about = "Run the session in the foreground, for systemd. aqx starts one in the background")]
     Serve {
@@ -57,23 +57,23 @@ enum Cmd {
         #[arg(long, conflicts_with = "json", help = "Print nothing; read the log with aqx logs or the TUI")]
         quiet: bool,
     },
-    #[command(about = "Log out every bot and end the session")]
+    #[command(about = "Log out every account and end the session")]
     Down {
         #[arg(short, long, value_name = "FILE", help = "Config file")]
         config: Option<PathBuf>,
     },
-    #[command(about = "List running aqx processes and their bots")]
+    #[command(about = "List running aqx processes and their accounts")]
     Ps,
-    #[command(about = "Print a bot's recent log")]
+    #[command(about = "Print an account's recent log")]
     Logs {
-        #[arg(help = "Only this bot")]
-        bot: Option<String>,
+        #[arg(help = "Only this account")]
+        account: Option<String>,
         #[arg(short, long, help = "Keep printing new lines")]
         follow: bool,
     },
-    #[command(about = "Control a bot in a running aqx process")]
+    #[command(about = "Control an account in a running aqx process")]
     Ctl {
-        bot: String,
+        account: String,
         #[command(subcommand)]
         action: Ctl,
     },
@@ -100,9 +100,9 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum Ctl {
-    #[command(about = "Log in and run the bot's own script")]
+    #[command(about = "Log in and run the account's own script")]
     Login,
-    #[command(about = "Run a script, stopping the one running. Logs the bot in if it's offline")]
+    #[command(about = "Run a script, stopping the one running. Logs the account in if it's offline")]
     Run {
         script: PathBuf,
         #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = parse_arg)]
@@ -118,11 +118,11 @@ enum Ctl {
 
 #[derive(Args)]
 struct Wanted {
-    #[arg(value_name = "BOT", help = "Bots to log in, by name or user. Without any, a new session logs in every bot")]
-    bots: Vec<String>,
+    #[arg(value_name = "ACCOUNT", help = "Accounts to log in, by name or user. Without any, a new session logs in every account")]
+    accounts: Vec<String>,
     #[arg(short, long, value_name = "FILE", help = "Config file")]
     config: Option<PathBuf>,
-    #[arg(long, value_name = "FILE", help = "Run this script on the bots instead of their own")]
+    #[arg(long, value_name = "FILE", help = "Run this script on the accounts instead of their own")]
     script: Option<PathBuf>,
     #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = parse_arg, requires = "script", help = "Script input read by script.args(). Repeatable")]
     args: Vec<(String, String)>,
@@ -139,13 +139,13 @@ struct ViewArgs {
 
 #[derive(Args)]
 struct RunArgs {
-    #[arg(help = "Script to run instead of the bot's own. A bot without one stays online until Ctrl-C")]
+    #[arg(help = "Script to run instead of the account's own. An account without one stays online until Ctrl-C")]
     script: Option<PathBuf>,
-    #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = parse_arg, help = "Script input read by script.args(), over the bot's args. Repeatable")]
+    #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = parse_arg, help = "Script input read by script.args(), over the account's args. Repeatable")]
     args: Vec<(String, String)>,
-    #[arg(long, conflicts_with_all = ["script", "args"], help = "Log in without running the bot's script")]
+    #[arg(long, conflicts_with_all = ["script", "args"], help = "Log in without running the account's script")]
     idle: bool,
-    #[arg(short, long, value_name = "NAME", help = "The [[bot]] to use from the config, by name or user")]
+    #[arg(short, long, value_name = "NAME", help = "The [[account]] to use from the config, by name or user")]
     account: Option<String>,
     #[arg(short, long, value_name = "FILE", help = "Config file")]
     config: Option<PathBuf>,
@@ -175,8 +175,8 @@ fn main() -> ExitCode {
         Some(Cmd::Serve { wanted, json, quiet }) => serve(&wanted, json, quiet),
         Some(Cmd::Down { config }) => down(config.as_deref()),
         Some(Cmd::Ps) => ps(),
-        Some(Cmd::Logs { bot, follow }) => logs(bot.as_deref(), follow),
-        Some(Cmd::Ctl { bot, action }) => ctl(&bot, action),
+        Some(Cmd::Logs { account, follow }) => logs(account.as_deref(), follow),
+        Some(Cmd::Ctl { account, action }) => ctl(&account, action),
         Some(Cmd::Servers { config }) => servers(config.as_deref()),
         Some(Cmd::View(args)) => view::view(&args.file, &args.cmd, args.full),
         Some(Cmd::Schema) => {
@@ -201,9 +201,9 @@ struct Launch {
     recorder: Option<Recorder>,
 }
 
-fn spec(bot: &BotConfig, settings: Settings, version: &str, script: Option<Script>, exit_when_done: bool) -> Spec {
+fn spec(account: &AccountConfig, settings: Settings, version: &str, script: Option<Script>, exit_when_done: bool) -> Spec {
     Spec {
-        creds: Credentials { api: settings.api.unwrap_or_else(|| DEFAULT_API.into()), user: bot.user.clone(), password: bot.password.clone() },
+        creds: Credentials { api: settings.api.unwrap_or_else(|| DEFAULT_API.into()), user: account.user.clone(), password: account.password.clone() },
         server: settings.server,
         version: version.into(),
         script,
@@ -212,23 +212,23 @@ fn spec(bot: &BotConfig, settings: Settings, version: &str, script: Option<Scrip
         stall_after: settings.stall_after.unwrap_or(STALL_AFTER),
         on_stall: settings.on_stall.unwrap_or_default(),
         exit_when_done,
-        relogin: Backoff::new(bot::RELOGIN_FIRST, bot::RELOGIN_MAX),
-        restarts: Backoff::new(bot::RESTART_FIRST, bot::RELOGIN_MAX),
+        relogin: Backoff::new(account::RELOGIN_FIRST, account::RELOGIN_MAX),
+        restarts: Backoff::new(account::RESTART_FIRST, account::RELOGIN_MAX),
     }
 }
 
 fn run(args: RunArgs) -> Result<(), String> {
-    let RunArgs { script, args, idle, account, config, server, record, client_version, json } = args;
+    let RunArgs { script, args, idle, account: name, config, server, record, client_version, json } = args;
     let (config, path) = config::load(config.as_deref())?;
-    let bot = config.bot(account.as_deref()).map_err(|e| format!("{}: {e}", path.display()))?;
-    let script = bot.run_script(&path, script, args, idle)?;
+    let account = config.account(name.as_deref()).map_err(|e| format!("{}: {e}", path.display()))?;
+    let script = account.run_script(&path, script, args, idle)?;
     let recorder = record.map(|p| Recorder::create(&p).map_err(|e| format!("{}: {e}", p.display()))).transpose()?;
-    let mut settings = bot.settings(&config.defaults);
+    let mut settings = account.settings(&config.defaults);
     settings.server = server.or(settings.server);
     let exit_when_done = script.is_some();
-    let launch = Launch { name: bot.name().into(), spec: spec(bot, settings, &client_version, script, exit_when_done), recorder };
+    let launch = Launch { name: account.name().into(), spec: spec(account, settings, &client_version, script, exit_when_done), recorder };
     let print = if json { Print::Json } else { Print::Plain };
-    let results = start(bot.name(), None, vec![launch], print, &|_| Some(Command::Login))?;
+    let results = start(account.name(), None, vec![launch], print, &|_| Some(Command::Login))?;
     results.into_iter().next().map_or(Ok(()), |(_, r)| r)
 }
 
@@ -237,21 +237,21 @@ fn open(wanted: &Wanted) -> Result<(), String> {
         return Err("aqx opens a TUI and needs a terminal; use aqx serve or aqx run".into());
     }
     let (config, path) = config::load(wanted.config.as_deref())?;
-    let bots = named(&config, &wanted.bots)?;
+    let accounts = named(&config, &wanted.accounts)?;
     let command = command(wanted)?;
     let session = match socket::session_for(&path)? {
-        None => start_session(&path, &bots, &command)?,
+        None => start_session(&path, &accounts, &command)?,
         Some(session) => {
             let info = socket::info(&session)?;
             if socket::other_build(&info) && restart_wanted(&info)? {
-                restart_session(&session, &path, &bots, &command)?
+                restart_session(&session, &path, &accounts, &command)?
             } else {
                 socket::same_build(&info)?;
-                if bots.is_empty() && wanted.script.is_some() {
-                    return Err("aqx is already running for this config; name the bots to run the script on".into());
+                if accounts.is_empty() && wanted.script.is_some() {
+                    return Err("aqx is already running for this config; name the accounts to run the script on".into());
                 }
-                for bot in &bots {
-                    socket::ctl(&session, bot, &command)?;
+                for account in &accounts {
+                    socket::ctl(&session, account, &command)?;
                 }
                 session
             }
@@ -265,40 +265,40 @@ fn restart_wanted(info: &serde_json::Value) -> Result<bool, String> {
         socket::same_build(info)?;
         return Err("aqx is already running for this config from a different build; run aqx down and start it again".into());
     }
-    prompt::confirm("aqx is already running for this config from a different build. Restart it with this one? Its bots log out and back in.")
+    prompt::confirm("aqx is already running for this config from a different build. Restart it with this one? Its accounts log out and back in.")
 }
 
-fn restart_session(session: &Path, config: &Path, bots: &[String], command: &Command) -> Result<PathBuf, String> {
+fn restart_session(session: &Path, config: &Path, accounts: &[String], command: &Command) -> Result<PathBuf, String> {
     let mut resume = socket::to_resume(session)?;
-    resume.retain(|(bot, _)| !bots.contains(bot));
-    resume.extend(bots.iter().map(|bot| (bot.clone(), command.clone())));
+    resume.retain(|(account, _)| !accounts.contains(account));
+    resume.extend(accounts.iter().map(|account| (account.clone(), command.clone())));
     end_session(session)?;
     let mut resume = resume.into_iter();
-    let Some((first, command)) = resume.next() else { return start_session(config, bots, command) };
+    let Some((first, command)) = resume.next() else { return start_session(config, accounts, command) };
     let session = start_session(config, &[first], &command)?;
-    for (bot, command) in resume {
-        socket::ctl(&session, &bot, &command)?;
+    for (account, command) in resume {
+        socket::ctl(&session, &account, &command)?;
     }
     Ok(session)
 }
 
 fn named(config: &Config, names: &[String]) -> Result<Vec<String>, String> {
-    let mut bots: Vec<String> = Vec::new();
+    let mut accounts: Vec<String> = Vec::new();
     for name in names {
-        let bot = config.bot(Some(name))?.name().to_string();
-        if !bots.contains(&bot) {
-            bots.push(bot);
+        let account = config.account(Some(name))?.name().to_string();
+        if !accounts.contains(&account) {
+            accounts.push(account);
         }
     }
-    Ok(bots)
+    Ok(accounts)
 }
 
 fn command(wanted: &Wanted) -> Result<Command, String> {
     let Some(script) = &wanted.script else { return Ok(Command::Login) };
-    Ok(Command::Run { script: bot::script_path(script)?, args: wanted.args.clone() })
+    Ok(Command::Run { script: account::script_path(script)?, args: wanted.args.clone() })
 }
 
-fn start_session(config: &Path, bots: &[String], command: &Command) -> Result<PathBuf, String> {
+fn start_session(config: &Path, accounts: &[String], command: &Command) -> Result<PathBuf, String> {
     let stem = config.file_stem().map_or("aqx".into(), |s| s.to_string_lossy().into_owned());
     let mut hasher = std::hash::DefaultHasher::new();
     config.hash(&mut hasher);
@@ -308,7 +308,7 @@ fn start_session(config: &Path, bots: &[String], command: &Command) -> Result<Pa
     let errors = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut serve = std::process::Command::new(exe);
-    serve.args(["serve", "--quiet", "--config"]).arg(config).args(bots);
+    serve.args(["serve", "--quiet", "--config"]).arg(config).args(accounts);
     if let Command::Run { script, args } = command {
         serve.arg("--script").arg(script);
         for (key, value) in args {
@@ -342,18 +342,18 @@ fn start_session(config: &Path, bots: &[String], command: &Command) -> Result<Pa
 
 fn serve(wanted: &Wanted, json: bool, quiet: bool) -> Result<(), String> {
     let (config, path) = config::load(wanted.config.as_deref())?;
-    if config.bots.is_empty() {
-        return Err(format!("{} has no [[bot]]", path.display()));
+    if config.accounts.is_empty() {
+        return Err(format!("{} has no [[account]]", path.display()));
     }
     if let Some(session) = socket::session_for(&path)? {
         return Err(format!("aqx is already running for {}; its socket is {}", path.display(), session.display()));
     }
-    let bots = named(&config, &wanted.bots)?;
+    let accounts = named(&config, &wanted.accounts)?;
     let command = command(wanted)?;
     let mut launches = Vec::new();
-    for bot in &config.bots {
-        let spec = spec(bot, bot.settings(&config.defaults), CLIENT_VERSION, bot.script(&path)?, false);
-        launches.push(Launch { name: bot.name().into(), spec, recorder: None });
+    for account in &config.accounts {
+        let spec = spec(account, account.settings(&config.defaults), CLIENT_VERSION, account.script(&path)?, false);
+        launches.push(Launch { name: account.name().into(), spec, recorder: None });
     }
     let name = path.file_stem().map_or("aqx".into(), |s| s.to_string_lossy().into_owned());
     let print = match (json, quiet) {
@@ -361,9 +361,9 @@ fn serve(wanted: &Wanted, json: bool, quiet: bool) -> Result<(), String> {
         (_, true) => Print::Quiet,
         _ => Print::Plain,
     };
-    let first = |bot: &str| (bots.is_empty() || bots.iter().any(|b| b == bot)).then(|| command.clone());
+    let first = |account: &str| (accounts.is_empty() || accounts.iter().any(|a| a == account)).then(|| command.clone());
     let results = start(&name, Some(&path), launches, print, &first)?;
-    let failed: Vec<String> = results.into_iter().filter_map(|(bot, r)| r.err().map(|e| format!("{bot}: {e}"))).collect();
+    let failed: Vec<String> = results.into_iter().filter_map(|(account, r)| r.err().map(|e| format!("{account}: {e}"))).collect();
     if failed.is_empty() { Ok(()) } else { Err(failed.join("\n")) }
 }
 
@@ -374,8 +374,8 @@ fn down(config: Option<&Path>) -> Result<(), String> {
 }
 
 fn end_session(session: &Path) -> Result<(), String> {
-    for bot in socket::bots(session)? {
-        socket::ctl(session, &bot, &Command::Logout)?;
+    for account in socket::accounts(session)? {
+        socket::ctl(session, &account, &Command::Logout)?;
     }
     let deadline = Instant::now() + DOWN_TIMEOUT;
     while std::os::unix::net::UnixStream::connect(session).is_ok() {
@@ -395,7 +395,7 @@ fn start(name: &str, config: Option<&Path>, launches: Vec<Launch>, print: Print,
     let mut parts = Vec::new();
     for launch in launches {
         let control = Control::new().map_err(|e| e.to_string())?;
-        let cell = Arc::new(BotCell::local(&launch.name, control.stop_handle()));
+        let cell = Arc::new(AccountCell::local(&launch.name, control.stop_handle()));
         if let Some(command) = first(&launch.name) {
             cell.send(command)?;
         }
@@ -421,7 +421,7 @@ fn start(name: &str, config: Option<&Path>, launches: Vec<Launch>, print: Print,
             let hub = hub.clone();
             let thread = std::thread::Builder::new()
                 .name(launch.name.clone())
-                .spawn(move || bot::run(launch.spec, launch.recorder, control, cell, hub))
+                .spawn(move || account::run(launch.spec, launch.recorder, control, cell, hub))
                 .map_err(|e| e.to_string())?;
             Ok((launch.name, thread))
         })
@@ -432,7 +432,7 @@ fn start(name: &str, config: Option<&Path>, launches: Vec<Launch>, print: Print,
     for cell in &hub.cells {
         cell.close();
     }
-    Ok(threads.into_iter().map(|(bot, t)| (bot, t.join().unwrap_or_else(|_| Err("the bot thread crashed".into())))).collect())
+    Ok(threads.into_iter().map(|(account, t)| (account, t.join().unwrap_or_else(|_| Err("the account thread crashed".into())))).collect())
 }
 
 fn log_out_all(hub: &Hub) {
@@ -447,8 +447,8 @@ fn attach(path: &Path) -> Result<(), String> {
     let hello = conn.recv().ok_or("the aqx process closed the connection")?;
     socket::same_build(&hello)?;
     let name = hello["name"].as_str().unwrap_or("aqx").to_string();
-    let bots: Vec<String> = serde_json::from_value(hello["bots"].clone()).map_err(|e| e.to_string())?;
-    let cells: Vec<Arc<BotCell>> = bots.iter().map(|b| Arc::new(BotCell::mirror(b))).collect();
+    let accounts: Vec<String> = serde_json::from_value(hello["accounts"].clone()).map_err(|e| e.to_string())?;
+    let cells: Vec<Arc<AccountCell>> = accounts.iter().map(|name| Arc::new(AccountCell::mirror(name))).collect();
     let gone = Arc::new(AtomicBool::new(false));
     {
         let (cells, gone) = (cells.clone(), gone.clone());
@@ -472,11 +472,11 @@ fn attach(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn mirror(cells: &[Arc<BotCell>], message: &serde_json::Value) {
+fn mirror(cells: &[Arc<AccountCell>], message: &serde_json::Value) {
     match message["type"].as_str() {
         Some("log") => {
-            let (Some(bot), Ok(line)) = (message["bot"].as_str(), serde_json::from_value::<hub::LogLine>(message["line"].clone())) else { return };
-            if let Some(cell) = cells.iter().find(|c| c.name == bot) {
+            let (Some(account), Ok(line)) = (message["account"].as_str(), serde_json::from_value::<hub::LogLine>(message["line"].clone())) else { return };
+            if let Some(cell) = cells.iter().find(|c| c.name == account) {
                 let mut board = cell.board();
                 if board.log.len() == hub::LOG_LINES {
                     board.log.pop_front();
@@ -486,7 +486,7 @@ fn mirror(cells: &[Arc<BotCell>], message: &serde_json::Value) {
         }
         Some("snapshot") => {
             let Ok(snapshot) = serde_json::from_value::<hub::Snapshot>(message["snapshot"].clone()) else { return };
-            if let Some(cell) = cells.iter().find(|c| c.name == snapshot.bot) {
+            if let Some(cell) = cells.iter().find(|c| c.name == snapshot.account) {
                 cell.board().snapshot = Some(snapshot);
             }
         }
@@ -500,32 +500,32 @@ fn ps() -> Result<(), String> {
         println!("no aqx process is running");
         return Ok(());
     }
-    println!("{:<12}  {:<10}  {:<12}  {:<22}  {:<24}  {:<6}  STATUS", "PROCESS", "BOT", "STATE", "SCRIPT", "WHERE", "UP");
+    println!("{:<12}  {:<10}  {:<12}  {:<22}  {:<24}  {:<6}  STATUS", "PROCESS", "ACCOUNT", "STATE", "SCRIPT", "WHERE", "UP");
     for (name, path) in all {
-        let bots = match socket::snapshot(&path) {
-            Ok(bots) => bots,
+        let accounts = match socket::snapshot(&path) {
+            Ok(accounts) => accounts,
             Err(e) => {
                 println!("{name:<12}  {e}");
                 continue;
             }
         };
-        for s in bots {
+        for s in accounts {
             let (state, script) = (s.state(), s.script_label());
             let place = s.game.as_ref().map_or(String::new(), |g| format!("{} {}", g.area, g.cell));
             let status = if s.phase != "READY" && !s.detail.is_empty() { &s.detail } else { &s.status };
-            println!("{name:<12}  {:<10}  {state:<12}  {script:<22}  {place:<24}  {:<6}  {status}", s.bot, output::span(s.up_secs));
+            println!("{name:<12}  {:<10}  {state:<12}  {script:<22}  {place:<24}  {:<6}  {status}", s.account, output::span(s.up_secs));
         }
     }
     Ok(())
 }
 
-fn logs(bot: Option<&str>, follow: bool) -> Result<(), String> {
-    let path = match bot {
-        Some(bot) => socket::find_bot(bot)?,
+fn logs(account: Option<&str>, follow: bool) -> Result<(), String> {
+    let path = match account {
+        Some(account) => socket::find_account(account)?,
         None => socket::pick(None)?.1,
     };
     let mut conn = Conn::open(&path)?;
-    conn.send(&json!({ "op": "logs", "bot": bot, "follow": follow }))?;
+    conn.send(&json!({ "op": "logs", "account": account, "follow": follow }))?;
     while let Some(message) = conn.recv() {
         match message["type"].as_str() {
             Some("log") => {
@@ -533,7 +533,7 @@ fn logs(bot: Option<&str>, follow: bool) -> Result<(), String> {
                 println!(
                     "{}  {:<10}  {:<6}  {}",
                     output::clock(line["t"].as_u64().unwrap_or(0)),
-                    message["bot"].as_str().unwrap_or_default(),
+                    message["account"].as_str().unwrap_or_default(),
                     line["source"].as_str().unwrap_or_default(),
                     line["text"].as_str().unwrap_or_default()
                 );
@@ -545,10 +545,10 @@ fn logs(bot: Option<&str>, follow: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn ctl(bot: &str, action: Ctl) -> Result<(), String> {
+fn ctl(account: &str, action: Ctl) -> Result<(), String> {
     let command = match action {
         Ctl::Login => Command::Login,
-        Ctl::Run { script, args } => Command::Run { script: bot::script_path(&script)?, args },
+        Ctl::Run { script, args } => Command::Run { script: account::script_path(&script)?, args },
         Ctl::Stop => Command::Stop,
         Ctl::Restart => Command::Restart,
         Ctl::Pause => Command::Pause,
@@ -556,8 +556,8 @@ fn ctl(bot: &str, action: Ctl) -> Result<(), String> {
         Ctl::Relogin => Command::Relogin,
         Ctl::Logout => Command::Logout,
     };
-    if !socket::ctl(&socket::find_bot(bot)?, bot, &command)? {
-        println!("{bot}: {}", command.unchanged());
+    if !socket::ctl(&socket::find_account(account)?, account, &command)? {
+        println!("{account}: {}", command.unchanged());
     }
     Ok(())
 }

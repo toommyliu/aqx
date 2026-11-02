@@ -58,7 +58,7 @@ pub enum Print {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
-    pub bot: String,
+    pub account: String,
     pub user: String,
     pub server: String,
     pub phase: String,
@@ -299,10 +299,10 @@ impl Board {
         self.gold_from = None;
     }
 
-    pub fn snapshot(&self, bot: &str, user: &str, phase: &Phase, world: &World, now: Instant) -> Snapshot {
+    pub fn snapshot(&self, account: &str, user: &str, phase: &Phase, world: &World, now: Instant) -> Snapshot {
         let (phase, detail) = describe_phase(phase, now);
         Snapshot {
-            bot: bot.into(),
+            account: account.into(),
             user: user.into(),
             server: self.server.clone(),
             phase: if self.online { phase } else { "OFFLINE".into() },
@@ -392,7 +392,7 @@ fn game(world: &World, now: Instant) -> Option<Game> {
     })
 }
 
-pub struct BotCell {
+pub struct AccountCell {
     pub name: String,
     pub board: Mutex<Board>,
     stop: Option<StopHandle>,
@@ -406,13 +406,13 @@ struct Inbox {
     closed: bool,
 }
 
-impl BotCell {
+impl AccountCell {
     pub fn local(name: &str, stop: StopHandle) -> Self {
-        BotCell { name: name.into(), board: Mutex::new(Board::default()), stop: Some(stop), inbox: Mutex::default(), wake: Condvar::new() }
+        AccountCell { name: name.into(), board: Mutex::new(Board::default()), stop: Some(stop), inbox: Mutex::default(), wake: Condvar::new() }
     }
 
     pub fn mirror(name: &str) -> Self {
-        BotCell { name: name.into(), board: Mutex::new(Board::default()), stop: None, inbox: Mutex::default(), wake: Condvar::new() }
+        AccountCell { name: name.into(), board: Mutex::new(Board::default()), stop: None, inbox: Mutex::default(), wake: Condvar::new() }
     }
 
     pub fn board(&self) -> MutexGuard<'_, Board> {
@@ -504,23 +504,23 @@ impl BotCell {
 
 pub struct Hub {
     pub name: String,
-    pub cells: Vec<Arc<BotCell>>,
+    pub cells: Vec<Arc<AccountCell>>,
     watchers: AtomicUsize,
     ending: Mutex<bool>,
     print: Print,
 }
 
 impl Hub {
-    pub fn new(name: &str, cells: Vec<Arc<BotCell>>, print: Print) -> Self {
+    pub fn new(name: &str, cells: Vec<Arc<AccountCell>>, print: Print) -> Self {
         Hub { name: name.into(), cells, watchers: AtomicUsize::new(0), ending: Mutex::new(false), print }
     }
 
-    pub fn send(&self, bot: &str, command: Command) -> Result<bool, String> {
+    pub fn send(&self, account: &str, command: Command) -> Result<bool, String> {
         let ending = self.ending.lock().unwrap_or_else(|e| e.into_inner());
         if *ending {
             return Err(format!("{} is ending", self.name));
         }
-        let cell = self.cells.iter().find(|c| c.name == bot).ok_or_else(|| format!("no bot named {bot} in {}", self.name))?;
+        let cell = self.cells.iter().find(|c| c.name == account).ok_or_else(|| format!("no account named {account} in {}", self.name))?;
         cell.send(command)
     }
 
@@ -539,7 +539,7 @@ impl Hub {
         Watching(self.clone())
     }
 
-    pub fn record(&self, cell: &BotCell, event: &Event) {
+    pub fn record(&self, cell: &AccountCell, event: &Event) {
         let now = Instant::now();
         let t = output::now();
         let line = {
@@ -558,7 +558,7 @@ impl Hub {
         }
     }
 
-    pub fn say(&self, cell: &BotCell, source: &str, text: impl Into<String>) {
+    pub fn say(&self, cell: &AccountCell, source: &str, text: impl Into<String>) {
         let line = cell.board().push_log(output::now(), source, text.into());
         match self.print {
             Print::Json => self.json(cell, json!({ "event": "log", "source": line.source, "text": line.text })),
@@ -567,7 +567,7 @@ impl Hub {
         }
     }
 
-    pub fn status(&self, cell: &BotCell, world: &World) {
+    pub fn status(&self, cell: &AccountCell, world: &World) {
         let Some(me) = &world.me else { return };
         let area = world.area.as_ref().map_or("", |a| a.name.as_str());
         let players = world.area.as_ref().map_or(0, |a| a.players.len()) + 1;
@@ -598,7 +598,7 @@ impl Hub {
         }
     }
 
-    fn plain(&self, cell: &BotCell, line: &LogLine) {
+    fn plain(&self, cell: &AccountCell, line: &LogLine) {
         let mut out = std::io::stdout().lock();
         let _ = if self.cells.len() > 1 {
             writeln!(out, "{}  {:<10}  {:<6}  {}", clock(line.t), cell.name, line.source, line.text)
@@ -607,10 +607,10 @@ impl Hub {
         };
     }
 
-    fn json(&self, cell: &BotCell, mut value: Value) {
+    fn json(&self, cell: &AccountCell, mut value: Value) {
         if let Value::Object(fields) = &mut value {
             fields.insert("t".into(), output::now().into());
-            fields.insert("bot".into(), cell.name.clone().into());
+            fields.insert("account".into(), cell.name.clone().into());
         }
         let _ = writeln!(std::io::stdout().lock(), "{value}");
     }

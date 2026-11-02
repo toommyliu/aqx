@@ -385,7 +385,7 @@ fn once_ignores_events_queued_before_it_was_called() {
 #[test]
 fn relative_imports_climb_out_of_a_relative_script_path() {
     let mut fake = Fake::start(FARM, |_, _| {});
-    let main = write("climb", &[("bots/main.ts", r#"import { answer } from "../shared/util.ts"; if (answer !== 42) throw new Error("wrong module");"#), ("shared/util.ts", "export const answer: number = 42;")]);
+    let main = write("climb", &[("scripts/main.ts", r#"import { answer } from "../shared/util.ts"; if (answer !== 42) throw new Error("wrong module");"#), ("shared/util.ts", "export const answer: number = 42;")]);
     let cwd = std::env::current_dir().unwrap();
     let ups = cwd.components().count() - 1;
     let relative = PathBuf::from("../".repeat(ups)).join(main.strip_prefix("/").unwrap());

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::hub::{Command, Hub, LogLine, Snapshot};
 
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 const BUILD: &str = env!("AQX_BUILD");
 const TICK: Duration = Duration::from_millis(250);
 const FRESH: Duration = Duration::from_millis(300);
@@ -25,12 +25,12 @@ enum Request {
     Snapshot,
     Subscribe,
     Logs {
-        bot: Option<String>,
+        account: Option<String>,
         #[serde(default)]
         follow: bool,
     },
     Ctl {
-        bot: String,
+        account: String,
         #[serde(flatten)]
         command: Command,
     },
@@ -119,14 +119,14 @@ fn serve_client(hub: &Arc<Hub>, config: Option<&Path>, conn: UnixStream) {
         let Ok(line) = line else { return };
         let reply = match serde_json::from_str::<Request>(&line) {
             Err(e) => json!({ "type": "error", "message": format!("unreadable request: {e}") }),
-            Ok(Request::Info) => json!({ "type": "info", "protocol": PROTOCOL, "build": BUILD, "name": hub.name, "config": config, "bots": names(hub) }),
-            Ok(Request::Snapshot) => json!({ "type": "snapshot", "protocol": PROTOCOL, "name": hub.name, "bots": snapshots(hub) }),
-            Ok(Request::Ctl { bot, command }) => match hub.send(&bot, command) {
+            Ok(Request::Info) => json!({ "type": "info", "protocol": PROTOCOL, "build": BUILD, "name": hub.name, "config": config, "accounts": names(hub) }),
+            Ok(Request::Snapshot) => json!({ "type": "snapshot", "protocol": PROTOCOL, "name": hub.name, "accounts": snapshots(hub) }),
+            Ok(Request::Ctl { account, command }) => match hub.send(&account, command) {
                 Ok(changed) => json!({ "type": "ok", "changed": changed }),
                 Err(e) => json!({ "type": "error", "message": e }),
             },
             Ok(Request::Subscribe) => return subscribe(hub, &mut out),
-            Ok(Request::Logs { bot, follow }) => return logs(hub, bot.as_deref(), follow, &mut out),
+            Ok(Request::Logs { account, follow }) => return logs(hub, account.as_deref(), follow, &mut out),
         };
         if !send(&mut out, &reply) {
             return;
@@ -140,7 +140,7 @@ fn snapshots(hub: &Arc<Hub>) -> Vec<Snapshot> {
         let _watching = hub.watch();
         thread::sleep(FRESH);
     }
-    hub.cells.iter().map(|c| c.board().snapshot.clone().unwrap_or_else(|| Snapshot { bot: c.name.clone(), phase: "STARTING".into(), ..Snapshot::default() })).collect()
+    hub.cells.iter().map(|c| c.board().snapshot.clone().unwrap_or_else(|| Snapshot { account: c.name.clone(), phase: "STARTING".into(), ..Snapshot::default() })).collect()
 }
 
 fn names(hub: &Hub) -> Vec<&str> {
@@ -149,7 +149,7 @@ fn names(hub: &Hub) -> Vec<&str> {
 
 fn subscribe(hub: &Arc<Hub>, out: &mut UnixStream) {
     let _watching = hub.watch();
-    if !send(out, &json!({ "type": "hello", "protocol": PROTOCOL, "name": hub.name, "bots": names(hub) })) {
+    if !send(out, &json!({ "type": "hello", "protocol": PROTOCOL, "name": hub.name, "accounts": names(hub) })) {
         return;
     }
     let mut shown: Vec<Option<Snapshot>> = vec![None; hub.cells.len()];
@@ -163,7 +163,7 @@ fn subscribe(hub: &Arc<Hub>, out: &mut UnixStream) {
             };
             for line in lines {
                 next[i] = line.seq + 1;
-                if !send(out, &json!({ "type": "log", "bot": cell.name, "line": line })) {
+                if !send(out, &json!({ "type": "log", "account": cell.name, "line": line })) {
                     return;
                 }
             }
@@ -178,10 +178,10 @@ fn subscribe(hub: &Arc<Hub>, out: &mut UnixStream) {
     }
 }
 
-fn logs(hub: &Arc<Hub>, bot: Option<&str>, follow: bool, out: &mut UnixStream) {
-    let cells: Vec<_> = hub.cells.iter().filter(|c| bot.is_none_or(|b| c.name == b)).collect();
+fn logs(hub: &Arc<Hub>, account: Option<&str>, follow: bool, out: &mut UnixStream) {
+    let cells: Vec<_> = hub.cells.iter().filter(|c| account.is_none_or(|name| c.name == name)).collect();
     if cells.is_empty() {
-        send(out, &json!({ "type": "error", "message": format!("no bot named {} in {}", bot.unwrap_or_default(), hub.name) }));
+        send(out, &json!({ "type": "error", "message": format!("no account named {} in {}", account.unwrap_or_default(), hub.name) }));
         return;
     }
     let mut next = vec![0u64; cells.len()];
@@ -197,7 +197,7 @@ fn logs(hub: &Arc<Hub>, bot: Option<&str>, follow: bool, out: &mut UnixStream) {
         }
         lines.sort_by_key(|(_, l)| l.t);
         for (name, line) in lines {
-            if !send(out, &json!({ "type": "log", "bot": name, "line": line })) {
+            if !send(out, &json!({ "type": "log", "account": name, "line": line })) {
                 return;
             }
         }
@@ -283,7 +283,7 @@ pub fn session_for(config: &Path) -> Result<Option<PathBuf>, String> {
 
 #[derive(Deserialize)]
 struct Resumable {
-    bot: String,
+    account: String,
     phase: String,
     run: String,
     script: Option<String>,
@@ -293,20 +293,20 @@ struct Resumable {
 
 pub fn to_resume(path: &Path) -> Result<Vec<(String, Command)>, String> {
     let reply = Conn::ask(path, &json!({ "op": "snapshot" }))?;
-    let bots: Vec<Resumable> = serde_json::from_value(reply["bots"].clone()).map_err(|e| format!("unreadable snapshot: {e}"))?;
-    Ok(bots
+    let accounts: Vec<Resumable> = serde_json::from_value(reply["accounts"].clone()).map_err(|e| format!("unreadable snapshot: {e}"))?;
+    Ok(accounts
         .into_iter()
-        .filter(|b| b.phase != "OFFLINE")
-        .map(|b| match (b.run.as_str(), b.script) {
-            ("running", Some(script)) => (b.bot, Command::Run { script: script.into(), args: b.args }),
-            _ => (b.bot, Command::Login),
+        .filter(|a| a.phase != "OFFLINE")
+        .map(|a| match (a.run.as_str(), a.script) {
+            ("running", Some(script)) => (a.account, Command::Run { script: script.into(), args: a.args }),
+            _ => (a.account, Command::Login),
         })
         .collect())
 }
 
-pub fn bots(path: &Path) -> Result<Vec<String>, String> {
+pub fn accounts(path: &Path) -> Result<Vec<String>, String> {
     let info = Conn::ask(path, &json!({ "op": "info" }))?;
-    serde_json::from_value(info["bots"].clone()).map_err(|e| e.to_string())
+    serde_json::from_value(info["accounts"].clone()).map_err(|e| e.to_string())
 }
 
 pub fn same_build(reply: &Value) -> Result<(), String> {
@@ -328,27 +328,27 @@ pub fn other_build(info: &Value) -> bool {
 pub fn snapshot(path: &Path) -> Result<Vec<Snapshot>, String> {
     let reply = Conn::ask(path, &json!({ "op": "snapshot" }))?;
     same_build(&reply)?;
-    serde_json::from_value(reply["bots"].clone()).map_err(|e| e.to_string())
+    serde_json::from_value(reply["accounts"].clone()).map_err(|e| e.to_string())
 }
 
-pub fn ctl(path: &Path, bot: &str, command: &Command) -> Result<bool, String> {
+pub fn ctl(path: &Path, account: &str, command: &Command) -> Result<bool, String> {
     let mut request = serde_json::to_value(command).map_err(|e| e.to_string())?;
     request["op"] = json!("ctl");
-    request["bot"] = json!(bot);
+    request["account"] = json!(account);
     Conn::ask(path, &request).map(|reply| reply["changed"].as_bool().unwrap_or(true))
 }
 
-pub fn find_bot(bot: &str) -> Result<PathBuf, String> {
+pub fn find_account(account: &str) -> Result<PathBuf, String> {
     let all = processes()?;
     if all.is_empty() {
         return Err("no aqx process is running".into());
     }
     for (_, path) in &all {
-        if bots(path).is_ok_and(|bots| bots.iter().any(|b| b == bot)) {
+        if accounts(path).is_ok_and(|accounts| accounts.iter().any(|a| a == account)) {
             return Ok(path.clone());
         }
     }
-    Err(format!("no running aqx process has a bot named {bot}"))
+    Err(format!("no running aqx process has an account named {account}"))
 }
 
 #[cfg(test)]
@@ -356,7 +356,7 @@ mod tests {
     use aqx_core::Control;
 
     use super::*;
-    use crate::hub::{BotCell, Print};
+    use crate::hub::{AccountCell, Print};
 
     fn keys(value: &Value, at: &str, out: &mut Vec<String>) {
         match value {
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn an_ending_session_refuses_commands() {
         let control = Control::new().unwrap();
-        let hub = Hub::new("ending", vec![Arc::new(BotCell::local("main", control.stop_handle()))], Print::Quiet);
+        let hub = Hub::new("ending", vec![Arc::new(AccountCell::local("main", control.stop_handle()))], Print::Quiet);
         assert!(hub.end_if_idle());
         assert_eq!(hub.send("main", Command::Login), Err("ending is ending".to_string()));
     }
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn a_session_from_another_build_is_named_with_the_way_out() {
         assert_eq!(same_build(&json!({ "type": "info", "protocol": PROTOCOL, "name": "farm" })), Ok(()));
-        let before_protocols = json!({ "type": "info", "name": "farm", "bots": ["hero"] });
+        let before_protocols = json!({ "type": "info", "name": "farm", "accounts": ["hero"] });
         assert_eq!(same_build(&before_protocols), Err("farm was started by a different build of aqx; run aqx down and start it again".into()));
     }
 
@@ -396,12 +396,12 @@ mod tests {
     }
 
     #[test]
-    fn a_restart_resumes_online_bots_and_their_scripts() {
+    fn a_restart_resumes_online_accounts_and_their_scripts() {
         let controls: Vec<Control> = (0..3).map(|_| Control::new().unwrap()).collect();
-        let cells: Vec<Arc<BotCell>> = ["farmer", "idler", "away"].iter().zip(&controls).map(|(b, c)| Arc::new(BotCell::local(b, c.stop_handle()))).collect();
-        let show = |cell: &BotCell, phase: &str, run: &str, script: Option<&str>| {
+        let cells: Vec<Arc<AccountCell>> = ["farmer", "idler", "away"].iter().zip(&controls).map(|(name, c)| Arc::new(AccountCell::local(name, c.stop_handle()))).collect();
+        let show = |cell: &AccountCell, phase: &str, run: &str, script: Option<&str>| {
             let args = vec![("rounds".to_string(), "3".to_string())];
-            cell.board().snapshot = Some(Snapshot { bot: cell.name.clone(), phase: phase.into(), run: run.into(), script: script.map(Into::into), args, ..Snapshot::default() });
+            cell.board().snapshot = Some(Snapshot { account: cell.name.clone(), phase: phase.into(), run: run.into(), script: script.map(Into::into), args, ..Snapshot::default() });
         };
         show(&cells[0], "READY", "running", Some("/srv/farm.ts"));
         show(&cells[1], "READY", "done", Some("/srv/farm.ts"));
@@ -411,7 +411,7 @@ mod tests {
         let (_, listener, _listening) = bind(&name, false).unwrap();
         serve(listener, hub, None).unwrap();
         let resume = to_resume(&pick(Some(&name)).unwrap().1).unwrap();
-        let shown: Vec<String> = resume.iter().map(|(bot, command)| format!("{bot} {}", serde_json::to_string(command).unwrap())).collect();
+        let shown: Vec<String> = resume.iter().map(|(account, command)| format!("{account} {}", serde_json::to_string(command).unwrap())).collect();
         assert_eq!(shown, [r#"farmer {"cmd":"run","script":"/srv/farm.ts","args":[["rounds","3"]]}"#, r#"idler {"cmd":"login"}"#]);
     }
 
@@ -437,7 +437,7 @@ mod tests {
         let mut shape = Vec::new();
         keys(&json!({ "snapshot": snapshot, "log": line }), "", &mut shape);
         shape.sort();
-        let pinned = "log log.seq log.source log.t log.text snapshot snapshot.args snapshot.bot snapshot.deaths snapshot.detail \
+        let pinned = "log log.seq log.source log.t log.text snapshot snapshot.account snapshot.args snapshot.deaths snapshot.detail \
              snapshot.drops snapshot.game snapshot.game.afk snapshot.game.area snapshot.game.auras \
              snapshot.game.auras.name snapshot.game.auras.stacks snapshot.game.cell snapshot.game.cell_players \
              snapshot.game.cell_players.level snapshot.game.cell_players.name snapshot.game.class \
@@ -449,13 +449,13 @@ mod tests {
              snapshot.paused snapshot.phase snapshot.progress snapshot.progress.current \
              snapshot.progress.eta_secs snapshot.progress.label snapshot.progress.total snapshot.run \
              snapshot.script snapshot.server snapshot.stalled snapshot.status snapshot.up_secs snapshot.user";
-        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (2, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
+        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (3, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
     }
 
     #[test]
     fn answers_snapshots_logs_and_commands() {
         let control = Control::new().unwrap();
-        let cell = Arc::new(BotCell::local("main", control.stop_handle()));
+        let cell = Arc::new(AccountCell::local("main", control.stop_handle()));
         let name = format!("test-{}", std::process::id());
         let hub = Arc::new(Hub::new(&name, vec![cell.clone()], Print::Quiet));
         hub.say(&cell, "aqx", "hello");
@@ -471,24 +471,24 @@ mod tests {
         assert_eq!(found, name);
         assert_eq!(session_for(Path::new("/srv/aqx.toml")).unwrap(), Some(path.clone()));
         assert_eq!(session_for(Path::new("/srv/other.toml")).unwrap(), None);
-        assert_eq!(bots(&path).unwrap(), ["main"]);
+        assert_eq!(accounts(&path).unwrap(), ["main"]);
 
-        let bots = snapshot(&path).unwrap();
-        assert_eq!(bots[0].bot, "main");
+        let accounts = snapshot(&path).unwrap();
+        assert_eq!(accounts[0].account, "main");
 
         let mut conn = Conn::open(&path).unwrap();
-        conn.send(&json!({ "op": "logs", "bot": "main" })).unwrap();
+        conn.send(&json!({ "op": "logs", "account": "main" })).unwrap();
         let line = conn.recv().unwrap();
         assert_eq!((line["type"].as_str(), line["line"]["text"].as_str()), (Some("log"), Some("hello")));
         assert_eq!(conn.recv().unwrap()["type"], "end");
 
         let ctl = |request: Value| Conn::ask(&path, &request);
         super::ctl(&path, "main", &Command::Pause).unwrap();
-        assert_eq!(super::ctl(&path, "main", &Command::Login), Ok(false), "an online bot is already logged in");
+        assert_eq!(super::ctl(&path, "main", &Command::Login), Ok(false), "an online account is already logged in");
         assert!(cell.board().paused);
-        ctl(json!({ "op": "ctl", "bot": "main", "cmd": "run", "script": "/x.ts", "args": [["n", "3"]] })).unwrap();
+        ctl(json!({ "op": "ctl", "account": "main", "cmd": "run", "script": "/x.ts", "args": [["n", "3"]] })).unwrap();
         assert!(matches!(cell.take_command(), Some(Command::Run { script, args }) if script == Path::new("/x.ts") && args == [("n".to_string(), "3".to_string())]));
-        assert!(ctl(json!({ "op": "ctl", "bot": "nobody", "cmd": "stop" })).unwrap_err().contains("no bot named nobody"));
+        assert!(ctl(json!({ "op": "ctl", "account": "nobody", "cmd": "stop" })).unwrap_err().contains("no account named nobody"));
         drop(listening);
         assert!(!dir().join(format!("{name}.sock")).exists());
     }

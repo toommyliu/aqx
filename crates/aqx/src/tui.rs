@@ -12,8 +12,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
-use crate::bot::{expand_home, script_path};
-use crate::hub::{Bar, BotCell, Command, Game, LOG_LINES, LogLine, Snapshot};
+use crate::account::{expand_home, script_path};
+use crate::hub::{Bar, AccountCell, Command, Game, LOG_LINES, LogLine, Snapshot};
 use crate::output::{clock, span};
 use crate::socket;
 
@@ -26,8 +26,8 @@ const CARD_HEIGHT: u16 = 8;
 
 type Field = Vec<Span<'static>>;
 
-const BOT_KEYS: [(&str, &str); 11] = [
-    ("", "Bots"),
+const ACCOUNT_KEYS: [(&str, &str); 11] = [
+    ("", "Accounts"),
     ("↑ ↓", "pick"),
     ("tab", "next"),
     ("space", "mark"),
@@ -57,7 +57,7 @@ const SCRIPT_KEYS: [(&str, &str); 12] = [
 
 pub struct Fleet {
     pub title: String,
-    pub cells: Vec<Arc<BotCell>>,
+    pub cells: Vec<Arc<AccountCell>>,
     pub socket: PathBuf,
 }
 
@@ -215,7 +215,7 @@ impl App {
     fn who(&self, shown: &[Shown], room: usize) -> String {
         let targets = self.targets();
         let names = targets.iter().filter_map(|&i| shown.get(i)).map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ");
-        if names.chars().count() <= room { names } else { format!("{} bots", targets.len()) }
+        if names.chars().count() <= room { names } else { format!("{} accounts", targets.len()) }
     }
 
     fn pick(&mut self, i: usize) {
@@ -233,9 +233,9 @@ impl App {
         self.act_on(self.targets(), fleet, command, done);
     }
 
-    fn act_on(&mut self, bots: Vec<usize>, fleet: &Fleet, command: Command, done: &str) {
+    fn act_on(&mut self, accounts: Vec<usize>, fleet: &Fleet, command: Command, done: &str) {
         let (mut sent, mut same, mut said) = (Vec::new(), Vec::new(), Vec::new());
-        for i in bots {
+        for i in accounts {
             let Some(cell) = fleet.cells.get(i) else { continue };
             match socket::ctl(&fleet.socket, &cell.name, &command) {
                 Ok(true) => sent.push(cell.name.as_str()),
@@ -268,7 +268,7 @@ impl App {
             match key.code {
                 KeyCode::Enter => {
                     self.ending = false;
-                    self.act_on((0..fleet.cells.len()).collect(), fleet, Command::Logout, "logging out; the session ends once every bot is offline");
+                    self.act_on((0..fleet.cells.len()).collect(), fleet, Command::Logout, "logging out; the session ends once every account is offline");
                 }
                 KeyCode::Char('q') => return true,
                 KeyCode::Esc => self.ending = false,
@@ -309,9 +309,9 @@ impl App {
             }
             return false;
         }
-        let bots = fleet.cells.len();
-        let last = bots.saturating_sub(1);
-        let line = bots < 2 || key.modifiers.contains(KeyModifiers::SHIFT);
+        let accounts = fleet.cells.len();
+        let last = accounts.saturating_sub(1);
+        let line = accounts < 2 || key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('Q') => self.ending = true,
@@ -334,8 +334,8 @@ impl App {
                     self.marked.insert(self.selected);
                 }
             }
-            KeyCode::Char('a') if self.marked.len() == bots => self.marked.clear(),
-            KeyCode::Char('a') => self.marked = (0..bots).collect(),
+            KeyCode::Char('a') if self.marked.len() == accounts => self.marked.clear(),
+            KeyCode::Char('a') => self.marked = (0..accounts).collect(),
             KeyCode::Esc => self.marked.clear(),
             KeyCode::PageUp => self.scroll = (self.scroll + 10).min(self.max_scroll.get()),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
@@ -396,7 +396,7 @@ fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
     draw_header(f, header, fleet, app, shown, list || app.grid);
     if app.grid {
         draw_grid(f, body, app, shown);
-    } else if let Some(bot) = shown.get(app.selected) {
+    } else if let Some(account) = shown.get(app.selected) {
         let pane = if list {
             let width = (3 + name_width(shown) + 1 + STATE_WIDTH) as u16;
             let [left, _, pane] = Layout::horizontal([Constraint::Length(width + 1), Constraint::Length(1), Constraint::Min(0)]).areas(body);
@@ -405,7 +405,7 @@ fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
         } else {
             body.inner(Margin::new(1, 0))
         };
-        draw_bot(f, pane, bot, app);
+        draw_account(f, pane, account, app);
     }
     draw_footer(f, footer, app, shown);
     if app.keys {
@@ -477,8 +477,8 @@ fn draw_header(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App, shown: &[Sho
     if overview {
         let online = shown.iter().filter(|s| s.snapshot.as_ref().is_some_and(|s| s.phase != "OFFLINE")).count();
         left.push(Span::raw(format!("  {online} of {} online", shown.len())).dark_gray());
-    } else if let Some(bot) = shown.get(app.selected).filter(|_| shown.len() > 1) {
-        left.push(Span::raw(format!("  {} {}/{}", bot.name, app.selected + 1, shown.len())).dark_gray());
+    } else if let Some(account) = shown.get(app.selected).filter(|_| shown.len() > 1) {
+        left.push(Span::raw(format!("  {} {}/{}", account.name, app.selected + 1, shown.len())).dark_gray());
     }
     if !app.marked.is_empty() {
         left.push(Span::raw(format!(" · {} marked", app.marked.len())).dark_gray());
@@ -508,11 +508,11 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         .enumerate()
         .skip(top)
         .take(height)
-        .map(|(i, bot)| {
+        .map(|(i, account)| {
             let selected = i == app.selected;
-            let name: String = bot.name.chars().take(width).collect();
+            let name: String = account.name.chars().take(width).collect();
             let name = Span::raw(format!("{name:<width$} "));
-            let (state, style) = state_of(bot.snapshot.as_ref());
+            let (state, style) = state_of(account.snapshot.as_ref());
             Line::from(vec![
                 Span::raw(if selected { "▌" } else { " " }).fg(ACCENT),
                 Span::raw(if app.marked.contains(&i) { "●" } else { " " }).fg(ACCENT),
@@ -589,7 +589,7 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     let row = app.selected / cols;
     let top = app.grid_top.get().min(row).max((row + 1).saturating_sub(rows));
     app.grid_top.set(top);
-    for (i, bot) in shown.iter().enumerate().skip(top * cols).take(rows * cols) {
+    for (i, account) in shown.iter().enumerate().skip(top * cols).take(rows * cols) {
         let at = i - top * cols;
         let edge = |col: usize| (usize::from(area.width) * col / cols) as u16;
         let rect = Rect {
@@ -598,18 +598,18 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
             width: edge(at % cols + 1) - edge(at % cols),
             height: CARD_HEIGHT,
         };
-        draw_card(f, rect.intersection(area), bot, i == app.selected, app.marked.contains(&i));
+        draw_card(f, rect.intersection(area), account, i == app.selected, app.marked.contains(&i));
     }
 }
 
-fn draw_card(f: &mut Frame, area: Rect, bot: &Shown, selected: bool, marked: bool) {
-    let (state, style) = state_of(bot.snapshot.as_ref());
+fn draw_card(f: &mut Frame, area: Rect, account: &Shown, selected: bool, marked: bool) {
+    let (state, style) = state_of(account.snapshot.as_ref());
     let state = format!(" {state} ");
     let mut name = Vec::new();
     if marked {
         name.push(Span::raw(" ●").fg(ACCENT));
     }
-    name.push(Span::raw(format!(" {} ", bot.name)).bold());
+    name.push(Span::raw(format!(" {} ", account.name)).bold());
     let name = clip(name, usize::from(area.width).saturating_sub(state.len() + 3));
     let (border, color) = if selected { (BorderType::Thick, ACCENT) } else { (BorderType::Plain, Color::DarkGray) };
     let block = Block::bordered()
@@ -619,14 +619,14 @@ fn draw_card(f: &mut Frame, area: Rect, bot: &Shown, selected: bool, marked: boo
         .title(Line::from(Span::styled(state, style.bold())).right_aligned())
         .padding(Padding::horizontal(1));
     let width = usize::from(area.width.saturating_sub(4));
-    f.render_widget(Paragraph::new(card(bot, width)).block(block), area);
+    f.render_widget(Paragraph::new(card(account, width)).block(block), area);
 }
 
-fn card(bot: &Shown, width: usize) -> Vec<Line<'static>> {
-    let Some(s) = &bot.snapshot else { return vec![Line::raw("waiting for the server").dark_gray()] };
+fn card(account: &Shown, width: usize) -> Vec<Line<'static>> {
+    let Some(s) = &account.snapshot else { return vec![Line::raw("waiting for the server").dark_gray()] };
     let online = !is_offline(s);
     let mut about = Vec::new();
-    if !s.user.is_empty() && !s.user.eq_ignore_ascii_case(&bot.name) {
+    if !s.user.is_empty() && !s.user.eq_ignore_ascii_case(&account.name) {
         about.push(s.user.clone());
     }
     if !s.server.is_empty() {
@@ -666,9 +666,9 @@ fn task(s: &Snapshot) -> Field {
     task
 }
 
-fn draw_bot(f: &mut Frame, area: Rect, bot: &Shown, app: &App) {
+fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
     let width = area.width as usize;
-    let mut lines = detail(bot, app.details, width);
+    let mut lines = detail(account, app.details, width);
     let log = log_lines(app, (area.height as usize).saturating_sub(lines.len() + 1), width);
     let mut rule = format!("── log · {}", app.filter.label());
     let scrolled = app.scroll.min(app.max_scroll.get());
@@ -681,16 +681,16 @@ fn draw_bot(f: &mut Frame, area: Rect, bot: &Shown, app: &App) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
-fn detail(bot: &Shown, full: bool, width: usize) -> Vec<Line<'static>> {
-    let Some(s) = &bot.snapshot else {
+fn detail(account: &Shown, full: bool, width: usize) -> Vec<Line<'static>> {
+    let Some(s) = &account.snapshot else {
         let (state, style) = state_of(None);
         return vec![
-            spread(vec![Span::raw(bot.name.clone()).bold()], vec![Span::styled(state, style.bold())], width),
+            spread(vec![Span::raw(account.name.clone()).bold()], vec![Span::styled(state, style.bold())], width),
             Line::raw("waiting for the server").dark_gray(),
         ];
     };
     let online = s.phase != "OFFLINE";
-    let mut lines = vec![identity(bot, s, width)];
+    let mut lines = vec![identity(account, s, width)];
     lines.extend(trouble(s).map(|t| fit(vec![t], width)));
     lines.push(fit(task(s), width));
     if online {
@@ -703,9 +703,9 @@ fn detail(bot: &Shown, full: bool, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn identity(bot: &Shown, s: &Snapshot, width: usize) -> Line<'static> {
-    let mut left = vec![Span::raw(bot.name.clone()).bold()];
-    if !s.user.is_empty() && !s.user.eq_ignore_ascii_case(&bot.name) {
+fn identity(account: &Shown, s: &Snapshot, width: usize) -> Line<'static> {
+    let mut left = vec![Span::raw(account.name.clone()).bold()];
+    if !s.user.is_empty() && !s.user.eq_ignore_ascii_case(&account.name) {
         left.push(Span::raw(format!(" ({})", s.user)));
     }
     if !s.server.is_empty() {
@@ -1005,24 +1005,24 @@ fn draw_keys(f: &mut Frame, area: Rect) {
         }
         vec![Span::raw(format!("{key:<11}")).bold(), Span::raw(format!("{word:<w$}", w = width - 11))]
     };
-    let rows = BOT_KEYS.len().max(SCRIPT_KEYS.len());
+    let rows = ACCOUNT_KEYS.len().max(SCRIPT_KEYS.len());
     let mut lines: Vec<Line> = (0..rows)
         .map(|i| {
-            let mut spans = BOT_KEYS.get(i).map_or_else(|| vec![Span::raw(" ".repeat(30))], |&k| cell(k, 30));
+            let mut spans = ACCOUNT_KEYS.get(i).map_or_else(|| vec![Span::raw(" ".repeat(30))], |&k| cell(k, 30));
             spans.extend(SCRIPT_KEYS.get(i).map(|&k| cell(k, 27)).unwrap_or_default());
             Line::from(spans)
         })
         .collect();
     lines.push(Line::default());
-    lines.push(Line::raw("Keys act on the marked bots, or the selected one.").dark_gray());
+    lines.push(Line::raw("Keys act on the marked accounts, or the selected one.").dark_gray());
     let rect = centered(area, 61, lines.len() as u16 + 2);
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(lines).block(Block::bordered().title(" keys ").padding(Padding::horizontal(1))), rect);
 }
 
-fn draw_ending(f: &mut Frame, area: Rect, bots: usize) {
+fn draw_ending(f: &mut Frame, area: Rect, accounts: usize) {
     f.buffer_mut().set_style(area, Style::new().fg(Color::DarkGray));
-    let (who, them) = if bots == 1 { ("the bot".to_string(), "it") } else { (format!("all {bots} bots"), "them") };
+    let (who, them) = if accounts == 1 { ("the account".to_string(), "it") } else { (format!("all {accounts} accounts"), "them") };
     let lines = vec![
         Line::raw(format!("Log out {who} and end the session?")).bold(),
         Line::raw(format!("Detaching leaves {them} running.")).dark_gray(),
@@ -1108,13 +1108,13 @@ mod tests {
         world
     }
 
-    fn fleet(bots: &[&str]) -> (Fleet, Arc<Hub>) {
-        let cells: Vec<Arc<BotCell>> = bots.iter().map(|b| Arc::new(BotCell::mirror(b))).collect();
+    fn fleet(accounts: &[&str]) -> (Fleet, Arc<Hub>) {
+        let cells: Vec<Arc<AccountCell>> = accounts.iter().map(|name| Arc::new(AccountCell::mirror(name))).collect();
         let hub = Arc::new(Hub::new("aqx", cells.clone(), Print::Quiet));
         (Fleet { title: "aqx".into(), cells, socket: PathBuf::new() }, hub)
     }
 
-    fn publish(hub: &Hub, cell: &BotCell, world: &World) {
+    fn publish(hub: &Hub, cell: &AccountCell, world: &World) {
         let now = Instant::now();
         let mut board: std::sync::MutexGuard<'_, Board> = cell.board();
         board.server = "Twilly".into();
@@ -1130,7 +1130,7 @@ mod tests {
         board.snapshot = Some(board.snapshot(&cell.name, "hero", &Phase::Ready, world, now));
     }
 
-    fn show(cell: &BotCell, snapshot: Snapshot) {
+    fn show(cell: &AccountCell, snapshot: Snapshot) {
         cell.board().snapshot = Some(snapshot);
     }
 
@@ -1139,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn the_selected_bot_shows_its_task_a_summary_and_its_log() {
+    fn the_selected_account_shows_its_task_a_summary_and_its_log() {
         let (fleet, hub) = fleet(&["main"]);
         publish(&hub, &fleet.cells[0], &farm_world());
         let mut app = App::default();
@@ -1188,7 +1188,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_shows_each_bot_and_who_keys_act_on() {
+    fn the_list_shows_each_account_and_who_keys_act_on() {
         let (fleet, hub) = fleet(&["main", "healer"]);
         publish(&hub, &fleet.cells[0], &farm_world());
         let mut app = App::default();
@@ -1208,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn g_shows_every_bot_as_a_card_and_arrows_move_across_the_grid() {
+    fn g_shows_every_account_as_a_card_and_arrows_move_across_the_grid() {
         let (fleet, hub) = fleet(&["main", "healer", "spare", "alt"]);
         publish(&hub, &fleet.cells[0], &farm_world());
         let detail = "this account logged in somewhere else";
@@ -1236,13 +1236,13 @@ mod tests {
         assert_eq!(app.selected, 0);
         press(&fleet, &mut app, KeyCode::Right);
         press(&fleet, &mut app, KeyCode::Enter);
-        assert!(screen(&fleet, &mut app, 140).contains("── log"), "enter opens the picked bot");
+        assert!(screen(&fleet, &mut app, 140).contains("── log"), "enter opens the picked account");
         assert_eq!(app.selected, 1);
     }
 
     #[test]
     fn the_grid_follows_the_selection_past_the_bottom() {
-        let names: Vec<String> = (0..30).map(|i| format!("bot{i:02}")).collect();
+        let names: Vec<String> = (0..30).map(|i| format!("alt{i:02}")).collect();
         let (fleet, _hub) = fleet(&names.iter().map(String::as_str).collect::<Vec<_>>());
         let mut app = App { grid: true, ..App::default() };
         screen(&fleet, &mut app, 100);
@@ -1250,12 +1250,12 @@ mod tests {
             press(&fleet, &mut app, KeyCode::Down);
         }
         let shown = screen(&fleet, &mut app, 100);
-        assert!(row(&shown, "┏ bot16").contains("STARTING"), "{shown}");
-        assert!(!shown.contains("bot00"));
+        assert!(row(&shown, "┏ alt16").contains("STARTING"), "{shown}");
+        assert!(!shown.contains("alt00"));
     }
 
     #[test]
-    fn a_narrow_terminal_hides_the_list_and_tab_switches_bots() {
+    fn a_narrow_terminal_hides_the_list_and_tab_switches_accounts() {
         let (fleet, hub) = fleet(&["main", "healer"]);
         publish(&hub, &fleet.cells[0], &farm_world());
         let mut app = App::default();
@@ -1267,10 +1267,10 @@ mod tests {
     }
 
     #[test]
-    fn an_offline_bot_shows_why_and_offers_to_log_in() {
+    fn an_offline_account_shows_why_and_offers_to_log_in() {
         let (fleet, _hub) = fleet(&["spare"]);
         let detail = "this account logged in somewhere else";
-        show(&fleet.cells[0], Snapshot { bot: "spare".into(), phase: "OFFLINE".into(), detail: detail.into(), ..Snapshot::default() });
+        show(&fleet.cells[0], Snapshot { account: "spare".into(), phase: "OFFLINE".into(), detail: detail.into(), ..Snapshot::default() });
         let shown = screen(&fleet, &mut App::default(), 100);
         assert!(row(&shown, "spare").contains("OFFLINE"));
         assert!(shown.contains(detail) && shown.contains("i log in"), "{shown}");
@@ -1339,15 +1339,15 @@ mod tests {
 
     #[test]
     fn the_list_follows_the_selection_past_the_bottom() {
-        let names: Vec<String> = (0..30).map(|i| format!("bot{i:02}")).collect();
+        let names: Vec<String> = (0..30).map(|i| format!("alt{i:02}")).collect();
         let (fleet, _hub) = fleet(&names.iter().map(String::as_str).collect::<Vec<_>>());
         let mut app = App::default();
         for _ in 0..25 {
             press(&fleet, &mut app, KeyCode::Down);
         }
         let shown = screen(&fleet, &mut app, 100);
-        assert!(row(&shown, "▌  bot25").contains("STARTING"), "{shown}");
-        assert!(!shown.contains("bot00"));
+        assert!(row(&shown, "▌  alt25").contains("STARTING"), "{shown}");
+        assert!(!shown.contains("alt00"));
     }
 
     #[test]
@@ -1356,9 +1356,9 @@ mod tests {
         let (fleet, _hub) = fleet(&names.iter().map(String::as_str).collect::<Vec<_>>());
         let mut app = App::default();
         press(&fleet, &mut app, KeyCode::Char('a'));
-        assert!(screen(&fleet, &mut app, 100).contains("→ 12 bots   o run"));
+        assert!(screen(&fleet, &mut app, 100).contains("→ 12 accounts   o run"));
         press(&fleet, &mut app, KeyCode::Char('o'));
-        assert!(screen(&fleet, &mut app, 100).contains(" run on 12 bots: █"));
+        assert!(screen(&fleet, &mut app, 100).contains(" run on 12 accounts: █"));
     }
 
     #[test]
@@ -1404,7 +1404,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bot_shows_starting_before_the_server_answers() {
+    fn an_account_shows_starting_before_the_server_answers() {
         let (fleet, _hub) = fleet(&["main"]);
         let shown = screen(&fleet, &mut App::default(), 100);
         for expected in ["STARTING", "waiting for the server", "── log · all"] {
@@ -1424,9 +1424,9 @@ mod tests {
     }
 
     #[test]
-    fn enter_in_the_end_dialog_logs_every_bot_out() {
+    fn enter_in_the_end_dialog_logs_every_account_out() {
         let controls: Vec<aqx_core::Control> = (0..2).map(|_| aqx_core::Control::new().unwrap()).collect();
-        let cells: Vec<Arc<BotCell>> = ["main", "alt"].iter().zip(&controls).map(|(b, c)| Arc::new(BotCell::local(b, c.stop_handle()))).collect();
+        let cells: Vec<Arc<AccountCell>> = ["main", "alt"].iter().zip(&controls).map(|(name, c)| Arc::new(AccountCell::local(name, c.stop_handle()))).collect();
         for cell in &cells {
             cell.board().online = true;
         }
@@ -1439,7 +1439,7 @@ mod tests {
         let logouts = || cells.iter().filter(|c| matches!(c.take_command(), Some(Command::Logout))).count();
 
         press(&fleet, &mut app, KeyCode::Char('Q'));
-        assert!(screen(&fleet, &mut app, 100).contains("Log out all 2 bots and end the session?"));
+        assert!(screen(&fleet, &mut app, 100).contains("Log out all 2 accounts and end the session?"));
         press(&fleet, &mut app, KeyCode::Char('x'));
         assert!(screen(&fleet, &mut app, 100).contains("end the session?"), "other keys leave the dialog open");
         assert_eq!(logouts(), 0, "and don't act, even x");
@@ -1461,7 +1461,7 @@ mod tests {
 
         assert!(!key(&mut app, ctrl_c), "the first ctrl+c only asks");
         let asked = screen(&fleet, &mut app, 100);
-        assert!(asked.contains("Log out all 2 bots and end the session?") && asked.contains("enter end it  q detach  esc stay"), "{asked}");
+        assert!(asked.contains("Log out all 2 accounts and end the session?") && asked.contains("enter end it  q detach  esc stay"), "{asked}");
         assert!(!key(&mut app, KeyEvent::from(KeyCode::Esc)), "esc stays");
         assert!(!screen(&fleet, &mut app, 100).contains("end the session?"));
 
@@ -1489,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_bot_shows_its_phase_before_pause_or_stall() {
+    fn a_closed_account_shows_its_phase_before_pause_or_stall() {
         let snapshot = |phase: &str| Snapshot { phase: phase.into(), paused: true, stalled: true, ..Snapshot::default() };
         assert_eq!(snapshot("READY").state(), "PAUSED");
         assert_eq!(snapshot("RECONNECTING").state(), "RECONNECTING");
@@ -1498,7 +1498,7 @@ mod tests {
     }
 
     #[test]
-    fn the_header_names_the_account_only_when_it_differs_from_the_bot() {
+    fn the_header_names_the_user_only_when_it_differs_from_the_account() {
         let (fleet, hub) = fleet(&["hero"]);
         publish(&hub, &fleet.cells[0], &farm_world());
         let shown = screen(&fleet, &mut App::default(), 110);

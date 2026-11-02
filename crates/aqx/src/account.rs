@@ -7,7 +7,7 @@ use aqx_core::{Control, Credentials, Disconnect, Event, Halt, LoginError, Phase,
 use aqx_script::{Outcome, ScriptError};
 
 use crate::config::{OnStall, Restart};
-use crate::hub::{BotCell, Command, Hub, Run};
+use crate::hub::{AccountCell, Command, Hub, Run};
 use crate::output::span;
 
 const WATCH_EVERY: Duration = Duration::from_millis(250);
@@ -78,48 +78,48 @@ enum Next {
     Quit(Result<(), String>),
 }
 
-struct Bot {
+struct Driver {
     spec: Spec,
-    cell: Arc<BotCell>,
+    cell: Arc<AccountCell>,
     hub: Arc<Hub>,
     wanted: Option<Script>,
     last: Option<Script>,
     ever_ready: bool,
 }
 
-pub fn run(spec: Spec, recorder: Option<Recorder>, control: Control, cell: Arc<BotCell>, hub: Arc<Hub>) -> Result<(), String> {
+pub fn run(spec: Spec, recorder: Option<Recorder>, control: Control, cell: Arc<AccountCell>, hub: Arc<Hub>) -> Result<(), String> {
     let sink: Sink = {
         let (hub, cell) = (hub.clone(), cell.clone());
         Rc::new(move |event: &Event| hub.record(&cell, event))
     };
     let mut session = Session::new(control, spec.creds.clone(), &spec.version, recorder, sink);
     session.watch(WATCH_EVERY, watcher(&spec, &cell, &hub));
-    let mut bot = Bot { spec, cell, hub, wanted: None, last: None, ever_ready: false };
-    bot.publish(&session, String::new());
+    let mut driver = Driver { spec, cell, hub, wanted: None, last: None, ever_ready: false };
+    driver.publish(&session, String::new());
     let mut result = Ok(());
-    while let Some(login) = bot.cell.next_login() {
+    while let Some(login) = driver.cell.next_login() {
         session.clear_stop();
-        if bot.cell.has_commands() {
+        if driver.cell.has_commands() {
             session.stop_handle().stop();
         }
-        bot.begin(match login {
+        driver.begin(match login {
             Command::Run { script, args } => Some(Script { path: script, args }),
-            _ => bot.spec.script.clone(),
+            _ => driver.spec.script.clone(),
         });
-        result = bot.drive(&mut session);
-        bot.cell.board().leaving = true;
+        result = driver.drive(&mut session);
+        driver.cell.board().leaving = true;
         if let Err(e) = &result {
-            bot.say(format!("stopped: {e}"));
+            driver.say(format!("stopped: {e}"));
         }
         session.logout();
-        bot.say("logged out");
-        bot.cell.go_offline();
-        bot.publish(&session, result.as_ref().err().cloned().unwrap_or_default());
+        driver.say("logged out");
+        driver.cell.go_offline();
+        driver.publish(&session, result.as_ref().err().cloned().unwrap_or_default());
     }
     result
 }
 
-fn watcher(spec: &Spec, cell: &Arc<BotCell>, hub: &Arc<Hub>) -> impl FnMut(&Phase, &World) + 'static {
+fn watcher(spec: &Spec, cell: &Arc<AccountCell>, hub: &Arc<Hub>) -> impl FnMut(&Phase, &World) + 'static {
     let (cell, hub, user) = (cell.clone(), hub.clone(), spec.creds.user.clone());
     let (stall_after, on_stall) = (spec.stall_after, spec.on_stall);
     let mut status_at = Instant::now() + STATUS_EVERY;
@@ -154,7 +154,7 @@ fn watcher(spec: &Spec, cell: &Arc<BotCell>, hub: &Arc<Hub>) -> impl FnMut(&Phas
     }
 }
 
-impl Bot {
+impl Driver {
     fn begin(&mut self, script: Option<Script>) {
         self.cell.board().reset_stats();
         self.wanted = script;
@@ -242,7 +242,7 @@ impl Bot {
             Err(ScriptError::Halted(Halt::Stopped)) => self.command(session),
             Err(ScriptError::Halted(Halt::Closed(why))) => {
                 if why.retryable() {
-                    self.say("the script starts again once the bot is back");
+                    self.say("the script starts again once the account is back");
                 }
                 self.lost(session, why)
             }
@@ -348,15 +348,15 @@ mod tests {
 
     use super::*;
     use crate::fake::{FARM, Servers, Wire};
-    use crate::hub::{Board, BotCell, Hub, Print};
+    use crate::hub::{Board, AccountCell, Hub, Print};
 
     struct Running {
-        cell: Arc<BotCell>,
+        cell: Arc<AccountCell>,
         thread: JoinHandle<Result<(), String>>,
     }
 
     fn script(name: &str, source: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("aqx-bot-tests-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("aqx-account-tests-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{name}.ts"));
         std::fs::write(&path, source).unwrap();
@@ -380,7 +380,7 @@ mod tests {
         };
         tweak(&mut spec);
         let control = Control::new().unwrap();
-        let cell = Arc::new(BotCell::local("main", control.stop_handle()));
+        let cell = Arc::new(AccountCell::local("main", control.stop_handle()));
         let hub = Arc::new(Hub::new("test", vec![cell.clone()], Print::Quiet));
         cell.send(Command::Login).unwrap();
         let thread = {
@@ -403,16 +403,16 @@ mod tests {
         }
     }
 
-    fn log(cell: &BotCell) -> Vec<String> {
+    fn log(cell: &AccountCell) -> Vec<String> {
         cell.board().log.iter().map(|l| l.text.clone()).collect()
     }
 
-    fn count(cell: &BotCell, prefix: &str) -> usize {
+    fn count(cell: &AccountCell, prefix: &str) -> usize {
         log(cell).iter().filter(|l| l.starts_with(prefix)).count()
     }
 
     #[track_caller]
-    fn wait_for(cell: &BotCell, what: &str, done: impl Fn(&Board) -> bool) {
+    fn wait_for(cell: &AccountCell, what: &str, done: impl Fn(&Board) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !done(&cell.board()) {
             assert!(Instant::now() < deadline, "never {what}: {:#?}", log(cell));
@@ -430,9 +430,9 @@ mod tests {
             }
         });
         let path = script("restart-after-drop", r#"import { map, wait } from "aqx"; map.jump("r1"); wait.ms(300); console.log("made it");"#);
-        let bot = launch(&servers, Some(path), |_| {});
-        let cell = bot.cell.clone();
-        let result = bot.finish();
+        let account = launch(&servers, Some(path), |_| {});
+        let cell = account.cell.clone();
+        let result = account.finish();
         assert!(result.is_ok(), "{result:?}: {:#?}", log(&cell));
         assert_eq!(servers.logins.load(Ordering::SeqCst), 2);
         assert_eq!(count(&cell, "running "), 2, "{:#?}", log(&cell));
@@ -442,16 +442,16 @@ mod tests {
     }
 
     #[test]
-    fn logging_in_elsewhere_takes_the_bot_offline() {
+    fn logging_in_elsewhere_takes_the_account_offline() {
         let servers = Servers::start(FARM, |msg: &str, wire: &mut Wire| {
             if msg.contains("%moveToCell%5%r1%") {
                 wire.send("%xt%multiLoginWarning%-1%");
             }
         });
         let path = script("elsewhere", r#"import { map, wait } from "aqx"; map.jump("r1"); wait.ms(3000);"#);
-        let bot = launch(&servers, Some(path), |_| {});
-        let cell = bot.cell.clone();
-        let result = bot.finish();
+        let account = launch(&servers, Some(path), |_| {});
+        let cell = account.cell.clone();
+        let result = account.finish();
         assert!(matches!(&result, Err(e) if e.contains("logged in somewhere else")), "{result:?}");
         assert_eq!(servers.logins.load(Ordering::SeqCst), 1);
         let board = cell.board();
@@ -461,66 +461,66 @@ mod tests {
     }
 
     #[test]
-    fn commands_run_pause_stop_and_log_out_an_idle_bot() {
+    fn commands_run_pause_stop_and_log_out_an_idle_account() {
         let servers = Servers::start(FARM, |_: &str, _: &mut Wire| {});
-        let bot = launch(&servers, None, |s| s.exit_when_done = false);
-        wait_for(&bot.cell, "logged in", |b| b.ready_since.is_some());
+        let account = launch(&servers, None, |s| s.exit_when_done = false);
+        wait_for(&account.cell, "logged in", |b| b.ready_since.is_some());
         let path = script("forever", r#"import { wait } from "aqx"; wait.until(() => false);"#);
-        bot.cell.send(Command::Run { script: path, args: Vec::new() }).unwrap();
-        wait_for(&bot.cell, "ran the script", |b| b.run == Run::Running);
-        bot.cell.send(Command::Pause).unwrap();
-        assert!(bot.cell.board().paused);
-        bot.cell.send(Command::Stop).unwrap();
-        wait_for(&bot.cell, "stopped the script", |b| b.run == Run::Stopped);
-        bot.cell.send(Command::Logout).unwrap();
-        let cell = bot.cell.clone();
-        assert!(bot.finish().is_ok());
-        assert!(cell.send(Command::Stop).is_err(), "an offline bot takes no commands");
+        account.cell.send(Command::Run { script: path, args: Vec::new() }).unwrap();
+        wait_for(&account.cell, "ran the script", |b| b.run == Run::Running);
+        account.cell.send(Command::Pause).unwrap();
+        assert!(account.cell.board().paused);
+        account.cell.send(Command::Stop).unwrap();
+        wait_for(&account.cell, "stopped the script", |b| b.run == Run::Stopped);
+        account.cell.send(Command::Logout).unwrap();
+        let cell = account.cell.clone();
+        assert!(account.finish().is_ok());
+        assert!(cell.send(Command::Stop).is_err(), "an offline account takes no commands");
         servers.stop();
     }
 
     #[test]
-    fn a_logged_out_bot_logs_in_again() {
+    fn a_logged_out_account_logs_in_again() {
         let servers = Servers::start(FARM, |_: &str, _: &mut Wire| {});
-        let bot = launch(&servers, None, |s| s.exit_when_done = false);
-        wait_for(&bot.cell, "logged in", |b| b.ready_since.is_some());
-        let first = bot.cell.board().ready_since;
-        bot.cell.send(Command::Logout).unwrap();
-        wait_for(&bot.cell, "went offline", |b| !b.online);
-        let offline = bot.cell.board().snapshot.clone().expect("a snapshot once offline");
+        let account = launch(&servers, None, |s| s.exit_when_done = false);
+        wait_for(&account.cell, "logged in", |b| b.ready_since.is_some());
+        let first = account.cell.board().ready_since;
+        account.cell.send(Command::Logout).unwrap();
+        wait_for(&account.cell, "went offline", |b| !b.online);
+        let offline = account.cell.board().snapshot.clone().expect("a snapshot once offline");
         assert_eq!((offline.state(), &offline.game, offline.up_secs), ("OFFLINE", &None, 0));
-        bot.cell.send(Command::Login).unwrap();
-        wait_for(&bot.cell, "logged in again", |b| b.ready_since > first);
+        account.cell.send(Command::Login).unwrap();
+        wait_for(&account.cell, "logged in again", |b| b.ready_since > first);
         assert_eq!(servers.logins.load(Ordering::SeqCst), 2);
-        bot.cell.send(Command::Logout).unwrap();
-        assert!(bot.finish().is_ok());
+        account.cell.send(Command::Logout).unwrap();
+        assert!(account.finish().is_ok());
         servers.stop();
     }
 
     #[test]
-    fn running_a_script_on_an_offline_bot_logs_it_in() {
+    fn running_a_script_on_an_offline_account_logs_it_in() {
         let servers = Servers::start(FARM, |_: &str, _: &mut Wire| {});
-        let bot = launch(&servers, None, |s| s.exit_when_done = false);
-        wait_for(&bot.cell, "logged in", |b| b.ready_since.is_some());
-        bot.cell.send(Command::Logout).unwrap();
-        wait_for(&bot.cell, "went offline", |b| !b.online);
+        let account = launch(&servers, None, |s| s.exit_when_done = false);
+        wait_for(&account.cell, "logged in", |b| b.ready_since.is_some());
+        account.cell.send(Command::Logout).unwrap();
+        wait_for(&account.cell, "went offline", |b| !b.online);
         let path = script("after-offline", r#"console.log("back online");"#);
-        bot.cell.send(Command::Run { script: path, args: Vec::new() }).unwrap();
-        wait_for(&bot.cell, "ran the script", |b| b.log.iter().any(|l| l.text == "back online"));
+        account.cell.send(Command::Run { script: path, args: Vec::new() }).unwrap();
+        wait_for(&account.cell, "ran the script", |b| b.log.iter().any(|l| l.text == "back online"));
         assert_eq!(servers.logins.load(Ordering::SeqCst), 2);
-        bot.cell.send(Command::Logout).unwrap();
-        assert!(bot.finish().is_ok());
+        account.cell.send(Command::Logout).unwrap();
+        assert!(account.finish().is_ok());
         servers.stop();
     }
 
     #[test]
     fn a_script_error_names_its_path_once() {
-        let missing = std::env::temp_dir().join("aqx-bot-tests-no-such-script.ts");
+        let missing = std::env::temp_dir().join("aqx-account-tests-no-such-script.ts");
         for path in [missing, script("broken", "let x = ;")] {
             let servers = Servers::start(FARM, |_: &str, _: &mut Wire| {});
-            let bot = launch(&servers, Some(path.clone()), |_| {});
-            let cell = bot.cell.clone();
-            let result = bot.finish();
+            let account = launch(&servers, Some(path.clone()), |_| {});
+            let cell = account.cell.clone();
+            let result = account.finish();
             let shown = path.display().to_string();
             assert!(matches!(&result, Err(e) if e.matches(&shown).count() == 1), "{result:?}");
             let error = log(&cell).into_iter().find(|l| l.starts_with("error: ")).expect("an error line");
@@ -532,15 +532,15 @@ mod tests {
     #[test]
     fn logging_in_right_after_logging_out_comes_back_online() {
         let servers = Servers::start(FARM, |_: &str, _: &mut Wire| {});
-        let bot = launch(&servers, None, |s| s.exit_when_done = false);
-        wait_for(&bot.cell, "logged in", |b| b.ready_since.is_some());
-        let first = bot.cell.board().ready_since;
-        bot.cell.send(Command::Logout).unwrap();
-        bot.cell.send(Command::Login).unwrap();
-        wait_for(&bot.cell, "logged in again", |b| b.ready_since > first);
+        let account = launch(&servers, None, |s| s.exit_when_done = false);
+        wait_for(&account.cell, "logged in", |b| b.ready_since.is_some());
+        let first = account.cell.board().ready_since;
+        account.cell.send(Command::Logout).unwrap();
+        account.cell.send(Command::Login).unwrap();
+        wait_for(&account.cell, "logged in again", |b| b.ready_since > first);
         assert_eq!(servers.logins.load(Ordering::SeqCst), 2);
-        bot.cell.send(Command::Logout).unwrap();
-        assert!(bot.finish().is_ok());
+        account.cell.send(Command::Logout).unwrap();
+        assert!(account.finish().is_ok());
         servers.stop();
     }
 
@@ -548,14 +548,14 @@ mod tests {
     fn a_stalled_script_is_restarted() {
         let servers = Servers::start(FARM, |_: &str, _: &mut Wire| {});
         let path = script("stalls", r#"import { wait } from "aqx"; wait.ms(60000);"#);
-        let bot = launch(&servers, Some(path), |s| {
+        let account = launch(&servers, Some(path), |s| {
             s.stall_after = Duration::from_millis(300);
             s.on_stall = OnStall::Restart;
         });
-        wait_for(&bot.cell, "restarted", |b| b.log.iter().filter(|l| l.text.starts_with("running ")).count() >= 2);
-        assert!(log(&bot.cell).iter().any(|l| l.contains("stalled")));
-        bot.cell.send(Command::Logout).unwrap();
-        assert!(bot.finish().is_ok());
+        wait_for(&account.cell, "restarted", |b| b.log.iter().filter(|l| l.text.starts_with("running ")).count() >= 2);
+        assert!(log(&account.cell).iter().any(|l| l.contains("stalled")));
+        account.cell.send(Command::Logout).unwrap();
+        assert!(account.finish().is_ok());
         servers.stop();
     }
 
@@ -563,32 +563,32 @@ mod tests {
     fn a_failing_script_restarts_on_error() {
         let servers = Servers::start(FARM, |_: &str, _: &mut Wire| {});
         let path = script("fails", r#"throw new Error("boom");"#);
-        let bot = launch(&servers, Some(path), |s| s.restart = Restart::OnError);
-        wait_for(&bot.cell, "retried", |b| b.log.iter().filter(|l| l.text.starts_with("running ")).count() >= 2);
-        assert!(log(&bot.cell).iter().any(|l| l.contains("Error: boom")));
-        bot.cell.send(Command::Logout).unwrap();
-        assert!(bot.finish().is_ok());
+        let account = launch(&servers, Some(path), |s| s.restart = Restart::OnError);
+        wait_for(&account.cell, "retried", |b| b.log.iter().filter(|l| l.text.starts_with("running ")).count() >= 2);
+        assert!(log(&account.cell).iter().any(|l| l.contains("Error: boom")));
+        account.cell.send(Command::Logout).unwrap();
+        assert!(account.finish().is_ok());
         servers.stop();
     }
 
     #[test]
     fn stopping_aqx_run_without_a_script_keeps_it_online() {
         let servers = Servers::start(FARM, |_: &str, _: &mut Wire| {});
-        let bot = launch(&servers, None, |_| {});
-        wait_for(&bot.cell, "logged in", |b| b.ready_since.is_some());
-        bot.cell.send(Command::Stop).unwrap();
+        let account = launch(&servers, None, |_| {});
+        wait_for(&account.cell, "logged in", |b| b.ready_since.is_some());
+        account.cell.send(Command::Stop).unwrap();
         thread::sleep(Duration::from_millis(300));
-        assert!(!bot.cell.offline(), "{:#?}", log(&bot.cell));
-        bot.cell.send(Command::Logout).unwrap();
-        assert!(bot.finish().is_ok());
+        assert!(!account.cell.offline(), "{:#?}", log(&account.cell));
+        account.cell.send(Command::Logout).unwrap();
+        assert!(account.finish().is_ok());
         servers.stop();
     }
 
     #[test]
     fn aqx_run_gives_up_when_the_first_login_fails() {
         let servers = Servers::start(FARM, |_: &str, _: &mut Wire| {});
-        let bot = launch(&servers, None, |s| s.creds.api = "http://127.0.0.1:1".into());
-        let result = bot.finish();
+        let account = launch(&servers, None, |s| s.creds.api = "http://127.0.0.1:1".into());
+        let result = account.finish();
         assert!(matches!(&result, Err(e) if e.contains("login request failed")), "{result:?}");
         servers.stop();
     }
@@ -603,13 +603,13 @@ mod tests {
             }
         });
         let path = script("no-stall", r#"import { map, wait } from "aqx"; map.jump("r1"); wait.ms(100);"#);
-        let bot = launch(&servers, Some(path), |s| {
+        let account = launch(&servers, Some(path), |s| {
             s.stall_after = Duration::from_millis(1000);
             s.on_stall = OnStall::Restart;
             s.relogin = Backoff::new(Duration::from_millis(2500), Duration::from_millis(2500));
         });
-        let cell = bot.cell.clone();
-        assert!(bot.finish().is_ok());
+        let cell = account.cell.clone();
+        assert!(account.finish().is_ok());
         assert!(!log(&cell).iter().any(|l| l.contains("stalled")), "{:#?}", log(&cell));
         assert_eq!(count(&cell, "running "), 2);
         servers.stop();

@@ -4,13 +4,13 @@ use std::time::Duration;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer};
 
-use crate::bot::Script;
+use crate::account::Script;
 
 const SERVER: &str = "Game server to join, e.g. \"Twilly\". `aqx servers` lists them.";
 const API: &str = "Host that takes the login. Defaults to https://game.aq.com.";
 const ROOM: &str = "Room number scripts read as `settings.room`.";
-const STALL_AFTER: &str = "How long a running script can go without progress before the bot counts as stalled, like \"90s\", \"5m\" or \"1h\". Defaults to 5m.";
-const ON_STALL: &str = "What happens when the bot stalls. Defaults to warn.";
+const STALL_AFTER: &str = "How long a running script can go without progress before the account counts as stalled, like \"90s\", \"5m\" or \"1h\". Defaults to 5m.";
+const ON_STALL: &str = "What happens when the account stalls. Defaults to warn.";
 const RESTART: &str = "Whether to rerun the script when it throws. Defaults to never.";
 
 #[derive(Deserialize, JsonSchema)]
@@ -18,11 +18,11 @@ const RESTART: &str = "Whether to rerun the script when it throws. Defaults to n
 #[schemars(title = "aqx.toml")]
 pub struct Config {
     #[serde(default)]
-    #[schemars(description = "Settings for every bot. A [[bot]] can override each one.")]
+    #[schemars(description = "Settings for every account. An [[account]] can override each one.")]
     pub defaults: Settings,
-    #[serde(default, rename = "bot")]
+    #[serde(default, rename = "account")]
     #[schemars(description = "One account to log in.")]
-    pub bots: Vec<BotConfig>,
+    pub accounts: Vec<AccountConfig>,
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Default, Debug, PartialEq, Eq)]
@@ -59,7 +59,7 @@ pub enum OnStall {
 #[serde(rename_all = "kebab-case")]
 pub enum Restart {
     #[default]
-    #[schemars(description = "Leave the bot idle when the script throws.")]
+    #[schemars(description = "Leave the account idle when the script throws.")]
     Never,
     #[schemars(description = "Rerun the script with backoff when it throws.")]
     OnError,
@@ -67,14 +67,14 @@ pub enum Restart {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct BotConfig {
-    #[schemars(description = "How aqx ps, aqx ctl, the TUI and the logs refer to the bot. Defaults to user.")]
+pub struct AccountConfig {
+    #[schemars(description = "How aqx ps, aqx ctl, the TUI and the logs refer to the account. Defaults to user.")]
     name: Option<String>,
     #[schemars(description = "Account username.")]
     pub user: String,
     #[schemars(description = "Account password.")]
     pub password: String,
-    #[schemars(description = "Script to run after login, relative to this file. Without one the bot waits for aqx ctl or the TUI.")]
+    #[schemars(description = "Script to run after login, relative to this file. Without one the account waits for aqx ctl or the TUI.")]
     script: Option<PathBuf>,
     #[serde(default)]
     #[schemars(description = "Script input read by script.args(). Values are strings, numbers or booleans.", schema_with = "args_schema")]
@@ -121,31 +121,31 @@ pub fn load(explicit: Option<&Path>) -> Result<(Config, PathBuf), String> {
     let path = std::fs::canonicalize(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let config: Config = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut names: Vec<&str> = config.bots.iter().map(BotConfig::name).collect();
+    let mut names: Vec<&str> = config.accounts.iter().map(AccountConfig::name).collect();
     names.sort_unstable();
     if let Some(twice) = names.windows(2).find(|w| w[0] == w[1]) {
-        return Err(format!("{}: two bots are named {}; give one a `name`", path.display(), twice[0]));
+        return Err(format!("{}: two accounts are named {}; give one a `name`", path.display(), twice[0]));
     }
     warn_if_others_can_read(&path);
     Ok((config, path))
 }
 
 impl Config {
-    pub fn bot(&self, name: Option<&str>) -> Result<&BotConfig, String> {
-        match (name, &self.bots[..]) {
-            (Some(name), bots) => bots
+    pub fn account(&self, name: Option<&str>) -> Result<&AccountConfig, String> {
+        match (name, &self.accounts[..]) {
+            (Some(name), accounts) => accounts
                 .iter()
-                .find(|b| b.name() == name)
-                .or_else(|| bots.iter().find(|b| b.user.eq_ignore_ascii_case(name)))
-                .ok_or_else(|| format!("no [[bot]] named {name}")),
+                .find(|a| a.name() == name)
+                .or_else(|| accounts.iter().find(|a| a.user.eq_ignore_ascii_case(name)))
+                .ok_or_else(|| format!("no [[account]] named {name}")),
             (None, [only]) => Ok(only),
-            (None, []) => Err("the config has no [[bot]]".into()),
-            (None, _) => Err("the config has several bots; pick one with -a NAME".into()),
+            (None, []) => Err("the config has no [[account]]".into()),
+            (None, _) => Err("the config has several accounts; pick one with -a NAME".into()),
         }
     }
 }
 
-impl BotConfig {
+impl AccountConfig {
     pub fn name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.user)
     }
@@ -163,7 +163,7 @@ impl BotConfig {
 
     pub fn script(&self, config: &Path) -> Result<Option<Script>, String> {
         let Some(script) = &self.script else {
-            return if self.args.is_empty() { Ok(None) } else { Err(format!("bot {} has args but no script", self.name())) };
+            return if self.args.is_empty() { Ok(None) } else { Err(format!("account {} has args but no script", self.name())) };
         };
         let path = if script.is_absolute() { script.clone() } else { config.parent().unwrap_or(Path::new(".")).join(script) };
         Ok(Some(Script { path: std::path::absolute(&path).unwrap_or(path), args: self.script_args()? }))
@@ -177,7 +177,7 @@ impl BotConfig {
             return Ok(None);
         }
         let Some(mut script) = self.script(config)? else {
-            return if args.is_empty() { Ok(None) } else { Err(format!("--arg needs a script, and bot {} has none", self.name())) };
+            return if args.is_empty() { Ok(None) } else { Err(format!("--arg needs a script, and account {} has none", self.name())) };
         };
         for (key, value) in args {
             match script.args.iter_mut().find(|(k, _)| *k == key) {
@@ -197,7 +197,7 @@ impl BotConfig {
                     toml::Value::Integer(n) => n.to_string(),
                     toml::Value::Float(f) => f.to_string(),
                     toml::Value::Boolean(b) => b.to_string(),
-                    other => return Err(format!("bot {}: args.{key} is a {}; use a string, number or boolean", self.name(), other.type_str())),
+                    other => return Err(format!("account {}: args.{key} is a {}; use a string, number or boolean", self.name(), other.type_str())),
                 };
                 Ok((key.clone(), text))
             })
@@ -246,7 +246,7 @@ fn warn_if_others_can_read(path: &Path) {
 mod tests {
     use super::*;
 
-    const TWO_BOTS: &str = r#"
+    const TWO_ACCOUNTS: &str = r#"
         [defaults]
         server = "Twilly"
         api = "http://127.0.0.1:8787"
@@ -255,13 +255,13 @@ mod tests {
         on_stall = "relogin"
         restart = "on-error"
 
-        [[bot]]
+        [[account]]
         user = "Hero"
         password = "x"
         script = "scripts/void-aura.ts"
         args = { target = 7500, batch = 5, fast = true, label = "a=b" }
 
-        [[bot]]
+        [[account]]
         name = "healer"
         user = "medic"
         password = "y"
@@ -277,34 +277,34 @@ mod tests {
     }
 
     #[test]
-    fn a_bot_is_named_after_its_user_unless_it_has_a_name() {
-        let config: Config = toml::from_str(TWO_BOTS).unwrap();
-        assert_eq!(config.bot(Some("Hero")).unwrap().name(), "Hero");
-        assert_eq!(config.bot(Some("hero")).unwrap().name(), "Hero", "users match case-insensitively");
-        assert_eq!(config.bot(Some("healer")).unwrap().user, "medic");
-        assert_eq!(config.bot(Some("medic")).unwrap().name(), "healer", "-a also takes the user");
-        assert!(config.bot(None).is_err());
-        assert!(config.bot(Some("nobody")).is_err());
-        let one: Config = toml::from_str("[[bot]]\nuser = \"hero\"\npassword = \"x\"").unwrap();
-        assert_eq!(one.bot(None).unwrap().name(), "hero");
+    fn an_account_is_named_after_its_user_unless_it_has_a_name() {
+        let config: Config = toml::from_str(TWO_ACCOUNTS).unwrap();
+        assert_eq!(config.account(Some("Hero")).unwrap().name(), "Hero");
+        assert_eq!(config.account(Some("hero")).unwrap().name(), "Hero", "users match case-insensitively");
+        assert_eq!(config.account(Some("healer")).unwrap().user, "medic");
+        assert_eq!(config.account(Some("medic")).unwrap().name(), "healer", "-a also takes the user");
+        assert!(config.account(None).is_err());
+        assert!(config.account(Some("nobody")).is_err());
+        let one: Config = toml::from_str("[[account]]\nuser = \"hero\"\npassword = \"x\"").unwrap();
+        assert_eq!(one.account(None).unwrap().name(), "hero");
     }
 
     #[test]
-    fn a_bot_overrides_any_default() {
-        let config: Config = toml::from_str(TWO_BOTS).unwrap();
+    fn an_account_overrides_any_default() {
+        let config: Config = toml::from_str(TWO_ACCOUNTS).unwrap();
         let d = &config.defaults;
-        let hero = config.bot(Some("Hero")).unwrap().settings(d);
+        let hero = config.account(Some("Hero")).unwrap().settings(d);
         assert_eq!(hero, *d);
-        let healer = config.bot(Some("healer")).unwrap().settings(d);
+        let healer = config.account(Some("healer")).unwrap().settings(d);
         assert_eq!(healer.server.as_deref(), Some("Yorumi"));
         assert_eq!((healer.stall_after, healer.on_stall), (Some(Duration::from_secs(1200)), Some(OnStall::Warn)));
         assert_eq!((healer.room, healer.restart, healer.api.as_deref()), (Some(12345), Some(Restart::OnError), Some("http://127.0.0.1:8787")));
     }
 
     #[test]
-    fn aqx_run_takes_the_bots_script_unless_given_another() {
-        let config: Config = toml::from_str(TWO_BOTS).unwrap();
-        let (hero, healer) = (config.bot(Some("Hero")).unwrap(), config.bot(Some("healer")).unwrap());
+    fn aqx_run_takes_the_accounts_script_unless_given_another() {
+        let config: Config = toml::from_str(TWO_ACCOUNTS).unwrap();
+        let (hero, healer) = (config.account(Some("Hero")).unwrap(), config.account(Some("healer")).unwrap());
         let file = Path::new("/srv/aqx/aqx.toml");
         let cli = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
 
@@ -317,22 +317,22 @@ mod tests {
 
         assert!(hero.run_script(file, None, Vec::new(), true).unwrap().is_none(), "--idle skips the script");
         assert!(healer.run_script(file, None, Vec::new(), false).unwrap().is_none());
-        assert!(healer.run_script(file, None, cli(&[("n", "1")]), false).unwrap_err().contains("bot healer has none"));
+        assert!(healer.run_script(file, None, cli(&[("n", "1")]), false).unwrap_err().contains("account healer has none"));
     }
 
     #[test]
     fn rejects_unknown_keys_bad_values_and_twins() {
-        assert!(toml::from_str::<Config>("[[bot]]\nuser = \"hero\"\npasword = \"x\"").is_err());
+        assert!(toml::from_str::<Config>("[[account]]\nuser = \"hero\"\npasword = \"x\"").is_err());
         assert!(toml::from_str::<Config>("[defaults]\nstall_after = \"soon\"").is_err());
-        assert!(toml::from_str::<Config>("[[bot]]\nuser = \"hero\"\npassword = \"x\"\non_stall = \"panic\"").is_err());
-        assert!(toml::from_str::<Config>("[defaults]\nscript = \"a.ts\"").is_err(), "a script belongs to a bot");
+        assert!(toml::from_str::<Config>("[[account]]\nuser = \"hero\"\npassword = \"x\"\non_stall = \"panic\"").is_err());
+        assert!(toml::from_str::<Config>("[defaults]\nscript = \"a.ts\"").is_err(), "a script belongs to an account");
         assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
         assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
         let dir = std::env::temp_dir().join(format!("aqx-config-tests-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let twins = dir.join("twins.toml");
-        std::fs::write(&twins, "[[bot]]\nuser = \"hero\"\npassword = \"x\"\n\n[[bot]]\nname = \"hero\"\nuser = \"other\"\npassword = \"y\"\n").unwrap();
+        std::fs::write(&twins, "[[account]]\nuser = \"hero\"\npassword = \"x\"\n\n[[account]]\nname = \"hero\"\nuser = \"other\"\npassword = \"y\"\n").unwrap();
         std::fs::set_permissions(&twins, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
-        assert!(load(Some(&twins)).err().unwrap().contains("two bots are named hero"));
+        assert!(load(Some(&twins)).err().unwrap().contains("two accounts are named hero"));
     }
 }

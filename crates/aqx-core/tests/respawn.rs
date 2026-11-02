@@ -6,7 +6,7 @@ use aqx_core::State;
 use server::{FARM, Fake};
 
 #[test]
-fn after_respawning_the_bot_goes_back_to_the_cell_it_died_in() {
+fn after_respawning_the_player_goes_back_to_the_cell_it_died_in() {
     let mut killed = false;
     let mut fake = Fake::start(FARM, move |msg, wire| {
         if msg.contains("%moveToCell%5%r2%") && !killed {
