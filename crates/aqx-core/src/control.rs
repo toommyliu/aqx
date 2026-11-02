@@ -31,10 +31,6 @@ impl StopHandle {
         self.stop.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn waker(&self) -> Arc<Waker> {
-        self.waker.clone()
-    }
-
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         let _ = self.waker.wake();

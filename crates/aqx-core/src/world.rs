@@ -183,7 +183,7 @@ impl Faction {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct Aura {
     pub name: String,
     pub stacks: u32,

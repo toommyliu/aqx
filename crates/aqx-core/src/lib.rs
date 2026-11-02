@@ -6,7 +6,6 @@ mod pacer;
 mod quests;
 mod record;
 mod session;
-mod team;
 mod world;
 
 pub use actions::{ActError, Fight, Predicate, Step};
@@ -16,5 +15,4 @@ pub use event::{Event, Place};
 pub use quests::{Need, Quest, QuestStatus, Reward, RewardKind};
 pub use record::Recorder;
 pub use session::{CLIENT_VERSION, Credentials, Disconnect, Goal, Halt, Hook, LoginError, Phase, Session, Sink, Target};
-pub use team::{Live, Member, Membership, Team, Waiting};
 pub use world::{Area, Aura, Faction, Item, ItemRef, Me, Monster, Player, Shop, ShopItem, Skill, SkillTarget, State, Vitals, World, reduce};
