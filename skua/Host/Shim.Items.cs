@@ -42,6 +42,8 @@ public sealed partial class Shim
 
     bool LoadBank()
     {
+        if (View("bank") is not null)
+            return true;
         if (!Act("load_bank"))
             return false;
         StrongReferenceMessenger.Default.Send(new BankLoadedMessage());
