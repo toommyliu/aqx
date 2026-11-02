@@ -283,6 +283,7 @@ pub fn session_for(config: &Path) -> Result<Option<PathBuf>, String> {
 
 #[derive(Deserialize)]
 struct Resumable {
+    #[serde(alias = "bot")]
     account: String,
     phase: String,
     run: String,
@@ -292,8 +293,12 @@ struct Resumable {
 }
 
 pub fn to_resume(path: &Path) -> Result<Vec<(String, Command)>, String> {
-    let reply = Conn::ask(path, &json!({ "op": "snapshot" }))?;
-    let accounts: Vec<Resumable> = serde_json::from_value(reply["accounts"].clone()).map_err(|e| format!("unreadable snapshot: {e}"))?;
+    resumable(&Conn::ask(path, &json!({ "op": "snapshot" }))?)
+}
+
+fn resumable(reply: &Value) -> Result<Vec<(String, Command)>, String> {
+    let listed = reply.get("accounts").or_else(|| reply.get("bots")).cloned().unwrap_or_default();
+    let accounts: Vec<Resumable> = serde_json::from_value(listed).map_err(|e| format!("unreadable snapshot: {e}"))?;
     Ok(accounts
         .into_iter()
         .filter(|a| a.phase != "OFFLINE")
@@ -413,6 +418,17 @@ mod tests {
         let resume = to_resume(&pick(Some(&name)).unwrap().1).unwrap();
         let shown: Vec<String> = resume.iter().map(|(account, command)| format!("{account} {}", serde_json::to_string(command).unwrap())).collect();
         assert_eq!(shown, [r#"farmer {"cmd":"run","script":"/srv/farm.ts","args":[["rounds","3"]]}"#, r#"idler {"cmd":"login"}"#]);
+    }
+
+    #[test]
+    fn a_restart_reads_a_session_from_before_accounts_were_named() {
+        let protocol_2 = json!({ "type": "snapshot", "protocol": 2, "name": "aqx", "bots": [
+            { "bot": "farmer", "phase": "READY", "run": "running", "script": "/srv/farm.ts", "args": [["rounds", "3"]] },
+            { "bot": "idle", "phase": "READY", "run": "done", "script": null, "args": [] },
+        ] });
+        let shown: Vec<String> =
+            resumable(&protocol_2).unwrap().iter().map(|(account, command)| format!("{account} {}", serde_json::to_string(command).unwrap())).collect();
+        assert_eq!(shown, [r#"farmer {"cmd":"run","script":"/srv/farm.ts","args":[["rounds","3"]]}"#, r#"idle {"cmd":"login"}"#]);
     }
 
     #[test]
