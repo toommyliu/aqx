@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aqx_core::{ActError, Event, Halt, ItemRef, Outcome, Phase, ScriptError, Session, StopHandle, views};
+use aqx_core::{ActError, Event, Halt, ItemRef, Need, Outcome, Phase, Quest, QuestStatus, ScriptError, Session, StopHandle, World, views};
 use aqx_protocol::{ItemId, MonMapId, QuestId, ShopId};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -228,7 +228,16 @@ fn op(name: &str) -> Option<Op> {
         "view" => I(view),
         "quest" => I(|s, a| {
             let (id,): (QuestId,) = args(a)?;
-            Ok(s.world.quests.get(&id).map_or(Value::Null, |q| views::quest(&s.world, q)))
+            Ok(s.world.quests.get(&id).map_or(Value::Null, |q| quest(&s.world, q)))
+        }),
+        "quests" => I(|s, _| Ok(Value::Array(s.world.quests.values().map(|q| quest(&s.world, q)).collect()))),
+        "quest_value" => I(|s, a| {
+            let (slot,): (i32,) = args(a)?;
+            Ok(json!(s.world.quest_value(slot)))
+        }),
+        "achievement" => I(|s, a| {
+            let (field, index): (String, u32) = args(a)?;
+            Ok(json!(s.world.achievement(&field, index)))
         }),
         "shop" => I(|s, a| {
             let (id,): (ShopId,) = args(a)?;
@@ -421,4 +430,32 @@ fn phase(phase: &Phase) -> &'static str {
         Phase::Closed(_) => "closed",
         Phase::Waiting { .. } => "waiting",
     }
+}
+
+fn quest(world: &World, quest: &Quest) -> Value {
+    let need = |n: &Need| json!({ "item": n.item, "name": n.name, "qty": n.qty, "maxStack": n.max_stack });
+    let status = match world.quest_status(quest.id) {
+        Some(QuestStatus::Locked) => "locked",
+        Some(QuestStatus::Available) | None => "available",
+        Some(QuestStatus::Active) => "active",
+        Some(QuestStatus::Completable) => "completable",
+        Some(QuestStatus::Done) => "done",
+    };
+    json!({
+        "id": quest.id,
+        "name": quest.name,
+        "status": status,
+        "slot": quest.slot,
+        "value": quest.value,
+        "once": quest.once,
+        "field": quest.period.as_ref().map_or("", |(field, _)| field.as_str()),
+        "index": quest.period.as_ref().map_or(0, |(_, index)| *index),
+        "member": quest.member,
+        "level": quest.level,
+        "faction": quest.reputation.map_or(0, |(faction, _)| faction.0),
+        "rep": quest.reputation.map_or(0, |(_, rep)| rep),
+        "requirements": quest.turn_in.iter().map(need).collect::<Vec<_>>(),
+        "held": quest.hold.iter().map(need).collect::<Vec<_>>(),
+        "rewards": quest.rewards.iter().map(|r| json!({ "item": r.item, "name": r.name, "qty": r.qty, "maxStack": r.max_stack, "chance": r.chance })).collect::<Vec<_>>(),
+    })
 }
