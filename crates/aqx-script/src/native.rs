@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use aqx_core::{ActError, Event, Fight, Halt, ItemRef, Monster, Session, Step, World};
+use aqx_core::{ActError, Event, Fight, Halt, ItemRef, Monster, Session, Step, Target as Lasting, World};
 use aqx_protocol::{ItemId, MonMapId, QuestId, ShopId};
 use rquickjs::module::{Declarations, Exports, ModuleDef};
 use rquickjs::{Array, Ctx, Error, Exception, FromJs, Function, Object, Result, Value};
@@ -30,7 +30,8 @@ macro_rules! natives {
 
 natives!(
     init, view, find, bank, quest, shop, join, jump, rest, kill, farm, withdraw, deposit, equip, pickup, accept, complete, buy, sell, wait_until, sleep, status,
-    progress, stop, args, respawn, events_queued,
+    progress, stop, args, respawn, events_queued, listen, listen_packet, aggro, exit, use_skill, use_item, walk, goto, collect, send_packet, server,
+    servers, relogin, room,
 );
 
 struct Ref(ItemRef);
@@ -133,6 +134,17 @@ fn target<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Target<'js>> {
         let ctx = ctx.clone();
         return Ok(Box::new(move |world, monster| bridge::check(&ctx, world, || f.call((js(&ctx, &views::monster(monster))?,)))));
     }
+    Ok(listed(ctx, value)?)
+}
+
+fn lasting<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Lasting> {
+    match value.as_function().cloned() {
+        Some(f) => Ok(bridge::lasting_target(ctx, f)),
+        None => listed(ctx, value),
+    }
+}
+
+fn listed<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<Lasting> {
     let mut wanted = Vec::new();
     for entry in Array::from_js(ctx, value)?.iter::<Value>() {
         let entry = entry?;
@@ -165,9 +177,8 @@ impl<'js> Plan<'js> {
         for step in opts.get::<_, Array>("skills")?.iter::<Object>() {
             let step = step?;
             let slot = match step.get::<_, u32>("slot")? {
-                slot @ 0..=4 => slot as usize,
-                5 => return Err(Exception::throw_type(ctx, "slot 5, the equipped consumable, can't be used in a fight yet")),
-                slot => return Err(Exception::throw_type(ctx, &format!("there is no skill slot {slot}; slots are 0 to 4"))),
+                slot @ 0..=5 => slot as usize,
+                slot => return Err(Exception::throw_type(ctx, &format!("there is no skill slot {slot}; slots are 0 to 5"))),
             };
             let when = step.get::<_, Option<Function>>("when")?.map(|f| bridge::predicate(ctx, f));
             steps.push(Step { slot, when });
@@ -317,4 +328,71 @@ fn events_queued(ctx: Ctx<'_>) -> Result<f64> {
 fn respawn(ctx: Ctx<'_>, cell: Option<String>, pad: Option<String>) -> Result<()> {
     let to = cell.map(|cell| (cell, pad.unwrap_or_else(|| "Left".into())));
     with_session(&ctx, "settings.respawn", |s| s.respawn_to = to)
+}
+
+fn room() -> Option<u32> {
+    bridge::room()
+}
+
+fn listen(name: String, on: bool) {
+    bridge::listen(name, on);
+}
+
+fn listen_packet(ctx: Ctx<'_>, cmd: String, on: bool) -> Result<()> {
+    with_session(&ctx, "packet.on", |s| s.listen(&cmd, on))
+}
+
+pub(crate) fn alarm(ctx: Ctx<'_>, delay: f64) -> Result<()> {
+    let at = (delay >= 0.0).then(|| Instant::now() + ms(Some(delay)).unwrap_or_default());
+    with_session(&ctx, "setTimeout", |s| s.set_alarm(at))
+}
+
+fn aggro<'js>(ctx: Ctx<'js>, monsters: Value<'js>) -> Result<()> {
+    let target = if monsters.is_null() || monsters.is_undefined() { None } else { Some(lasting(&ctx, monsters)?) };
+    with_session(&ctx, "combat.aggro", |s| s.set_aggro(target))
+}
+
+fn exit(ctx: Ctx<'_>) -> Result<()> {
+    blocking(&ctx, "combat.exit", Session::exit_combat)
+}
+
+fn use_skill<'js>(ctx: Ctx<'js>, slot: u32, monsters: Value<'js>) -> Result<()> {
+    if slot > 5 {
+        return Err(Exception::throw_type(&ctx, &format!("there is no skill slot {slot}; slots are 0 to 5")));
+    }
+    let target = if monsters.is_null() || monsters.is_undefined() { None } else { Some(target(&ctx, monsters)?) };
+    blocking(&ctx, "skills.use", |s| s.use_skill(slot as usize, target.as_deref()))
+}
+
+fn use_item(ctx: Ctx<'_>, item: Ref) -> Result<()> {
+    blocking(&ctx, "inventory.use", |s| s.use_item(&item.0))
+}
+
+fn walk(ctx: Ctx<'_>, x: f64, y: f64) -> Result<()> {
+    blocking(&ctx, "map.walk", |s| s.walk(x.round() as i32, y.round() as i32))
+}
+
+fn goto(ctx: Ctx<'_>, name: String) -> Result<()> {
+    blocking(&ctx, "map.goto", |s| s.goto(&name))
+}
+
+fn collect(ctx: Ctx<'_>, id: u32, item: Ref, qty: Option<u32>) -> Result<()> {
+    blocking(&ctx, "map.collect", |s| s.collect(id, &item.0, qty.unwrap_or(1).max(1)))
+}
+
+fn send_packet(ctx: Ctx<'_>, text: String) -> Result<()> {
+    blocking(&ctx, "packet.send", |s| s.send_raw(&text))
+}
+
+fn server(ctx: Ctx<'_>) -> Result<String> {
+    with_session(&ctx, "session.server", |s| s.server().map(|s| s.name.clone()).unwrap_or_default())
+}
+
+fn servers(ctx: Ctx<'_>) -> Result<Value<'_>> {
+    let list = blocking(&ctx, "session.servers", Session::servers)?;
+    js(&ctx, &list.iter().map(views::server).collect())
+}
+
+fn relogin(ctx: Ctx<'_>, name: Option<String>) -> Result<()> {
+    blocking(&ctx, "session.relogin", |s| s.relogin(name.as_deref()))
 }

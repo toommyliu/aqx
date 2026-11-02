@@ -35,6 +35,12 @@ pub enum Out<'a> {
     Sell { room: AreaId, item: ItemId, qty: u32, char_item: CharItemId },
     Equip { room: AreaId, item: ItemId },
     EquipConsumable { room: AreaId, link: &'a str, meta: &'a str, item: ItemId },
+    UseItem { counter: u32, target: Aim, item: ItemId },
+    ServerUseItem { item: ItemId },
+    Afk(bool),
+    Walk { room: AreaId, x: i32, y: i32, speed: u32 },
+    Goto { name: &'a str },
+    GetMapItem { room: AreaId, id: u32 },
     Raw(&'a str),
 }
 
@@ -99,6 +105,15 @@ impl Out<'_> {
             Out::Sell { room, item, qty, char_item } => write!(buf, "%xt%zm%sellItem%{room}%{item}%{qty}%{char_item}%").unwrap(),
             Out::Equip { room, item } => write!(buf, "%xt%zm%equipItem%{room}%{item}%").unwrap(),
             Out::EquipConsumable { room, link, meta, item } => write!(buf, "%xt%zm%geia%{room}%{link}%{meta}%{item}%").unwrap(),
+            Out::UseItem { counter, target, item } => match target {
+                Aim::Monster(id) => write!(buf, "%xt%zm%gar%1%{counter}%i1>m:{id}%{item}%wvz%").unwrap(),
+                Aim::Player(eid) => write!(buf, "%xt%zm%gar%1%{counter}%i1>p:{eid}%{item}%wvz%").unwrap(),
+            },
+            Out::ServerUseItem { item } => write!(buf, "%xt%zm%serverUseItem%-1%+%{item}%").unwrap(),
+            Out::Afk(on) => write!(buf, "%xt%zm%afk%1%{on}%").unwrap(),
+            Out::Walk { room, x, y, speed } => write!(buf, "%xt%zm%mv%{room}%{x}%{y}%{speed}%").unwrap(),
+            Out::Goto { name } => write!(buf, "%xt%zm%cmd%1%goto%{name}%").unwrap(),
+            Out::GetMapItem { room, id } => write!(buf, "%xt%zm%getMapItem%{room}%{id}%").unwrap(),
             Out::Raw(text) => buf.extend_from_slice(text.as_bytes()),
         }
         buf.push(0);
@@ -144,6 +159,15 @@ mod tests {
         assert_eq!(encoded(Out::Respawn { room, eid: EntityId(1001) }), "%xt%zm%resPlayerTimed%168500%1001%\0");
         assert_eq!(encoded(Out::PickUp { room, item: ItemId(1528) }), "%xt%zm%getDrop%168500%1528%\0");
         assert_eq!(encoded(Out::Aggro { room, monsters: &[MonMapId(1), MonMapId(2)] }), "%xt%zm%aggroMon%168500%1%2%\0");
+        assert_eq!(
+            encoded(Out::UseItem { counter: 0, target: Aim::Player(EntityId(41361)), item: ItemId(11736) }),
+            "%xt%zm%gar%1%0%i1>p:41361%11736%wvz%\0"
+        );
+        assert_eq!(encoded(Out::UseItem { counter: 4, target: Aim::Monster(MonMapId(3)), item: ItemId(9) }), "%xt%zm%gar%1%4%i1>m:3%9%wvz%\0");
+        assert_eq!(encoded(Out::Afk(false)), "%xt%zm%afk%1%false%\0");
+        assert_eq!(encoded(Out::Walk { room: AreaId(167964), x: 143, y: 465, speed: 8 }), "%xt%zm%mv%167964%143%465%8%\0");
+        assert_eq!(encoded(Out::GetMapItem { room, id: 923 }), "%xt%zm%getMapItem%168500%923%\0");
+        assert_eq!(encoded(Out::ServerUseItem { item: ItemId(18927) }), "%xt%zm%serverUseItem%-1%+%18927%\0");
     }
 
     #[test]
@@ -187,6 +211,8 @@ mod tests {
     fn encodes_join_time_requests_as_the_client_sends_them() {
         let room = AreaId(7111);
         assert_eq!(encoded(Out::Join { user: "hero", map: "yulgar" }), "%xt%zm%cmd%1%tfer%hero%yulgar%\0");
+        assert_eq!(encoded(Out::Goto { name: "ally" }), "%xt%zm%cmd%1%goto%ally%\0");
+
         assert_eq!(encoded(Out::MoveToCell { room, cell: "Enter", pad: "Spawn" }), "%xt%zm%moveToCell%7111%Enter%Spawn%\0");
         assert_eq!(
             encoded(Out::RetrieveUserData { room, eid: EntityId(1001) }),

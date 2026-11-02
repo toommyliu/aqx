@@ -1,6 +1,7 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use aqx_core::{Aura, Event, Item, Monster, Place, Player, Quest, QuestStatus, RewardKind, Shop, SkillTarget, State, World};
+use aqx_core::{Aura, Event, Item, Monster, Place, Player, Quest, QuestStatus, RewardKind, Server, Shop, SkillTarget, State, World};
+use aqx_protocol::Message;
 use serde_json::{Value, json};
 
 pub fn player(world: &World) -> Value {
@@ -16,6 +17,10 @@ pub fn player(world: &World) -> Value {
         "state": state(me.vitals.state),
         "cell": me.cell,
         "pad": me.pad,
+        "x": me.x,
+        "y": me.y,
+        "afk": me.afk,
+        "target": world.target.and_then(|id| world.area.as_ref()?.monsters.iter().find(|m| m.map_id == id)).map_or(Value::Null, monster),
         "gold": me.gold,
         "member": me.member,
         "class": me.class,
@@ -37,11 +42,12 @@ pub fn player(world: &World) -> Value {
 }
 
 pub fn map(world: &World) -> Value {
-    let Some(area) = &world.area else { return json!({ "name": "", "room": 0, "monsters": [], "players": [] }) };
+    let Some(area) = &world.area else { return json!({ "name": "", "room": 0, "areaId": 0, "monsters": [], "players": [] }) };
     let room = area.name.rsplit_once('-').and_then(|(_, room)| room.parse::<u32>().ok()).unwrap_or(0);
     json!({
         "name": area.map,
         "room": room,
+        "areaId": area.id,
         "monsters": area.monsters.iter().map(monster).collect::<Vec<_>>(),
         "players": area.players.iter().map(other).collect::<Vec<_>>(),
     })
@@ -156,24 +162,42 @@ pub fn shop(shop: &Shop) -> Value {
     json!({ "id": shop.id, "name": shop.name, "items": items })
 }
 
-pub fn event(world: &World, event: &Event) -> Option<(&'static str, Value)> {
+pub fn event_name(event: &Event) -> Option<&'static str> {
     Some(match event {
-        Event::Died => ("death", Value::Null),
-        Event::Respawned => ("respawn", Value::Null),
+        Event::Died => "death",
+        Event::Respawned => "respawn",
+        Event::Joined { .. } => "map",
+        Event::Moved { .. } => "cell",
+        Event::Killed { .. } => "kill",
+        Event::DropOffered { .. } => "drop",
+        Event::ItemChanged { .. } => "item",
+        Event::QuestAccepted { .. } | Event::QuestCompleted { .. } => "quest",
+        Event::Chat { .. } => "chat",
+        Event::Warning { .. } => "warning",
+        Event::AuraChanged { .. } => "aura",
+        Event::Countering { .. } => "counter",
+        Event::Packet { .. } => "packet",
+        _ => return None,
+    })
+}
+
+pub fn event(world: &World, event: &Event) -> Value {
+    match event {
         Event::Joined { area, .. } => {
             let (name, room) = area.rsplit_once('-').map_or((area.as_str(), 0), |(name, room)| (name, room.parse::<u32>().unwrap_or(0)));
-            ("map", json!({ "name": name, "room": room }))
+            json!({ "name": name, "room": room })
         }
+        Event::Moved { cell, pad } => json!({ "cell": cell, "pad": pad }),
         Event::Killed { id, monster: name } => {
             let found = world.area.as_ref().and_then(|a| a.monsters.iter().find(|m| m.map_id == *id));
             let mut killed = found.map_or_else(|| json!({ "mapId": id, "monId": 0, "name": name, "cell": "", "maxHp": 0, "auras": [] }), monster);
             killed["alive"] = json!(false);
             killed["hp"] = json!(0);
-            ("kill", killed)
+            killed
         }
         Event::DropOffered { id, item: name, qty } => {
             let ac = world.drops.iter().chain(&world.inventory).find(|i| i.id == *id).is_some_and(|i| i.ac);
-            ("drop", json!({ "id": id, "name": name, "qty": qty, "ac": ac }))
+            json!({ "id": id, "name": name, "qty": qty, "ac": ac })
         }
         Event::ItemChanged { item, qty, place } => {
             let place = match place {
@@ -181,14 +205,34 @@ pub fn event(world: &World, event: &Event) -> Option<(&'static str, Value)> {
                 Place::Temp => "temp",
                 Place::Bank => "bank",
             };
-            ("item", json!({ "name": item, "qty": qty, "where": place }))
+            json!({ "name": item, "qty": qty, "where": place })
         }
-        Event::QuestAccepted { id, .. } => ("quest", json!({ "id": id, "change": "accepted" })),
-        Event::QuestCompleted { id, .. } => ("quest", json!({ "id": id, "change": "completed" })),
-        Event::Chat { channel, sender, text } => ("chat", json!({ "from": sender, "text": text, "channel": channel })),
-        Event::Warning { text } => ("warning", json!({ "text": text })),
-        _ => return None,
-    })
+        Event::QuestAccepted { id, .. } => json!({ "id": id, "change": "accepted" }),
+        Event::QuestCompleted { id, .. } => json!({ "id": id, "change": "completed" }),
+        Event::Chat { channel, sender, text } => json!({ "from": sender, "text": text, "channel": channel }),
+        Event::Warning { text } => json!({ "text": text }),
+        Event::AuraChanged { monster, name, stacks, added } => {
+            json!({ "name": name, "stacks": stacks, "change": if *added { "added" } else { "removed" }, "monster": monster })
+        }
+        Event::Countering { id, active } => json!({ "monster": id, "active": active }),
+        Event::Packet { text } => packet(text),
+        _ => Value::Null,
+    }
+}
+
+pub fn packet(text: &str) -> Value {
+    match Message::parse(text) {
+        Ok(Message::Json(json)) => {
+            json!({ "cmd": json.cmd, "data": serde_json::from_str::<Value>(json.body.get()).unwrap_or(Value::Null), "args": [], "raw": text })
+        }
+        Ok(Message::Xt(xt)) => json!({ "cmd": xt.cmd, "data": null, "args": xt.args().collect::<Vec<_>>(), "raw": text }),
+        Ok(Message::Xml(xml)) => json!({ "cmd": xml.action.unwrap_or_default(), "data": null, "args": [], "raw": text }),
+        Err(_) => json!({ "cmd": "", "data": null, "args": [], "raw": text }),
+    }
+}
+
+pub fn server(server: &Server) -> Value {
+    json!({ "name": server.name, "online": server.online, "members": server.members_only, "players": server.players, "capacity": server.capacity })
 }
 
 fn auras(auras: &[Aura]) -> Value {

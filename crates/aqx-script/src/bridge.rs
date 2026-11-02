@@ -1,8 +1,9 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
 
-use aqx_core::{ActError, Event, Goal, Halt, Predicate, Session, StopHandle, World};
+use aqx_core::{ActError, Event, Goal, Halt, Monster, Predicate, Session, Sink, StopHandle, Target, World};
 use rquickjs::{Coerced, Ctx, Exception, Function, Persistent, Value, qjs};
 
 use crate::{Outcome, ScriptError, views};
@@ -22,10 +23,13 @@ thread_local! {
 struct State {
     make_error: Option<Persistent<Function<'static>>>,
     dispatch: Option<Persistent<Function<'static>>>,
+    timers: Option<Persistent<Function<'static>>>,
+    listening: HashSet<String>,
     pending: Option<Persistent<Value<'static>>>,
     end: Option<End>,
     args: Vec<(String, String)>,
-    sink: fn(&Event),
+    room: Option<u32>,
+    sink: Sink,
     stop: StopHandle,
 }
 
@@ -36,8 +40,19 @@ enum End {
 
 pub struct Scope;
 
-pub fn enter(ctx: &Ctx<'_>, session: &mut Session, args: &[(String, String)]) -> Scope {
-    let state = State { make_error: None, dispatch: None, pending: None, end: None, args: args.to_vec(), sink: session.sink(), stop: session.stop_handle() };
+pub fn enter(ctx: &Ctx<'_>, session: &mut Session, args: &[(String, String)], room: Option<u32>) -> Scope {
+    let state = State {
+        make_error: None,
+        dispatch: None,
+        timers: None,
+        listening: HashSet::new(),
+        pending: None,
+        end: None,
+        args: args.to_vec(),
+        room,
+        sink: session.sink(),
+        stop: session.stop_handle(),
+    };
     SESSION.set(session);
     WORLD.set(ptr::null());
     CTX.set(Some(ctx.as_raw()));
@@ -96,12 +111,31 @@ pub fn init<'js>(ctx: &Ctx<'js>, make_error: Function<'js>, dispatch: Function<'
     });
 }
 
+pub fn set_timers<'js>(ctx: &Ctx<'js>, run: Function<'js>) {
+    let run = Persistent::save(ctx, run);
+    with_state(|s| s.timers = Some(run));
+}
+
+pub fn listen(name: String, on: bool) {
+    with_state(|s| {
+        if on {
+            s.listening.insert(name);
+        } else {
+            s.listening.remove(&name);
+        }
+    });
+}
+
+pub fn room() -> Option<u32> {
+    with_state(|s| s.room)
+}
+
 pub fn args() -> Vec<(String, String)> {
     with_state(|s| s.args.clone())
 }
 
 pub fn emit(event: Event) {
-    let sink = with_state(|s| s.sink);
+    let sink = with_state(|s| s.sink.clone());
     sink(&event);
 }
 
@@ -238,6 +272,18 @@ pub fn predicate<'js>(ctx: &Ctx<'js>, f: Function<'js>) -> Predicate<'js> {
     Box::new(move |world| check(&ctx, world, || f.call(())))
 }
 
+pub fn lasting_target<'js>(ctx: &Ctx<'js>, f: Function<'js>) -> Target {
+    let f = Persistent::save(ctx, f);
+    Box::new(move |world: &World, monster: &Monster| {
+        let Some(raw) = CTX.get() else { return false };
+        let ctx = unsafe { Ctx::from_raw(raw) };
+        match f.clone().restore(&ctx) {
+            Ok(f) => check(&ctx, world, || f.call((ctx.json_parse(views::monster(monster).to_string())?,))),
+            Err(_) => false,
+        }
+    })
+}
+
 pub fn goal<'js>(ctx: &Ctx<'js>, f: Function<'js>) -> Goal {
     let f = Persistent::save(ctx, f);
     Box::new(move |world| {
@@ -262,9 +308,19 @@ pub fn dispatch(session: &mut Session) {
         if failed() {
             break;
         }
-        let Some((name, payload)) = views::event(unsafe { &(*session).world }, event) else { continue };
-        touch();
-        let called = ctx.json_parse(payload.to_string()).and_then(|payload| handler.call::<_, ()>((name, payload, seq as f64)));
+        let called = if let Event::Alarm = event {
+            let Some(run) = with_state(|s| s.timers.clone()).and_then(|f| f.restore(&ctx).ok()) else { continue };
+            touch();
+            run.call::<_, ()>(())
+        } else {
+            let Some(name) = views::event_name(event) else { continue };
+            if name != "packet" && !with_state(|s| s.listening.contains(name)) {
+                continue;
+            }
+            let payload = views::event(unsafe { &(*session).world }, event);
+            touch();
+            ctx.json_parse(payload.to_string()).and_then(|payload| handler.call::<_, ()>((name, payload, seq as f64)))
+        };
         if let Err(e) = called {
             fail(&ctx, e);
         }

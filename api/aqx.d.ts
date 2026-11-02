@@ -15,7 +15,7 @@ declare module "aqx" {
   /** Monster name (case-insensitive, `"*"` = any), MonMapID, a list of those, or a predicate. */
   export type Target = string | number | readonly (string | number)[] | ((m: Monster) => boolean);
 
-  /** 0 = auto attack, 1-4 = class skills, 5 = equipped consumable, which a fight can't use yet. */
+  /** 0 = auto attack, 1-4 = class skills, 5 = the consumable equipped with `inventory.equip`. */
   export type Slot = 0 | 1 | 2 | 3 | 4 | 5;
 
   export type State = "dead" | "idle" | "combat";
@@ -155,7 +155,7 @@ declare module "aqx" {
     readonly items: readonly ShopItem[];
   }
 
-  export type Step = Exclude<Slot, 5> | { readonly slot: Exclude<Slot, 5>; readonly when: () => boolean };
+  export type Step = Slot | { readonly slot: Slot; readonly when: () => boolean };
 
   export interface Fight {
     /** Default `[1, 2, 3, 4]`. When several steps are ready, the earliest wins. */
@@ -188,6 +188,8 @@ declare module "aqx" {
     death: undefined;
     respawn: undefined;
     map: { readonly name: string; readonly room: number };
+    /** The player's cell or pad changed: a jump, a respawn, or the server moving it. */
+    cell: { readonly cell: string; readonly pad: string };
     kill: Monster;
     drop: Drop;
     /** `qty` is the new total in that place, 0 once the item is gone. */
@@ -199,6 +201,36 @@ declare module "aqx" {
       readonly channel: "zone" | "party" | "guild" | "whisper";
     };
     warning: { readonly text: string };
+    /**
+     * An aura the server added to or removed from the player (`monster: null`)
+     * or a monster. Auras that run out or end with a death raise no event.
+     */
+    aura: {
+      readonly name: string;
+      readonly stacks: number;
+      readonly change: "added" | "removed";
+      readonly monster: number | null;
+    };
+    /** A monster started telegraphing a counter attack, or its "Counter Attack" aura ended. */
+    counter: { readonly monster: number; readonly active: boolean };
+  }
+
+  export interface Packet {
+    readonly cmd: string;
+    /** The `b.o` object of a JSON message, `null` for the other kinds. */
+    readonly data: Readonly<Record<string, any>> | null;
+    /** The fields of an XT string after its room, empty for the other kinds. */
+    readonly args: readonly string[];
+    /** The message as it arrived, after decompression. */
+    readonly raw: string;
+  }
+
+  export interface Server {
+    readonly name: string;
+    readonly online: boolean;
+    readonly members: boolean;
+    readonly players: number;
+    readonly capacity: number;
   }
 
   export const player: {
@@ -211,6 +243,13 @@ declare module "aqx" {
     readonly state: State;
     readonly cell: string;
     readonly pad: string;
+    /** Where the player last walked to in the cell, or where the server placed it on joining. 0 after a jump. */
+    readonly x: number;
+    readonly y: number;
+    /** The server marked the player away. The client answers that on its own. */
+    readonly afk: boolean;
+    /** The monster a `kill` or `farm` is fighting right now. */
+    readonly target: Monster | null;
     readonly gold: number;
     readonly member: boolean;
     /** Name of the equipped class, `""` before the server sends it. */
@@ -225,6 +264,8 @@ declare module "aqx" {
   export const map: {
     readonly name: string;
     readonly room: number;
+    /** The server's id for this map instance, which raw packets carry as their room. */
+    readonly areaId: number;
     readonly monsters: readonly Monster[];
     readonly players: readonly OtherPlayer[];
     find(target: Target): Monster[];
@@ -235,6 +276,12 @@ declare module "aqx" {
      */
     join(name: string, cell?: string, pad?: string): void;
     jump(cell: string, pad?: string): void;
+    /** Walks to a point in the current cell. Returns once sent; the server doesn't acknowledge it. */
+    walk(x: number, y: number): void;
+    /** Goes to a player's map and cell. Throws `timeout` when the server doesn't move the bot, as when the player is offline. */
+    goto(player: string): void;
+    /** Picks up a map item until the inventories hold `qty` of `item`. Throws `rejected` after 3 tries that give nothing. */
+    collect(mapItem: number, item: ItemRef, qty?: number): void;
   };
 
   export const combat: {
@@ -246,10 +293,24 @@ declare module "aqx" {
      */
     farm(item: ItemRef, qty: number, opts?: FarmOptions): void;
     farm(goals: readonly Goal[], opts?: FarmOptions): void;
+    /**
+     * Pulls the matching monsters in the player's cell every 500 ms until
+     * called with `null` or the script ends. The real client never sends this.
+     */
+    aggro(target: Target | null): void;
+    /** Leaves combat by jumping to the current cell again. */
+    exit(): void;
   };
 
   export const skills: {
     readonly slots: readonly Skill[];
+    /**
+     * Casts one slot as soon as its cooldown, the global cooldown and mana
+     * allow, and returns once it's sent. Throws `timeout` when mana falls
+     * short for 30 s. Hostile skills hit the matching monster in the cell
+     * with the lowest HP; others target the player.
+     */
+    use(slot: Slot, target?: Target): void;
   };
 
   export const inventory: Items & {
@@ -258,6 +319,8 @@ declare module "aqx" {
     readonly used: number;
     /** Withdraws from the bank first if needed. */
     equip(item: ItemRef): void;
+    /** Uses a "ServerUse" item such as a boost. Returns once sent. */
+    use(item: ItemRef): void;
   };
 
   /** Reading `items` loads the bank on first use, except inside a predicate. */
@@ -319,6 +382,28 @@ declare module "aqx" {
     ): EventMap[K];
   };
 
+  /** The escape hatch. Packets sent here go through the same pacer as everything else. */
+  export const packet: {
+    /** A raw packet such as `%xt%zm%cmd%${map.areaId}%...%`, without the trailing NUL. */
+    send(text: string): void;
+    /** Runs for every inbound message with this cmd: the XT or JSON `cmd`, or the XML `action`. */
+    on(cmd: string, handler: (p: Packet) => void): () => void;
+    /** Sends `text` and returns the next `cmd` message that passes `filter`. Throws `timeout` after `timeout` ms, default 10000. */
+    request(text: string, cmd: string, opts?: { readonly timeout?: number; readonly filter?: (p: Packet) => boolean }): Packet;
+  };
+
+  export const session: {
+    /** The server the bot is on. */
+    readonly server: string;
+    servers(): Server[];
+    /**
+     * Logs out and back in, to `server` if given, else to the current one.
+     * Returns once the character has loaded. The game state starts over: the
+     * bot is back in its home map, and the bank and shops load again.
+     */
+    relogin(server?: string): void;
+  };
+
   export const wait: {
     /** Re-evaluates `predicate` after every state change and at least every 250 ms. Returns `false` on timeout. */
     until(predicate: () => boolean, timeout?: number): boolean;
@@ -354,6 +439,12 @@ declare module "aqx" {
     readonly code: ErrorCode;
   }
 }
+
+/** Timers fire while the script waits inside a blocking call, like event handlers. They end with the script. */
+declare function setTimeout<A extends unknown[]>(handler: (...args: A) => void, ms?: number, ...args: A): number;
+declare function setInterval<A extends unknown[]>(handler: (...args: A) => void, ms?: number, ...args: A): number;
+declare function clearTimeout(id: number | undefined): void;
+declare function clearInterval(id: number | undefined): void;
 
 declare const console: {
   debug(...args: unknown[]): void;

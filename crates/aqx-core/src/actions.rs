@@ -3,10 +3,11 @@ use std::time::{Duration, Instant};
 
 use aqx_protocol::{Aim, AreaId, ItemId, MonMapId, Out, QuestId, ShopId};
 
-use crate::pacer::Kind;
-use crate::quests::{QuestStatus, RewardKind};
-use crate::session::{Goal, Halt, Phase, Session};
+use crate::api::{self, Server};
 use crate::event::Event;
+use crate::pacer::{self, Kind};
+use crate::quests::{QuestStatus, RewardKind};
+use crate::session::{Goal, Halt, LoginError, Phase, Session};
 use crate::world::{Item, ItemRef, Monster, SkillTarget, State, World, items_from};
 
 const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
@@ -18,6 +19,11 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const JUMP_SETTLE: Duration = Duration::from_millis(500);
 const SERVER_MARGIN: Duration = Duration::from_millis(200);
 const HOLD_RECHECK: Duration = Duration::from_millis(200);
+const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+const MANA_TIMEOUT: Duration = Duration::from_secs(30);
+const COLLECT_WAIT: Duration = Duration::from_secs(2);
+const COLLECT_TRIES: u32 = 3;
+const WALK_SPEED: u32 = 8;
 const AUTO_ATTACK: usize = 0;
 
 #[derive(Debug)]
@@ -50,6 +56,7 @@ impl fmt::Display for ActError {
 }
 
 pub type Predicate<'a> = Box<dyn FnMut(&World) -> bool + 'a>;
+type Pick<'a> = &'a dyn Fn(&World, &Monster) -> bool;
 
 pub struct Step<'a> {
     pub slot: usize,
@@ -296,14 +303,8 @@ impl Session {
         Ok(())
     }
 
-    fn off_thread<T: Send + 'static>(&mut self, job: impl FnOnce() -> T + Send + 'static, timeout: Duration, what: &str) -> Result<T, ActError> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let waker = self.waker();
-        std::thread::spawn(move || {
-            let _ = tx.send(job());
-            let _ = waker.wake();
-        });
-        match self.pump_until(Some(Instant::now() + timeout), |_| rx.try_recv().ok()) {
+    fn off_thread_for<T: Send + 'static>(&mut self, job: impl FnOnce() -> T + Send + 'static, timeout: Duration, what: &str) -> Result<T, ActError> {
+        match self.off_thread(job, timeout) {
             Err(Halt::Timeout) => Err(ActError::Timeout(what.into())),
             other => Ok(other?),
         }
@@ -326,9 +327,9 @@ impl Session {
     pub fn load_bank(&mut self) -> Result<(), ActError> {
         self.ready(None)?;
         let char_id = self.world.me.as_ref().and_then(|m| m.char_id).ok_or_else(|| ActError::NotFound("the character id".into()))?;
-        let (api, token) = (self.api.clone(), self.token().to_string());
+        let (api, token) = (self.api().to_string(), self.token().to_string());
         let body = self
-            .off_thread(move || crate::api::load_bank(&api, char_id, &token), BANK_TIMEOUT, "loading the bank")?
+            .off_thread_for(move || api::load_bank(&api, char_id, &token), BANK_TIMEOUT, "loading the bank")?
             .map_err(|e| ActError::Rejected(e.to_string()))?;
         let values: Vec<serde_json::Value> = serde_json::from_str(&body).map_err(|e| ActError::Rejected(format!("unreadable bank: {e}")))?;
         let mut events = Vec::new();
@@ -519,6 +520,13 @@ impl Session {
     }
 
     fn fight(&mut self, id: MonMapId, fight: &mut Fight, deadline: Option<Instant>) -> Result<bool, ActError> {
+        self.world.target = Some(id);
+        let result = self.fight_target(id, fight, deadline);
+        self.world.target = None;
+        result
+    }
+
+    fn fight_target(&mut self, id: MonMapId, fight: &mut Fight, deadline: Option<Instant>) -> Result<bool, ActError> {
         loop {
             let (Some(me), Some(area)) = (&self.world.me, &self.world.area) else { return Ok(false) };
             let Some(monster) = area.monsters.iter().find(|m| m.map_id == id) else { return Ok(false) };
@@ -539,7 +547,7 @@ impl Session {
                 continue;
             }
             match self.choose(fight, now) {
-                Choice::Cast(slot) => self.cast(slot, id)?,
+                Choice::Cast(slot) => self.cast(slot, Some(id))?,
                 Choice::Wait(at) => self.idle_until(cap(at, deadline))?,
             }
         }
@@ -569,7 +577,10 @@ impl Session {
 
     fn castable_at(&self, slot: usize, now: Instant) -> Option<Instant> {
         let me = self.world.me.as_ref()?;
-        let skill = me.skills.get(slot).filter(|s| !s.slot.starts_with('i'))?;
+        let skill = me.skills.get(slot)?;
+        if skill.slot.starts_with('i') && self.equipped_item().is_none() {
+            return None;
+        }
         if f64::from(skill.mana) * me.stats.get("$cmc").copied().unwrap_or(1.0) > f64::from(me.vitals.mp) {
             return None;
         }
@@ -578,23 +589,175 @@ impl Session {
         Some(own.max(self.pacer_ready_at(kind, now)))
     }
 
-    fn cast(&mut self, slot: usize, id: MonMapId) -> Result<(), ActError> {
+    fn equipped_item(&self) -> Option<ItemId> {
+        let skill = self.world.me.as_ref()?.item_skill?;
+        self.world.inventory.iter().find(|i| i.qty > 0 && i.meta.parse::<u32>().is_ok_and(|meta| meta == skill)).map(|i| i.id)
+    }
+
+    fn cast(&mut self, slot: usize, target: Option<MonMapId>) -> Result<(), ActError> {
         let (Some(me), Some(area)) = (&self.world.me, &self.world.area) else { return Ok(()) };
         let Some(skill) = me.skills.get(slot) else { return Ok(()) };
-        let aims: Vec<Aim> = match skill.target {
-            SkillTarget::Hostile => {
+        let aims: Vec<Aim> = match (skill.target, target) {
+            (SkillTarget::Hostile, Some(id)) => {
                 let mut others: Vec<&Monster> = area.monsters.iter().filter(|m| m.map_id != id && m.cell == me.cell && m.alive()).collect();
                 others.sort_by_key(|m| m.vitals.hp);
                 std::iter::once(id).chain(others.iter().map(|m| m.map_id)).take(skill.max_targets as usize).map(Aim::Monster).collect()
             }
-            SkillTarget::Friendly | SkillTarget::Myself => vec![Aim::Player(me.eid)],
+            (SkillTarget::Hostile, None) => return Ok(()),
+            (SkillTarget::Friendly | SkillTarget::Myself, _) => vec![Aim::Player(me.eid)],
         };
         let name = skill.slot.clone();
         let kind = if slot == AUTO_ATTACK { Kind::AutoAttack } else { Kind::ClassSkill };
-        let counter = self.next_counter();
-        self.send_paced(Out::Skill { counter, slot: &name, targets: &aims }, kind)?;
+        if name.starts_with('i') {
+            let Some(item) = self.equipped_item() else { return Ok(()) };
+            let counter = self.next_counter();
+            self.send_paced(Out::UseItem { counter, target: aims[0], item }, kind)?;
+        } else {
+            let counter = self.next_counter();
+            self.send_paced(Out::Skill { counter, slot: &name, targets: &aims }, kind)?;
+        }
         self.casts.insert(name, Instant::now());
         Ok(())
+    }
+
+    pub fn use_skill(&mut self, slot: usize, target: Option<Pick>) -> Result<(), ActError> {
+        let mana_by = Instant::now() + MANA_TIMEOUT;
+        loop {
+            self.ready(None)?;
+            let Some(skill) = self.world.me.as_ref().and_then(|m| m.skills.get(slot)).cloned() else {
+                return Err(ActError::NotFound(format!("a skill in slot {slot}")));
+            };
+            if skill.slot.starts_with('i') && self.equipped_item().is_none() {
+                return Err(ActError::NotFound("a consumable equipped in slot 5".into()));
+            }
+            let now = Instant::now();
+            let Some(at) = self.castable_at(slot, now) else {
+                let what = format!("waiting for mana for {}", skill.name);
+                self.wait_for(Some(mana_by), &what, |s| s.castable_at(slot, Instant::now()).is_some())?;
+                continue;
+            };
+            if at > now {
+                self.idle_until(at)?;
+                continue;
+            }
+            let aim = match skill.target {
+                SkillTarget::Hostile => {
+                    let any = |_: &World, _: &Monster| true;
+                    let Some(id) = self.target_in_cell(target.unwrap_or(&any)) else {
+                        return Err(ActError::NotFound("a live monster to target in this cell".into()));
+                    };
+                    Some(id)
+                }
+                SkillTarget::Friendly | SkillTarget::Myself => None,
+            };
+            return self.cast(slot, aim);
+        }
+    }
+
+    pub fn exit_combat(&mut self) -> Result<(), ActError> {
+        self.ready(None)?;
+        let in_combat = |s: &Session| s.world.me.as_ref().is_some_and(|m| m.vitals.state == State::Combat);
+        if !in_combat(self) {
+            return Ok(());
+        }
+        let (Some(me), Some(area)) = (&self.world.me, &self.world.area) else { return Err(ActError::NotFound("a map".into())) };
+        let (room, cell, pad) = (area.id, me.cell.clone(), me.pad.clone());
+        self.send_paced(Out::MoveToCell { room, cell: &cell, pad: &pad }, Kind::Free)?;
+        self.wait_for(Some(Instant::now() + EXIT_TIMEOUT), "leaving combat", |s| !in_combat(s))
+    }
+
+    pub fn walk(&mut self, x: i32, y: i32) -> Result<(), ActError> {
+        self.ready(None)?;
+        let room = self.room()?;
+        self.send_paced(Out::Walk { room, x, y, speed: WALK_SPEED }, Kind::Free)?;
+        if let Some(me) = &mut self.world.me {
+            (me.x, me.y) = (x, y);
+        }
+        self.world.rev += 1;
+        Ok(())
+    }
+
+    pub fn goto(&mut self, name: &str) -> Result<(), ActError> {
+        self.ready(None)?;
+        let spot = |s: &Session| {
+            let area = s.world.area.as_ref()?;
+            area.players.iter().find(|p| p.name.eq_ignore_ascii_case(name)).map(|p| (p.cell.clone(), p.pad.clone()))
+        };
+        if spot(self).is_none() {
+            let before = self.joined;
+            self.send_paced(Out::Goto { name }, Kind::Free)?;
+            self.wait_for(Some(Instant::now() + JOIN_TIMEOUT), &format!("going to {name}"), |s| s.joined.is_some() && s.joined != before)?;
+        }
+        let Some((cell, pad)) = spot(self) else { return Err(ActError::NotFound(format!("{name} in this map"))) };
+        if cell.is_empty() {
+            return Ok(());
+        }
+        self.jump(&cell, if pad.is_empty() { "Left" } else { &pad })
+    }
+
+    pub fn collect(&mut self, map_item: u32, item: &ItemRef, qty: u32) -> Result<(), ActError> {
+        let mut misses = 0;
+        loop {
+            self.ready(None)?;
+            let have = self.world.count_of(item);
+            if have >= qty {
+                return Ok(());
+            }
+            let room = self.room()?;
+            self.send_paced(Out::GetMapItem { room, id: map_item }, Kind::Locked("getMapItem"))?;
+            match self.wait_for(Some(Instant::now() + COLLECT_WAIT), "collecting", |s| s.world.count_of(item) > have) {
+                Ok(()) => misses = 0,
+                Err(ActError::Timeout(_)) if misses + 1 < COLLECT_TRIES => misses += 1,
+                Err(ActError::Timeout(_)) => {
+                    return Err(ActError::Rejected(format!("map item {map_item} gave no {item} in {COLLECT_TRIES} tries")));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    pub fn use_item(&mut self, item: &ItemRef) -> Result<(), ActError> {
+        self.ready(None)?;
+        let Some(found) = self.world.inventory.iter().find(|i| item.matches(i) && i.qty > 0).cloned() else {
+            return Err(ActError::NotFound(format!("{item} in the inventory")));
+        };
+        if !found.kind.eq_ignore_ascii_case("ServerUse") {
+            return Err(ActError::Rejected(format!("{} isn't a usable item; equip consumables and use slot 5", found.name)));
+        }
+        Ok(self.send_paced(Out::ServerUseItem { item: found.id }, Kind::Free)?)
+    }
+
+    pub fn send_raw(&mut self, text: &str) -> Result<(), ActError> {
+        self.ready(None)?;
+        if text.contains('\0') {
+            return Err(ActError::Rejected("a packet can't contain a NUL character".into()));
+        }
+        let kind = if let Some(rest) = text.strip_prefix("%xt%") {
+            let fields: Vec<&str> = rest.split('%').collect();
+            match fields.get(1) {
+                Some(&"cmd") => pacer::kind_for(fields.get(3).copied().unwrap_or_default()),
+                Some(cmd) => pacer::kind_for(cmd),
+                None => Kind::Free,
+            }
+        } else if text.starts_with('<') || text.starts_with('{') {
+            Kind::Free
+        } else {
+            return Err(ActError::Rejected("a packet starts with %xt%, < or {".into()));
+        };
+        Ok(self.send_paced(Out::Raw(text), kind)?)
+    }
+
+    pub fn servers(&mut self) -> Result<Vec<Server>, ActError> {
+        let url = self.api().to_string();
+        self.off_thread_for(move || api::servers(&url), REPLY_TIMEOUT, "loading the server list")?.map_err(|e| ActError::Rejected(e.to_string()))
+    }
+
+    pub fn relogin(&mut self, server: Option<&str>) -> Result<(), ActError> {
+        let name = server.map(String::from).or_else(|| self.server().map(|s| s.name.clone()));
+        self.login(name.as_deref()).map_err(|e| match e {
+            LoginError::Halted(halt) => ActError::Halted(halt),
+            e => ActError::Rejected(e.to_string()),
+        })
     }
 
     fn live_target_anywhere(&self, target: &dyn Fn(&World, &Monster) -> bool) -> bool {

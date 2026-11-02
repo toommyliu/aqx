@@ -1,0 +1,202 @@
+mod server;
+
+use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+
+use aqx_core::{ActError, Disconnect, Halt, Item, ItemRef, Monster, Phase, State, World};
+use aqx_protocol::ItemId;
+use server::{FARM, Fake};
+
+fn sent(fake: Fake) -> Vec<(Instant, String)> {
+    fake.finish()
+}
+
+fn messages(sent: &[(Instant, String)]) -> Vec<&str> {
+    sent.iter().map(|(_, m)| m.as_str()).collect()
+}
+
+fn pump_for(fake: &mut Fake, wait: Duration) {
+    let _ = fake.session.pump_until(Some(Instant::now() + wait), |_| None::<()>);
+}
+
+#[test]
+fn being_marked_afk_is_answered_like_the_client_does() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%moveToCell%5%r1%") {
+            wire.send("%xt%uotls%-1%hero%afk:true%");
+        } else if msg == "%xt%zm%afk%1%false%" {
+            wire.send("%xt%uotls%-1%hero%afk:false%");
+        }
+    });
+    fake.session.jump("r1", "Left").unwrap();
+    pump_for(&mut fake, Duration::from_millis(300));
+    assert!(!fake.session.world.me.as_ref().unwrap().afk);
+    let sent = sent(fake);
+    assert_eq!(messages(&sent).iter().filter(|m| **m == "%xt%zm%afk%1%false%").count(), 1);
+}
+
+#[test]
+fn aggro_pulls_live_matches_in_the_cell_every_half_second() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    fake.session.jump("r2", "Left").unwrap();
+    fake.session.set_aggro(Some(Box::new(|_: &World, m: &Monster| m.name == "Treeant")));
+    pump_for(&mut fake, Duration::from_millis(1200));
+    fake.session.set_aggro(None);
+    pump_for(&mut fake, Duration::from_millis(600));
+    let sent = sent(fake);
+    let pulls: Vec<&(Instant, String)> = sent.iter().filter(|(_, m)| m.contains("%aggroMon%")).collect();
+    assert!((2..=4).contains(&pulls.len()), "{pulls:?}");
+    assert!(pulls.iter().all(|(_, m)| m == "%xt%zm%aggroMon%5%2%"));
+    assert!(pulls[1].0 - pulls[0].0 >= Duration::from_millis(450));
+}
+
+#[test]
+fn a_dropped_connection_closes_the_session_and_a_relogin_restores_it() {
+    let mut dropped = false;
+    let mut fake = Fake::start(FARM, move |msg, wire| {
+        if msg.contains("%moveToCell%5%r1%") && !dropped {
+            dropped = true;
+            wire.hang_up();
+        }
+    });
+    fake.session.world.me.as_mut().unwrap().gold = 5;
+    let lost = fake.session.jump("r1", "Left").and_then(|()| Ok(fake.session.pump_until(Some(Instant::now() + Duration::from_secs(2)), |_| None::<()>)?));
+    let Err(ActError::Halted(Halt::Closed(why))) = lost else { panic!("expected the connection to close, got {lost:?}") };
+    assert!(matches!(why, Disconnect::ConnectionLost(_)) && why.retryable(), "{why:?}");
+
+    fake.session.wait_to_relogin(why.to_string(), Instant::now() + Duration::from_millis(100)).unwrap();
+    fake.session.login(Some("Fake")).unwrap();
+    assert_eq!(fake.session.phase, Phase::Ready);
+    assert_eq!(fake.session.world.me.as_ref().unwrap().gold, 0, "the world starts over");
+    fake.session.jump("r2", "Left").unwrap();
+    assert_eq!(fake.logins.load(Ordering::SeqCst), 2);
+    let sent = sent(fake);
+    assert_eq!(messages(&sent).iter().filter(|m| m.contains("action='login'")).count(), 2);
+}
+
+#[test]
+fn relogin_logs_out_first_and_picks_the_server_again() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    fake.session.relogin(None).unwrap();
+    assert_eq!(fake.session.server().map(|s| s.name.as_str()), Some("Fake"));
+    let servers = fake.session.servers().unwrap();
+    assert_eq!(servers.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Fake"]);
+    let sent = sent(fake);
+    let all = messages(&sent);
+    let logout = all.iter().position(|m| m.contains("%logout%")).unwrap();
+    assert!(all[logout..].iter().any(|m| m.contains("action='login'")));
+}
+
+#[test]
+fn exit_jumps_to_the_same_cell_until_combat_ends() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%gar%") {
+            wire.object(r#"{"cmd":"ct","p":{"hero":{"intState":2}},"m":{"2":{"intHP":800,"intState":2}}}"#);
+        } else if msg == "%xt%zm%moveToCell%5%r2%Left%" {
+            wire.object(r#"{"cmd":"uotls","unm":"hero","o":{"intState":1}}"#);
+        }
+    });
+    fake.session.jump("r2", "Left").unwrap();
+    fake.session.use_skill(0, None).unwrap();
+    pump_for(&mut fake, Duration::from_millis(200));
+    assert_eq!(fake.session.world.me.as_ref().unwrap().vitals.state, State::Combat);
+    fake.session.exit_combat().unwrap();
+    assert_eq!(fake.session.world.me.as_ref().unwrap().vitals.state, State::Idle);
+    let sent = sent(fake);
+    assert_eq!(messages(&sent).iter().filter(|m| **m == "%xt%zm%moveToCell%5%r2%Left%").count(), 2);
+}
+
+fn potion() -> Item {
+    Item {
+        id: ItemId(11857),
+        char_item: None,
+        name: "Health Potion".into(),
+        qty: 3,
+        max_stack: 10,
+        kind: "Item".into(),
+        slot: "None".into(),
+        equipped: true,
+        ac: false,
+        member: false,
+        link: "potion".into(),
+        meta: "457".into(),
+    }
+}
+
+#[test]
+fn skills_use_casts_a_slot_now_and_slot_five_drinks_the_equipped_potion() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    let none = fake.session.use_skill(1, None);
+    assert!(matches!(none, Err(ActError::NotFound(_))), "nothing to hit in Enter: {none:?}");
+    fake.session.world.inventory.push(potion());
+    fake.session.world.me.as_mut().unwrap().item_skill = Some(457);
+    fake.session.use_skill(5, None).unwrap();
+    fake.session.jump("r1", "Left").unwrap();
+    let mosquito = |_: &World, m: &Monster| m.name == "Mosquito";
+    fake.session.use_skill(1, Some(&mosquito)).unwrap();
+    let sent = sent(fake);
+    let casts: Vec<&str> = messages(&sent).into_iter().filter(|m| m.contains("%gar%")).collect();
+    assert_eq!(casts, ["%xt%zm%gar%1%0%i1>p:1001%11857%wvz%", "%xt%zm%gar%1%1%a1>m:1%wvz%"]);
+}
+
+#[test]
+fn collect_repeats_get_map_item_until_the_count_is_reached() {
+    let mut held = 0;
+    let mut fake = Fake::start(FARM, move |msg, wire| {
+        if msg == "%xt%zm%getMapItem%5%923%" {
+            held += 1;
+            wire.object(&format!(r#"{{"cmd":"addItems","items":{{"77":{{"ItemID":77,"sName":"Ore","bTemp":true,"iQty":1,"iQtyNow":{held}}}}}}}"#));
+        }
+    });
+    let ore = ItemRef::Name("Ore".into());
+    fake.session.collect(923, &ore, 2).unwrap();
+    assert_eq!(fake.session.world.count_of(&ore), 2);
+    let missing = fake.session.collect(924, &ore, 3);
+    assert!(matches!(&missing, Err(ActError::Rejected(why)) if why.contains("map item 924")), "{missing:?}");
+    let sent = sent(fake);
+    let gets: Vec<&(Instant, String)> = sent.iter().filter(|(_, m)| m == "%xt%zm%getMapItem%5%923%").collect();
+    assert_eq!(gets.len(), 2);
+    assert!(gets[1].0 - gets[0].0 >= Duration::from_millis(950), "getMapItem keeps the client's 1 s lock");
+}
+
+#[test]
+fn raw_packets_go_through_the_pacer() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    fake.session.send_raw("%xt%zm%cmd%5%tfer%hero%farm%").unwrap();
+    fake.session.send_raw("%xt%zm%cmd%5%tfer%hero%farm%").unwrap();
+    assert!(matches!(fake.session.send_raw("hello"), Err(ActError::Rejected(_))));
+    let sent = sent(fake);
+    let raw: Vec<&Instant> = sent.iter().filter(|(_, m)| m == "%xt%zm%cmd%5%tfer%hero%farm%").map(|(t, _)| t).collect();
+    assert_eq!(raw.len(), 2);
+    assert!(*raw[1] - *raw[0] >= Duration::from_millis(2950), "tfer keeps its 3 s lock: {:?}", *raw[1] - *raw[0]);
+}
+
+#[test]
+fn a_failed_login_closes_the_session() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    let refused = fake.session.relogin(Some("Nowhere"));
+    assert!(matches!(&refused, Err(ActError::Rejected(why)) if why.contains("no server named Nowhere")), "{refused:?}");
+    assert!(matches!(fake.session.phase, Phase::Closed(_)), "{:?}", fake.session.phase);
+    let after = fake.session.jump("r1", "Left");
+    assert!(matches!(after, Err(ActError::Halted(Halt::Closed(_)))), "{after:?}");
+    fake.finish();
+}
+
+#[test]
+fn skills_use_waits_for_mana() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg == "%xt%zm%moveToCell%5%r1%Left%" {
+            wire.object(r#"{"cmd":"ct","p":{"hero":{"intMP":0}}}"#);
+            wire.later(Duration::from_millis(900), "<mana>", r#"{"cmd":"ct","p":{"hero":{"intMP":100}}}"#.into());
+        }
+    });
+    fake.session.jump("r1", "Left").unwrap();
+    let started = Instant::now();
+    fake.session.use_skill(1, None).unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(250), "cast after {:?}", started.elapsed());
+    let sent = sent(fake);
+    let all = messages(&sent);
+    let mana = all.iter().position(|m| *m == "<mana>").expect("mana came back");
+    assert_eq!(all.iter().filter(|m| m.contains("%gar%")).count(), 1);
+    assert!(all.iter().position(|m| m.contains("%gar%")).unwrap() > mana, "cast before the mana came back");
+}

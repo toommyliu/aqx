@@ -194,7 +194,8 @@ fn waiting<'a>(title: &'a str) -> Paragraph<'a> {
 
 fn draw_header(f: &mut Frame, area: Rect, view: Option<&View>, now: u64) {
     let phase = match view.map(|v| &v.phase) {
-        None => "CONNECTING".yellow(),
+        None | Some(Phase::Connecting) => "CONNECTING".yellow(),
+        Some(Phase::Waiting { .. }) => "RECONNECTING".yellow(),
         Some(Phase::Handshaking | Phase::LoggingIn) => "LOGGING IN".yellow(),
         Some(Phase::Loading) => "LOADING".yellow(),
         Some(Phase::Ready) => "READY".green(),

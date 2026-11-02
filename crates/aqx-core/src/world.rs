@@ -34,6 +34,7 @@ pub struct World {
     pub shops: HashMap<ShopId, Arc<Shop>>,
     pub(crate) last_shop: Option<ShopId>,
     pub(crate) buying: Option<ShopId>,
+    pub target: Option<MonMapId>,
     pub rev: u64,
 }
 
@@ -62,6 +63,9 @@ pub struct Me {
     pub class: String,
     pub cell: String,
     pub pad: String,
+    pub x: i32,
+    pub y: i32,
+    pub afk: bool,
     pub vitals: Vitals,
     pub auras: Vec<Aura>,
     pub skills: Vec<Skill>,
@@ -99,6 +103,7 @@ pub struct Area {
     pub map: String,
     pub monsters: Vec<Monster>,
     pub players: Vec<Player>,
+    announced: bool,
 }
 
 #[derive(Clone)]
@@ -387,6 +392,14 @@ struct Anim {
     msg: String,
 }
 
+fn skill_target(tgt: &str) -> SkillTarget {
+    match tgt {
+        "f" => SkillTarget::Friendly,
+        "s" => SkillTarget::Myself,
+        _ => SkillTarget::Hostile,
+    }
+}
+
 fn qty(n: i64) -> u32 {
     n.clamp(0, u32::MAX as i64) as u32
 }
@@ -437,7 +450,7 @@ impl World {
             Some("joinOK") => {
                 let Some(id) = xml.room() else { return };
                 let players = xml.users().filter(|(eid, _)| Some(*eid) != me).map(|(eid, name)| Player::new(eid, name)).collect();
-                self.area = Some(Area { id, name: String::new(), map: String::new(), monsters: Vec::new(), players });
+                self.area = Some(Area { id, name: String::new(), map: String::new(), monsters: Vec::new(), players, announced: false });
             }
             Some("uER") => {
                 if let Some(area) = &mut self.area {
@@ -473,10 +486,12 @@ impl World {
             },
             "server" => {
                 let text = xt.arg(0).unwrap_or_default();
-                match &self.area {
-                    Some(area) if text.starts_with("You joined \"") => {
-                        events.push(Event::Joined { area: area.name.clone(), players: area.players.len() + 1 })
+                match &mut self.area {
+                    Some(area) if text.starts_with("You joined \"") && !area.announced => {
+                        area.announced = true;
+                        events.push(Event::Joined { area: area.name.clone(), players: area.players.len() + 1 });
                     }
+                    Some(_) if text.starts_with("You joined \"") => {}
                     _ => events.push(Event::ServerText { text: text.into() }),
                 }
             }
@@ -507,12 +522,24 @@ impl World {
             "uotls" => {
                 let (Some(name), Some(fields)) = (xt.arg(0), xt.arg(1)) else { return };
                 let mut patch = Patch::default();
+                let (mut afk, mut x, mut y) = (None, None, None);
                 for (key, value) in fields.split(',').filter_map(|kv| kv.split_once(':')) {
                     match key {
                         "strFrame" => patch.cell = Some(value.into()),
                         "strPad" => patch.pad = Some(value.into()),
+                        "afk" => afk = Some(value == "true"),
+                        "tx" => x = value.parse().ok(),
+                        "ty" => y = value.parse().ok(),
                         _ => {}
                     }
+                }
+                if let Some(me) = self.me.as_mut().filter(|m| m.user.eq_ignore_ascii_case(name)) {
+                    if let Some(afk) = afk.filter(|afk| *afk != me.afk) {
+                        me.afk = afk;
+                        events.push(Event::Afk { afk });
+                    }
+                    me.x = x.unwrap_or(me.x);
+                    me.y = y.unwrap_or(me.y);
                 }
                 self.patch_named(name, &patch, events);
             }
@@ -567,15 +594,18 @@ impl World {
                     }
                 }
                 for change in tick.a {
-                    self.aura(change, now);
+                    self.aura(change, now, events);
                 }
                 for anim in tick.anims.iter().filter(|a| a.msg.contains(COUNTER_WARNING)) {
                     if let Some(m) = self.monster_ref(&anim.caster) {
+                        if m.counter_warned.is_none() {
+                            events.push(Event::Countering { id: m.map_id, active: true });
+                        }
                         m.counter_warned = Some(now);
                     }
                 }
             }
-            "aura+" | "aura++" | "aura-" | "aura--" => self.aura(json.decode()?, now),
+            "aura+" | "aura++" | "aura-" | "aura--" => self.aura(json.decode()?, now, events),
             "clearAuras" => {
                 if let Some(me) = &mut self.me {
                     me.auras.retain(|a| a.persist);
@@ -944,12 +974,27 @@ impl World {
                 struct Skill5 {
                     #[serde(deserialize_with = "int")]
                     id: i64,
+                    #[serde(default, deserialize_with = "int")]
+                    cd: i64,
+                    #[serde(default, deserialize_with = "int")]
+                    mp: i64,
+                    #[serde(default, deserialize_with = "text")]
+                    tgt: String,
+                    #[serde(rename = "tgtMax", default, deserialize_with = "int")]
+                    max_targets: i64,
                 }
                 let equipped: Equipped = json.decode()?;
                 if !equipped.ok {
                     events.push(Event::Refused { action: "equipping".into(), reason: "the server refused it".into() });
                 } else if let Some(me) = &mut self.me {
-                    me.item_skill = Some(qty(equipped.o.id));
+                    let o = equipped.o;
+                    me.item_skill = Some(qty(o.id));
+                    if let Some(slot) = me.skills.iter_mut().find(|s| s.slot == "i1") {
+                        slot.cooldown = Duration::from_millis(o.cd.max(0) as u64);
+                        slot.mana = o.mp as i32;
+                        slot.target = skill_target(&o.tgt);
+                        slot.max_targets = qty(o.max_targets).max(1);
+                    }
                 }
             }
             "sellItem" => {
@@ -1029,11 +1074,7 @@ impl World {
                             name: s.nam,
                             cooldown: Duration::from_millis(s.cd.max(0) as u64),
                             mana: s.mp as i32,
-                            target: match s.tgt.as_str() {
-                                "f" => SkillTarget::Friendly,
-                                "s" => SkillTarget::Myself,
-                                _ => SkillTarget::Hostile,
-                            },
+                            target: skill_target(&s.tgt),
                             max_targets: qty(s.max_targets).max(1),
                         })
                         .collect();
@@ -1114,11 +1155,13 @@ impl World {
             Some(area) if area.id == m.id => area.players,
             _ => Vec::new(),
         };
-        self.area = Some(Area { id: m.id, name: m.name, map: m.map, monsters, players });
+        self.area = Some(Area { id: m.id, name: m.name, map: m.map, monsters, players, announced: false });
         for avatar in each::<Avatar>(m.avatars, "player", events) {
             let me = self.me.as_mut().filter(|me| me.eid == avatar.eid);
             if let Some(me) = me {
                 me.apply(&avatar.patch);
+                me.x = avatar.tx.map_or(0, |x| x as i32);
+                me.y = avatar.ty.map_or(0, |y| y as i32);
                 continue;
             }
             let Some(area) = &mut self.area else { continue };
@@ -1176,7 +1219,12 @@ impl World {
     fn patch_named(&mut self, name: &str, patch: &Patch, events: &mut Vec<Event>) {
         if let Some(me) = self.me.as_mut().filter(|m| m.user.eq_ignore_ascii_case(name)) {
             let was = me.vitals.state;
+            let spot = (me.cell.clone(), me.pad.clone());
             me.apply(patch);
+            if (&me.cell, &me.pad) != (&spot.0, &spot.1) {
+                (me.x, me.y) = (0, 0);
+                events.push(Event::Moved { cell: me.cell.clone(), pad: me.pad.clone() });
+            }
             match (was, me.vitals.state) {
                 (State::Dead, State::Dead) => {}
                 (_, State::Dead) => events.push(Event::Died),
@@ -1255,10 +1303,20 @@ impl World {
         self.area.as_mut()?.players.iter_mut().find(|p| p.eid == eid).map(|p| &mut p.auras)
     }
 
-    fn aura(&mut self, change: AuraChange, now: Instant) {
+    fn aura_owner(&self, target: &str) -> Option<Option<MonMapId>> {
+        if let Some(id) = target.strip_prefix("m:") {
+            return id.parse().ok().map(|id| Some(MonMapId(id)));
+        }
+        let eid = EntityId(target.strip_prefix("p:")?.parse().ok()?);
+        self.me.as_ref().filter(|m| m.eid == eid).map(|_| None)
+    }
+
+    fn aura(&mut self, change: AuraChange, now: Instant, events: &mut Vec<Event>) {
+        let owner = self.aura_owner(&change.target);
         let Some(auras) = self.auras_of(&change.target) else { return };
         match change.cmd.as_str() {
             "aura+" | "aura++" => {
+                let mut counter = false;
                 for add in change.auras {
                     let until = add
                         .dur
@@ -1266,19 +1324,37 @@ impl World {
                         .and_then(|d| Duration::try_from_secs_f64(d).ok())
                         .and_then(|d| now.checked_add(d));
                     let aura = Aura { name: add.nam, stacks: add.stk.unwrap_or(1), until, persist: add.persist };
+                    counter |= aura.name == COUNTER_AURA;
+                    if let Some(monster) = owner {
+                        events.push(Event::AuraChanged { monster, name: aura.name.clone(), stacks: aura.stacks, added: true });
+                    }
                     match auras.iter_mut().find(|a| a.name == aura.name) {
                         Some(existing) => *existing = aura,
                         None => auras.push(aura),
                     }
                 }
+                if counter
+                    && let Some(m) = self.monster_ref(&change.target).filter(|m| m.counter_warned.is_none())
+                {
+                    m.counter_warned = Some(now);
+                    events.push(Event::Countering { id: m.map_id, active: true });
+                }
             }
             "aura-" | "aura--" => {
                 let gone: Vec<String> = change.auras.into_iter().map(|a| a.nam).chain(change.aura.map(|a| a.nam)).collect();
+                for aura in auras.iter().filter(|a| gone.contains(&a.name)) {
+                    if let Some(monster) = owner {
+                        events.push(Event::AuraChanged { monster, name: aura.name.clone(), stacks: 0, added: false });
+                    }
+                }
                 auras.retain(|a| !gone.contains(&a.name));
                 if gone.iter().any(|name| name == COUNTER_AURA)
                     && let Some(m) = self.monster_ref(&change.target)
                 {
-                    m.counter_warned = None;
+                    let id = m.map_id;
+                    if m.counter_warned.take().is_some() {
+                        events.push(Event::Countering { id, active: false });
+                    }
                 }
             }
             _ => {}
@@ -1297,6 +1373,9 @@ impl Me {
             class: String::new(),
             cell: String::new(),
             pad: String::new(),
+            x: 0,
+            y: 0,
+            afk: false,
             vitals: Vitals::default(),
             auras: Vec::new(),
             skills: Vec::new(),
@@ -1418,6 +1497,8 @@ struct Avatar {
     name: String,
     #[serde(rename = "intLevel", default, deserialize_with = "int")]
     level: i64,
+    tx: Option<f64>,
+    ty: Option<f64>,
     #[serde(flatten)]
     patch: Patch,
 }
@@ -1459,6 +1540,7 @@ mod tests {
     fn joining_builds_the_area_from_joinok_and_movetoarea() {
         let mut world = joined();
         assert_eq!(feed(&mut world, "%xt%server%-1%You joined \"farm-1\"%"), [Event::Joined { area: "farm-1".into(), players: 2 }]);
+        assert_eq!(feed(&mut world, "%xt%server%-1%You joined \"farm-1\"!%"), [], "one join per moveToArea");
         let area = world.area.as_ref().unwrap();
         assert_eq!((area.id, area.map.as_str()), (AreaId(5), "farm"));
         let mosquito = &area.monsters[0];

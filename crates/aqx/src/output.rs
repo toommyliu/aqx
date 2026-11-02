@@ -92,6 +92,7 @@ pub fn status(world: &World) {
 
 pub fn describe(event: &Event) -> Option<(&'static str, String)> {
     Some(match event {
+        Event::Connecting { server, version } => ("aqx", format!("connecting to {server}, client version {version}")),
         Event::LoggedIn { eid } => ("aqx", format!("logged in, entity {eid}")),
         Event::Joined { area, players: 1 } => ("aqx", format!("joined {area}, alone")),
         Event::Joined { area, players } => ("aqx", format!("joined {area}, {players} players")),
@@ -99,6 +100,8 @@ pub fn describe(event: &Event) -> Option<(&'static str, String)> {
         Event::BankLoaded { items } => ("aqx", format!("bank loaded, {items} items")),
         Event::Died => ("aqx", "died".into()),
         Event::Respawned => ("aqx", "respawned".into()),
+        Event::Moved { cell, pad } => ("aqx", format!("moved to {cell}/{pad}")),
+        Event::Afk { afk: true } => ("aqx", "marked away, answering".into()),
         Event::Killed { monster, .. } => ("aqx", format!("killed {monster}")),
         Event::DropOffered { item, qty, .. } => ("aqx", format!("drop offered: {item} x{qty}")),
         Event::ItemChanged { item, qty, place } => {
@@ -121,7 +124,14 @@ pub fn describe(event: &Event) -> Option<(&'static str, String)> {
         Event::ServerText { text } | Event::Warning { text } => ("server", text.clone()),
         Event::Unreadable { what } => ("aqx", format!("unreadable message: {what}")),
         Event::RecordingFailed { error } => ("aqx", format!("recording stopped: {error}")),
-        Event::LoginRejected { .. } | Event::LoggedInElsewhere | Event::InventoryLoaded { .. } => return None,
+        Event::LoginRejected { .. }
+        | Event::LoggedInElsewhere
+        | Event::InventoryLoaded { .. }
+        | Event::Afk { afk: false }
+        | Event::AuraChanged { .. }
+        | Event::Countering { .. }
+        | Event::Packet { .. }
+        | Event::Alarm => return None,
     })
 }
 

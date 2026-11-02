@@ -1,34 +1,43 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
+use std::rc::Rc;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use aqx_protocol::{Decoder, Framer, Message, MonMapId, Out};
+use aqx_protocol::{AreaId, Decoder, Framer, Message, MonMapId, Out, QuestId};
 use mio::net::TcpStream;
 use mio::{Events, Interest, Token};
 
-use crate::api::Server;
-use crate::control::Control;
+use crate::api::{self, ApiError, Server, ServerError};
+use crate::control::{Control, StopHandle};
 use crate::event::Event;
 use crate::pacer::{Kind, Pacer};
 use crate::record::Recorder;
-use crate::world::{self, State, World};
+use crate::world::{self, Monster, State, World};
 
 pub const CLIENT_VERSION: &str = "5.31";
 
 const SOCKET: Token = Token(0);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
+const LOGOUT_TIMEOUT: Duration = Duration::from_secs(3);
+const VERSION_RETRIES: usize = 3;
 const RESPAWN_DELAY: Duration = Duration::from_secs(11);
 const RESPAWN_RETRY: Duration = Duration::from_secs(10);
+const AGGRO_EVERY: Duration = Duration::from_millis(500);
 const SLOW_DOWN: [&str; 3] = ["slow down", "too soon", "spamming"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
+    Connecting,
     Handshaking,
     LoggingIn,
     Loading,
     Ready,
     Closed(Disconnect),
+    Waiting { reason: String, until: Instant },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +48,12 @@ pub enum Disconnect {
     LoggedInElsewhere,
     ConnectionLost(String),
     Protocol(String),
+}
+
+impl Disconnect {
+    pub fn retryable(&self) -> bool {
+        !matches!(self, Disconnect::LoggedInElsewhere)
+    }
 }
 
 impl std::fmt::Display for Disconnect {
@@ -63,16 +78,52 @@ pub enum Halt {
     Closed(Disconnect),
 }
 
-pub struct Login<'a> {
-    pub api: &'a str,
-    pub user: &'a str,
-    pub token: &'a str,
-    pub version: &'a str,
+#[derive(Debug)]
+pub enum LoginError {
+    Api(ApiError),
+    Server(ServerError),
+    Connect(String),
+    Closed(Disconnect),
+    NotReady(String),
+    Halted(Halt),
 }
 
+impl LoginError {
+    pub fn retryable(&self) -> bool {
+        match self {
+            LoginError::Api(ApiError::Rejected(_)) | LoginError::Halted(_) => false,
+            LoginError::Server(e) => !e.lasting,
+            LoginError::Closed(why) => why.retryable(),
+            _ => true,
+        }
+    }
+}
+
+impl std::fmt::Display for LoginError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoginError::Api(e) => write!(f, "{e}"),
+            LoginError::Server(e) => f.write_str(&e.message),
+            LoginError::Connect(e) => f.write_str(e),
+            LoginError::Closed(why) => write!(f, "{why}"),
+            LoginError::NotReady(phase) => write!(f, "not ready after {} s, stuck in {phase}", READY_TIMEOUT.as_secs()),
+            LoginError::Halted(halt) => write!(f, "{halt:?}"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Credentials {
+    pub api: String,
+    pub user: String,
+    pub password: String,
+}
+
+pub type Sink = Rc<dyn Fn(&Event)>;
 type WatchFn = Box<dyn FnMut(&Phase, &World)>;
 pub type Goal = Box<dyn Fn(&World) -> bool>;
 pub type Hook = Box<dyn FnMut(&mut Session)>;
+pub type Target = Box<dyn Fn(&World, &Monster) -> bool>;
 
 struct Watcher {
     every: Duration,
@@ -80,17 +131,25 @@ struct Watcher {
     f: WatchFn,
 }
 
+struct Aggro {
+    target: Target,
+    next: Instant,
+}
+
 pub struct Session {
     control: Control,
     events: Events,
-    stream: TcpStream,
+    stream: Option<TcpStream>,
     framer: Framer,
     decoder: Decoder,
     outbox: Vec<u8>,
     recorder: Option<Recorder>,
-    pub(crate) sink: fn(&Event),
-    login: (String, String, String),
-    pub(crate) api: String,
+    pub(crate) sink: Sink,
+    creds: Credentials,
+    version: String,
+    token: String,
+    server: Option<Server>,
+    ready_at: Option<Instant>,
     pub(crate) refusals: HashMap<String, String>,
     inventory_requested: bool,
     pacer: Pacer,
@@ -100,45 +159,36 @@ pub struct Session {
     watcher: Option<Watcher>,
     hook: Option<Hook>,
     pub(crate) goal: Option<Goal>,
-    script_events: Option<std::collections::VecDeque<Event>>,
+    script_events: Option<VecDeque<Event>>,
     events_queued: u64,
     pub respawn_to: Option<(String, String)>,
     died_in: Option<(String, String)>,
     pub(crate) casts: HashMap<String, Instant>,
-    pub(crate) joined: Option<aqx_protocol::AreaId>,
-    pub(crate) quest_outcomes: HashMap<aqx_protocol::QuestId, Result<(), String>>,
+    pub(crate) joined: Option<AreaId>,
+    pub(crate) quest_outcomes: HashMap<QuestId, Result<(), String>>,
+    aggro: Option<Aggro>,
+    alarm: Option<Instant>,
+    packets: HashSet<String>,
     pub world: World,
     pub phase: Phase,
 }
 
 impl Session {
-    pub fn connect(
-        control: Control,
-        server: &Server,
-        login: Login,
-        recorder: Option<Recorder>,
-        sink: fn(&Event),
-    ) -> io::Result<Session> {
-        let addr = (server.host.as_str(), server.port)
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, format!("{} has no address", server.host)))?;
-        let std_stream = std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
-        std_stream.set_nodelay(true)?;
-        std_stream.set_nonblocking(true)?;
-        let mut stream = TcpStream::from_std(std_stream);
-        control.poll.registry().register(&mut stream, SOCKET, Interest::READABLE | Interest::WRITABLE)?;
-        let mut session = Session {
+    pub fn new(control: Control, creds: Credentials, version: &str, recorder: Option<Recorder>, sink: Sink) -> Session {
+        Session {
             control,
             events: Events::with_capacity(16),
-            stream,
+            stream: None,
             framer: Framer::default(),
             decoder: Decoder::default(),
             outbox: Vec::new(),
             recorder,
             sink,
-            login: (login.user.into(), login.token.into(), login.version.into()),
-            api: login.api.into(),
+            creds,
+            version: version.into(),
+            token: String::new(),
+            server: None,
+            ready_at: None,
             refusals: HashMap::new(),
             inventory_requested: false,
             pacer: Pacer::new(Instant::now()),
@@ -155,16 +205,134 @@ impl Session {
             casts: HashMap::new(),
             joined: None,
             quest_outcomes: HashMap::new(),
+            aggro: None,
+            alarm: None,
+            packets: HashSet::new(),
             world: World::default(),
-            phase: Phase::Handshaking,
-        };
-        session.send(Out::VerChk);
-        Ok(session)
+            phase: Phase::Connecting,
+        }
     }
 
-    pub fn into_parts(mut self) -> (Control, Option<Recorder>) {
-        let _ = self.control.poll.registry().deregister(&mut self.stream);
-        (self.control, self.recorder)
+    pub fn login(&mut self, server: Option<&str>) -> Result<(), LoginError> {
+        let (hook, goal) = (self.hook.take(), self.goal.take());
+        let result = self.log_in(server);
+        self.hook = hook;
+        self.goal = goal;
+        if let Err(e) = &result {
+            self.close(Disconnect::ConnectionLost(e.to_string()));
+        }
+        result
+    }
+
+    fn log_in(&mut self, server: Option<&str>) -> Result<(), LoginError> {
+        self.hang_up();
+        self.ready_at = None;
+        for _ in 0..VERSION_RETRIES {
+            self.phase = Phase::Connecting;
+            let Credentials { api, user, password } = self.creds.clone();
+            let account = match self.off_thread(move || api::login(&api, &user, &password), LOGIN_TIMEOUT) {
+                Ok(reply) => reply.map_err(LoginError::Api)?,
+                Err(Halt::Timeout) => return Err(LoginError::Api(ApiError::Http("the login request timed out".into()))),
+                Err(halt) => return Err(LoginError::Halted(halt)),
+            };
+            let chosen = api::pick_server(&account.servers, server, account.member).map_err(LoginError::Server)?.clone();
+            self.token = account.token;
+            self.open(&chosen)?;
+            let outcome = self.pump_until(Some(Instant::now() + READY_TIMEOUT), |s| match &s.phase {
+                Phase::Ready => Some(Ok(())),
+                Phase::Closed(why) => Some(Err(why.clone())),
+                _ => None,
+            });
+            match outcome {
+                Ok(Ok(())) => {
+                    self.ready_at = Some(Instant::now());
+                    return Ok(());
+                }
+                Ok(Err(Disconnect::ClientVersion(wanted))) if wanted != self.version => self.version = wanted,
+                Ok(Err(why)) => return Err(LoginError::Closed(why)),
+                Err(Halt::Timeout) => {
+                    let stuck = format!("{:?}", self.phase);
+                    self.close(Disconnect::ConnectionLost("the character never loaded".into()));
+                    return Err(LoginError::NotReady(stuck));
+                }
+                Err(halt) => return Err(LoginError::Halted(halt)),
+            }
+        }
+        Err(LoginError::Closed(Disconnect::ClientVersion(self.version.clone())))
+    }
+
+    fn open(&mut self, server: &Server) -> Result<(), LoginError> {
+        let unreachable = |e: io::Error| LoginError::Connect(format!("can't reach {}: {e}", server.name));
+        let addr = (server.host.as_str(), server.port)
+            .to_socket_addrs()
+            .map_err(unreachable)?
+            .next()
+            .ok_or_else(|| LoginError::Connect(format!("{} has no address", server.host)))?;
+        let std_stream = std::net::TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(unreachable)?;
+        std_stream.set_nodelay(true).map_err(unreachable)?;
+        std_stream.set_nonblocking(true).map_err(unreachable)?;
+        let mut stream = TcpStream::from_std(std_stream);
+        self.control.poll.registry().register(&mut stream, SOCKET, Interest::READABLE | Interest::WRITABLE).map_err(unreachable)?;
+        self.stream = Some(stream);
+        self.framer = Framer::default();
+        self.decoder = Decoder::default();
+        self.outbox.clear();
+        self.pacer = Pacer::new(Instant::now());
+        self.counter = 0;
+        self.respawn_at = None;
+        self.respawn_sent = false;
+        self.died_in = None;
+        self.casts.clear();
+        self.joined = None;
+        self.quest_outcomes.clear();
+        self.refusals.clear();
+        self.inventory_requested = false;
+        self.ready_at = None;
+        self.world = World { rev: self.world.rev + 1, ..World::default() };
+        self.server = Some(server.clone());
+        self.phase = Phase::Handshaking;
+        self.publish(Event::Connecting { server: server.name.clone(), version: self.version.clone() });
+        self.send(Out::VerChk);
+        Ok(())
+    }
+
+    pub fn logout(&mut self) {
+        self.control.clear_stop();
+        self.hang_up();
+    }
+
+    fn hang_up(&mut self) {
+        if self.stream.is_some() && !matches!(self.phase, Phase::Closed(_)) {
+            self.send(Out::Logout);
+            let _ = self.pump_until(Some(Instant::now() + LOGOUT_TIMEOUT), |s| matches!(s.phase, Phase::Closed(_)).then_some(()));
+        }
+        self.close(Disconnect::LoggedOut);
+    }
+
+    pub fn wait_to_relogin(&mut self, reason: impl Into<String>, until: Instant) -> Result<(), Halt> {
+        let reason = reason.into();
+        self.close(Disconnect::ConnectionLost(reason.clone()));
+        self.phase = Phase::Waiting { reason, until };
+        match self.pump_until(Some(until), |_| None::<()>) {
+            Err(Halt::Timeout) => Ok(()),
+            other => other,
+        }
+    }
+
+    pub fn connected_for(&self) -> Duration {
+        self.ready_at.map_or(Duration::ZERO, |at| at.elapsed())
+    }
+
+    pub fn server(&self) -> Option<&Server> {
+        self.server.as_ref()
+    }
+
+    pub fn user(&self) -> &str {
+        &self.creds.user
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
     pub fn watch(&mut self, every: Duration, f: impl FnMut(&Phase, &World) + 'static) {
@@ -198,7 +366,10 @@ impl Session {
             if self.run_hook() {
                 continue;
             }
-            let wake = [deadline, self.respawn_at, self.watcher.as_ref().map(|w| w.next)].into_iter().flatten().min();
+            let wake = [deadline, self.respawn_at, self.watcher.as_ref().map(|w| w.next), self.aggro.as_ref().map(|a| a.next), self.alarm]
+                .into_iter()
+                .flatten()
+                .min();
             let timeout = wake.map(|w| w.saturating_duration_since(now));
             match self.control.poll.poll(&mut self.events, timeout) {
                 Ok(()) => {}
@@ -211,7 +382,12 @@ impl Session {
     }
 
     pub fn set_hook(&mut self, hook: Option<Hook>) {
-        self.script_events = hook.as_ref().map(|_| std::collections::VecDeque::new());
+        if hook.is_none() {
+            self.aggro = None;
+            self.alarm = None;
+            self.packets.clear();
+        }
+        self.script_events = hook.as_ref().map(|_| VecDeque::new());
         self.hook = hook;
     }
 
@@ -243,12 +419,28 @@ impl Session {
         true
     }
 
-    pub fn sink(&self) -> fn(&Event) {
-        self.sink
+    pub fn sink(&self) -> Sink {
+        self.sink.clone()
     }
 
-    pub fn stop_handle(&self) -> crate::control::StopHandle {
+    pub fn stop_handle(&self) -> StopHandle {
         self.control.stop_handle()
+    }
+
+    pub fn set_aggro(&mut self, target: Option<Target>) {
+        self.aggro = target.map(|target| Aggro { target, next: Instant::now() });
+    }
+
+    pub fn set_alarm(&mut self, at: Option<Instant>) {
+        self.alarm = at;
+    }
+
+    pub fn listen(&mut self, cmd: &str, on: bool) {
+        if on {
+            self.packets.insert(cmd.into());
+        } else {
+            self.packets.remove(cmd);
+        }
     }
 
     pub(crate) fn idle_until(&mut self, at: Instant) -> Result<(), Halt> {
@@ -273,12 +465,22 @@ impl Session {
         self.pacer.ready_at(kind, now)
     }
 
-    pub(crate) fn token(&self) -> &str {
-        &self.login.1
+    pub(crate) fn api(&self) -> &str {
+        &self.creds.api
     }
 
-    pub(crate) fn waker(&self) -> std::sync::Arc<mio::Waker> {
-        self.control.waker()
+    pub(crate) fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub(crate) fn off_thread<T: Send + 'static>(&mut self, job: impl FnOnce() -> T + Send + 'static, timeout: Duration) -> Result<T, Halt> {
+        let (tx, rx) = mpsc::channel();
+        let waker = self.control.waker();
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+            let _ = waker.wake();
+        });
+        self.pump_until(Some(Instant::now() + timeout), |_| rx.try_recv().ok())
     }
 
     pub(crate) fn next_counter(&mut self) -> u32 {
@@ -299,7 +501,34 @@ impl Session {
                 _ => self.respawn_at = Some(now + Duration::from_secs(1)),
             }
         }
+        if self.aggro.as_ref().is_some_and(|a| now >= a.next) {
+            if let Some(aggro) = &mut self.aggro {
+                aggro.next = now + AGGRO_EVERY;
+            }
+            self.pull(now);
+        }
+        if self.alarm.is_some_and(|at| now >= at) {
+            self.alarm = None;
+            self.queue(Event::Alarm);
+        }
         self.fire_watcher(now, false);
+    }
+
+    fn pull(&mut self, now: Instant) {
+        if self.phase != Phase::Ready {
+            return;
+        }
+        let (Some(aggro), Some(me), Some(area)) = (&self.aggro, &self.world.me, &self.world.area) else { return };
+        if me.vitals.state == State::Dead {
+            return;
+        }
+        let ids: Vec<MonMapId> =
+            area.monsters.iter().filter(|m| m.cell == me.cell && m.alive() && (aggro.target)(&self.world, m)).map(|m| m.map_id).collect();
+        if !ids.is_empty() {
+            let room = area.id;
+            self.pacer.sent(Kind::Free, now);
+            self.send(Out::Aggro { room, monsters: &ids });
+        }
     }
 
     fn fire_watcher(&mut self, now: Instant, force: bool) {
@@ -312,16 +541,10 @@ impl Session {
         }
     }
 
-    pub fn logout(&mut self) {
-        self.control.clear_stop();
-        if matches!(self.phase, Phase::Closed(_)) {
+    pub(crate) fn send(&mut self, out: Out) {
+        if self.stream.is_none() {
             return;
         }
-        self.send(Out::Logout);
-        let _ = self.pump_until(Some(Instant::now() + Duration::from_secs(3)), |_| None::<()>);
-    }
-
-    pub(crate) fn send(&mut self, out: Out) {
         let start = self.outbox.len();
         out.encode(&mut self.outbox);
         let sent = String::from_utf8_lossy(&self.outbox[start..self.outbox.len() - 1]).into_owned();
@@ -330,8 +553,9 @@ impl Session {
     }
 
     fn flush(&mut self) {
-        while !self.outbox.is_empty() && !matches!(self.phase, Phase::Closed(_)) {
-            match self.stream.write(&self.outbox) {
+        while !self.outbox.is_empty() {
+            let Some(stream) = &mut self.stream else { return self.outbox.clear() };
+            match stream.write(&self.outbox) {
                 Ok(0) => self.close(Disconnect::ConnectionLost("socket closed while writing".into())),
                 Ok(n) => {
                     self.outbox.drain(..n);
@@ -345,13 +569,14 @@ impl Session {
 
     fn read_socket(&mut self) {
         let mut buf = [0u8; 16 * 1024];
-        while !matches!(self.phase, Phase::Closed(_)) {
-            match self.stream.read(&mut buf) {
-                Ok(0) => self.close(Disconnect::ConnectionLost("server closed the connection".into())),
+        loop {
+            let Some(stream) = &mut self.stream else { return };
+            match stream.read(&mut buf) {
+                Ok(0) => return self.close(Disconnect::ConnectionLost("server closed the connection".into())),
                 Ok(n) => self.receive_bytes(&buf[..n]),
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => self.close(Disconnect::ConnectionLost(e.to_string())),
+                Err(e) => return self.close(Disconnect::ConnectionLost(e.to_string())),
             }
         }
     }
@@ -371,7 +596,7 @@ impl Session {
     }
 
     fn receive(&mut self, text: &str) {
-        if matches!(self.phase, Phase::Closed(_)) {
+        if self.stream.is_none() {
             return;
         }
         self.record("in", text);
@@ -388,7 +613,7 @@ impl Session {
         if let Message::Xml(xml) = &msg {
             match xml.action {
                 Some("apiOK") if self.phase == Phase::Handshaking => {
-                    let (user, token, version) = self.login.clone();
+                    let (user, version, token) = (self.creds.user.clone(), self.version.clone(), self.token.clone());
                     self.send(Out::Login { user: &user, version: &version, token: &token });
                     self.phase = Phase::LoggingIn;
                 }
@@ -398,11 +623,30 @@ impl Session {
         }
         for event in world::reduce(&mut self.world, &msg, Instant::now()) {
             (self.sink)(&event);
+            self.queue(event.clone());
             self.react(&event);
-            if let Some(queue) = &mut self.script_events {
-                self.events_queued += 1;
-                queue.push_back(event);
+        }
+        if !self.packets.is_empty() && self.script_events.is_some() {
+            let cmd = match &msg {
+                Message::Json(json) => json.cmd,
+                Message::Xt(xt) => xt.cmd,
+                Message::Xml(xml) => xml.action.unwrap_or_default(),
+            };
+            if self.packets.contains(cmd) {
+                self.queue(Event::Packet { text: text.into() });
             }
+        }
+    }
+
+    pub(crate) fn publish(&mut self, event: Event) {
+        (self.sink)(&event);
+        self.queue(event);
+    }
+
+    fn queue(&mut self, event: Event) {
+        if let Some(queue) = &mut self.script_events {
+            self.events_queued += 1;
+            queue.push_back(event);
         }
     }
 
@@ -410,7 +654,7 @@ impl Session {
         match event {
             Event::LoggedIn { .. } if self.phase == Phase::LoggingIn => {
                 if let Some(me) = self.world.me.as_mut().filter(|me| me.user.is_empty()) {
-                    me.user.clone_from(&self.login.0);
+                    me.user.clone_from(&self.creds.user);
                 }
                 self.send(Out::FirstJoin);
                 self.send(Out::ClearIgnoreList);
@@ -449,6 +693,10 @@ impl Session {
                     }
                 }
             }
+            Event::Afk { afk: true } if self.phase == Phase::Ready => {
+                self.pacer.sent(Kind::Free, Instant::now());
+                self.send(Out::Afk(false));
+            }
             Event::Warning { text } if SLOW_DOWN.iter().any(|w| text.to_lowercase().contains(w)) => self.pacer.warned(Instant::now()),
             Event::InventoryLoaded { items } if self.phase == Phase::Loading => {
                 self.phase = Phase::Ready;
@@ -459,11 +707,16 @@ impl Session {
     }
 
     pub(crate) fn moved_to(&mut self, cell: &str, pad: &str) {
-        if let Some(me) = &mut self.world.me {
+        let moved = self.world.me.as_ref().is_some_and(|m| m.cell != cell || m.pad != pad);
+        if let Some(me) = self.world.me.as_mut().filter(|_| moved) {
             me.cell = cell.into();
             me.pad = pad.into();
+            (me.x, me.y) = (0, 0);
         }
         self.world.rev += 1;
+        if moved {
+            self.publish(Event::Moved { cell: cell.into(), pad: pad.into() });
+        }
         let (Some(me), Some(area)) = (&self.world.me, &self.world.area) else { return };
         let aggressive: Vec<MonMapId> = area.monsters.iter().filter(|m| m.cell == me.cell && m.aggressive && m.alive()).map(|m| m.map_id).collect();
         if !aggressive.is_empty() {
@@ -498,6 +751,10 @@ impl Session {
     }
 
     fn close(&mut self, why: Disconnect) {
+        if let Some(mut stream) = self.stream.take() {
+            let _ = self.control.poll.registry().deregister(&mut stream);
+        }
+        self.outbox.clear();
         if !matches!(self.phase, Phase::Closed(_)) {
             self.phase = Phase::Closed(why);
         }

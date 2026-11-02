@@ -51,6 +51,13 @@ pub struct Pacer {
     backoff_at: Instant,
 }
 
+pub fn kind_for(action: &str) -> Kind {
+    match action {
+        "gar" => Kind::ClassSkill,
+        _ => LOCKS.iter().find(|(name, _)| *name == action).map_or(Kind::Free, |(name, _)| Kind::Locked(name)),
+    }
+}
+
 impl Pacer {
     pub fn new(now: Instant) -> Self {
         Pacer { last: HashMap::new(), last_class: None, last_any: None, tokens: BURST, tokens_at: now, backoff: Duration::ZERO, backoff_at: now }

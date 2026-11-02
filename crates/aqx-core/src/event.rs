@@ -12,6 +12,7 @@ pub enum Place {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
+    Connecting { server: String, version: String },
     LoggedIn { eid: EntityId },
     LoginRejected { reason: String },
     LoggedInElsewhere,
@@ -21,6 +22,10 @@ pub enum Event {
     Ready { items: usize },
     Died,
     Respawned,
+    Moved { cell: String, pad: String },
+    Afk { afk: bool },
+    AuraChanged { monster: Option<MonMapId>, name: String, stacks: u32, added: bool },
+    Countering { id: MonMapId, active: bool },
     Killed { id: MonMapId, monster: String },
     DropOffered { id: ItemId, item: String, qty: u32 },
     ItemChanged { item: String, qty: u32, place: Place },
@@ -36,4 +41,6 @@ pub enum Event {
     Warning { text: String },
     Unreadable { what: String },
     RecordingFailed { error: String },
+    Packet { text: String },
+    Alarm,
 }

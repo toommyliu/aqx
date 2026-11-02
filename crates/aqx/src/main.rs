@@ -3,19 +3,22 @@ mod output;
 mod tui;
 mod view;
 
+use std::cell::RefCell;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aqx_core::{CLIENT_VERSION, Control, Disconnect, Halt, Login, Phase, Recorder, Server, Session, login};
+use aqx_core::{CLIENT_VERSION, Control, Credentials, Halt, LoginError, Phase, Recorder, Session};
 use aqx_script::{Outcome, ScriptError};
 use clap::{Args, Parser, Subcommand};
 use output::{Mode, say};
 
 const DEFAULT_API: &str = "https://game.aq.com";
-const READY_TIMEOUT: Duration = Duration::from_secs(60);
+const RELOGIN_FIRST: Duration = Duration::from_secs(35);
+const RELOGIN_MAX: Duration = Duration::from_secs(300);
 const STATUS_EVERY: Duration = Duration::from_secs(60);
 const SNAPSHOT_EVERY: Duration = Duration::from_millis(250);
 
@@ -144,44 +147,64 @@ fn run(args: RunArgs) -> Result<(), String> {
     tui::run(rx, slot, stop, bot)
 }
 
-fn run_bot(setup: Setup, mut control: Control, mut recorder: Option<Recorder>, watch: Watch, script: Option<Script>) -> Result<(), String> {
-    let mut version = setup.version.clone();
+fn run_bot(setup: Setup, control: Control, recorder: Option<Recorder>, watch: Watch, script: Option<Script>) -> Result<(), String> {
+    let creds = Credentials { api: setup.api.clone(), user: setup.user.clone(), password: setup.password.clone() };
+    let mut session = Session::new(control, creds, &setup.version, recorder, Rc::new(output::event));
+    let server = Rc::new(RefCell::new(String::new()));
+    watch_session(&mut session, &watch, &server);
+    let mut delay = RELOGIN_FIRST;
+    let mut ever_ready = false;
     loop {
         say("aqx", format_args!("logging in as {} at {}, config {}", setup.user, setup.api, setup.config.display()));
-        let account = login(&setup.api, &setup.user, &setup.password).map_err(|e| e.to_string())?;
-        let server = pick_server(&account.servers, setup.server.as_deref(), account.member)?;
-        say("aqx", format_args!("connecting to {}, client version {version}", server.name));
-        let login = Login { api: &setup.api, user: &setup.user, token: &account.token, version: &version };
-        let mut session =
-            Session::connect(control, server, login, recorder, output::event).map_err(|e| format!("can't reach {}: {e}", server.name))?;
-        watch_session(&mut session, &watch, &server.name);
-        match live(&mut session, script.as_ref()) {
-            Ok(result) => {
-                say("aqx", "logging out");
-                session.logout();
-                return result;
+        let why = match session.login(setup.server.as_deref()) {
+            Ok(()) => {
+                ever_ready = true;
+                server.borrow_mut().clone_from(&session.server().map(|s| s.name.clone()).unwrap_or_default());
+                match live(&mut session, script.as_ref()) {
+                    Ok(result) => {
+                        say("aqx", "logging out");
+                        session.logout();
+                        return result;
+                    }
+                    Err(Halt::Closed(why)) if why.retryable() => {
+                        if script.is_some() {
+                            say("aqx", "the script starts again once the bot is back");
+                        }
+                        why.to_string()
+                    }
+                    Err(Halt::Closed(why)) => return Err(why.to_string()),
+                    Err(_) => {
+                        say("aqx", "logging out");
+                        session.logout();
+                        return Ok(());
+                    }
+                }
             }
-            Err(Halt::Stopped | Halt::Interrupted) => {
-                say("aqx", "logging out");
+            Err(LoginError::Halted(_)) => {
                 session.logout();
                 return Ok(());
             }
-            Err(Halt::Closed(Disconnect::ClientVersion(wanted))) if wanted != version => {
-                say("aqx", format_args!("the server requires {wanted}, logging in again"));
-                version = wanted;
-                (control, recorder) = session.into_parts();
-            }
-            Err(Halt::Closed(why)) => return Err(why.to_string()),
-            Err(Halt::Timeout | Halt::GoalMet) => return Err(format!("not ready after {} s, stuck in {:?}", READY_TIMEOUT.as_secs(), session.phase)),
+            Err(e) if ever_ready && e.retryable() => e.to_string(),
+            Err(e) => return Err(e.to_string()),
+        };
+        if session.connected_for() >= RELOGIN_MAX {
+            delay = RELOGIN_FIRST;
+        }
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+        let wait = delay.mul_f64(0.8 + f64::from(nanos % 1000) / 1000.0 * 0.4);
+        delay = (delay * 2).min(RELOGIN_MAX);
+        say("aqx", format_args!("{why}; logging in again in {} s", wait.as_secs()));
+        if session.wait_to_relogin(why, Instant::now() + wait).is_err() {
+            session.logout();
+            return Ok(());
         }
     }
 }
 
 fn live(session: &mut Session, script: Option<&Script>) -> Result<Result<(), String>, Halt> {
-    session.pump_until(Some(Instant::now() + READY_TIMEOUT), |s| (s.phase == Phase::Ready).then_some(()))?;
     let Some(script) = script else { return session.pump_until(None, |_| None) };
     say("aqx", format_args!("running {}", script.path.display()));
-    Ok(match aqx_script::run(session, &script.path, &script.args) {
+    Ok(match aqx_script::run(session, &script.path, &script.args, None) {
         Ok(Outcome::Finished) => {
             say("aqx", "the script finished");
             Ok(())
@@ -195,7 +218,7 @@ fn live(session: &mut Session, script: Option<&Script>) -> Result<Result<(), Str
     })
 }
 
-fn watch_session(session: &mut Session, watch: &Watch, server: &str) {
+fn watch_session(session: &mut Session, watch: &Watch, server: &Rc<RefCell<String>>) {
     match watch {
         Watch::Status => session.watch(STATUS_EVERY, |phase, world| {
             if *phase == Phase::Ready {
@@ -203,37 +226,17 @@ fn watch_session(session: &mut Session, watch: &Watch, server: &str) {
             }
         }),
         Watch::Snapshots(slot) => {
-            let (slot, server) = (slot.clone(), server.to_string());
+            let (slot, server) = (slot.clone(), server.clone());
             let mut published = None;
             session.watch(SNAPSHOT_EVERY, move |phase, world| {
                 let version = (world.rev, phase.clone());
                 if published.as_ref() != Some(&version)
                     && let Ok(mut view) = slot.lock()
                 {
-                    *view = Some(Arc::new(tui::View { phase: phase.clone(), server: server.clone(), world: world.clone() }));
+                    *view = Some(Arc::new(tui::View { phase: phase.clone(), server: server.borrow().clone(), world: world.clone() }));
                     published = Some(version);
                 }
             });
         }
-    }
-}
-
-fn pick_server<'a>(servers: &'a [Server], name: Option<&str>, member: bool) -> Result<&'a Server, String> {
-    let Some(name) = name else {
-        return servers
-            .iter()
-            .find(|s| s.online && !s.full() && (member || !s.members_only))
-            .ok_or_else(|| "no server is open to this account".into());
-    };
-    let server = servers.iter().find(|s| s.name.eq_ignore_ascii_case(name)).ok_or_else(|| {
-        let names: Vec<_> = servers.iter().map(|s| s.name.as_str()).collect();
-        format!("no server named {name}; the servers are {}", names.join(", "))
-    })?;
-    if !server.online {
-        Err(format!("{} is offline", server.name))
-    } else if server.members_only && !member {
-        Err(format!("{} is for members only", server.name))
-    } else {
-        Ok(server)
     }
 }

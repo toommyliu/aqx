@@ -67,6 +67,48 @@ fn cache_buster() -> String {
     format!("0.{nanos:09}")
 }
 
+pub fn servers(api: &str) -> Result<Vec<Server>, ApiError> {
+    let url = format!("{}/game/api/data/servers", api.trim_end_matches('/'));
+    let body = ureq::get(&url)
+        .header("artixmode", "launcher")
+        .config()
+        .timeout_global(Some(Duration::from_secs(15)))
+        .build()
+        .call()
+        .and_then(|mut r| r.body_mut().read_to_string())
+        .map_err(|e| ApiError::Http(format!("server list request failed: {e}")))?;
+    serde_json::from_str(&body).map_err(|e| ApiError::Http(format!("unreadable server list: {e}")))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ServerError {
+    pub message: String,
+    pub lasting: bool,
+}
+
+pub fn pick_server<'a>(servers: &'a [Server], name: Option<&str>, member: bool) -> Result<&'a Server, ServerError> {
+    let fail = |message: String, lasting| Err(ServerError { message, lasting });
+    let Some(name) = name else {
+        return match servers.iter().find(|s| s.online && !s.full() && (member || !s.members_only)) {
+            Some(server) => Ok(server),
+            None => fail("no server is open to this account".into(), false),
+        };
+    };
+    let Some(server) = servers.iter().find(|s| s.name.eq_ignore_ascii_case(name)) else {
+        let names: Vec<_> = servers.iter().map(|s| s.name.as_str()).collect();
+        return fail(format!("no server named {name}; the servers are {}", names.join(", ")), true);
+    };
+    if server.members_only && !member {
+        fail(format!("{} is for members only", server.name), true)
+    } else if !server.online {
+        fail(format!("{} is offline", server.name), false)
+    } else if server.full() {
+        fail(format!("{} is full", server.name), false)
+    } else {
+        Ok(server)
+    }
+}
+
 pub fn load_bank(api: &str, char_id: u32, token: &str) -> Result<String, ApiError> {
     let url = format!("{}/game/api/char/bank?v={}", api.trim_end_matches('/'), cache_buster());
     ureq::post(&url)
@@ -127,6 +169,10 @@ mod tests {
         assert_eq!((twilly.name.as_str(), twilly.host.as_str(), twilly.port), ("Twilly", "10.0.0.1", 5588));
         assert!(twilly.online && !twilly.members_only && !twilly.full());
         assert!(gravelyn.members_only && gravelyn.full());
+        assert_eq!(pick_server(&account.servers, None, true).unwrap().name, "Twilly");
+        assert_eq!(pick_server(&account.servers, Some("gravelyn"), true).unwrap_err(), ServerError { message: "Gravelyn is full".into(), lasting: false });
+        let unknown = pick_server(&account.servers, Some("Yokai"), false).unwrap_err();
+        assert_eq!((unknown.message.as_str(), unknown.lasting), ("no server named Yokai; the servers are Twilly, Gravelyn", true));
     }
 
     #[test]

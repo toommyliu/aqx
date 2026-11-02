@@ -19,7 +19,7 @@ fn write(test: &str, files: &[(&str, &str)]) -> PathBuf {
 }
 
 fn run_script(fake: &mut Fake, test: &str, source: &str) -> Result<Outcome, ScriptError> {
-    run(&mut fake.session, &write(test, &[("main.ts", source)]), &[])
+    run(&mut fake.session, &write(test, &[("main.ts", source)]), &[], None)
 }
 
 fn sent(fake: Fake) -> Vec<String> {
@@ -127,9 +127,9 @@ fn args_take_their_type_from_the_defaults() {
     "#;
     let path = write("args", &[("main.ts", source)]);
     let given = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
-    finished(run(&mut fake.session, &path, &given(&[("n", "3"), ("name", "a=b"), ("fast", "true")])));
-    failed_with(run(&mut fake.session, &path, &given(&[("m", "3")])), "unknown --arg m; this script takes n, name, fast");
-    failed_with(run(&mut fake.session, &path, &given(&[("n", "three")])), "--arg n=three isn't a number");
+    finished(run(&mut fake.session, &path, &given(&[("n", "3"), ("name", "a=b"), ("fast", "true")]), None));
+    failed_with(run(&mut fake.session, &path, &given(&[("m", "3")]), None), "unknown --arg m; this script takes n, name, fast");
+    failed_with(run(&mut fake.session, &path, &given(&[("n", "three")]), None), "--arg n=three isn't a number");
     fake.finish();
 }
 
@@ -143,7 +143,7 @@ fn typescript_imports_relative_modules_and_nothing_else() {
         if (double(21) !== 42 || fight.skills?.length !== 1) throw new Error("wrong");
     "#;
     let lib = "export interface Unused { a: string }\nexport const double = (n: number): number => n * 2;\n";
-    finished(run(&mut fake.session, &write("imports", &[("main.ts", main), ("lib.ts", lib)]), &[]));
+    finished(run(&mut fake.session, &write("imports", &[("main.ts", main), ("lib.ts", lib)]), &[], None));
     failed_with(run_script(&mut fake, "fs", r#"import fs from "fs";"#), "only `aqx` and relative imports are supported");
     failed_with(run_script(&mut fake, "native", r#"import * as n from "aqx:native";"#), "only `aqx` and relative imports are supported");
     fake.finish();
@@ -389,7 +389,7 @@ fn relative_imports_climb_out_of_a_relative_script_path() {
     let cwd = std::env::current_dir().unwrap();
     let ups = cwd.components().count() - 1;
     let relative = PathBuf::from("../".repeat(ups)).join(main.strip_prefix("/").unwrap());
-    finished(run(&mut fake.session, &relative, &[]));
+    finished(run(&mut fake.session, &relative, &[], None));
     fake.finish();
 }
 
@@ -399,5 +399,136 @@ fn a_busy_script_is_stopped() {
     let started = Instant::now();
     failed_with(run_script(&mut fake, "busy", r#"import { player } from "aqx"; while (player.hp >= 0) {}"#), "without calling aqx");
     assert!(started.elapsed() < Duration::from_secs(8));
+    fake.finish();
+}
+
+#[test]
+fn timers_fire_while_the_script_waits() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    let result = run_script(
+        &mut fake,
+        "timers",
+        r#"
+        import { wait } from "aqx";
+        const fired: string[] = [];
+        setTimeout((tag: string) => fired.push(tag), 50, "once");
+        const cancelled = setTimeout(() => fired.push("cancelled"), 60);
+        clearTimeout(cancelled);
+        let ticks = 0;
+        const every = setInterval(() => { if (++ticks === 3) clearInterval(every); }, 40);
+        wait.ms(400);
+        if (fired.join() !== "once" || ticks !== 3) throw new Error(`${fired.join()} ${ticks}`);
+        "#,
+    );
+    finished(result);
+    fake.finish();
+}
+
+#[test]
+fn packets_reach_handlers_for_their_cmd_and_answer_requests() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg == "%xt%zm%hi%1%" {
+            wire.send("%xt%hi%-1%");
+            wire.object(r#"{"cmd":"event","args":{"zoneSet":"A"}}"#);
+        }
+    });
+    let result = run_script(
+        &mut fake,
+        "packets",
+        r#"
+        import { packet } from "aqx";
+        const zones: string[] = [];
+        packet.on("event", (p) => zones.push(p.data?.args.zoneSet));
+        const reply = packet.request("%xt%zm%hi%1%", "hi");
+        if (reply.cmd !== "hi" || reply.args.join() !== "") throw new Error(JSON.stringify(reply));
+        if (zones.join() !== "A") throw new Error(`zones: ${zones.join()}`);
+        "#,
+    );
+    finished(result);
+    assert!(sent(fake).iter().any(|m| m == "%xt%zm%hi%1%"));
+}
+
+#[test]
+fn cell_aura_and_counter_events_reach_handlers() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg == "%xt%zm%moveToCell%5%r2%Left%" {
+            wire.object(
+                r#"{"cmd":"ct","anims":[{"cInf":"m:2","tInf":"p:1001","msg":"Treeant prepares a counter attack!!"}],
+                "a":[{"cmd":"aura+","tInf":"p:1001","auras":[{"nam":"Rage","dur":5,"stk":2}]},{"cmd":"aura++","tInf":"m:2","auras":[{"nam":"Counter Attack","dur":6}]}]}"#,
+            );
+            wire.object(r#"{"cmd":"ct","a":[{"cmd":"aura--","tInf":"m:2","aura":{"nam":"Counter Attack"}}]}"#);
+        }
+    });
+    let result = run_script(
+        &mut fake,
+        "service-events",
+        r#"
+        import { events, map } from "aqx";
+        const seen: string[] = [];
+        events.on("cell", (c) => seen.push(`cell ${c.cell}/${c.pad}`));
+        events.on("aura", (a) => seen.push(`aura ${a.change} ${a.name} x${a.stacks} on ${a.monster ?? "me"}`));
+        events.on("counter", (c) => seen.push(`counter ${c.monster} ${c.active}`));
+        map.jump("r2");
+        const want = ["cell r2/Left", "aura added Rage x2 on me", "aura added Counter Attack x1 on 2", "counter 2 true", "aura removed Counter Attack x0 on 2", "counter 2 false"];
+        if (seen.join("; ") !== want.join("; ")) throw new Error(seen.join("; "));
+        "#,
+    );
+    finished(result);
+    fake.finish();
+}
+
+#[test]
+fn aggro_takes_a_predicate_and_ends_with_the_script() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    let result = run_script(
+        &mut fake,
+        "aggro",
+        r#"
+        import { combat, map, wait } from "aqx";
+        map.jump("r2");
+        combat.aggro((m) => m.monId === 12);
+        wait.ms(700);
+        "#,
+    );
+    finished(result);
+    let _ = fake.session.pump_until(Some(Instant::now() + Duration::from_millis(800)), |_| None::<()>);
+    let pulls = sent(fake).into_iter().filter(|m| m.contains("%aggroMon%")).collect::<Vec<_>>();
+    assert!((1..=2).contains(&pulls.len()) && pulls.iter().all(|m| m == "%xt%zm%aggroMon%5%2%"), "{pulls:?}");
+}
+
+#[test]
+fn the_player_knows_its_target_and_server() {
+    let mut fake = Fake::start(FARM, killed_on(2));
+    let result = run_script(
+        &mut fake,
+        "target",
+        r#"
+        import { combat, player, session } from "aqx";
+        let seen = "";
+        combat.kill("Treeant", { hold: () => { seen ||= player.target?.name ?? ""; return false; } });
+        if (seen !== "Treeant" || player.target !== null) throw new Error(`${seen} ${JSON.stringify(player.target)}`);
+        if (session.server !== "Fake" || session.servers()[0]?.name !== "Fake") throw new Error(session.server);
+        "#,
+    );
+    finished(result);
+    fake.finish();
+}
+
+#[test]
+fn a_script_can_relogin_and_carry_on() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    let result = run_script(
+        &mut fake,
+        "relogin",
+        r#"
+        import { map, session } from "aqx";
+        map.jump("r1");
+        session.relogin();
+        if (map.name !== "farm") throw new Error(map.name);
+        map.jump("r2");
+        "#,
+    );
+    finished(result);
+    assert_eq!(fake.logins.load(std::sync::atomic::Ordering::SeqCst), 2);
     fake.finish();
 }

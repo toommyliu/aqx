@@ -8,7 +8,10 @@ export class AqxError extends Error {
   }
 }
 
-const handlers = new Map(["death", "respawn", "map", "kill", "drop", "item", "quest", "chat", "warning"].map((name) => [name, []]));
+const handlers = new Map(
+  ["death", "respawn", "map", "cell", "kill", "drop", "item", "quest", "chat", "warning", "aura", "counter"].map((name) => [name, []]),
+);
+const packetHandlers = new Map();
 
 let delivering = 0;
 
@@ -16,9 +19,21 @@ native.init(
   (code, message) => new AqxError(code, message),
   (name, payload, seq) => {
     delivering = seq;
-    for (const handler of [...handlers.get(name)]) handler(payload);
+    const list = name === "packet" ? packetHandlers.get(payload.cmd) : handlers.get(name);
+    for (const handler of [...(list ?? [])]) handler(payload);
   },
 );
+
+function subscribe(list, handler, first, last) {
+  list.push(handler);
+  if (list.length === 1) first();
+  return () => {
+    const at = list.indexOf(handler);
+    if (at < 0) return;
+    list.splice(at, 1);
+    if (list.length === 0) last();
+  };
+}
 
 const view = native.view;
 
@@ -66,7 +81,7 @@ function quietly(what, action) {
   }
 }
 
-const config = { room: null, respawn: null, antiCounter: true };
+const config = { room: native.room() ?? null, respawn: null, antiCounter: true };
 
 export const settings = {
   get room() {
@@ -104,7 +119,27 @@ function fightOf(opts) {
 export const player = live(
   { rest: () => native.rest() },
   () => view("player"),
-  ["name", "level", "hp", "maxHp", "mp", "maxMp", "state", "cell", "pad", "gold", "member", "class", "stats", "auras", "factions"],
+  [
+    "name",
+    "level",
+    "hp",
+    "maxHp",
+    "mp",
+    "maxMp",
+    "state",
+    "cell",
+    "pad",
+    "x",
+    "y",
+    "afk",
+    "target",
+    "gold",
+    "member",
+    "class",
+    "stats",
+    "auras",
+    "factions",
+  ],
 );
 
 export const map = live(
@@ -115,12 +150,17 @@ export const map = live(
       if (cell) native.jump(cell, pad);
     },
     jump: (cell, pad = "Left") => native.jump(cell, pad),
+    walk: (x, y) => native.walk(x, y),
+    goto: (name) => native.goto(String(name)),
+    collect: (id, item, qty = 1) => native.collect(id, item, qty),
   },
   () => view("map"),
-  ["name", "room", "monsters", "players"],
+  ["name", "room", "areaId", "monsters", "players"],
 );
 
 export const combat = {
+  aggro: (target) => native.aggro(target == null ? null : targetOf(target)),
+  exit: () => native.exit(),
   kill(target, opts = {}) {
     native.kill(targetOf(target), { ...fightOf(opts), until: opts.until, timeout: opts.timeout });
   },
@@ -138,6 +178,7 @@ export const skills = {
   get slots() {
     return view("skills");
   },
+  use: (slot, target) => native.use_skill(slot, target == null ? null : targetOf(target)),
 };
 
 export const inventory = items(() => view("inventory"), {
@@ -149,6 +190,7 @@ export const inventory = items(() => view("inventory"), {
     return view("slots").bagUsed;
   },
   equip: (item) => native.equip(item),
+  use: (item) => native.use_item(item),
 });
 
 export const bank = items(() => native.bank(), {
@@ -170,11 +212,12 @@ export const events = {
   on(name, handler) {
     const list = handlers.get(name);
     if (!list) throw new TypeError(`unknown event ${name}; the events are ${[...handlers.keys()].join(", ")}`);
-    list.push(handler);
-    return () => {
-      const at = list.indexOf(handler);
-      if (at >= 0) list.splice(at, 1);
-    };
+    return subscribe(
+      list,
+      handler,
+      () => native.listen(name, true),
+      () => native.listen(name, false),
+    );
   },
   once(name, opts = {}) {
     let seen;
@@ -269,6 +312,43 @@ export const drops = {
       for (let i = dropRules.length - 1; i >= 0; i--) if (same(dropRules[i])) dropRules.splice(i, 1);
     }
   },
+};
+
+export const packet = {
+  send: (text) => native.send_packet(String(text)),
+  on(cmd, handler) {
+    cmd = String(cmd);
+    if (!packetHandlers.has(cmd)) packetHandlers.set(cmd, []);
+    return subscribe(
+      packetHandlers.get(cmd),
+      handler,
+      () => native.listen_packet(cmd, true),
+      () => native.listen_packet(cmd, false),
+    );
+  },
+  request(text, cmd, opts = {}) {
+    const timeout = opts.timeout ?? 10_000;
+    let seen;
+    const after = native.events_queued();
+    const off = packet.on(cmd, (p) => {
+      if (!seen && delivering >= after && (!opts.filter || opts.filter(p))) seen = { p };
+    });
+    try {
+      native.send_packet(String(text));
+      if (!native.wait_until(() => seen !== undefined, timeout)) throw new AqxError("timeout", `no ${cmd} reply within ${timeout} ms`);
+    } finally {
+      off();
+    }
+    return seen.p;
+  },
+};
+
+export const session = {
+  get server() {
+    return native.server();
+  },
+  servers: () => native.servers(),
+  relogin: (server) => native.relogin(server == null ? undefined : String(server)),
 };
 
 export const wait = {
