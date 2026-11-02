@@ -4,7 +4,8 @@ mod server;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use aqx_script::{Outcome, ScriptError, check, run};
+use aqx_core::{Outcome, ScriptError};
+use aqx_script::{check, run};
 use server::{FARM, Fake, Wire};
 
 fn write(test: &str, files: &[(&str, &str)]) -> PathBuf {

@@ -1,40 +1,15 @@
 mod bridge;
 mod loader;
 mod native;
-mod views;
 
-use std::fmt;
 use std::path::Path;
 
-use aqx_core::{Event, Halt, Session};
+use aqx_core::{Event, Outcome, ScriptError, Session};
 use rquickjs::function::Rest;
 use rquickjs::{CatchResultExt, CaughtError, Coerced, Context, Ctx, FromJs, Function, Module, Object, Runtime, Value};
 
 const MEMORY_LIMIT: usize = 32 << 20;
 const TIMERS: &str = include_str!("timers.js");
-
-#[derive(Debug)]
-pub enum Outcome {
-    Finished,
-    Stopped(Option<String>),
-}
-
-#[derive(Debug)]
-pub enum ScriptError {
-    Load(String),
-    Failed(String),
-    Halted(Halt),
-}
-
-impl fmt::Display for ScriptError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ScriptError::Load(why) | ScriptError::Failed(why) => f.write_str(why),
-            ScriptError::Halted(Halt::Closed(why)) => write!(f, "{why}"),
-            ScriptError::Halted(halt) => write!(f, "{halt:?}"),
-        }
-    }
-}
 
 pub fn check(path: &Path) -> Result<(), String> {
     let (name, code) = source(path)?;

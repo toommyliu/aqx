@@ -6,7 +6,7 @@ use rquickjs::module::{Declarations, Exports, ModuleDef};
 use rquickjs::{Array, Ctx, Error, Exception, FromJs, Function, Object, Result, Value};
 
 use crate::bridge::{self, blocking, read, with_session};
-use crate::views;
+use aqx_core::views;
 
 const TICK: Duration = Duration::from_millis(250);
 

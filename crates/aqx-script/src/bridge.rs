@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use aqx_core::{ActError, Event, Goal, Halt, Monster, Predicate, Session, Sink, StopHandle, Target, World};
 use rquickjs::{Coerced, Ctx, Exception, Function, Persistent, Value, qjs};
 
-use crate::{Outcome, ScriptError, views};
+use aqx_core::{Outcome, ScriptError, views};
 
 const WATCHDOG: Duration = Duration::from_secs(5);
 

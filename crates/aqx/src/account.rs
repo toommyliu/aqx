@@ -3,8 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aqx_core::{Control, Credentials, Disconnect, Event, Halt, LoginError, Phase, Recorder, Session, Sink, State, World};
-use aqx_script::{Outcome, ScriptError};
+use aqx_core::{Control, Credentials, Disconnect, Event, Halt, LoginError, Outcome, Phase, Recorder, ScriptError, Session, Sink, State, World};
 
 use crate::config::{OnStall, Restart};
 use crate::hub::{AccountCell, Command, Hub, Run};
