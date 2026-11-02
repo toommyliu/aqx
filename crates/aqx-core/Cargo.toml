@@ -1,0 +1,12 @@
+[package]
+name = "aqx-core"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+aqx-protocol.workspace = true
+mio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
