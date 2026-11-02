@@ -19,6 +19,7 @@ const NAME_TRIES: usize = 100;
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Request {
+    Info,
     Snapshot,
     Subscribe,
     Logs {
@@ -65,10 +66,15 @@ fn private(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn bind(name: &str, unique: bool) -> Result<(String, UnixListener, Listening), String> {
+pub fn prepare_dir() -> Result<PathBuf, String> {
     let dir = dir();
     fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     private(&dir)?;
+    Ok(dir)
+}
+
+pub fn bind(name: &str, unique: bool) -> Result<(String, UnixListener, Listening), String> {
+    let dir = prepare_dir()?;
     for n in 1..=NAME_TRIES {
         let taken = if n == 1 { name.to_string() } else { format!("{name}-{n}") };
         let path = dir.join(format!("{taken}.sock"));
@@ -88,13 +94,13 @@ pub fn bind(name: &str, unique: bool) -> Result<(String, UnixListener, Listening
     Err(format!("{NAME_TRIES} aqx processes named {name} are already running"))
 }
 
-pub fn serve(listener: UnixListener, hub: Arc<Hub>) -> Result<(), String> {
+pub fn serve(listener: UnixListener, hub: Arc<Hub>, config: Option<PathBuf>) -> Result<(), String> {
     thread::Builder::new()
         .name("control".into())
         .spawn(move || {
             for conn in listener.incoming().flatten() {
-                let hub = hub.clone();
-                let _ = thread::Builder::new().name("client".into()).spawn(move || serve_client(&hub, conn));
+                let (hub, config) = (hub.clone(), config.clone());
+                let _ = thread::Builder::new().name("client".into()).spawn(move || serve_client(&hub, config.as_deref(), conn));
             }
         })
         .map_err(|e| e.to_string())?;
@@ -105,12 +111,13 @@ fn send(out: &mut UnixStream, value: &Value) -> bool {
     writeln!(out, "{value}").is_ok()
 }
 
-fn serve_client(hub: &Arc<Hub>, conn: UnixStream) {
+fn serve_client(hub: &Arc<Hub>, config: Option<&Path>, conn: UnixStream) {
     let Ok(mut out) = conn.try_clone() else { return };
     for line in BufReader::new(conn).lines() {
         let Ok(line) = line else { return };
         let reply = match serde_json::from_str::<Request>(&line) {
             Err(e) => json!({ "type": "error", "message": format!("unreadable request: {e}") }),
+            Ok(Request::Info) => json!({ "type": "info", "name": hub.name, "config": config, "bots": names(hub) }),
             Ok(Request::Snapshot) => json!({ "type": "snapshot", "name": hub.name, "bots": snapshots(hub) }),
             Ok(Request::Ctl { bot, command }) => match hub.cell(&bot) {
                 None => json!({ "type": "error", "message": format!("no bot named {bot} in {}", hub.name) }),
@@ -137,10 +144,13 @@ fn snapshots(hub: &Arc<Hub>) -> Vec<Snapshot> {
     hub.cells.iter().map(|c| c.board().snapshot.clone().unwrap_or_else(|| Snapshot { bot: c.name.clone(), phase: "STARTING".into(), ..Snapshot::default() })).collect()
 }
 
+fn names(hub: &Hub) -> Vec<&str> {
+    hub.cells.iter().map(|c| c.name.as_str()).collect()
+}
+
 fn subscribe(hub: &Arc<Hub>, out: &mut UnixStream) {
     let _watching = hub.watch();
-    let names: Vec<&str> = hub.cells.iter().map(|c| c.name.as_str()).collect();
-    if !send(out, &json!({ "type": "hello", "name": hub.name, "bots": names })) {
+    if !send(out, &json!({ "type": "hello", "name": hub.name, "bots": names(hub) })) {
         return;
     }
     let mut shown: Vec<Option<Snapshot>> = vec![None; hub.cells.len()];
@@ -267,6 +277,16 @@ fn listed(all: &[(String, PathBuf)]) -> String {
     if all.is_empty() { String::new() } else { format!(": {}", all.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ")) }
 }
 
+pub fn session_for(config: &Path) -> Result<Option<PathBuf>, String> {
+    let Some(config) = config.to_str() else { return Ok(None) };
+    Ok(processes()?.into_iter().map(|(_, path)| path).find(|path| Conn::ask(path, &json!({ "op": "info" })).is_ok_and(|info| info["config"] == config)))
+}
+
+pub fn bots(path: &Path) -> Result<Vec<String>, String> {
+    let info = Conn::ask(path, &json!({ "op": "info" }))?;
+    serde_json::from_value(info["bots"].clone()).map_err(|e| e.to_string())
+}
+
 pub fn snapshot(path: &Path) -> Result<Vec<Snapshot>, String> {
     let reply = Conn::ask(path, &json!({ "op": "snapshot" }))?;
     serde_json::from_value(reply["bots"].clone()).map_err(|e| e.to_string())
@@ -306,18 +326,22 @@ mod tests {
         let name = format!("test-{}", std::process::id());
         let hub = Arc::new(Hub::new(&name, vec![cell.clone()], Print::Quiet));
         hub.say(&cell, "aqx", "hello");
+        cell.board().online = true;
         let (taken, listener, listening) = bind(&name, false).unwrap();
         assert_eq!(taken, name);
-        serve(listener, hub.clone()).unwrap();
+        serve(listener, hub.clone(), Some("/srv/aqx.toml".into())).unwrap();
         assert!(bind(&name, false).is_err(), "a second process with the same name is refused");
         let (second, _, second_listening) = bind(&name, true).unwrap();
         assert_eq!(second, format!("{name}-2"), "unless it may take another name");
         drop(second_listening);
         let (found, path) = pick(Some(&name)).unwrap();
         assert_eq!(found, name);
+        assert_eq!(session_for(Path::new("/srv/aqx.toml")).unwrap(), Some(path.clone()));
+        assert_eq!(session_for(Path::new("/srv/other.toml")).unwrap(), None);
+        assert_eq!(bots(&path).unwrap(), ["main"]);
 
         let bots = snapshot(&path).unwrap();
-        assert_eq!((bots[0].bot.as_str(), bots[0].phase.as_str()), ("main", "STARTING"));
+        assert_eq!(bots[0].bot, "main");
 
         let mut conn = Conn::open(&path).unwrap();
         conn.send(&json!({ "op": "logs", "bot": "main" })).unwrap();

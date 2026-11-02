@@ -118,6 +118,7 @@ pub fn load(explicit: Option<&Path>) -> Result<(Config, PathBuf), String> {
             .find(|p| p.is_file())
             .ok_or_else(|| format!("no config found at ./aqx.toml or {}", user_config().display()))?,
     };
+    let path = std::fs::canonicalize(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let config: Config = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut names: Vec<&str> = config.bots.iter().map(BotConfig::name).collect();

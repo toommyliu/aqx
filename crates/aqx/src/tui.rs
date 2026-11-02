@@ -16,28 +16,10 @@ use crate::socket;
 const WIDE: u16 = 90;
 const NOTE_FOR: Duration = Duration::from_secs(4);
 
-pub enum Commander {
-    Local,
-    Remote(PathBuf),
-}
-
 pub struct Fleet {
     pub title: String,
     pub cells: Vec<Arc<BotCell>>,
-    pub commander: Commander,
-}
-
-impl Fleet {
-    fn send(&self, cell: &BotCell, command: Command) -> Result<(), String> {
-        match &self.commander {
-            Commander::Local => cell.send(command),
-            Commander::Remote(path) => socket::ctl(path, &cell.name, &command),
-        }
-    }
-
-    fn remote(&self) -> bool {
-        matches!(self.commander, Commander::Remote(_))
-    }
+    pub socket: PathBuf,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -113,8 +95,6 @@ struct App {
     prompt: Option<Prompt>,
     recent: Vec<String>,
     note: Option<(String, Instant)>,
-    quitting: bool,
-    leave: bool,
     log: Vec<LogLine>,
     log_of: Option<usize>,
 }
@@ -124,18 +104,18 @@ struct Shown {
     snapshot: Option<Snapshot>,
 }
 
-pub fn run(fleet: Fleet, done: impl Fn() -> bool, quit: impl Fn()) -> Result<(), String> {
+pub fn run(fleet: &Fleet, done: impl Fn() -> bool) -> Result<(), String> {
     let mut terminal = ratatui::init();
     let mut app = App { open: (fleet.cells.len() == 1).then_some(0), ..App::default() };
     loop {
-        let shown = gather(&fleet, &mut app);
+        let shown = gather(fleet, &mut app);
         for script in shown.iter().filter_map(|s| s.snapshot.as_ref()?.script.clone()) {
             if !app.recent.contains(&script) {
                 app.recent.push(script);
             }
         }
-        let _ = terminal.draw(|f| draw(f, &fleet, &app, &shown));
-        if done() || app.leave {
+        let _ = terminal.draw(|f| draw(f, fleet, &app, &shown));
+        if done() {
             break;
         }
         if !event::poll(Duration::from_millis(250)).unwrap_or(false) {
@@ -145,14 +125,8 @@ pub fn run(fleet: Fleet, done: impl Fn() -> bool, quit: impl Fn()) -> Result<(),
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        if app.handle(key, &fleet, &shown) && !app.quitting {
-            if fleet.remote() {
-                app.leave = true;
-            } else {
-                app.quitting = true;
-                app.note = Some(("logging out".into(), Instant::now() + Duration::from_secs(3600)));
-                quit();
-            }
+        if app.handle(key, fleet, &shown) {
+            break;
         }
     }
     ratatui::restore();
@@ -193,7 +167,7 @@ impl App {
 
     fn act(&mut self, fleet: &Fleet, command: Command, done: &str) {
         let Some(cell) = fleet.cells.get(self.current()) else { return };
-        match fleet.send(cell, command) {
+        match socket::ctl(&fleet.socket, &cell.name, &command) {
             Ok(()) => self.say(format!("{}: {done}", cell.name)),
             Err(e) => self.say(e),
         }
@@ -267,6 +241,7 @@ impl App {
             KeyCode::Char('c') => self.prompt = Some(Prompt::new(Ask::Chat)),
             KeyCode::Char('s') => self.act(fleet, Command::Stop, "stopping the script"),
             KeyCode::Char('r') => self.act(fleet, Command::Restart, "restarting the script"),
+            KeyCode::Char('i') => self.act(fleet, Command::Login, "logging in"),
             KeyCode::Char('x') => self.act(fleet, Command::Logout, "logging out"),
             KeyCode::Char('p') => {
                 let paused = shown.get(self.current()).and_then(|s| s.snapshot.as_ref()).is_some_and(|s| s.paused);
@@ -389,11 +364,10 @@ fn draw_footer(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App) {
     {
         return f.render_widget(Paragraph::new(format!(" {note}")).yellow(), area);
     }
-    let quit = if fleet.remote() { "q detach" } else { "q quit" };
     let keys = match (app.open, fleet.cells.len() > 1) {
-        (None, _) => format!(" {quit} · ↑↓ pick · enter open · o run · s stop · r restart · p pause · x logout · c chat"),
-        (Some(_), true) => format!(" {quit} · esc fleet · tab next · o run · s stop · r restart · p pause · x logout · l log · c chat"),
-        (Some(_), false) => format!(" {quit} · o run · s stop · r restart · p pause · x logout · l log · c chat · ↑↓ scroll"),
+        (None, _) => " q detach · ↑↓ pick · enter open · o run · s stop · r restart · p pause · i login · x logout · c chat",
+        (Some(_), true) => " q detach · esc fleet · tab next · o run · s stop · r restart · p pause · i login · x logout · l log · c chat",
+        (Some(_), false) => " q detach · o run · s stop · r restart · p pause · i login · x logout · l log · c chat · ↑↓ scroll",
     };
     f.render_widget(Paragraph::new(keys).dark_gray(), area);
 }
@@ -402,7 +376,8 @@ fn state_style(snapshot: &Snapshot) -> (String, Style) {
     let state = snapshot.state();
     let color = match state {
         "READY" => Color::Green,
-        "CLOSED" | "LOGGED OUT" => Color::Red,
+        "OFFLINE" if snapshot.detail.is_empty() => Color::DarkGray,
+        "CLOSED" | "OFFLINE" => Color::Red,
         _ => Color::Yellow,
     };
     (state.to_string(), Style::new().bold().fg(color))
@@ -410,8 +385,7 @@ fn state_style(snapshot: &Snapshot) -> (String, Style) {
 
 fn draw_fleet(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App, shown: &[Shown]) {
     let [header, table] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    let attached = if fleet.remote() { " · attached" } else { "" };
-    f.render_widget(Paragraph::new(format!(" {} · {}{attached}", fleet.title, count(shown.len(), "bot"))).bold(), header);
+    f.render_widget(Paragraph::new(format!(" {} · {}", fleet.title, count(shown.len(), "bot"))).bold(), header);
     let rows = shown.iter().enumerate().map(|(i, bot)| {
         let Some(s) = &bot.snapshot else {
             return Row::new(vec![TableCell::from(bot.name.clone()), TableCell::from("STARTING").yellow()]);
@@ -674,13 +648,14 @@ mod tests {
     fn fleet(bots: &[&str]) -> (Fleet, Arc<Hub>) {
         let cells: Vec<Arc<BotCell>> = bots.iter().map(|b| Arc::new(BotCell::mirror(b))).collect();
         let hub = Arc::new(Hub::new("aqx", cells.clone(), Print::Quiet));
-        (Fleet { title: "aqx".into(), cells, commander: Commander::Local }, hub)
+        (Fleet { title: "aqx".into(), cells, socket: PathBuf::new() }, hub)
     }
 
     fn publish(hub: &Hub, cell: &BotCell, world: &World) {
         let now = Instant::now();
         let mut board: std::sync::MutexGuard<'_, Board> = cell.board();
         board.server = "Twilly".into();
+        board.online = true;
         board.ready_since = Some(now - Duration::from_secs(90));
         board.first_ready = board.ready_since;
         board.start_script("/srv/void-aura.ts".into(), now);
@@ -718,7 +693,7 @@ mod tests {
             assert!(shown.contains(expected), "missing {expected:?}");
         }
         let narrow = screen(&fleet, &mut app, 60);
-        for expected in ["HP █████░░░░░ 2000/4000", "Void Aura", "killed Mosquito", "q quit"] {
+        for expected in ["HP █████░░░░░ 2000/4000", "Void Aura", "killed Mosquito", "q detach"] {
             assert!(narrow.contains(expected), "narrow screen is missing {expected:?}");
         }
         app.filter = Filter::Server;
@@ -780,7 +755,7 @@ mod tests {
         let snapshot = |phase: &str| Snapshot { phase: phase.into(), paused: true, stalled: true, ..Snapshot::default() };
         assert_eq!(snapshot("READY").state(), "PAUSED");
         assert_eq!(snapshot("RECONNECTING").state(), "RECONNECTING");
-        assert_eq!(snapshot("LOGGED OUT").state(), "LOGGED OUT");
+        assert_eq!(snapshot("OFFLINE").state(), "OFFLINE");
         assert_eq!(Snapshot { phase: "READY".into(), stalled: true, ..Snapshot::default() }.state(), "STALLED");
     }
 

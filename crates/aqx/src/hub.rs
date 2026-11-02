@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use aqx_core::{Event, Phase, State, StopHandle, World};
@@ -26,6 +26,7 @@ pub struct LogLine {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
+    Login,
     Run {
         script: PathBuf,
         #[serde(default)]
@@ -154,7 +155,7 @@ pub struct Board {
     pub status: String,
     pub paused: bool,
     pub stalled: bool,
-    pub ended: bool,
+    pub online: bool,
     pub server: String,
     pub ready_since: Option<Instant>,
     pub first_ready: Option<Instant>,
@@ -177,7 +178,7 @@ impl Default for Board {
             status: String::new(),
             paused: false,
             stalled: false,
-            ended: false,
+            online: false,
             server: String::new(),
             ready_since: None,
             first_ready: None,
@@ -281,7 +282,7 @@ impl Board {
             bot: bot.into(),
             user: user.into(),
             server: self.server.clone(),
-            phase: if self.ended { "LOGGED OUT".into() } else { phase },
+            phase: if self.online { phase } else { "OFFLINE".into() },
             detail,
             script: self.script.clone(),
             run: match self.run {
@@ -306,12 +307,12 @@ impl Board {
                 })
                 .collect(),
             quiet_secs: now.saturating_duration_since(self.last_progress).as_secs(),
-            up_secs: self.ready_since.map_or(0, |t| now.saturating_duration_since(t).as_secs()),
+            up_secs: self.ready_since.filter(|_| self.online).map_or(0, |t| now.saturating_duration_since(t).as_secs()),
             kills_h: per_hour(self.kills.len()),
             drops_h: per_hour(self.drops.len()),
             gold_h,
             deaths: self.deaths.len(),
-            game: game(world, now),
+            game: if self.online { game(world, now) } else { None },
         }
     }
 }
@@ -374,48 +375,99 @@ pub struct BotCell {
     pub name: String,
     pub board: Mutex<Board>,
     stop: Option<StopHandle>,
-    commands: Mutex<VecDeque<Command>>,
+    inbox: Mutex<Inbox>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct Inbox {
+    commands: VecDeque<Command>,
+    closed: bool,
 }
 
 impl BotCell {
     pub fn local(name: &str, stop: StopHandle) -> Self {
-        BotCell { name: name.into(), board: Mutex::new(Board::default()), stop: Some(stop), commands: Mutex::new(VecDeque::new()) }
+        BotCell { name: name.into(), board: Mutex::new(Board::default()), stop: Some(stop), inbox: Mutex::default(), wake: Condvar::new() }
     }
 
     pub fn mirror(name: &str) -> Self {
-        BotCell { name: name.into(), board: Mutex::new(Board::default()), stop: None, commands: Mutex::new(VecDeque::new()) }
+        BotCell { name: name.into(), board: Mutex::new(Board::default()), stop: None, inbox: Mutex::default(), wake: Condvar::new() }
     }
 
     pub fn board(&self) -> MutexGuard<'_, Board> {
         self.board.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn inbox(&self) -> MutexGuard<'_, Inbox> {
+        self.inbox.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn send(&self, command: Command) -> Result<(), String> {
         let Some(stop) = &self.stop else { return Err(format!("{} runs in another process", self.name)) };
-        if self.board().ended {
-            return Err(format!("{} has logged out", self.name));
-        }
-        match command {
+        let mut board = self.board();
+        match &command {
+            Command::Login if board.online => return Ok(()),
+            Command::Logout if !board.online => return Ok(()),
+            Command::Login | Command::Run { .. } => board.online = true,
+            _ if !board.online => return Err(format!("{} is offline", self.name)),
             Command::Pause | Command::Resume => {
                 let paused = matches!(command, Command::Pause);
-                self.board().paused = paused;
+                board.paused = paused;
                 stop.post(move |s| s.set_paused(paused));
+                return Ok(());
             }
-            Command::Chat { text } => stop.post(move |s| s.chat(&text)),
-            command => {
-                self.commands.lock().unwrap_or_else(|e| e.into_inner()).push_back(command);
-                stop.stop();
+            Command::Chat { text } => {
+                let text = text.clone();
+                stop.post(move |s| s.chat(&text));
+                return Ok(());
             }
+            _ => {}
         }
+        drop(board);
+        self.inbox().commands.push_back(command);
+        self.wake.notify_one();
+        stop.stop();
         Ok(())
     }
 
     pub fn take_command(&self) -> Option<Command> {
-        self.commands.lock().unwrap_or_else(|e| e.into_inner()).pop_front()
+        self.inbox().commands.pop_front()
     }
 
     pub fn has_commands(&self) -> bool {
-        !self.commands.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+        !self.inbox().commands.is_empty()
+    }
+
+    pub fn next_login(&self) -> Option<Command> {
+        let mut inbox = self.inbox();
+        loop {
+            if inbox.closed {
+                return None;
+            }
+            match inbox.commands.pop_front() {
+                Some(command @ (Command::Login | Command::Run { .. })) => {
+                    self.board().online = true;
+                    return Some(command);
+                }
+                Some(_) => {}
+                None => inbox = self.wake.wait(inbox).unwrap_or_else(|e| e.into_inner()),
+            }
+        }
+    }
+
+    pub fn offline(&self) -> bool {
+        !self.board().online && self.inbox().commands.is_empty()
+    }
+
+    pub fn close(&self) {
+        let mut inbox = self.inbox();
+        inbox.closed = true;
+        inbox.commands.clear();
+        drop(inbox);
+        self.wake.notify_one();
+        if let Some(stop) = &self.stop {
+            stop.stop();
+        }
     }
 }
 
