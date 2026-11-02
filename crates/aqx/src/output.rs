@@ -1,51 +1,56 @@
 use std::fmt::Display;
 use std::io::Write;
 use std::sync::OnceLock;
+use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
 use aqx_core::{Event, Place, World};
 use serde_json::{Value, json};
 
-static START: OnceLock<Instant> = OnceLock::new();
-static JSON: OnceLock<bool> = OnceLock::new();
-
-pub fn init(json: bool) {
-    START.get_or_init(Instant::now);
-    JSON.get_or_init(|| json);
+pub enum Mode {
+    Plain,
+    Json,
+    Tui(SyncSender<Update>),
 }
 
-pub fn say(source: &str, text: impl Display) {
-    write(json!({ "event": "log", "source": source, "text": text.to_string() }), source, &text);
+pub enum Update {
+    Say { t: u64, source: &'static str, text: String },
+    Event { t: u64, event: Event },
+}
+
+static START: OnceLock<Instant> = OnceLock::new();
+static MODE: OnceLock<Mode> = OnceLock::new();
+
+pub fn init(mode: Mode) {
+    START.get_or_init(Instant::now);
+    let _ = MODE.set(mode);
+}
+
+pub fn now() -> u64 {
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+pub fn say(source: &'static str, text: impl Display) {
+    match MODE.get() {
+        Some(Mode::Tui(tx)) => {
+            let _ = tx.try_send(Update::Say { t: now(), source, text: text.to_string() });
+        }
+        Some(Mode::Json) => json_line(json!({ "event": "log", "source": source, "text": text.to_string() })),
+        _ => plain_line(source, &text),
+    }
 }
 
 pub fn event(event: &Event) {
-    let line = match event {
-        Event::LoggedIn { eid } => Some(("aqx", format!("logged in, entity {eid}"))),
-        Event::Joined { area, players: 1 } => Some(("aqx", format!("joined {area}, alone"))),
-        Event::Joined { area, players } => Some(("aqx", format!("joined {area}, {players} players"))),
-        Event::Ready { items } => Some(("aqx", format!("ready, {items} items. Ctrl-C logs out"))),
-        Event::Died => Some(("aqx", "died".into())),
-        Event::Respawned => Some(("aqx", "respawned".into())),
-        Event::Killed { monster } => Some(("aqx", format!("killed {monster}"))),
-        Event::DropOffered { item, qty } => Some(("aqx", format!("drop offered: {item} x{qty}"))),
-        Event::ItemChanged { item, qty, place } => {
-            let place = match place {
-                Place::Inventory => "inventory",
-                Place::Temp => "temp inventory",
-                Place::Bank => "bank",
-            };
-            Some(("aqx", format!("{item}: {qty} in the {place}")))
+    match MODE.get() {
+        Some(Mode::Tui(tx)) => {
+            let _ = tx.try_send(Update::Event { t: now(), event: event.clone() });
         }
-        Event::Chat { channel, sender, text } => Some(("server", format!("[{channel}] {sender}: {text}"))),
-        Event::ServerText { text } | Event::Warning { text } => Some(("server", text.clone())),
-        Event::Unreadable { what } => Some(("aqx", format!("unreadable message: {what}"))),
-        Event::RecordingFailed { error } => Some(("aqx", format!("recording stopped: {error}"))),
-        Event::LoginRejected { .. } | Event::LoggedInElsewhere | Event::InventoryLoaded { .. } => None,
-    };
-    if *JSON.get().unwrap_or(&false) {
-        write(serde_json::to_value(event).unwrap_or(Value::Null), "", &"");
-    } else if let Some((source, text)) = line {
-        write(Value::Null, source, &text);
+        Some(Mode::Json) => json_line(serde_json::to_value(event).unwrap_or(Value::Null)),
+        _ => {
+            if let Some((source, text)) = describe(event) {
+                plain_line(source, &text);
+            }
+        }
     }
 }
 
@@ -54,36 +59,64 @@ pub fn status(world: &World) {
     let area = world.area.as_ref().map_or("", |a| a.name.as_str());
     let players = world.area.as_ref().map_or(0, |a| a.players.len()) + 1;
     let v = me.vitals;
-    let text = format!(
-        "{area} {}/{}, hp {}/{}, mp {}/{}, {} items, {players} players",
-        me.cell,
-        me.pad,
-        v.hp,
-        v.max_hp,
-        v.mp,
-        v.max_mp,
-        world.inventory.len()
-    );
-    let structured = json!({
-        "event": "status", "area": area, "cell": me.cell, "pad": me.pad,
-        "hp": v.hp, "max_hp": v.max_hp, "mp": v.mp, "max_mp": v.max_mp,
-        "items": world.inventory.len(), "players": players,
-    });
-    write(structured, "aqx", &text);
+    match MODE.get() {
+        Some(Mode::Json) => json_line(json!({
+            "event": "status", "area": area, "cell": me.cell, "pad": me.pad,
+            "hp": v.hp, "max_hp": v.max_hp, "mp": v.mp, "max_mp": v.max_mp,
+            "items": world.inventory.len(), "players": players,
+        })),
+        Some(Mode::Tui(_)) => {}
+        _ => plain_line(
+            "aqx",
+            &format_args!(
+                "{area} {}/{}, hp {}/{}, mp {}/{}, {} items, {players} players",
+                me.cell,
+                me.pad,
+                v.hp,
+                v.max_hp,
+                v.mp,
+                v.max_mp,
+                world.inventory.len()
+            ),
+        ),
+    }
 }
 
-fn write(structured: Value, source: &str, text: &dyn Display) {
-    let ms = START.get_or_init(Instant::now).elapsed().as_millis() as u64;
-    let mut out = std::io::stdout().lock();
-    let _ = if *JSON.get().unwrap_or(&false) {
-        let mut structured = structured;
-        if let Value::Object(fields) = &mut structured {
-            fields.insert("t".into(), ms.into());
+pub fn describe(event: &Event) -> Option<(&'static str, String)> {
+    Some(match event {
+        Event::LoggedIn { eid } => ("aqx", format!("logged in, entity {eid}")),
+        Event::Joined { area, players: 1 } => ("aqx", format!("joined {area}, alone")),
+        Event::Joined { area, players } => ("aqx", format!("joined {area}, {players} players")),
+        Event::Ready { items } => ("aqx", format!("ready, {items} items")),
+        Event::Died => ("aqx", "died".into()),
+        Event::Respawned => ("aqx", "respawned".into()),
+        Event::Killed { monster } => ("aqx", format!("killed {monster}")),
+        Event::DropOffered { item, qty } => ("aqx", format!("drop offered: {item} x{qty}")),
+        Event::ItemChanged { item, qty, place } => {
+            let place = match place {
+                Place::Inventory => "inventory",
+                Place::Temp => "temp inventory",
+                Place::Bank => "bank",
+            };
+            ("aqx", format!("{item}: {qty} in the {place}"))
         }
-        writeln!(out, "{structured}")
-    } else {
-        writeln!(out, "{}  {source:<6}  {text}", clock(ms))
-    };
+        Event::Chat { channel, sender, text } => ("server", format!("[{channel}] {sender}: {text}")),
+        Event::ServerText { text } | Event::Warning { text } => ("server", text.clone()),
+        Event::Unreadable { what } => ("aqx", format!("unreadable message: {what}")),
+        Event::RecordingFailed { error } => ("aqx", format!("recording stopped: {error}")),
+        Event::LoginRejected { .. } | Event::LoggedInElsewhere | Event::InventoryLoaded { .. } => return None,
+    })
+}
+
+fn plain_line(source: &str, text: &dyn Display) {
+    let _ = writeln!(std::io::stdout().lock(), "{}  {source:<6}  {text}", clock(now()));
+}
+
+fn json_line(mut value: Value) {
+    if let Value::Object(fields) = &mut value {
+        fields.insert("t".into(), now().into());
+    }
+    let _ = writeln!(std::io::stdout().lock(), "{value}");
 }
 
 pub fn clock(ms: u64) -> String {

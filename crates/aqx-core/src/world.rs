@@ -9,7 +9,7 @@ use crate::event::{Event, Place};
 
 const RANK_REP: [u32; 9] = [900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500];
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct World {
     pub me: Option<Me>,
     pub area: Option<Area>,
@@ -19,6 +19,7 @@ pub struct World {
     pub drops: Vec<Item>,
 }
 
+#[derive(Clone)]
 pub struct Me {
     pub eid: EntityId,
     pub user: String,
@@ -51,6 +52,7 @@ pub enum State {
     Combat,
 }
 
+#[derive(Clone)]
 pub struct Area {
     pub id: AreaId,
     pub name: String,
@@ -59,6 +61,7 @@ pub struct Area {
     pub players: Vec<Player>,
 }
 
+#[derive(Clone)]
 pub struct Monster {
     pub map_id: MonMapId,
     pub mon_id: MonId,
@@ -68,6 +71,7 @@ pub struct Monster {
     pub auras: Vec<Aura>,
 }
 
+#[derive(Clone)]
 pub struct Player {
     pub eid: EntityId,
     pub name: String,
@@ -92,6 +96,7 @@ pub struct Item {
     pub member: bool,
 }
 
+#[derive(Clone)]
 pub struct Faction {
     pub id: FactionId,
     pub name: String,
@@ -104,12 +109,14 @@ impl Faction {
     }
 }
 
+#[derive(Clone)]
 pub struct Aura {
     pub name: String,
     pub stacks: u32,
     pub until: Option<Instant>,
 }
 
+#[derive(Clone)]
 pub struct Skill {
     pub slot: String,
     pub name: String,

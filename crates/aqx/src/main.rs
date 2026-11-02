@@ -1,18 +1,22 @@
 mod config;
 mod output;
+mod tui;
 mod view;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use aqx_core::{CLIENT_VERSION, Control, Disconnect, Halt, Login, Phase, Recorder, Server, Session, login};
 use clap::{Args, Parser, Subcommand};
-use output::say;
+use output::{Mode, say};
 
 const DEFAULT_API: &str = "https://game.aq.com";
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const STATUS_EVERY: Duration = Duration::from_secs(60);
+const SNAPSHOT_EVERY: Duration = Duration::from_millis(250);
 
 #[derive(Parser)]
 #[command(name = "aqx", version, about = "Headless AQW client")]
@@ -52,16 +56,29 @@ struct RunArgs {
     record: Option<PathBuf>,
     #[arg(long, value_name = "VERSION", default_value = CLIENT_VERSION, help = "Client version to log in with first")]
     client_version: String,
-    #[arg(long, help = "Print events as JSON lines")]
+    #[arg(long, conflicts_with = "plain", help = "Print events as JSON lines")]
     json: bool,
+    #[arg(long, help = "Print one line per event instead of the TUI")]
+    plain: bool,
+}
+
+struct Setup {
+    api: String,
+    user: String,
+    password: String,
+    server: Option<String>,
+    version: String,
+    config: PathBuf,
+}
+
+enum Watch {
+    Status,
+    Snapshots(tui::Slot),
 }
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
-        Command::Run(args) => {
-            output::init(args.json);
-            run(args)
-        }
+        Command::Run(args) => run(args),
         Command::View(args) => view::view(&args.file, &args.cmd, args.full),
     };
     match result {
@@ -74,33 +91,57 @@ fn main() -> ExitCode {
 }
 
 fn run(args: RunArgs) -> Result<(), String> {
-    let RunArgs { script, account, config, server, record, client_version: mut version, .. } = args;
+    let RunArgs { script, account, config, server, record, client_version, json, plain } = args;
     if let Some(script) = script {
         return Err(format!("can't run {}: scripts aren't supported yet. Run without one to log in", script.display()));
     }
     let (config, path) = config::load(config.as_deref())?;
     let bot = config.bot(account.as_deref()).map_err(|e| format!("{}: {e}", path.display()))?;
-    let api = config.defaults.api.as_deref().unwrap_or(DEFAULT_API);
-    let server_name = server.or(config.defaults.server.clone());
-
-    let mut control = Control::new().map_err(|e| e.to_string())?;
+    let setup = Setup {
+        api: config.defaults.api.clone().unwrap_or_else(|| DEFAULT_API.into()),
+        user: bot.user.clone(),
+        password: bot.password.clone(),
+        server: server.or(config.defaults.server.clone()),
+        version: client_version,
+        config: path,
+    };
+    let control = Control::new().map_err(|e| e.to_string())?;
     let stop = control.stop_handle();
-    ctrlc::set_handler(move || stop.stop()).map_err(|e| e.to_string())?;
-    let mut recorder = record
+    let ctrlc_stop = stop.clone();
+    ctrlc::set_handler(move || ctrlc_stop.stop()).map_err(|e| e.to_string())?;
+    let recorder = record
         .map(|p| Recorder::create(&p).map_err(|e| format!("{}: {e}", p.display())))
         .transpose()?;
 
+    if json || plain || !std::io::stdout().is_terminal() {
+        output::init(if json { Mode::Json } else { Mode::Plain });
+        return run_bot(setup, control, recorder, Watch::Status);
+    }
+    let (tx, rx) = mpsc::sync_channel(1024);
+    output::init(Mode::Tui(tx));
+    let slot: tui::Slot = Arc::new(Mutex::new(None));
+    let watch = Watch::Snapshots(slot.clone());
+    let bot = std::thread::Builder::new()
+        .name("bot".into())
+        .spawn(move || run_bot(setup, control, recorder, watch))
+        .map_err(|e| e.to_string())?;
+    tui::run(rx, slot, stop, bot)
+}
+
+fn run_bot(setup: Setup, mut control: Control, mut recorder: Option<Recorder>, watch: Watch) -> Result<(), String> {
+    let mut version = setup.version.clone();
     loop {
-        say("aqx", format_args!("logging in as {} at {api}, config {}", bot.user, path.display()));
-        let account = login(api, &bot.user, &bot.password).map_err(|e| e.to_string())?;
-        let server = pick_server(&account.servers, server_name.as_deref(), account.member)?;
+        say("aqx", format_args!("logging in as {} at {}, config {}", setup.user, setup.api, setup.config.display()));
+        let account = login(&setup.api, &setup.user, &setup.password).map_err(|e| e.to_string())?;
+        let server = pick_server(&account.servers, setup.server.as_deref(), account.member)?;
         say("aqx", format_args!("connecting to {}, client version {version}", server.name));
-        let login = Login { user: &bot.user, token: &account.token, version: &version };
+        let login = Login { user: &setup.user, token: &account.token, version: &version };
         let mut session =
             Session::connect(control, server, login, recorder, output::event).map_err(|e| format!("can't reach {}: {e}", server.name))?;
-        let outcome = session
-            .pump_until(Some(Instant::now() + READY_TIMEOUT), |s| (s.phase == Phase::Ready).then_some(()))
-            .and_then(|()| stay_online(&mut session));
+        let outcome = watch_until(&mut session, &server.name, &watch, Some(Instant::now() + READY_TIMEOUT), |s| {
+            (s.phase == Phase::Ready).then_some(())
+        })
+        .and_then(|()| watch_until(&mut session, &server.name, &watch, None, |_| None::<()>));
         match outcome {
             Ok(()) => return Ok(()),
             Err(Halt::Stopped) => {
@@ -139,10 +180,33 @@ fn pick_server<'a>(servers: &'a [Server], name: Option<&str>, member: bool) -> R
     }
 }
 
-fn stay_online(session: &mut Session) -> Result<(), Halt> {
+fn watch_until<T>(
+    session: &mut Session,
+    server: &str,
+    watch: &Watch,
+    deadline: Option<Instant>,
+    mut done: impl FnMut(&Session) -> Option<T>,
+) -> Result<T, Halt> {
     loop {
-        match session.pump_until(Some(Instant::now() + STATUS_EVERY), |_| None::<()>) {
-            Err(Halt::Timeout) => output::status(&session.world),
+        let tick = match watch {
+            Watch::Status => STATUS_EVERY,
+            Watch::Snapshots(slot) => {
+                if let Ok(mut view) = slot.lock() {
+                    *view = Some(tui::View { phase: session.phase.clone(), server: server.into(), world: session.world.clone() });
+                }
+                SNAPSHOT_EVERY
+            }
+        };
+        let wake = Instant::now() + tick;
+        match session.pump_until(Some(deadline.map_or(wake, |d| d.min(wake))), &mut done) {
+            Err(Halt::Timeout) if deadline.is_some_and(|d| Instant::now() >= d) => return Err(Halt::Timeout),
+            Err(Halt::Timeout) => {
+                if let Watch::Status = watch
+                    && session.phase == Phase::Ready
+                {
+                    output::status(&session.world);
+                }
+            }
             other => return other,
         }
     }
