@@ -112,7 +112,7 @@ pub struct Game {
     pub class: String,
     pub level: u32,
     pub gold: i64,
-    pub skills: Vec<String>,
+    pub skills: Vec<SkillState>,
     pub auras: Vec<String>,
     pub target: Option<String>,
     pub cell_monsters: (usize, usize),
@@ -120,6 +120,12 @@ pub struct Game {
     pub players: usize,
     pub cell_players: Vec<String>,
     pub drops: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SkillState {
+    pub name: String,
+    pub ready_pct: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -305,7 +311,7 @@ impl Board {
             drops_h: per_hour(self.drops.len()),
             gold_h,
             deaths: self.deaths.len(),
-            game: game(world),
+            game: game(world, now),
         }
     }
 }
@@ -323,7 +329,7 @@ fn describe_phase(phase: &Phase, now: Instant) -> (String, String) {
     }
 }
 
-fn game(world: &World) -> Option<Game> {
+fn game(world: &World, now: Instant) -> Option<Game> {
     let me = world.me.as_ref()?;
     let area = world.area.as_ref();
     let count = |cell: Option<&str>| {
@@ -347,7 +353,13 @@ fn game(world: &World) -> Option<Game> {
         class: me.class.clone(),
         level: me.level,
         gold: me.gold,
-        skills: me.skills.iter().skip(1).take(4).map(|s| s.name.clone()).collect(),
+        skills: me
+            .skills
+            .iter()
+            .skip(1)
+            .take(4)
+            .map(|s| SkillState { name: s.name.clone(), ready_pct: (world.recharged(s, now) * 100.0) as u8 })
+            .collect(),
         auras: me.auras.iter().map(|a| if a.stacks > 1 { format!("{} x{}", a.name, a.stacks) } else { a.name.clone() }).collect(),
         target,
         cell_monsters: count(Some(&me.cell)),

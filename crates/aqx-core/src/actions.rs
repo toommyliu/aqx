@@ -588,7 +588,7 @@ impl Session {
         if f64::from(skill.mana) * me.stats.get("$cmc").copied().unwrap_or(1.0) > f64::from(me.vitals.mp) {
             return None;
         }
-        let own = self.casts.get(&skill.slot).map_or(now, |last| *last + me.cooldown(skill) + SERVER_MARGIN);
+        let own = self.world.casts.get(&skill.slot).map_or(now, |last| *last + me.cooldown(skill) + SERVER_MARGIN);
         let kind = if slot == AUTO_ATTACK { Kind::AutoAttack } else { Kind::ClassSkill };
         Some(own.max(self.pacer_ready_at(kind, now)))
     }
@@ -620,7 +620,7 @@ impl Session {
             let counter = self.next_counter();
             self.send_paced(Out::Skill { counter, slot: &name, targets: &aims }, kind)?;
         }
-        self.casts.insert(name, Instant::now());
+        self.world.casts.insert(name, Instant::now());
         Ok(())
     }
 

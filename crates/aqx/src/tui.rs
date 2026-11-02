@@ -452,12 +452,25 @@ fn draw_vitals(f: &mut Frame, area: Rect, s: Option<&Snapshot>) {
 
 fn draw_combat(f: &mut Frame, area: Rect, s: Option<&Snapshot>) {
     let Some(g) = s.and_then(|s| s.game.as_ref()) else { return f.render_widget(waiting("Combat"), area) };
-    let skills = g.skills.iter().enumerate().map(|(i, s)| format!("{} {s}", i + 1)).collect::<Vec<_>>().join("  ");
+    let mut skills = vec![Span::raw("Skills  ")];
+    if g.skills.is_empty() {
+        skills.push(Span::raw("none"));
+    }
+    for (i, s) in g.skills.iter().enumerate() {
+        if i > 0 {
+            skills.push(Span::raw("  "));
+        }
+        let label = format!("{} {}", i + 1, s.name);
+        let lit = label.chars().count() * usize::from(s.ready_pct.min(100)) / 100;
+        let (ready, cooling) = label.split_at(label.char_indices().nth(lit).map_or(label.len(), |(at, _)| at));
+        skills.push(Span::raw(ready.to_owned()));
+        skills.push(Span::raw(cooling.to_owned()).dark_gray());
+    }
     let lines = vec![
         Line::raw(format!("Target  {}", g.target.as_deref().unwrap_or("none"))),
         Line::raw(format!("Cell    {}", monsters(g.cell_monsters))),
         Line::raw(format!("Map     {}", monsters(g.map_monsters))),
-        Line::raw(format!("Skills  {}", if skills.is_empty() { "none".into() } else { skills })),
+        Line::from(skills),
         Line::raw(format!("Auras   {}", if g.auras.is_empty() { "none".into() } else { g.auras.join(", ") })),
     ];
     f.render_widget(Paragraph::new(lines).block(panel(" Combat ")), area);
@@ -697,5 +710,21 @@ mod tests {
         publish(&hub, &fleet.cells[0], &farm_world());
         let shown = screen(&fleet, &mut App { open: Some(0), ..App::default() }, 110);
         assert!(shown.contains(" hero · Twilly · farm-1"), "{shown}");
+    }
+
+    #[test]
+    fn a_recharging_skill_lights_up_from_the_left() {
+        use crate::hub::{Game, SkillState};
+        let skill = |name: &str, ready_pct| SkillState { name: name.into(), ready_pct };
+        let game = Game { skills: vec![skill("Slash", 100), skill("Blur", 50), skill("Rend", 0)], ..Game::default() };
+        let snapshot = Snapshot { game: Some(game), ..Snapshot::default() };
+        let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        terminal.draw(|f| draw_combat(f, f.area(), Some(&snapshot))).unwrap();
+        let rows: Vec<_> = terminal.backend().buffer().content.chunks(60).map(<[_]>::to_vec).collect();
+        let row = rows.iter().find(|r| r.iter().map(|c| c.symbol()).collect::<String>().contains("Skills")).unwrap();
+        let text: String = row.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Skills  1 Slash  2 Blur  3 Rend"), "{text}");
+        let dim: String = row.iter().filter(|c| c.fg == Color::DarkGray).map(|c| c.symbol()).collect();
+        assert_eq!(dim, "lur3 Rend");
     }
 }

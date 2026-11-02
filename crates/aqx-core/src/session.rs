@@ -163,7 +163,6 @@ pub struct Session {
     events_queued: u64,
     pub respawn_to: Option<(String, String)>,
     died_in: Option<(String, String)>,
-    pub(crate) casts: HashMap<String, Instant>,
     pub(crate) joined: Option<AreaId>,
     pub(crate) quest_outcomes: HashMap<QuestId, Result<(), String>>,
     paused: bool,
@@ -203,7 +202,6 @@ impl Session {
             events_queued: 0,
             respawn_to: None,
             died_in: None,
-            casts: HashMap::new(),
             joined: None,
             quest_outcomes: HashMap::new(),
             paused: false,
@@ -284,7 +282,6 @@ impl Session {
         self.respawn_at = None;
         self.respawn_sent = false;
         self.died_in = None;
-        self.casts.clear();
         self.joined = None;
         self.quest_outcomes.clear();
         self.refusals.clear();

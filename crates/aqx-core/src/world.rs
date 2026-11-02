@@ -35,6 +35,7 @@ pub struct World {
     pub(crate) last_shop: Option<ShopId>,
     pub(crate) buying: Option<ShopId>,
     pub target: Option<MonMapId>,
+    pub casts: HashMap<String, Instant>,
     pub rev: u64,
 }
 
@@ -444,6 +445,15 @@ fn each<T: DeserializeOwned>(values: Vec<Value>, what: &str, events: &mut Vec<Ev
 }
 
 impl World {
+    pub fn recharged(&self, skill: &Skill, now: Instant) -> f64 {
+        let (Some(me), Some(last)) = (&self.me, self.casts.get(&skill.slot)) else { return 1.0 };
+        let cooldown = me.cooldown(skill);
+        if cooldown.is_zero() {
+            return 1.0;
+        }
+        (now.saturating_duration_since(*last).as_secs_f64() / cooldown.as_secs_f64()).min(1.0)
+    }
+
     fn on_xml(&mut self, xml: &Xml) {
         let me = self.me.as_ref().map(|m| m.eid);
         match xml.action {
