@@ -167,6 +167,7 @@ pub struct Session {
     pub(crate) quest_outcomes: HashMap<QuestId, Result<(), String>>,
     paused: bool,
     aggro: Option<Aggro>,
+    pub(crate) auto_attack: Option<Instant>,
     alarm: Option<Instant>,
     packets: HashSet<String>,
     pub world: World,
@@ -206,6 +207,7 @@ impl Session {
             quest_outcomes: HashMap::new(),
             paused: false,
             aggro: None,
+            auto_attack: None,
             alarm: None,
             packets: HashSet::new(),
             world: World::default(),
@@ -361,15 +363,20 @@ impl Session {
                 continue;
             }
             let now = Instant::now();
+            let rev = self.world.rev;
             self.run_timers(now);
             if deadline.is_some_and(|d| now >= d) {
                 return Err(Halt::Timeout);
             }
+            if self.world.rev != rev {
+                continue;
+            }
             if self.run_hook() {
                 continue;
             }
-            let wake = [deadline, self.respawn_at, self.watcher.as_ref().map(|w| w.next), self.aggro.as_ref().map(|a| a.next), self.alarm]
+            let wake = [deadline, self.respawn_at, self.watcher.as_ref().map(|w| w.next), self.aggro.as_ref().map(|a| a.next)]
                 .into_iter()
+                .chain([self.auto_attack, self.alarm])
                 .flatten()
                 .min();
             let timeout = wake.map(|w| w.saturating_duration_since(now));
@@ -386,6 +393,7 @@ impl Session {
     pub fn set_hook(&mut self, hook: Option<Hook>) {
         if hook.is_none() {
             self.aggro = None;
+            self.set_target(None);
             self.alarm = None;
             self.packets.clear();
         }
@@ -455,6 +463,12 @@ impl Session {
         self.aggro = target.map(|target| Aggro { target, next: Instant::now() });
     }
 
+    pub fn set_target(&mut self, target: Option<MonMapId>) {
+        self.world.target = target;
+        self.world.rev += 1;
+        self.auto_attack = target.map(|_| Instant::now());
+    }
+
     pub fn set_alarm(&mut self, at: Option<Instant>) {
         self.alarm = at;
     }
@@ -480,9 +494,13 @@ impl Session {
         let waited = self.idle_until(ready);
         self.hook = hook;
         waited?;
+        self.send_now(out, kind);
+        Ok(())
+    }
+
+    pub(crate) fn send_now(&mut self, out: Out, kind: Kind) {
         self.pacer.sent(kind, Instant::now());
         self.send(out);
-        Ok(())
     }
 
     pub(crate) fn pacer_ready_at(&self, kind: Kind, now: Instant) -> Instant {
@@ -529,7 +547,10 @@ impl Session {
             if let Some(aggro) = &mut self.aggro {
                 aggro.next = now + AGGRO_EVERY;
             }
-            self.pull(now);
+            self.pull();
+        }
+        if self.auto_attack.is_some_and(|at| now >= at) {
+            self.auto_attack = self.auto_attack_turn(now);
         }
         if self.alarm.is_some_and(|at| now >= at) {
             self.alarm = None;
@@ -538,7 +559,7 @@ impl Session {
         self.fire_watcher(now, false);
     }
 
-    fn pull(&mut self, now: Instant) {
+    fn pull(&mut self) {
         if self.phase != Phase::Ready || self.paused {
             return;
         }
@@ -550,8 +571,7 @@ impl Session {
             area.monsters.iter().filter(|m| m.cell == me.cell && m.alive() && (aggro.target)(&self.world, m)).map(|m| m.map_id).collect();
         if !ids.is_empty() {
             let room = area.id;
-            self.pacer.sent(Kind::Free, now);
-            self.send(Out::Aggro { room, monsters: &ids });
+            self.send_now(Out::Aggro { room, monsters: &ids }, Kind::Free);
         }
     }
 

@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use aqx_core::{ActError, Disconnect, Fight, Halt, Item, ItemRef, Monster, Phase, State, World};
-use aqx_protocol::ItemId;
+use aqx_protocol::{ItemId, MonMapId};
 use server::{FARM, Fake};
 
 fn sent(fake: Fake) -> Vec<(Instant, String)> {
@@ -223,4 +223,63 @@ fn skills_use_waits_for_mana() {
     let mana = all.iter().position(|m| *m == "<mana>").expect("mana came back");
     assert_eq!(all.iter().filter(|m| m.contains("%gar%")).count(), 1);
     assert!(all.iter().position(|m| m.contains("%gar%")).unwrap() > mana, "cast before the mana came back");
+}
+
+fn attacks(sent: &[(Instant, String)]) -> Vec<&(Instant, String)> {
+    sent.iter().filter(|(_, m)| m.contains("%gar%")).collect()
+}
+
+#[test]
+fn a_target_set_from_outside_is_auto_attacked_until_it_dies() {
+    let mut hits = 0;
+    let mut fake = Fake::start(FARM, move |msg, wire| {
+        if msg.contains("%gar%") {
+            hits += 1;
+            if hits == 2 {
+                wire.object(r#"{"cmd":"ct","m":{"2":{"intHP":0,"intState":0}}}"#);
+            }
+        }
+    });
+    fake.session.jump("r2", "Left").unwrap();
+    fake.session.set_target(Some(MonMapId(2)));
+    let cleared = fake.session.pump_until(Some(Instant::now() + Duration::from_secs(5)), |s| s.world.target.is_none().then(Instant::now));
+    let sent = sent(fake);
+
+    let attacks = attacks(&sent);
+    assert_eq!(attacks.len(), 2, "{attacks:?}");
+    assert!(attacks.iter().all(|(_, m)| m.contains("%aa>m:2%")), "{attacks:?}");
+    assert!(attacks[1].0 - attacks[0].0 >= Duration::from_millis(2000), "auto attacks {:?} apart", attacks[1].0 - attacks[0].0);
+    let after = cleared.expect("the dead target was cleared") - attacks[1].0;
+    assert!(after < Duration::from_millis(400), "cleared {after:?} after the killing blow");
+}
+
+#[test]
+fn cast_now_sends_a_ready_skill_at_the_target_and_refuses_one_on_cooldown() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    fake.session.jump("r2", "Left").unwrap();
+    assert!(!fake.session.cast_now(1), "cast a hostile skill with no target");
+    fake.session.set_target(Some(MonMapId(2)));
+    assert!(fake.session.can_cast(1));
+    assert!(fake.session.cast_now(1));
+    assert!(!fake.session.can_cast(3) && !fake.session.cast_now(3), "cast inside the global cooldown");
+    pump_for(&mut fake, Duration::from_millis(1600));
+    assert!(fake.session.cast_now(3));
+    let sent = sent(fake);
+
+    let class: Vec<&str> = attacks(&sent).into_iter().map(|(_, m)| m.as_str()).filter(|m| !m.contains("%aa>")).collect();
+    assert_eq!(class.len(), 2, "{class:?}");
+    assert!(class[0].contains("%a1>m:2%") && class[1].contains("%a3>m:2%"), "{class:?}");
+}
+
+#[test]
+fn the_end_of_a_script_stops_the_background_attack() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    fake.session.jump("r2", "Left").unwrap();
+    fake.session.set_target(Some(MonMapId(2)));
+    pump_for(&mut fake, Duration::from_millis(300));
+    fake.session.set_hook(None);
+    pump_for(&mut fake, Duration::from_millis(2500));
+    assert_eq!(fake.session.world.target, None);
+    let sent = sent(fake);
+    assert_eq!(attacks(&sent).len(), 1, "{:?}", attacks(&sent));
 }

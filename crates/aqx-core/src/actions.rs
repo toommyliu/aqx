@@ -94,6 +94,11 @@ enum TargetState {
     Gone,
 }
 
+enum Pace {
+    Wait,
+    Now,
+}
+
 impl Session {
     fn ready(&mut self, deadline: Option<Instant>) -> Result<(), ActError> {
         self.wait_for(deadline, "waiting to be alive and ready", |s| {
@@ -526,9 +531,9 @@ impl Session {
     }
 
     fn fight(&mut self, id: MonMapId, fight: &mut Fight, deadline: Option<Instant>) -> Result<bool, ActError> {
-        self.world.target = Some(id);
+        let parked = (self.world.target.replace(id), self.auto_attack.take());
         let result = self.fight_target(id, fight, deadline);
-        self.world.target = None;
+        (self.world.target, self.auto_attack) = parked;
         result
     }
 
@@ -548,10 +553,41 @@ impl Session {
                 return Err(ActError::Timeout("killing".into()));
             }
             match self.choose(fight, now) {
-                Choice::Cast(slot) => self.cast(slot, Some(id))?,
+                Choice::Cast(slot) => self.cast(slot, Some(id), Pace::Wait)?,
                 Choice::Wait(at) => self.idle_until(cap(at, deadline))?,
             }
         }
+    }
+
+    pub(crate) fn auto_attack_turn(&mut self, now: Instant) -> Option<Instant> {
+        let id = self.world.target?;
+        if self.phase != Phase::Ready || self.paused() {
+            return Some(now + HOLD_RECHECK);
+        }
+        if !matches!(self.target_state(id), TargetState::Alive) {
+            self.world.target = None;
+            self.world.rev += 1;
+            return None;
+        }
+        if self.castable_at(AUTO_ATTACK, now).is_some_and(|at| at <= now) {
+            let _ = self.cast(AUTO_ATTACK, Some(id), Pace::Now);
+        }
+        let recheck = now + HOLD_RECHECK;
+        Some(self.castable_at(AUTO_ATTACK, now).map_or(recheck, |at| at.min(recheck)))
+    }
+
+    pub fn can_cast(&self, slot: usize) -> bool {
+        let now = Instant::now();
+        self.phase == Phase::Ready && !self.paused() && !self.dead() && self.castable_at(slot, now).is_some_and(|at| at <= now)
+    }
+
+    pub fn cast_now(&mut self, slot: usize) -> bool {
+        let hostile = self.world.me.as_ref().and_then(|m| m.skills.get(slot)).is_some_and(|s| s.target == SkillTarget::Hostile);
+        let aimed = self.world.target.filter(|id| matches!(self.target_state(*id), TargetState::Alive));
+        if !self.can_cast(slot) || (hostile && aimed.is_none()) {
+            return false;
+        }
+        self.cast(slot, aimed, Pace::Now).is_ok()
     }
 
     fn target_state(&self, id: MonMapId) -> TargetState {
@@ -614,7 +650,7 @@ impl Session {
         self.world.inventory.iter().find(|i| i.qty > 0 && i.meta.parse::<u32>().is_ok_and(|meta| meta == skill)).map(|i| i.id)
     }
 
-    fn cast(&mut self, slot: usize, target: Option<MonMapId>) -> Result<(), ActError> {
+    fn cast(&mut self, slot: usize, target: Option<MonMapId>, pace: Pace) -> Result<(), ActError> {
         let (Some(me), Some(area)) = (&self.world.me, &self.world.area) else { return Ok(()) };
         let Some(skill) = me.skills.get(slot) else { return Ok(()) };
         let aims: Vec<Aim> = match (skill.target, target) {
@@ -628,13 +664,20 @@ impl Session {
         };
         let name = skill.slot.clone();
         let kind = if slot == AUTO_ATTACK { Kind::AutoAttack } else { Kind::ClassSkill };
-        if name.starts_with('i') {
+        let item = if name.starts_with('i') {
             let Some(item) = self.equipped_item() else { return Ok(()) };
-            let counter = self.next_counter();
-            self.send_paced(Out::UseItem { counter, target: aims[0], item }, kind)?;
+            Some(item)
         } else {
-            let counter = self.next_counter();
-            self.send_paced(Out::Skill { counter, slot: &name, targets: &aims }, kind)?;
+            None
+        };
+        let counter = self.next_counter();
+        let out = match item {
+            Some(item) => Out::UseItem { counter, target: aims[0], item },
+            None => Out::Skill { counter, slot: &name, targets: &aims },
+        };
+        match pace {
+            Pace::Wait => self.send_paced(out, kind)?,
+            Pace::Now => self.send_now(out, kind),
         }
         self.world.cooldown_starts.insert(name, Instant::now() + SERVER_MARGIN);
         Ok(())
@@ -670,7 +713,7 @@ impl Session {
                 }
                 SkillTarget::Friendly | SkillTarget::Myself => None,
             };
-            return self.cast(slot, aim);
+            return self.cast(slot, aim, Pace::Wait);
         }
     }
 
