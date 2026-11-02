@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::{AreaId, EntityId, ItemId, MonMapId, QuestId};
+use crate::{AreaId, CharItemId, EntityId, ItemId, MonMapId, QuestId, ShopId, ShopItemId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Aim {
@@ -28,6 +28,13 @@ pub enum Out<'a> {
     LoadQuests { room: AreaId, quests: &'a [QuestId] },
     AcceptQuest { room: AreaId, quest: QuestId },
     CompleteQuest { room: AreaId, quest: QuestId, reward: Option<ItemId>, times: u32 },
+    Withdraw { room: AreaId, item: ItemId, char_item: CharItemId },
+    Deposit { room: AreaId, item: ItemId, char_item: CharItemId },
+    LoadShop { room: AreaId, shop: ShopId },
+    Buy { room: AreaId, item: ItemId, shop: ShopId, shop_item: ShopItemId, qty: u32 },
+    Sell { room: AreaId, item: ItemId, qty: u32, char_item: CharItemId },
+    Equip { room: AreaId, item: ItemId },
+    EquipConsumable { room: AreaId, link: &'a str, meta: &'a str, item: ItemId },
     Raw(&'a str),
 }
 
@@ -85,6 +92,13 @@ impl Out<'_> {
                 let reward = reward.map_or(-1, |id| i64::from(id.0));
                 write!(buf, "%xt%zm%tryQuestComplete%{room}%{quest}%{reward}%false%{times}%wvz%").unwrap()
             }
+            Out::Withdraw { room, item, char_item } => write!(buf, "%xt%zm%bankToInv%{room}%{item}%{char_item}%").unwrap(),
+            Out::Deposit { room, item, char_item } => write!(buf, "%xt%zm%bankFromInv%{room}%{item}%{char_item}%").unwrap(),
+            Out::LoadShop { room, shop } => write!(buf, "%xt%zm%loadShop%{room}%{shop}%").unwrap(),
+            Out::Buy { room, item, shop, shop_item, qty } => write!(buf, "%xt%zm%buyItem%{room}%{item}%{shop}%{shop_item}%{qty}%").unwrap(),
+            Out::Sell { room, item, qty, char_item } => write!(buf, "%xt%zm%sellItem%{room}%{item}%{qty}%{char_item}%").unwrap(),
+            Out::Equip { room, item } => write!(buf, "%xt%zm%equipItem%{room}%{item}%").unwrap(),
+            Out::EquipConsumable { room, link, meta, item } => write!(buf, "%xt%zm%geia%{room}%{link}%{meta}%{item}%").unwrap(),
             Out::Raw(text) => buf.extend_from_slice(text.as_bytes()),
         }
         buf.push(0);
@@ -147,6 +161,25 @@ mod tests {
         assert_eq!(
             encoded(Out::CompleteQuest { room, quest: QuestId(445), reward: Some(ItemId(2481)), times: 5 }),
             "%xt%zm%tryQuestComplete%167928%445%2481%false%5%wvz%\0"
+        );
+    }
+
+    #[test]
+    fn encodes_bank_shop_and_equipment_requests_as_the_client_sends_them() {
+        let room = AreaId(7111);
+        let (item, char_item) = (ItemId(1528), CharItemId(77));
+        assert_eq!(encoded(Out::Withdraw { room, item, char_item }), "%xt%zm%bankToInv%7111%1528%77%\0");
+        assert_eq!(encoded(Out::Deposit { room, item, char_item }), "%xt%zm%bankFromInv%7111%1528%77%\0");
+        assert_eq!(encoded(Out::LoadShop { room, shop: ShopId(1348) }), "%xt%zm%loadShop%7111%1348%\0");
+        assert_eq!(
+            encoded(Out::Buy { room, item: ItemId(102658), shop: ShopId(1348), shop_item: ShopItemId(68071), qty: 1 }),
+            "%xt%zm%buyItem%7111%102658%1348%68071%1%\0"
+        );
+        assert_eq!(encoded(Out::Sell { room, item: ItemId(102658), qty: 1, char_item }), "%xt%zm%sellItem%7111%102658%1%77%\0");
+        assert_eq!(encoded(Out::Equip { room, item: ItemId(95742) }), "%xt%zm%equipItem%7111%95742%\0");
+        assert_eq!(
+            encoded(Out::EquipConsumable { room, link: "potion", meta: "457", item: ItemId(11857) }),
+            "%xt%zm%geia%7111%potion%457%11857%\0"
         );
     }
 

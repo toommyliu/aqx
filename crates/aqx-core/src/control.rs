@@ -36,6 +36,10 @@ impl Control {
         StopHandle { waker: self.waker.clone(), stop: self.stop.clone() }
     }
 
+    pub(crate) fn waker(&self) -> Arc<Waker> {
+        self.waker.clone()
+    }
+
     pub(crate) fn stop_requested(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use aqx_core::{ActError, CLIENT_VERSION, Control, Disconnect, Fight, Halt, ItemRef, Login, Phase, Recorder, Server, Session, login};
-use aqx_protocol::{ItemId, QuestId};
+use aqx_protocol::{ItemId, QuestId, ShopId};
 use clap::{Args, Parser, Subcommand};
 use output::{Mode, say};
 
@@ -65,7 +65,7 @@ struct RunArgs {
         long = "do",
         value_name = "STEP",
         value_parser = parse_task,
-        help = "Run a step once ready: \"join MAP [CELL PAD]\", \"jump CELL [PAD]\", \"kill NAME [COUNT]\", \"farm ITEM COUNT [from NAME]\", \"accept QUEST\", \"complete QUEST [REWARD]\", \"pickup ITEM\" or \"rest\". Repeatable"
+        help = "Run a step once ready: \"join MAP [CELL PAD]\", \"jump CELL [PAD]\", \"kill NAME [COUNT]\", \"farm ITEM COUNT [from NAME]\", \"accept QUEST\", \"complete QUEST [REWARD]\", \"withdraw ITEM\", \"deposit ITEM\", \"buy SHOP ITEM [QTY]\", \"sell ITEM [QTY]\", \"equip ITEM\", \"pickup ITEM\" or \"rest\". Repeatable"
     )]
     tasks: Vec<Task>,
 }
@@ -78,6 +78,11 @@ enum Task {
     Farm { item: String, count: u32, from: Option<String> },
     Accept(u32),
     Complete { quest: u32, reward: Option<u32> },
+    Withdraw(String),
+    Deposit(String),
+    Buy { shop: u32, item: String, qty: u32 },
+    Sell { item: String, qty: u32 },
+    Equip(String),
     Pickup(String),
     Rest,
 }
@@ -95,9 +100,22 @@ impl std::fmt::Display for Task {
             Task::Accept(quest) => write!(f, "accept {quest}"),
             Task::Complete { quest, reward: None } => write!(f, "complete {quest}"),
             Task::Complete { quest, reward: Some(item) } => write!(f, "complete {quest} {item}"),
+            Task::Withdraw(item) => write!(f, "withdraw {item}"),
+            Task::Deposit(item) => write!(f, "deposit {item}"),
+            Task::Buy { shop, item, qty } => write!(f, "buy {shop} {item} {qty}"),
+            Task::Sell { item, qty } => write!(f, "sell {item} {qty}"),
+            Task::Equip(item) => write!(f, "equip {item}"),
             Task::Pickup(item) => write!(f, "pickup {item}"),
             Task::Rest => write!(f, "rest"),
         }
+    }
+}
+
+fn name_and_count(words: &[&str]) -> Result<(String, u32), String> {
+    match words.split_last().map(|(last, name)| (last.parse::<u32>(), name)) {
+        Some((Ok(0), _)) => Err("the count must be at least 1".into()),
+        Some((Ok(count), name)) if !name.is_empty() => Ok((name.join(" "), count)),
+        _ => Ok((words.join(" "), 1)),
     }
 }
 
@@ -120,19 +138,30 @@ fn parse_task(step: &str) -> Result<Task, String> {
         ["join", map, cell, pad] => Task::Join { map: map.to_string(), cell: Some((cell.to_string(), pad.to_string())) },
         ["jump", cell] => Task::Jump { cell: cell.to_string(), pad: "Left".into() },
         ["jump", cell, pad] => Task::Jump { cell: cell.to_string(), pad: pad.to_string() },
-        ["kill", rest @ ..] if !rest.is_empty() => match rest.split_last().map(|(last, name)| (last.parse::<u32>(), name)) {
-            Some((Ok(0), _)) => return Err("kill needs a count of at least 1".into()),
-            Some((Ok(count), name)) if !name.is_empty() => Task::Kill { name: text(name), count },
-            _ => Task::Kill { name: text(rest), count: 1 },
-        },
+        ["kill", rest @ ..] if !rest.is_empty() => {
+            let (name, count) = name_and_count(rest)?;
+            Task::Kill { name, count }
+        }
         ["pickup", item @ ..] if !item.is_empty() => Task::Pickup(text(item)),
+        ["withdraw", item @ ..] if !item.is_empty() => Task::Withdraw(text(item)),
+        ["deposit", item @ ..] if !item.is_empty() => Task::Deposit(text(item)),
+        ["equip", item @ ..] if !item.is_empty() => Task::Equip(text(item)),
+        ["buy", shop, rest @ ..] if !rest.is_empty() => {
+            let shop = shop.parse().map_err(|_| format!("{shop} is not a shop id"))?;
+            let (item, qty) = name_and_count(rest)?;
+            Task::Buy { shop, item, qty }
+        }
+        ["sell", rest @ ..] if !rest.is_empty() => {
+            let (item, qty) = name_and_count(rest)?;
+            Task::Sell { item, qty }
+        }
         ["rest"] => Task::Rest,
         ["accept", quest] => Task::Accept(quest.parse().map_err(|_| format!("{quest} is not a quest id"))?),
         ["complete", quest, reward @ ..] if reward.len() <= 1 => Task::Complete {
             quest: quest.parse().map_err(|_| format!("{quest} is not a quest id"))?,
             reward: reward.first().map(|r| r.parse().map_err(|_| format!("{r} is not an item id"))).transpose()?,
         },
-        _ => return Err("expected join MAP [CELL PAD], jump CELL [PAD], kill NAME [COUNT], farm ITEM COUNT [from NAME], accept QUEST, complete QUEST [REWARD], pickup ITEM or rest".into()),
+        _ => return Err("expected join MAP [CELL PAD], jump CELL [PAD], kill NAME [COUNT], farm ITEM COUNT [from NAME], accept QUEST, complete QUEST [REWARD], withdraw ITEM, deposit ITEM, buy SHOP ITEM [QTY], sell ITEM [QTY], equip ITEM, pickup ITEM or rest".into()),
     })
 }
 
@@ -209,7 +238,7 @@ fn run_bot(setup: Setup, mut control: Control, mut recorder: Option<Recorder>, w
         let account = login(&setup.api, &setup.user, &setup.password).map_err(|e| e.to_string())?;
         let server = pick_server(&account.servers, setup.server.as_deref(), account.member)?;
         say("aqx", format_args!("connecting to {}, client version {version}", server.name));
-        let login = Login { user: &setup.user, token: &account.token, version: &version };
+        let login = Login { api: &setup.api, user: &setup.user, token: &account.token, version: &version };
         let mut session =
             Session::connect(control, server, login, recorder, output::event).map_err(|e| format!("can't reach {}: {e}", server.name))?;
         watch_session(&mut session, &watch, &server.name);
@@ -271,6 +300,11 @@ fn run_task(session: &mut Session, task: &Task) -> Result<(), ActError> {
         }
         Task::Accept(quest) => session.accept(QuestId(*quest)),
         Task::Complete { quest, reward } => session.complete(QuestId(*quest), reward.map(ItemId), 1),
+        Task::Withdraw(item) => session.withdraw(&ItemRef::Name(item.clone())),
+        Task::Deposit(item) => session.deposit(&ItemRef::Name(item.clone())),
+        Task::Buy { shop, item, qty } => session.buy(ShopId(*shop), &ItemRef::Name(item.clone()), *qty),
+        Task::Sell { item, qty } => session.sell(&ItemRef::Name(item.clone()), *qty),
+        Task::Equip(item) => session.equip(&ItemRef::Name(item.clone())),
         Task::Pickup(item) => session.pickup(item),
         Task::Rest => session.rest(),
     }
@@ -336,5 +370,13 @@ mod tests {
         assert!(matches!(parse_task("farm Treeant Branch 3 from Treeant"), Ok(Task::Farm { item, count: 3, from: Some(m) }) if item == "Treeant Branch" && m == "Treeant"));
         assert!(matches!(parse_task("farm Bone Dust 10"), Ok(Task::Farm { item, count: 10, from: None }) if item == "Bone Dust"));
         assert!(parse_task("farm Bone Dust").is_err());
+    }
+
+    #[test]
+    fn shop_steps_name_a_shop_an_item_and_maybe_a_quantity() {
+        assert!(matches!(parse_task("buy 1348 Health Potion 5"), Ok(Task::Buy { shop: 1348, item, qty: 5 }) if item == "Health Potion"));
+        assert!(matches!(parse_task("sell Sword"), Ok(Task::Sell { item, qty: 1 }) if item == "Sword"));
+        assert!(parse_task("buy shop Sword").is_err());
+        assert!(parse_task("sell Sword 0").is_err());
     }
 }

@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aqx_protocol::de::{flag, int, text};
-use aqx_protocol::{AreaId, CharItemId, EntityId, FactionId, ItemId, Json, Message, MonId, MonMapId, QuestId, Xml, Xt};
+use aqx_protocol::{AreaId, CharItemId, EntityId, FactionId, ItemId, Json, Message, MonId, MonMapId, QuestId, ShopId, ShopItemId, Xml, Xt};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -26,7 +27,28 @@ pub struct World {
     pub drops: Vec<Item>,
     pub quests: HashMap<QuestId, Quest>,
     pub active: Vec<QuestId>,
+    pub bank: Arc<Vec<Item>>,
+    pub bank_loaded: bool,
+    pub bank_count: u32,
+    pub shops: HashMap<ShopId, Arc<Shop>>,
+    pub(crate) last_shop: Option<ShopId>,
+    pub(crate) buying: Option<ShopId>,
     pub rev: u64,
+}
+
+#[derive(Clone)]
+pub struct Shop {
+    pub id: ShopId,
+    pub name: String,
+    pub items: Vec<ShopItem>,
+}
+
+#[derive(Clone)]
+pub struct ShopItem {
+    pub id: ShopItemId,
+    pub item: Item,
+    pub cost: u32,
+    pub reputation: Option<(FactionId, u32)>,
 }
 
 #[derive(Clone)]
@@ -44,6 +66,10 @@ pub struct Me {
     pub skills: Vec<Skill>,
     pub stats: BTreeMap<String, f64>,
     pub member: bool,
+    pub coins: i64,
+    pub bag_slots: u32,
+    pub bank_slots: u32,
+    pub item_skill: Option<u32>,
     pub quest_slots: Vec<String>,
     pub achievements: HashMap<String, i64>,
 }
@@ -133,6 +159,8 @@ pub struct Item {
     pub equipped: bool,
     pub ac: bool,
     pub member: bool,
+    pub link: String,
+    pub meta: String,
 }
 
 #[derive(Clone)]
@@ -284,6 +312,10 @@ struct ItemData {
     temp: bool,
     #[serde(rename = "bBank", default, deserialize_with = "flag")]
     bank: bool,
+    #[serde(rename = "sLink", default, deserialize_with = "text")]
+    link: String,
+    #[serde(rename = "sMeta", default, deserialize_with = "text")]
+    meta: String,
 }
 
 impl ItemData {
@@ -304,6 +336,8 @@ impl ItemData {
             equipped: self.equipped,
             ac: self.ac,
             member: self.member,
+            link: self.link,
+            meta: self.meta,
         }
     }
 }
@@ -354,6 +388,25 @@ struct Anim {
 
 fn qty(n: i64) -> u32 {
     n.clamp(0, u32::MAX as i64) as u32
+}
+
+fn add_item(list: &mut Vec<Item>, item: Item) -> u32 {
+    match list.iter_mut().find(|i| i.id == item.id) {
+        Some(existing) => {
+            existing.qty += item.qty;
+            existing.char_item = item.char_item.or(existing.char_item);
+            existing.qty
+        }
+        None => {
+            let total = item.qty;
+            list.push(item);
+            total
+        }
+    }
+}
+
+pub(crate) fn items_from(values: Vec<Value>, what: &str, events: &mut Vec<Event>) -> Vec<Item> {
+    each::<ItemData>(values, what, events).into_iter().filter_map(|d| d.id.map(|id| d.into_item(id))).collect()
 }
 
 fn each<T: DeserializeOwned>(values: Vec<Value>, what: &str, events: &mut Vec<Event>) -> Vec<T> {
@@ -534,6 +587,8 @@ impl World {
                     items: Vec<Value>,
                     #[serde(default)]
                     factions: Vec<Value>,
+                    #[serde(rename = "bankCount", default, deserialize_with = "int")]
+                    bank_count: i64,
                 }
                 #[derive(Deserialize)]
                 struct FactionData {
@@ -545,10 +600,10 @@ impl World {
                     rep: i64,
                 }
                 let inventory: Inventory = json.decode()?;
-                self.inventory = each::<ItemData>(inventory.items, "inventory item", events)
-                    .into_iter()
-                    .filter_map(|d| d.id.map(|id| d.into_item(id)))
-                    .collect();
+                self.inventory = items_from(inventory.items, "inventory item", events);
+                if !self.bank_loaded {
+                    self.bank_count = qty(inventory.bank_count);
+                }
                 self.factions = each::<FactionData>(inventory.factions, "faction", events)
                     .into_iter()
                     .map(|f| Faction { id: f.id, name: f.name, rep: qty(f.rep) })
@@ -563,8 +618,11 @@ impl World {
                 for (key, data) in json.decode::<Added>()?.items {
                     let Some((id, data)) = data.keyed(&key) else { continue };
                     if data.bank {
-                        let qty = qty(data.qty_now.unwrap_or(data.qty));
-                        events.push(Event::ItemChanged { item: data.name, qty, place: Place::Bank });
+                        let now = data.qty_now.map(qty);
+                        let item = data.into_item(id);
+                        let name = item.name.clone();
+                        let total = self.add_to_bank(item, now);
+                        events.push(Event::ItemChanged { item: name, qty: total, place: Place::Bank });
                         continue;
                     }
                     let temp = data.temp || data.char_item.is_none();
@@ -618,9 +676,12 @@ impl World {
                 let mut item = self.drops.remove(at);
                 item.qty = qty(picked.qty_now);
                 item.char_item = picked.char_item.or(item.char_item);
-                let place = if picked.bank { Place::Bank } else { Place::Inventory };
-                events.push(Event::ItemChanged { item: item.name.clone(), qty: item.qty, place });
-                if !picked.bank {
+                let name = item.name.clone();
+                if picked.bank {
+                    let total = self.add_to_bank(item, Some(qty(picked.qty_now)));
+                    events.push(Event::ItemChanged { item: name, qty: total, place: Place::Bank });
+                } else {
+                    events.push(Event::ItemChanged { item: name, qty: item.qty, place: Place::Inventory });
                     match self.inventory.iter_mut().find(|i| i.id == item.id) {
                         Some(existing) => existing.qty = item.qty,
                         None => self.inventory.push(item),
@@ -633,6 +694,7 @@ impl World {
                     #[serde(rename = "sItems")]
                     items: String,
                 }
+                let mut used_up = Vec::new();
                 for (id, n) in json.decode::<TurnIn>()?.items.split(',').filter_map(|pair| pair.split_once(':')) {
                     let (Ok(id), Ok(n)) = (id.parse().map(ItemId), n.parse::<u32>()) else { continue };
                     for (list, place) in [(&mut self.inventory, Place::Inventory), (&mut self.temp, Place::Temp)] {
@@ -640,11 +702,14 @@ impl World {
                             list[at].qty = list[at].qty.saturating_sub(n);
                             events.push(Event::ItemChanged { item: list[at].name.clone(), qty: list[at].qty, place });
                             if list[at].qty == 0 {
-                                list.remove(at);
+                                used_up.push(list.remove(at));
                             }
                             break;
                         }
                     }
+                }
+                for item in &used_up {
+                    self.forget_consumable(item);
                 }
             }
             "addGoldExp" => {
@@ -741,6 +806,151 @@ impl World {
                     }
                 }
             }
+            "loadShop" => {
+                #[derive(Deserialize)]
+                struct Loaded {
+                    shopinfo: ShopInfo,
+                }
+                #[derive(Deserialize)]
+                struct ShopInfo {
+                    #[serde(rename = "ShopID")]
+                    id: ShopId,
+                    #[serde(rename = "sName", default, deserialize_with = "text")]
+                    name: String,
+                    #[serde(default)]
+                    items: Vec<Value>,
+                }
+                #[derive(Deserialize)]
+                struct ShopItemData {
+                    #[serde(rename = "ShopItemID")]
+                    id: ShopItemId,
+                    #[serde(rename = "iCost", default, deserialize_with = "int")]
+                    cost: i64,
+                    #[serde(rename = "FactionID", default, deserialize_with = "int")]
+                    faction: i64,
+                    #[serde(rename = "iReqRep", default, deserialize_with = "int")]
+                    rep: i64,
+                    #[serde(flatten)]
+                    item: ItemData,
+                }
+                let info = json.decode::<Loaded>()?.shopinfo;
+                let items = each::<ShopItemData>(info.items, "shop item", events)
+                    .into_iter()
+                    .filter_map(|s| {
+                        let id = s.item.id?;
+                        Some(ShopItem {
+                            id: s.id,
+                            item: s.item.into_item(id),
+                            cost: qty(s.cost),
+                            reputation: (s.faction > 1 && s.rep > 0).then_some((FactionId(s.faction as u32), qty(s.rep))),
+                        })
+                    })
+                    .collect();
+                self.last_shop = Some(info.id);
+                self.shops.insert(info.id, Arc::new(Shop { id: info.id, name: info.name, items }));
+            }
+            "buyItem" => {
+                #[derive(Deserialize)]
+                struct Bought {
+                    #[serde(rename = "bitSuccess", default, deserialize_with = "flag")]
+                    ok: bool,
+                    #[serde(rename = "ItemID")]
+                    id: Option<ItemId>,
+                    #[serde(rename = "CharItemID")]
+                    char_item: Option<CharItemId>,
+                    #[serde(rename = "iQty", default, deserialize_with = "int")]
+                    qty: i64,
+                    #[serde(rename = "bBank", default, deserialize_with = "flag")]
+                    bank: bool,
+                    #[serde(rename = "strMessage", default, deserialize_with = "text")]
+                    message: String,
+                }
+                let bought: Bought = json.decode()?;
+                let from = self.buying.take().or(self.last_shop);
+                let listed = bought.id.and_then(|id| {
+                    let shops = from.and_then(|s| self.shops.get(&s)).into_iter().chain(self.shops.values());
+                    shops.flat_map(|s| &s.items).find(|s| s.item.id == id).cloned()
+                });
+                match (bought.ok, listed) {
+                    (true, Some(listed)) => {
+                        let n = qty(bought.qty);
+                        if let Some(me) = &mut self.me {
+                            let price = i64::from(listed.cost) * i64::from(n);
+                            if listed.item.ac { me.coins -= price } else { me.gold -= price }
+                        }
+                        let mut item = listed.item;
+                        item.qty = n;
+                        item.char_item = bought.char_item;
+                        let name = item.name.clone();
+                        let (total, place) =
+                            if bought.bank { (self.add_to_bank(item, None), Place::Bank) } else { (add_item(&mut self.inventory, item), Place::Inventory) };
+                        events.push(Event::ItemChanged { item: name, qty: total, place });
+                    }
+                    (true, None) => {}
+                    (false, _) => {
+                        let reason = if bought.message.is_empty() { "the server refused it".into() } else { bought.message };
+                        events.push(Event::Refused { action: "buying".into(), reason });
+                    }
+                }
+            }
+            "bankToInv" | "bankFromInv" => {
+                #[derive(Deserialize)]
+                struct Moved {
+                    #[serde(rename = "ItemID")]
+                    id: ItemId,
+                    #[serde(rename = "bSuccess", default = "yes", deserialize_with = "flag")]
+                    ok: bool,
+                    #[serde(default, deserialize_with = "text")]
+                    msg: String,
+                }
+                fn yes() -> bool {
+                    true
+                }
+                let moved: Moved = json.decode()?;
+                let withdrawing = json.cmd == "bankToInv";
+                if !moved.ok {
+                    let reason = if moved.msg.is_empty() { "the server refused it".into() } else { moved.msg };
+                    events.push(Event::Refused { action: if withdrawing { "withdrawing" } else { "depositing" }.into(), reason });
+                } else if withdrawing {
+                    let bank = Arc::make_mut(&mut self.bank);
+                    if let Some(at) = bank.iter().position(|i| i.id == moved.id) {
+                        let item = bank.remove(at);
+                        if !item.ac {
+                            self.bank_count = self.bank_count.saturating_sub(1);
+                        }
+                        let name = item.name.clone();
+                        let total = add_item(&mut self.inventory, item);
+                        events.push(Event::ItemChanged { item: name, qty: total, place: Place::Inventory });
+                    }
+                } else if let Some(at) = self.inventory.iter().position(|i| i.id == moved.id) {
+                    let item = self.inventory.remove(at);
+                    let name = item.name.clone();
+                    let total = self.add_to_bank(item, None);
+                    events.push(Event::ItemChanged { item: name, qty: total, place: Place::Bank });
+                }
+            }
+            "seia" => {
+                #[derive(Deserialize)]
+                struct Equipped {
+                    o: Skill5,
+                    #[serde(rename = "iRes", default = "yes", deserialize_with = "flag")]
+                    ok: bool,
+                }
+                fn yes() -> bool {
+                    true
+                }
+                #[derive(Deserialize)]
+                struct Skill5 {
+                    #[serde(deserialize_with = "int")]
+                    id: i64,
+                }
+                let equipped: Equipped = json.decode()?;
+                if !equipped.ok {
+                    events.push(Event::Refused { action: "equipping".into(), reason: "the server refused it".into() });
+                } else if let Some(me) = &mut self.me {
+                    me.item_skill = Some(qty(equipped.o.id));
+                }
+            }
             "sellItem" => {
                 #[derive(Deserialize)]
                 struct Sold {
@@ -754,15 +964,20 @@ impl World {
                     ac: bool,
                 }
                 let sold: Sold = json.decode()?;
-                if let Some(me) = self.me.as_mut().filter(|me| !sold.ac && me.gold < GOLD_CAP) {
-                    me.gold += sold.amount;
+                if let Some(me) = &mut self.me {
+                    if sold.ac {
+                        me.coins += sold.amount;
+                    } else if me.gold < GOLD_CAP {
+                        me.gold += sold.amount;
+                    }
                 }
                 if let Some(at) = self.inventory.iter().position(|i| i.char_item == Some(sold.char_item)) {
                     let item = &mut self.inventory[at];
                     item.qty = item.qty.saturating_sub(qty(sold.qty));
                     events.push(Event::ItemChanged { item: item.name.clone(), qty: item.qty, place: Place::Inventory });
                     if item.qty == 0 {
-                        self.inventory.remove(at);
+                        let gone = self.inventory.remove(at);
+                        self.forget_consumable(&gone);
                     }
                 }
             }
@@ -771,10 +986,13 @@ impl World {
                 struct Balance {
                     #[serde(rename = "intGold", deserialize_with = "int")]
                     gold: i64,
+                    #[serde(rename = "intCoins")]
+                    coins: Option<i64>,
                 }
                 let balance: Balance = json.decode()?;
                 if let Some(me) = &mut self.me {
                     me.gold = balance.gold;
+                    me.coins = balance.coins.unwrap_or(me.coins);
                 }
             }
             "sAct" => {
@@ -929,6 +1147,12 @@ impl World {
             }
             for (key, value) in data.rest {
                 let as_int = || value.as_i64().or_else(|| value.as_str()?.parse().ok());
+                match (key.as_str(), as_int()) {
+                    ("intCoins", Some(n)) => me.coins = n,
+                    ("iBagSlots", Some(n)) => me.bag_slots = qty(n),
+                    ("iBankSlots", Some(n)) => me.bank_slots = qty(n),
+                    _ => {}
+                }
                 if let Some(n) = key.strip_prefix("strQuests") {
                     let index = if n.is_empty() { Some(0) } else { n.parse::<usize>().ok().map(|n| n - 1) };
                     if let (Some(index), Some(slots)) = (index, value.as_str()) {
@@ -960,6 +1184,42 @@ impl World {
             }
         } else if let Some(player) = self.area.as_mut().and_then(|a| a.players.iter_mut().find(|p| p.name.eq_ignore_ascii_case(name))) {
             player.apply(patch);
+        }
+    }
+
+    pub fn set_bank(&mut self, items: Vec<Item>) {
+        self.bank_count = items.iter().filter(|i| !i.ac).count() as u32;
+        self.bank = Arc::new(items);
+        self.bank_loaded = true;
+    }
+
+    pub fn bank_full(&self) -> bool {
+        self.me.as_ref().is_some_and(|m| m.bank_slots > 0 && self.bank_count >= m.bank_slots)
+    }
+
+    fn add_to_bank(&mut self, mut item: Item, qty_now: Option<u32>) -> u32 {
+        let bank = Arc::make_mut(&mut self.bank);
+        if let Some(existing) = bank.iter_mut().find(|i| i.id == item.id) {
+            existing.qty = qty_now.unwrap_or(existing.qty + item.qty);
+            existing.char_item = item.char_item.or(existing.char_item);
+            return existing.qty;
+        }
+        if let Some(n) = qty_now {
+            item.qty = n;
+        }
+        let (total, counts) = (item.qty, !item.ac);
+        bank.push(item);
+        if counts {
+            self.bank_count += 1;
+        }
+        total
+    }
+
+    fn forget_consumable(&mut self, gone: &Item) {
+        if let Some(me) = &mut self.me
+            && gone.meta.parse::<u32>().is_ok_and(|skill| me.item_skill == Some(skill))
+        {
+            me.item_skill = None;
         }
     }
 
@@ -1041,6 +1301,10 @@ impl Me {
             skills: Vec::new(),
             stats: BTreeMap::new(),
             member: false,
+            coins: 0,
+            bag_slots: 0,
+            bank_slots: 0,
+            item_skill: None,
             quest_slots: Vec::new(),
             achievements: HashMap::new(),
         }
@@ -1410,5 +1674,130 @@ mod tests {
             feed(&mut world, "%xt%loginResponse%-1%0%-1%%Your game client is an older version.%"),
             [Event::LoginRejected { reason: "Your game client is an older version.".into() }]
         );
+    }
+
+    #[test]
+    fn buying_from_a_loaded_shop_adds_the_item_and_spends_gold_or_ac() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"initUserData","uid":1001,"data":{"intLevel":24,"intGold":1000,"intCoins":50,"iBagSlots":30,"iBankSlots":40}}"#));
+        feed(
+            &mut world,
+            &json(
+                r#"{"cmd":"loadShop","shopinfo":{"ShopID":1348,"sName":"Featured Gear Shop","items":[
+                {"ItemID":102658,"ShopItemID":68071,"sName":"Sword","iCost":300,"bCoins":false,"bUpg":false,"iStk":1,"iQty":1,"sType":"Sword","sES":"Weapon"},
+                {"ItemID":5,"ShopItemID":6,"sName":"Hat","iCost":20,"bCoins":true,"bUpg":false,"iStk":1,"iQty":1,"sType":"Helm","sES":"he"}]}}"#,
+            ),
+        );
+        assert_eq!(world.shops[&ShopId(1348)].items.len(), 2);
+        assert_eq!(
+            feed(&mut world, &json(r#"{"cmd":"buyItem","bitSuccess":1,"ItemID":102658,"CharItemID":77,"iQty":1,"bBank":0}"#)),
+            [Event::ItemChanged { item: "Sword".into(), qty: 1, place: Place::Inventory }]
+        );
+        feed(&mut world, &json(r#"{"cmd":"buyItem","bitSuccess":1,"ItemID":5,"CharItemID":78,"iQty":1,"bBank":0}"#));
+        let me = world.me.as_ref().unwrap();
+        assert_eq!((me.gold, me.coins, me.bag_slots, me.bank_slots), (700, 30, 30, 40));
+        assert_eq!(world.inventory.iter().find(|i| i.name == "Sword").and_then(|i| i.char_item), Some(CharItemId(77)));
+        assert_eq!(
+            feed(&mut world, &json(r#"{"cmd":"buyItem","bitSuccess":0,"strMessage":"Not enough gold"}"#)),
+            [Event::Refused { action: "buying".into(), reason: "Not enough gold".into() }]
+        );
+    }
+
+    #[test]
+    fn bank_moves_follow_the_replies() {
+        let mut world = joined();
+        let mut ignored = Vec::new();
+        let stack = serde_json::json!({"ItemID":1528,"CharItemID":77,"sName":"Defeated Makai","iQty":49,"iStk":50,"bBank":true});
+        world.set_bank(items_from(vec![stack], "bank item", &mut ignored));
+        assert_eq!(
+            feed(&mut world, &json(r#"{"cmd":"bankToInv","ItemID":"1528"}"#)),
+            [Event::ItemChanged { item: "Defeated Makai".into(), qty: 49, place: Place::Inventory }]
+        );
+        assert!(world.bank.is_empty() && world.inventory[0].qty == 49);
+        feed(&mut world, &json(r#"{"cmd":"bankFromInv","ItemID":1528,"bSuccess":1}"#));
+        assert!(world.inventory.is_empty() && world.bank[0].qty == 49);
+        feed(&mut world, &json(r#"{"cmd":"bankToInv","ItemID":"1528"}"#));
+        assert_eq!(
+            feed(&mut world, &json(r#"{"cmd":"bankFromInv","ItemID":1528,"bSuccess":0,"msg":"Your bank is full"}"#)),
+            [Event::Refused { action: "depositing".into(), reason: "Your bank is full".into() }]
+        );
+        assert_eq!(world.inventory.len(), 1);
+    }
+
+    #[test]
+    fn equipping_a_consumable_sets_the_item_skill() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"seia","o":{"id":457,"cd":60000,"tgt":"f"},"iRes":1}"#));
+        assert_eq!(world.me.as_ref().unwrap().item_skill, Some(457));
+    }
+
+    fn item(id: u32, name: &str, ac: bool) -> Value {
+        serde_json::json!({"ItemID": id, "CharItemID": id + 1000, "sName": name, "iQty": 1, "iStk": 1, "bCoins": ac})
+    }
+
+    #[test]
+    fn only_non_ac_items_fill_the_bank() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"initUserData","uid":1001,"data":{"iBankSlots":1}}"#));
+        let mut ignored = Vec::new();
+        world.set_bank(items_from(vec![item(1, "Crown", true), item(2, "Cape", true)], "bank item", &mut ignored));
+        assert!(!world.bank_full());
+        world.set_bank(items_from(vec![item(1, "Crown", true), item(3, "Sword", false)], "bank item", &mut ignored));
+        assert!(world.bank_full());
+    }
+
+    #[test]
+    fn a_pickup_into_the_bank_updates_the_bank_stack() {
+        let mut world = joined();
+        let mut ignored = Vec::new();
+        let stack = serde_json::json!({"ItemID":1528,"CharItemID":77,"sName":"Defeated Makai","iQty":49,"iStk":50});
+        world.set_bank(items_from(vec![stack], "bank item", &mut ignored));
+        feed(&mut world, &json(r#"{"cmd":"dropItem","items":{"1528":{"ItemID":1528,"sName":"Defeated Makai","iQty":1}}}"#));
+        feed(&mut world, &json(r#"{"cmd":"getDrop","bSuccess":1,"ItemID":1528,"CharItemID":77,"iQty":1,"iQtyNow":50,"bBank":1}"#));
+        assert_eq!(world.bank[0].qty, 50);
+        feed(&mut world, &json(r#"{"cmd":"addItems","items":{"1528":{"iQty":1,"iQtyNow":50,"CharItemID":77,"bBank":1}}}"#));
+        assert_eq!((world.bank.len(), world.bank[0].qty), (1, 50));
+    }
+
+    #[test]
+    fn a_purchase_is_priced_from_the_shop_it_was_bought_from() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"initUserData","uid":1001,"data":{"intGold":1000,"intCoins":50}}"#));
+        let shop = |id: u32, cost: u32, ac: bool| {
+            json(&format!(r#"{{"cmd":"loadShop","shopinfo":{{"ShopID":{id},"sName":"Shop","items":[{{"ItemID":7,"ShopItemID":{id},"sName":"Sword","iCost":{cost},"bCoins":{ac},"iStk":1,"iQty":1}}]}}}}"#))
+        };
+        feed(&mut world, &shop(1, 300, false));
+        feed(&mut world, &shop(2, 20, true));
+        world.buying = Some(ShopId(1));
+        feed(&mut world, &json(r#"{"cmd":"buyItem","bitSuccess":1,"ItemID":7,"CharItemID":70,"iQty":1,"bBank":0}"#));
+        let me = world.me.as_ref().unwrap();
+        assert_eq!((me.gold, me.coins), (700, 50));
+    }
+
+    #[test]
+    fn ac_sales_add_ac() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"initUserData","uid":1001,"data":{"intGold":1000,"intCoins":50}}"#));
+        feed(&mut world, &json(r#"{"cmd":"loadInventoryBig","items":[{"ItemID":5,"CharItemID":78,"sName":"Crown","iQty":1,"bCoins":true}],"factions":[]}"#));
+        feed(&mut world, &json(r#"{"cmd":"sellItem","CharItemID":78,"iQty":1,"iQtyNow":0,"intAmount":400,"bCoins":true}"#));
+        let me = world.me.as_ref().unwrap();
+        assert_eq!((me.gold, me.coins), (1000, 450));
+    }
+
+    #[test]
+    fn slot_five_empties_when_its_potions_run_out_and_a_refused_equip_does_not_fill_it() {
+        let mut world = joined();
+        feed(
+            &mut world,
+            &json(r#"{"cmd":"loadInventoryBig","items":[{"ItemID":11857,"CharItemID":80,"sName":"Health Potion","iQty":1,"sType":"Item","sLink":"potion","sMeta":"457"}],"factions":[]}"#),
+        );
+        feed(&mut world, &json(r#"{"cmd":"seia","o":{"id":457},"iRes":1}"#));
+        feed(&mut world, &json(r#"{"cmd":"turnIn","sItems":"11857:1"}"#));
+        assert_eq!(world.me.as_ref().unwrap().item_skill, None);
+        assert_eq!(
+            feed(&mut world, &json(r#"{"cmd":"seia","o":{"id":457},"iRes":0}"#)),
+            [Event::Refused { action: "equipping".into(), reason: "the server refused it".into() }]
+        );
+        assert_eq!(world.me.as_ref().unwrap().item_skill, None);
     }
 }

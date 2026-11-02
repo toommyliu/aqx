@@ -35,21 +35,20 @@ impl Server {
 }
 
 #[derive(Debug)]
-pub enum LoginError {
+pub enum ApiError {
     Http(String),
     Rejected(String),
 }
 
-impl std::fmt::Display for LoginError {
+impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LoginError::Http(e) => write!(f, "login request failed: {e}"),
-            LoginError::Rejected(msg) => write!(f, "login rejected: {msg}"),
+            ApiError::Http(e) | ApiError::Rejected(e) => f.write_str(e),
         }
     }
 }
 
-pub fn login(api: &str, user: &str, pass: &str) -> Result<Account, LoginError> {
+pub fn login(api: &str, user: &str, pass: &str) -> Result<Account, ApiError> {
     let url = format!("{}/game/api/login/now?ran={}", api.trim_end_matches('/'), cache_buster());
     let body = ureq::post(&url)
         .header("x-requested-with", "ShockwaveFlash/32.0.0.371")
@@ -59,7 +58,7 @@ pub fn login(api: &str, user: &str, pass: &str) -> Result<Account, LoginError> {
         .build()
         .send_form([("user", user), ("pass", pass), ("option", "1")])
         .and_then(|mut r| r.body_mut().read_to_string())
-        .map_err(|e| LoginError::Http(e.to_string()))?;
+        .map_err(|e| ApiError::Http(format!("login request failed: {e}")))?;
     parse_login(&body)
 }
 
@@ -68,7 +67,22 @@ fn cache_buster() -> String {
     format!("0.{nanos:09}")
 }
 
-fn parse_login(body: &str) -> Result<Account, LoginError> {
+pub fn load_bank(api: &str, char_id: u32, token: &str) -> Result<String, ApiError> {
+    let url = format!("{}/game/api/char/bank?v={}", api.trim_end_matches('/'), cache_buster());
+    ureq::post(&url)
+        .header("ccid", char_id.to_string())
+        .header("token", token)
+        .header("artixmode", "launcher")
+        .header("x-requested-with", "ShockwaveFlash/32.0.0.371")
+        .config()
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .send_form([("layout", r#"{"cat":"all"}"#)])
+        .and_then(|mut r| r.body_mut().with_config().limit(64 << 20).read_to_string())
+        .map_err(|e| ApiError::Http(format!("bank request failed: {e}")))
+}
+
+fn parse_login(body: &str) -> Result<Account, ApiError> {
     #[derive(Deserialize)]
     struct Reply {
         login: Option<Login>,
@@ -88,12 +102,13 @@ fn parse_login(body: &str) -> Result<Account, LoginError> {
         #[serde(rename = "sMsg")]
         msg: Option<String>,
     }
-    let reply: Reply = serde_json::from_str(body).map_err(|e| LoginError::Http(format!("unreadable reply: {e}")))?;
+    let reply: Reply = serde_json::from_str(body).map_err(|e| ApiError::Http(format!("unreadable login reply: {e}")))?;
     match reply.login {
         Some(Login { ok: true, token: Some(token), member, .. }) => Ok(Account { token, member, servers: reply.servers }),
-        login => Err(LoginError::Rejected(
-            login.and_then(|l| l.msg).or(reply.msg).unwrap_or_else(|| "no token in the reply".into()),
-        )),
+        login => Err(ApiError::Rejected(format!(
+            "login rejected: {}",
+            login.and_then(|l| l.msg).or(reply.msg).unwrap_or_else(|| "no token in the reply".into())
+        ))),
     }
 }
 
@@ -117,6 +132,6 @@ mod tests {
     #[test]
     fn reports_the_servers_message_on_failure() {
         let err = parse_login(r#"{"login":{"bSuccess":0,"sMsg":"Invalid password"}}"#).unwrap_err();
-        assert!(matches!(err, LoginError::Rejected(m) if m == "Invalid password"));
+        assert!(matches!(err, ApiError::Rejected(m) if m == "login rejected: Invalid password"));
     }
 }

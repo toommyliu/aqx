@@ -1,18 +1,20 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use aqx_protocol::{Aim, AreaId, ItemId, MonMapId, Out, QuestId};
+use aqx_protocol::{Aim, AreaId, ItemId, MonMapId, Out, QuestId, ShopId};
 
 use crate::pacer::Kind;
 use crate::quests::{QuestStatus, RewardKind};
 use crate::session::{Halt, Phase, Session};
 use crate::event::Event;
-use crate::world::{ItemRef, Monster, SkillTarget, State, World};
+use crate::world::{Item, ItemRef, Monster, SkillTarget, State, World, items_from};
 
 const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 const REST_TIMEOUT: Duration = Duration::from_secs(30);
 const PICKUP_TIMEOUT: Duration = Duration::from_secs(5);
 const QUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const BANK_TIMEOUT: Duration = Duration::from_secs(30);
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const JUMP_SETTLE: Duration = Duration::from_millis(500);
 const SERVER_MARGIN: Duration = Duration::from_millis(200);
 const HOLD_RECHECK: Duration = Duration::from_millis(200);
@@ -251,6 +253,191 @@ impl Session {
         Ok(())
     }
 
+    fn off_thread<T: Send + 'static>(&mut self, job: impl FnOnce() -> T + Send + 'static, timeout: Duration, what: &str) -> Result<T, ActError> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waker = self.waker();
+        std::thread::spawn(move || {
+            let _ = tx.send(job());
+            let _ = waker.wake();
+        });
+        match self.pump_until(Some(Instant::now() + timeout), |_| rx.try_recv().ok()) {
+            Err(Halt::Timeout) => Err(ActError::Timeout(what.into())),
+            other => Ok(other?),
+        }
+    }
+
+    fn send_expecting(&mut self, action: &str, out: Out, kind: Kind) -> Result<(), ActError> {
+        if self.refusal.as_ref().is_some_and(|(a, _)| a == action) {
+            self.refusal = None;
+        }
+        Ok(self.send_paced(out, kind)?)
+    }
+
+    fn refused_or(&mut self, action: &str, what: &str, mut done: impl FnMut(&Session) -> bool) -> Result<(), ActError> {
+        let refused = |s: &Session| s.refusal.as_ref().is_some_and(|(a, _)| a == action);
+        self.wait_for(Some(Instant::now() + REPLY_TIMEOUT), what, |s| refused(s) || done(s))?;
+        if refused(self) {
+            let (_, reason) = self.refusal.take().unwrap_or_default();
+            return Err(ActError::Rejected(reason));
+        }
+        Ok(())
+    }
+
+    pub fn load_bank(&mut self) -> Result<(), ActError> {
+        self.ready(None)?;
+        let char_id = self.world.me.as_ref().and_then(|m| m.char_id).ok_or_else(|| ActError::NotFound("the character id".into()))?;
+        let (api, token) = (self.api.clone(), self.token().to_string());
+        let body = self
+            .off_thread(move || crate::api::load_bank(&api, char_id, &token), BANK_TIMEOUT, "loading the bank")?
+            .map_err(|e| ActError::Rejected(e.to_string()))?;
+        let values: Vec<serde_json::Value> = serde_json::from_str(&body).map_err(|e| ActError::Rejected(format!("unreadable bank: {e}")))?;
+        let mut events = Vec::new();
+        self.world.set_bank(items_from(values, "bank item", &mut events));
+        self.world.rev += 1;
+        events.push(Event::BankLoaded { items: self.world.bank.len() });
+        for event in &events {
+            (self.sink)(event);
+        }
+        Ok(())
+    }
+
+    pub fn withdraw(&mut self, item: &ItemRef) -> Result<(), ActError> {
+        self.ready(None)?;
+        if self.world.inventory.iter().any(|i| item.matches(i)) {
+            return Ok(());
+        }
+        if !self.world.bank_loaded {
+            self.load_bank()?;
+        }
+        let Some(found) = self.world.bank.iter().find(|i| item.matches(i)).cloned() else {
+            return Err(ActError::NotFound(format!("{item} in the bank")));
+        };
+        if self.bag_full() {
+            return Err(ActError::Rejected("the inventory is full".into()));
+        }
+        let char_item = found.char_item.ok_or_else(|| ActError::NotFound(format!("a character item id for {item}")))?;
+        let room = self.room()?;
+        self.send_expecting("withdrawing", Out::Withdraw { room, item: found.id, char_item }, Kind::Free)?;
+        self.refused_or("withdrawing", &format!("withdrawing {item}"), |s| s.world.inventory.iter().any(|i| i.id == found.id))
+    }
+
+    pub fn deposit(&mut self, item: &ItemRef) -> Result<(), ActError> {
+        self.ready(None)?;
+        let Some(found) = self.world.inventory.iter().find(|i| item.matches(i)).cloned() else {
+            if !self.world.bank_loaded {
+                self.load_bank()?;
+            }
+            return if self.world.bank.iter().any(|i| item.matches(i)) { Ok(()) } else { Err(ActError::NotFound(format!("{item} in the inventory"))) };
+        };
+        if found.equipped {
+            return Err(ActError::Rejected(format!("{} is equipped", found.name)));
+        }
+        if !found.ac && self.world.bank_full() {
+            return Err(ActError::Rejected("the bank is full".into()));
+        }
+        let char_item = found.char_item.ok_or_else(|| ActError::NotFound(format!("a character item id for {item}")))?;
+        let room = self.room()?;
+        self.send_expecting("depositing", Out::Deposit { room, item: found.id, char_item }, Kind::Free)?;
+        self.refused_or("depositing", &format!("depositing {item}"), |s| s.world.bank.iter().any(|i| i.id == found.id))
+    }
+
+    fn bag_full(&self) -> bool {
+        self.world.me.as_ref().is_some_and(|m| m.bag_slots > 0 && self.world.inventory.len() as u32 >= m.bag_slots)
+    }
+
+    pub fn load_shop(&mut self, shop: ShopId) -> Result<(), ActError> {
+        self.ready(None)?;
+        if self.world.shops.contains_key(&shop) {
+            return Ok(());
+        }
+        let room = self.room()?;
+        self.send_paced(Out::LoadShop { room, shop }, Kind::Locked("loadShop"))?;
+        self.wait_for(Some(Instant::now() + REPLY_TIMEOUT), &format!("loading shop {shop}"), |s| s.world.shops.contains_key(&shop))
+    }
+
+    pub fn buy(&mut self, shop: ShopId, item: &ItemRef, qty: u32) -> Result<(), ActError> {
+        self.load_shop(shop)?;
+        let Some(listed) = self.world.shops.get(&shop).and_then(|s| s.items.iter().find(|i| item.matches(&i.item))).cloned() else {
+            return Err(ActError::NotFound(format!("{item} in shop {shop}")));
+        };
+        let qty = qty.max(1);
+        if listed.item.max_stack <= 1 {
+            if !self.world.bank_loaded {
+                self.load_bank()?;
+            }
+            if self.world.count(listed.item.id) + self.banked(listed.item.id) > 0 {
+                return Ok(());
+            }
+        }
+        let me = self.world.me.as_ref().ok_or_else(|| ActError::NotFound("a character".into()))?;
+        let price = i64::from(listed.cost) * i64::from(qty);
+        let funds = if listed.item.ac { me.coins } else { me.gold };
+        if listed.item.member && !me.member {
+            return Err(ActError::Rejected(format!("{} is for members", listed.item.name)));
+        }
+        if let Some((faction, rep)) = listed.reputation
+            && self.world.factions.iter().find(|f| f.id == faction).is_none_or(|f| f.rep < rep)
+        {
+            return Err(ActError::Rejected(format!("{} needs more reputation", listed.item.name)));
+        }
+        if funds < price {
+            let currency = if listed.item.ac { "AC" } else { "gold" };
+            return Err(ActError::Rejected(format!("{} costs {price} {currency}, you have {funds}", listed.item.name)));
+        }
+        let before = self.world.count(listed.item.id) + self.banked(listed.item.id);
+        let room = self.room()?;
+        self.world.buying = Some(shop);
+        let out = Out::Buy { room, item: listed.item.id, shop, shop_item: listed.id, qty };
+        self.send_expecting("buying", out, Kind::Locked("buyItem"))?;
+        let id = listed.item.id;
+        self.refused_or("buying", &format!("buying {}", listed.item.name), |s| s.world.count(id) + s.banked(id) > before)
+    }
+
+    fn banked(&self, id: ItemId) -> u32 {
+        self.world.bank.iter().filter(|i| i.id == id).map(|i| i.qty).sum()
+    }
+
+    pub fn sell(&mut self, item: &ItemRef, qty: u32) -> Result<(), ActError> {
+        self.ready(None)?;
+        let Some(found) = self.world.inventory.iter().find(|i| item.matches(i)).cloned() else {
+            return Err(ActError::NotFound(format!("{item} in the inventory")));
+        };
+        if found.equipped {
+            return Err(ActError::Rejected(format!("{} is equipped", found.name)));
+        }
+        let char_item = found.char_item.ok_or_else(|| ActError::NotFound(format!("a character item id for {item}")))?;
+        let qty = qty.max(1).min(found.qty.max(1));
+        let room = self.room()?;
+        self.send_expecting("selling", Out::Sell { room, item: found.id, qty, char_item }, Kind::Locked("sellItem"))?;
+        let left = found.qty.saturating_sub(qty);
+        self.refused_or("selling", &format!("selling {}", found.name), |s| s.world.count(found.id) <= left)
+    }
+
+    pub fn equip(&mut self, item: &ItemRef) -> Result<(), ActError> {
+        self.ready(None)?;
+        let Some(found) = self.world.inventory.iter().find(|i| item.matches(i)).cloned() else {
+            return Err(ActError::NotFound(format!("{item} in the inventory")));
+        };
+        let room = self.room()?;
+        if consumable(&found) {
+            let skill: u32 = found.meta.parse().map_err(|_| ActError::Rejected(format!("{} has no skill to equip", found.name)))?;
+            if self.world.me.as_ref().is_some_and(|m| m.item_skill == Some(skill)) {
+                return Ok(());
+            }
+            self.send_paced(Out::EquipConsumable { room, link: &found.link, meta: &found.meta, item: found.id }, Kind::Free)?;
+            return self.wait_for(Some(Instant::now() + REPLY_TIMEOUT), &format!("equipping {}", found.name), |s| {
+                s.world.me.as_ref().is_some_and(|m| m.item_skill == Some(skill))
+            });
+        }
+        if found.equipped {
+            return Ok(());
+        }
+        self.send_paced(Out::Equip { room, item: found.id }, Kind::Locked("equipItem"))?;
+        self.wait_for(Some(Instant::now() + REPLY_TIMEOUT), &format!("equipping {}", found.name), |s| {
+            s.world.inventory.iter().any(|i| i.id == found.id && i.equipped)
+        })
+    }
+
     pub fn kill(
         &mut self,
         target: &dyn Fn(&Monster) -> bool,
@@ -395,6 +582,10 @@ impl Session {
         }
         cells.into_iter().max_by_key(|(_, alive, total)| (*alive, *total)).map(|(c, _, _)| c.to_string())
     }
+}
+
+fn consumable(item: &Item) -> bool {
+    item.kind == "Item" && !item.link.is_empty() && !item.link.eq_ignore_ascii_case("none")
 }
 
 fn cap(at: Instant, deadline: Option<Instant>) -> Instant {

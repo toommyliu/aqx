@@ -62,6 +62,7 @@ pub enum Halt {
 }
 
 pub struct Login<'a> {
+    pub api: &'a str,
     pub user: &'a str,
     pub token: &'a str,
     pub version: &'a str,
@@ -85,6 +86,8 @@ pub struct Session {
     recorder: Option<Recorder>,
     pub(crate) sink: fn(&Event),
     login: (String, String, String),
+    pub(crate) api: String,
+    pub(crate) refusal: Option<(String, String)>,
     inventory_requested: bool,
     pacer: Pacer,
     counter: u32,
@@ -125,6 +128,8 @@ impl Session {
             recorder,
             sink,
             login: (login.user.into(), login.token.into(), login.version.into()),
+            api: login.api.into(),
+            refusal: None,
             inventory_requested: false,
             pacer: Pacer::new(Instant::now()),
             counter: 0,
@@ -197,6 +202,14 @@ impl Session {
 
     pub(crate) fn pacer_ready_at(&self, kind: Kind, now: Instant) -> Instant {
         self.pacer.ready_at(kind, now)
+    }
+
+    pub(crate) fn token(&self) -> &str {
+        &self.login.1
+    }
+
+    pub(crate) fn waker(&self) -> std::sync::Arc<mio::Waker> {
+        self.control.waker()
     }
 
     pub(crate) fn next_counter(&mut self) -> u32 {
@@ -339,6 +352,7 @@ impl Session {
             Event::Died => self.respawn_at = Some(Instant::now() + RESPAWN_DELAY),
             Event::QuestAccepted { id, .. } | Event::QuestCompleted { id, .. } => self.quest_outcome = Some((*id, Ok(()))),
             Event::QuestRejected { id, reason } => self.quest_outcome = Some((*id, Err(reason.clone()))),
+            Event::Refused { action, reason } => self.refusal = Some((action.clone(), reason.clone())),
             Event::Respawned => {
                 self.respawn_at = None;
                 if std::mem::take(&mut self.respawn_sent)

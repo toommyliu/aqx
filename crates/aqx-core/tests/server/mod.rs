@@ -100,7 +100,7 @@ impl Fake {
             }
         });
         let server = Server { name: "Fake".into(), host: "127.0.0.1".into(), port, online: true, members_only: false, players: 0, capacity: 0 };
-        let login = Login { user: "hero", token: "t", version: "5.31" };
+        let login = Login { api: "http://127.0.0.1:1", user: "hero", token: "t", version: "5.31" };
         let mut session = Session::connect(Control::new().unwrap(), &server, login, None, |_| {}).unwrap();
         session.pump_until(Some(Instant::now() + Duration::from_secs(5)), |s| (s.phase == Phase::Ready).then_some(())).unwrap();
         Fake { session, seen, thread }
