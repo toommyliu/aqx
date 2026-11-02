@@ -9,6 +9,7 @@ publish = false
 [workspace.dependencies]
 aqx-core = { path = "crates/aqx-core" }
 aqx-protocol = { path = "crates/aqx-protocol" }
+aqx-remote = { path = "crates/aqx-remote" }
 aqx-script = { path = "crates/aqx-script" }
 base64 = "0.23"
 clap = { version = "4", features = ["derive"] }

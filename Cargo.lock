@@ -141,6 +141,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqx-remote"
+version = "0.1.0"
+dependencies = [
+ "aqx-core",
+ "aqx-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aqx-script"
 version = "0.1.0"
 dependencies = [
