@@ -36,14 +36,41 @@ impl fmt::Display for ScriptError {
     }
 }
 
-pub fn run(session: &mut Session, path: &Path, args: &[(String, String)], room: Option<u32>) -> Result<Outcome, ScriptError> {
-    let path = std::path::absolute(path).map_err(|e| ScriptError::Load(format!("{}: {e}", path.display())))?;
+pub fn check(path: &Path) -> Result<(), String> {
+    let (name, code) = source(path)?;
+    let runtime = runtime(loader::Load { checking: true })?;
+    let context = Context::full(&runtime).map_err(|e| e.to_string())?;
+    context.with(|ctx| {
+        let result = Module::declare(ctx.clone(), name, loader::halted(&code))
+            .and_then(|module| module.eval())
+            .and_then(|(_, promise)| promise.finish::<()>())
+            .catch(&ctx);
+        match result {
+            Err(CaughtError::Value(v)) if v.as_string().and_then(|s| s.to_string().ok()).as_deref() == Some(loader::CHECKED) => Ok(()),
+            Err(e) => Err(describe(e)),
+            Ok(()) => Ok(()),
+        }
+    })
+}
+
+fn source(path: &Path) -> Result<(String, String), String> {
+    let path = std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let name = path.to_string_lossy().into_owned();
-    let source = std::fs::read_to_string(&path).map_err(|e| ScriptError::Load(format!("{name}: {e}")))?;
-    let code = loader::compile(&name, source).map_err(ScriptError::Load)?;
-    let runtime = Runtime::new().map_err(|e| ScriptError::Load(e.to_string()))?;
+    let source = std::fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))?;
+    let code = loader::compile(&name, source)?;
+    Ok((name, code))
+}
+
+fn runtime(load: loader::Load) -> Result<Runtime, String> {
+    let runtime = Runtime::new().map_err(|e| e.to_string())?;
     runtime.set_memory_limit(MEMORY_LIMIT);
-    runtime.set_loader(loader::Resolve, loader::Load);
+    runtime.set_loader(loader::Resolve, load);
+    Ok(runtime)
+}
+
+pub fn run(session: &mut Session, path: &Path, args: &[(String, String)], room: Option<u32>) -> Result<Outcome, ScriptError> {
+    let (name, code) = source(path).map_err(ScriptError::Load)?;
+    let runtime = runtime(loader::Load { checking: false }).map_err(ScriptError::Load)?;
     let stop = session.stop_handle();
     runtime.set_interrupt_handler(Some(Box::new(move || bridge::interrupted(&stop))));
     let context = Context::full(&runtime).map_err(|e| ScriptError::Load(e.to_string()))?;

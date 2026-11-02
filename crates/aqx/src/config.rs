@@ -224,7 +224,7 @@ pub fn parse_duration(text: &str) -> Option<Duration> {
     unit.checked_mul(u32::try_from(n).ok()?)
 }
 
-fn user_config() -> PathBuf {
+pub fn user_config() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())

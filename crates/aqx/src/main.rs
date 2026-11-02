@@ -4,7 +4,9 @@ mod config;
 #[path = "../../aqx-core/tests/server/mod.rs"]
 mod fake;
 mod hub;
+mod init;
 mod output;
+mod prompt;
 mod socket;
 mod tui;
 mod view;
@@ -84,6 +86,16 @@ enum Cmd {
     View(ViewArgs),
     #[command(about = "Print the JSON Schema of aqx.toml, for editor completion and checks")]
     Schema,
+    #[command(about = "Write aqx.d.ts, tsconfig.json, a sample script and, in a terminal, an aqx.toml for one account. Rerun after upgrading aqx to update aqx.d.ts")]
+    Init {
+        #[arg(default_value = ".", help = "Directory to write into")]
+        dir: PathBuf,
+    },
+    #[command(about = "Compile scripts and the files they import, without logging in or running them")]
+    Check {
+        #[arg(required = true)]
+        scripts: Vec<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -171,6 +183,8 @@ fn main() -> ExitCode {
             println!("{}", config::schema());
             Ok(())
         }
+        Some(Cmd::Init { dir }) => init::init(&dir, &config::user_config(), init::ask),
+        Some(Cmd::Check { scripts }) => check(&scripts),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -251,10 +265,7 @@ fn restart_wanted(info: &serde_json::Value) -> Result<bool, String> {
         socket::same_build(info)?;
         return Err("aqx is already running for this config from a different build; run aqx down and start it again".into());
     }
-    eprint!("aqx is already running for this config from a different build. Restart it with this one? Its bots log out and back in. [y/N] ");
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer).map_err(|e| e.to_string())?;
-    Ok(answer.trim().eq_ignore_ascii_case("y"))
+    prompt::confirm("aqx is already running for this config from a different build. Restart it with this one? Its bots log out and back in.")
 }
 
 fn restart_session(session: &Path, config: &Path, bots: &[String], command: &Command) -> Result<PathBuf, String> {
@@ -549,6 +560,24 @@ fn ctl(bot: &str, action: Ctl) -> Result<(), String> {
         println!("{bot}: {}", command.unchanged());
     }
     Ok(())
+}
+
+fn check(scripts: &[PathBuf]) -> Result<(), String> {
+    let mut failed = 0;
+    for script in scripts {
+        match aqx_script::check(script) {
+            Ok(()) => println!("{}: ok", script.display()),
+            Err(e) => {
+                failed += 1;
+                eprintln!("{}: {e}", script.display());
+            }
+        }
+    }
+    match failed {
+        0 => Ok(()),
+        1 => Err("1 script failed to compile".into()),
+        n => Err(format!("{n} scripts failed to compile")),
+    }
 }
 
 fn servers(config: Option<&Path>) -> Result<(), String> {

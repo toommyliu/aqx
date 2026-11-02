@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use rquickjs::loader::{ImportAttributes, Loader, Resolver};
 use rquickjs::module::Declared;
-use rquickjs::{Ctx, Error, Module, Result};
+use rquickjs::{Constructor, Ctx, Error, Module, Result, Value};
 use swc_common::errors::Handler;
 use swc_common::sync::Lrc;
 use swc_common::{GLOBALS, Globals, SourceMap};
@@ -30,19 +30,44 @@ impl Resolver for Resolve {
     }
 }
 
-pub struct Load;
+pub const CHECKED: &str = "aqx: checked";
+
+// QuickJS links a module's imports only when it evaluates the module, so a check
+// evaluates every module with a throw in front of its first statement.
+pub fn halted(code: &str) -> String {
+    format!("throw {CHECKED:?};{code}")
+}
+
+pub struct Load {
+    pub checking: bool,
+}
+
+impl Load {
+    fn declare<'js>(&self, ctx: &Ctx<'js>, name: &str, code: &str) -> Result<Module<'js, Declared>> {
+        if self.checking { Module::declare(ctx.clone(), name, halted(code)) } else { Module::declare(ctx.clone(), name, code) }
+    }
+}
 
 impl Loader for Load {
     fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str, _: Option<ImportAttributes<'js>>) -> Result<Module<'js, Declared>> {
         match name {
-            "aqx" => Module::declare(ctx.clone(), name, API),
+            "aqx" => self.declare(ctx, name, API),
             "aqx:native" => Module::declare_def::<Native, _>(ctx.clone(), name),
             _ => {
-                let source = std::fs::read_to_string(name).map_err(|e| Error::new_loading_message(name, e.to_string()))?;
-                let code = compile(name, source).map_err(|e| Error::new_loading_message(name, e))?;
-                Module::declare(ctx.clone(), name, code)
+                let source = std::fs::read_to_string(name).map_err(|e| load_error(ctx, name, e))?;
+                let code = compile(name, source).map_err(|e| load_error(ctx, name, e))?;
+                self.declare(ctx, name, &code)
             }
         }
+    }
+}
+
+fn load_error(ctx: &Ctx<'_>, name: &str, why: impl std::fmt::Display) -> Error {
+    let message = format!("Error loading module '{name}': {why}");
+    let error = ctx.globals().get::<_, Constructor>("ReferenceError").and_then(|c| c.construct::<_, Value>((message,)));
+    match error {
+        Ok(error) => ctx.throw(error),
+        Err(e) => e,
     }
 }
 

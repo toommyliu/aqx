@@ -4,7 +4,7 @@ mod server;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use aqx_script::{Outcome, ScriptError, run};
+use aqx_script::{Outcome, ScriptError, check, run};
 use server::{FARM, Fake, Wire};
 
 fn write(test: &str, files: &[(&str, &str)]) -> PathBuf {
@@ -531,4 +531,22 @@ fn a_script_can_relogin_and_carry_on() {
     finished(result);
     assert_eq!(fake.logins.load(std::sync::atomic::Ordering::SeqCst), 2);
     fake.finish();
+}
+
+#[track_caller]
+fn check_fails(test: &str, files: &[(&str, &str)], text: &str) {
+    let result = check(&write(test, files));
+    assert!(matches!(&result, Err(why) if why.contains(text)), "wanted an error mentioning {text:?}, got {result:?}");
+}
+
+#[test]
+fn check_loads_every_import_without_running_the_script() {
+    let main = r#"import { player } from "aqx"; import { double } from "./lib.ts"; throw new Error("ran " + double(player.hp));"#;
+    assert_eq!(check(&write("check-ok", &[("main.ts", main), ("lib.ts", "export const double = (n: number): number => n * 2;")])), Ok(()));
+    check_fails("check-syntax", &[("main.ts", "let = ;")], "Expression expected");
+    check_fails("check-npm", &[("main.ts", r#"import fs from "fs";"#)], "only `aqx` and relative imports are supported");
+    check_fails("check-missing", &[("main.ts", r#"import { x } from "./gone.ts";"#)], "check-missing/gone.ts': No such file");
+    check_fails("check-aqx-export", &[("main.ts", r#"import { combt } from "aqx";"#)], "Could not find export 'combt' in module 'aqx'");
+    check_fails("check-export", &[("main.ts", r#"import { y } from "./lib.ts";"#), ("lib.ts", "export const x = 1;")], "Could not find export 'y'");
+    check_fails("check-enum", &[("main.ts", r#"import { E } from "./lib.ts";"#), ("lib.ts", "export enum E { A }")], "export enum E { A }\n  |        ^^^^^^^^^^^^");
 }

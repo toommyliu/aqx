@@ -1,15 +1,4 @@
 {
-  "compilerOptions": {
-    "target": "es2023",
-    "lib": ["es2023"],
-    "module": "esnext",
-    "moduleDetection": "force",
-    "types": [],
-    "strict": true,
-    "noEmit": true,
-    "erasableSyntaxOnly": true,
-    "verbatimModuleSyntax": true,
-    "noUncheckedIndexedAccess": true
-  },
+  "extends": "./api/tsconfig.json",
   "include": ["api/aqx.d.ts", "examples/**/*.ts"]
 }
