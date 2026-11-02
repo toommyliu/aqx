@@ -9,7 +9,7 @@ use ratatui::crossterm::event::{self, Event as Input, KeyCode, KeyEvent, KeyEven
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
 use crate::bot::{expand_home, script_path};
@@ -21,6 +21,8 @@ const WIDE: u16 = 90;
 const NOTE_FOR: Duration = Duration::from_secs(4);
 const STATE_WIDTH: usize = 12;
 const ACCENT: Color = Color::Blue;
+const CARD_WIDTH: u16 = 44;
+const CARD_HEIGHT: u16 = 8;
 
 type Field = Vec<Span<'static>>;
 
@@ -36,7 +38,7 @@ const BOT_KEYS: [(&str, &str); 9] = [
     ("q", "detach"),
 ];
 
-const SCRIPT_KEYS: [(&str, &str); 12] = [
+const SCRIPT_KEYS: [(&str, &str); 13] = [
     ("", "Scripts"),
     ("o", "run a script"),
     ("s", "stop"),
@@ -44,6 +46,7 @@ const SCRIPT_KEYS: [(&str, &str); 12] = [
     ("p", "pause / resume"),
     ("c", "zone chat"),
     ("", "View"),
+    ("g", "dashboard"),
     ("d", "more details"),
     ("l", "filter the log"),
     ("⇧↑ ⇧↓", "scroll a line"),
@@ -125,11 +128,14 @@ struct App {
     selected: usize,
     marked: BTreeSet<usize>,
     details: bool,
+    grid: bool,
     keys: bool,
     filter: Filter,
     scroll: usize,
     max_scroll: Cell<usize>,
     list_top: Cell<usize>,
+    grid_top: Cell<usize>,
+    grid_cols: Cell<usize>,
     prompt: Option<Prompt>,
     recent: Vec<String>,
     note: Option<(String, Instant)>,
@@ -294,6 +300,13 @@ impl App {
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('?') => self.keys = true,
+            KeyCode::Char('g') => self.grid = !self.grid,
+            KeyCode::Char('d' | 'l') | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End if self.grid => {}
+            KeyCode::Enter if self.grid => self.grid = false,
+            KeyCode::Left if self.grid => self.pick(self.selected.saturating_sub(1)),
+            KeyCode::Right if self.grid => self.pick((self.selected + 1).min(last)),
+            KeyCode::Up if self.grid => self.pick(self.selected.saturating_sub(self.grid_cols.get())),
+            KeyCode::Down if self.grid => self.pick((self.selected + self.grid_cols.get()).min(last)),
             KeyCode::Up if line => self.scroll = (self.scroll + 1).min(self.max_scroll.get()),
             KeyCode::Down if line => self.scroll = self.scroll.saturating_sub(1),
             KeyCode::Up => self.pick(self.selected.saturating_sub(1)),
@@ -369,17 +382,19 @@ fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
     ])
     .areas(f.area());
     draw_matches(f, suggestions, matches);
-    let list = body.width >= WIDE && shown.len() > 1;
-    draw_header(f, header, fleet, app, shown, list);
-    let pane = if list {
-        let width = (3 + name_width(shown) + 1 + STATE_WIDTH) as u16;
-        let [left, _, pane] = Layout::horizontal([Constraint::Length(width + 1), Constraint::Length(1), Constraint::Min(0)]).areas(body);
-        draw_list(f, left, app, shown);
-        pane
-    } else {
-        body.inner(Margin::new(1, 0))
-    };
-    if let Some(bot) = shown.get(app.selected) {
+    let list = !app.grid && body.width >= WIDE && shown.len() > 1;
+    draw_header(f, header, fleet, app, shown, list || app.grid);
+    if app.grid {
+        draw_grid(f, body, app, shown);
+    } else if let Some(bot) = shown.get(app.selected) {
+        let pane = if list {
+            let width = (3 + name_width(shown) + 1 + STATE_WIDTH) as u16;
+            let [left, _, pane] = Layout::horizontal([Constraint::Length(width + 1), Constraint::Length(1), Constraint::Min(0)]).areas(body);
+            draw_list(f, left, app, shown);
+            pane
+        } else {
+            body.inner(Margin::new(1, 0))
+        };
         draw_bot(f, pane, bot, app);
     }
     draw_footer(f, footer, app, shown);
@@ -444,9 +459,9 @@ fn draw_matches(f: &mut Frame, area: Rect, matches: &[String]) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_header(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App, shown: &[Shown], list: bool) {
+fn draw_header(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App, shown: &[Shown], overview: bool) {
     let mut left = vec![Span::raw(format!(" {}", fleet.title)).bold()];
-    if list {
+    if overview {
         let online = shown.iter().filter(|s| s.snapshot.as_ref().is_some_and(|s| s.phase != "OFFLINE")).count();
         left.push(Span::raw(format!("  {online} of {} online", shown.len())).dark_gray());
     } else if let Some(bot) = shown.get(app.selected).filter(|_| shown.len() > 1) {
@@ -456,8 +471,11 @@ fn draw_header(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App, shown: &[Sho
         left.push(Span::raw(format!(" · {} marked", app.marked.len())).dark_gray());
     }
     let mut keys = Vec::new();
-    if !list && shown.len() > 1 {
+    if !overview && shown.len() > 1 {
         keys.push(("tab", "next"));
+    }
+    if shown.len() > 1 {
+        keys.push(("g", "dashboard"));
     }
     keys.extend([("?", "keys"), ("q", "detach")]);
     f.render_widget(Paragraph::new(spread(left, hints(&keys), area.width.saturating_sub(1) as usize)), area);
@@ -524,12 +542,19 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         return f.render_widget(Paragraph::new(format!(" {note}")).yellow(), area);
     }
     let details = if app.details { "less" } else { "details" };
-    let keys: Vec<(&str, &str)> = if app.all(shown, is_offline) {
-        vec![("i", "log in"), ("o", "log in and run"), ("space", "mark"), ("d", details)]
+    let offline = app.all(shown, is_offline);
+    let mut keys: Vec<(&str, &str)> = if offline {
+        vec![("i", "log in"), ("o", "log in and run")]
     } else {
         let pause = if app.all(shown, |s| s.paused) { "resume" } else { "pause" };
-        vec![("o", "run"), ("s", "stop"), ("r", "restart"), ("p", pause), ("x", "log out"), ("c", "chat"), ("space", "mark"), ("d", details), ("l", "filter")]
+        vec![("o", "run"), ("s", "stop"), ("r", "restart"), ("p", pause), ("x", "log out"), ("c", "chat")]
     };
+    keys.push(("space", "mark"));
+    match (app.grid, offline) {
+        (true, _) => keys.push(("enter", "open")),
+        (false, true) => keys.push(("d", details)),
+        (false, false) => keys.extend([("d", details), ("l", "filter")]),
+    }
     let mut line = vec![Span::raw(" → ").fg(ACCENT), Span::raw(who).bold(), Span::raw("   ")];
     let used = spans_width(&line);
     if used + spans_width(&hints(&keys)) <= width {
@@ -544,6 +569,90 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         line.extend(hints(&[("?", "more")]));
     }
     f.render_widget(Paragraph::new(Line::from(line)), area);
+}
+
+fn draw_grid(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
+    let cols = usize::from(area.width / CARD_WIDTH).max(1);
+    let rows = usize::from(area.height / CARD_HEIGHT).max(1);
+    app.grid_cols.set(cols);
+    let row = app.selected / cols;
+    let top = app.grid_top.get().min(row).max((row + 1).saturating_sub(rows));
+    app.grid_top.set(top);
+    for (i, bot) in shown.iter().enumerate().skip(top * cols).take(rows * cols) {
+        let at = i - top * cols;
+        let edge = |col: usize| (usize::from(area.width) * col / cols) as u16;
+        let rect = Rect {
+            x: area.x + edge(at % cols),
+            y: area.y + (at / cols) as u16 * CARD_HEIGHT,
+            width: edge(at % cols + 1) - edge(at % cols),
+            height: CARD_HEIGHT,
+        };
+        draw_card(f, rect.intersection(area), bot, i == app.selected, app.marked.contains(&i));
+    }
+}
+
+fn draw_card(f: &mut Frame, area: Rect, bot: &Shown, selected: bool, marked: bool) {
+    let (state, style) = state_of(bot.snapshot.as_ref());
+    let state = format!(" {state} ");
+    let mut name = Vec::new();
+    if marked {
+        name.push(Span::raw(" ●").fg(ACCENT));
+    }
+    name.push(Span::raw(format!(" {} ", bot.name)).bold());
+    let name = clip(name, usize::from(area.width).saturating_sub(state.len() + 3));
+    let (border, color) = if selected { (BorderType::Thick, ACCENT) } else { (BorderType::Plain, Color::DarkGray) };
+    let block = Block::bordered()
+        .border_type(border)
+        .border_style(Style::new().fg(color))
+        .title(Line::from(name).left_aligned())
+        .title(Line::from(Span::styled(state, style.bold())).right_aligned())
+        .padding(Padding::horizontal(1));
+    let width = usize::from(area.width.saturating_sub(4));
+    f.render_widget(Paragraph::new(card(bot, width)).block(block), area);
+}
+
+fn card(bot: &Shown, width: usize) -> Vec<Line<'static>> {
+    let Some(s) = &bot.snapshot else { return vec![Line::raw("waiting for the server").dark_gray()] };
+    let online = !is_offline(s);
+    let mut about = Vec::new();
+    if !s.user.is_empty() && !s.user.eq_ignore_ascii_case(&bot.name) {
+        about.push(s.user.clone());
+    }
+    if !s.server.is_empty() {
+        about.push(s.server.clone());
+    }
+    if online && s.up_secs > 0 {
+        about.push(format!("up {}", span(s.up_secs)));
+    }
+    let place = match (trouble(s), &s.game) {
+        (Some(t), _) => vec![t],
+        (None, Some(g)) => vec![Span::raw(format!("{} {}/{}", g.area, g.cell, g.pad))],
+        (None, None) => Vec::new(),
+    };
+    let mut lines: Vec<Line> = [vec![Span::raw(about.join(" · ")).dark_gray()], place, task(s)].into_iter().map(|spans| fit(spans, width)).collect();
+    if online {
+        lines.extend(s.progress.first().map(|b| progress(b, width)));
+        if let Some(g) = &s.game {
+            lines.extend(flow(summary(s, g), width));
+        }
+    }
+    lines
+}
+
+fn trouble(s: &Snapshot) -> Option<Span<'static>> {
+    (s.phase != "READY" && !s.detail.is_empty()).then(|| Span::raw(s.detail.clone()).fg(if is_offline(s) { Color::Red } else { Color::Yellow }))
+}
+
+fn task(s: &Snapshot) -> Field {
+    let online = !is_offline(s);
+    let mut task = vec![match &s.script {
+        Some(_) => Span::raw(s.script_label()).fg(if online { Color::Cyan } else { Color::DarkGray }),
+        None => Span::raw("idle").dark_gray(),
+    }];
+    if online && !s.status.is_empty() {
+        task.push(Span::raw(format!("  {}", s.status)));
+    }
+    task
 }
 
 fn draw_bot(f: &mut Frame, area: Rect, bot: &Shown, app: &App) {
@@ -571,19 +680,8 @@ fn detail(bot: &Shown, full: bool, width: usize) -> Vec<Line<'static>> {
     };
     let online = s.phase != "OFFLINE";
     let mut lines = vec![identity(bot, s, width)];
-    if s.phase != "READY" && !s.detail.is_empty() {
-        let color = if online { Color::Yellow } else { Color::Red };
-        lines.push(fit(vec![Span::raw(s.detail.clone()).fg(color)], width));
-    }
-    let script = match &s.script {
-        Some(_) => Span::raw(s.script_label()).fg(if online { Color::Cyan } else { Color::DarkGray }),
-        None => Span::raw("idle").dark_gray(),
-    };
-    let mut task = vec![script];
-    if online && !s.status.is_empty() {
-        task.push(Span::raw(format!("  {}", s.status)));
-    }
-    lines.push(fit(task, width));
+    lines.extend(trouble(s).map(|t| fit(vec![t], width)));
+    lines.push(fit(task(s), width));
     if online {
         lines.extend(s.progress.iter().map(|b| progress(b, width)));
     }
@@ -1078,6 +1176,53 @@ mod tests {
         assert!(shown.contains("2 marked") && shown.contains("→ main, healer"), "{shown}");
         press(&fleet, &mut app, KeyCode::Char('a'));
         assert!(screen(&fleet, &mut app, 120).contains("→ healer"), "a with everything marked clears the marks");
+    }
+
+    #[test]
+    fn g_shows_every_bot_as_a_card_and_arrows_move_across_the_grid() {
+        let (fleet, hub) = fleet(&["main", "healer", "spare", "alt"]);
+        publish(&hub, &fleet.cells[0], &farm_world());
+        let detail = "this account logged in somewhere else";
+        show(&fleet.cells[2], Snapshot { phase: "OFFLINE".into(), detail: detail.into(), ..Snapshot::default() });
+        let mut app = App::default();
+        press(&fleet, &mut app, KeyCode::Char('g'));
+        let shown = screen(&fleet, &mut app, 140);
+        println!("{shown}");
+        assert!(row(&shown, "1 of 4 online").contains("g dashboard"));
+        assert!(row(&shown, "┏ main").contains("READY") && row(&shown, "┏ main").contains("┌ healer"), "{shown}");
+        assert!(row(&shown, "spare").contains("OFFLINE") && row(&shown, "spare").contains("healer"), "three cards fit across 140 columns: {shown}");
+        for expected in ["hero · Twilly · up 1m", "farm-1 Enter/Spawn", "void-aura.ts  Astral", "HP ████░░░░ 2000/4000  1 kill", "Void Aura ", "waiting for the server", "this account logged in", "enter open"] {
+            assert!(shown.contains(expected), "missing {expected:?}: {shown}");
+        }
+        assert!(!shown.contains("── log"));
+        for key in ['d', 'l'] {
+            press(&fleet, &mut app, KeyCode::Char(key));
+        }
+        press(&fleet, &mut app, KeyCode::PageUp);
+        assert!(!app.details && app.filter == Filter::All && app.scroll == 0, "view keys for the hidden pane do nothing on the dashboard");
+        press(&fleet, &mut app, KeyCode::Down);
+        assert_eq!(app.selected, 3, "down moves one row of three cards");
+        press(&fleet, &mut app, KeyCode::Left);
+        press(&fleet, &mut app, KeyCode::Up);
+        assert_eq!(app.selected, 0);
+        press(&fleet, &mut app, KeyCode::Right);
+        press(&fleet, &mut app, KeyCode::Enter);
+        assert!(screen(&fleet, &mut app, 140).contains("── log"), "enter opens the picked bot");
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn the_grid_follows_the_selection_past_the_bottom() {
+        let names: Vec<String> = (0..30).map(|i| format!("bot{i:02}")).collect();
+        let (fleet, _hub) = fleet(&names.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut app = App { grid: true, ..App::default() };
+        screen(&fleet, &mut app, 100);
+        for _ in 0..8 {
+            press(&fleet, &mut app, KeyCode::Down);
+        }
+        let shown = screen(&fleet, &mut app, 100);
+        assert!(row(&shown, "┏ bot16").contains("STARTING"), "{shown}");
+        assert!(!shown.contains("bot00"));
     }
 
     #[test]
