@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aqx_core::{ActError, Event, Halt, ItemRef, Outcome, ScriptError, Session, StopHandle, views};
+use aqx_core::{ActError, Event, Halt, ItemRef, Outcome, Phase, ScriptError, Session, StopHandle, views};
 use aqx_protocol::{ItemId, MonMapId, QuestId, ShopId};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -234,7 +234,15 @@ fn op(name: &str) -> Option<Op> {
             let (id,): (ShopId,) = args(a)?;
             Ok(s.world.shops.get(&id).map_or(Value::Null, |shop| views::shop(shop)))
         }),
-        "server" => I(|s, _| Ok(s.server().map_or(Value::Null, views::server))),
+        "session" => I(|s, _| {
+            let server = s.server();
+            Ok(json!({ "phase": phase(&s.phase), "server": server.map_or(Value::Null, views::server), "host": server.map(|s| s.host.as_str()) }))
+        }),
+        "respawn" => I(|s, a| {
+            let (cell, pad): (Option<String>, Option<String>) = args(a)?;
+            s.respawn_to = cell.zip(pad);
+            done()
+        }),
         "target" => I(|s, a| {
             let (id,): (Option<MonMapId>,) = args(a)?;
             s.set_target(id);
@@ -362,6 +370,21 @@ fn op(name: &str) -> Option<Op> {
             s.send_raw(&packet)?;
             done()
         }),
+        "servers" => B(|s, _| {
+            let servers = s.servers()?;
+            let servers = servers.iter().map(|server| {
+                json!({
+                    "name": server.name,
+                    "host": server.host,
+                    "port": server.port,
+                    "online": server.online,
+                    "members": server.members_only,
+                    "players": server.players,
+                    "capacity": server.capacity,
+                })
+            });
+            Ok(Value::Array(servers.collect()))
+        }),
         "relogin" => B(|s, a| {
             let (server,): (Option<String>,) = args(a)?;
             s.relogin(server.as_deref())?;
@@ -386,4 +409,16 @@ fn view(session: &mut Session, a: &Value) -> Reply {
         "slots" => views::slots(world),
         _ => return Err(invalid(format!("there is no view named {name}"))),
     })
+}
+
+fn phase(phase: &Phase) -> &'static str {
+    match phase {
+        Phase::Connecting => "connecting",
+        Phase::Handshaking => "handshaking",
+        Phase::LoggingIn => "logging_in",
+        Phase::Loading => "loading",
+        Phase::Ready => "ready",
+        Phase::Closed(_) => "closed",
+        Phase::Waiting { .. } => "waiting",
+    }
 }
