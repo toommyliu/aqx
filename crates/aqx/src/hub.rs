@@ -37,9 +37,6 @@ pub enum Command {
     Resume,
     Logout,
     Relogin,
-    Chat {
-        text: String,
-    },
 }
 
 impl Command {
@@ -439,11 +436,6 @@ impl BotCell {
                 let paused = matches!(command, Command::Pause);
                 board.paused = paused;
                 stop.post(move |s| s.set_paused(paused));
-                return Ok(true);
-            }
-            Command::Chat { text } => {
-                let text = text.clone();
-                stop.post(move |s| s.chat(&text));
                 return Ok(true);
             }
             _ => {}

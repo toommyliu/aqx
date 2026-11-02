@@ -38,13 +38,12 @@ const BOT_KEYS: [(&str, &str); 9] = [
     ("q", "detach"),
 ];
 
-const SCRIPT_KEYS: [(&str, &str); 13] = [
+const SCRIPT_KEYS: [(&str, &str); 12] = [
     ("", "Scripts"),
     ("o", "run a script"),
     ("s", "stop"),
     ("r", "restart"),
     ("p", "pause / resume"),
-    ("c", "zone chat"),
     ("", "View"),
     ("g", "dashboard"),
     ("d", "more details"),
@@ -98,28 +97,21 @@ impl Filter {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Ask {
-    Run,
-    Chat,
-}
-
 struct Prompt {
-    ask: Ask,
     input: String,
     pick: Option<usize>,
     matches: Vec<String>,
 }
 
 impl Prompt {
-    fn new(ask: Ask) -> Self {
-        let mut prompt = Prompt { ask, input: String::new(), pick: None, matches: Vec::new() };
+    fn new() -> Self {
+        let mut prompt = Prompt { input: String::new(), pick: None, matches: Vec::new() };
         prompt.find_matches();
         prompt
     }
 
     fn find_matches(&mut self) {
-        self.matches = if self.ask == Ask::Run { scripts_matching(&self.input) } else { Vec::new() };
+        self.matches = scripts_matching(&self.input);
     }
 }
 
@@ -271,7 +263,7 @@ impl App {
                 KeyCode::Backspace => {
                     prompt.input.pop();
                 }
-                KeyCode::Up | KeyCode::Down if prompt.ask == Ask::Run && !self.recent.is_empty() => {
+                KeyCode::Up | KeyCode::Down if !self.recent.is_empty() => {
                     let n = self.recent.len();
                     let at = match (prompt.pick, key.code) {
                         (None, _) => 0,
@@ -330,8 +322,7 @@ impl App {
                 self.scroll = 0;
             }
             KeyCode::Char('d') => self.details = !self.details,
-            KeyCode::Char('o') => self.prompt = Some(Prompt::new(Ask::Run)),
-            KeyCode::Char('c') => self.prompt = Some(Prompt::new(Ask::Chat)),
+            KeyCode::Char('o') => self.prompt = Some(Prompt::new()),
             KeyCode::Char('s') => self.act(fleet, Command::Stop, "stopping the script"),
             KeyCode::Char('r') => self.act(fleet, Command::Restart, "restarting the script"),
             KeyCode::Char('i') => self.act(fleet, Command::Login, "logging in"),
@@ -348,27 +339,22 @@ impl App {
         if input.is_empty() {
             return;
         }
-        match prompt.ask {
-            Ask::Chat => self.act(fleet, Command::Chat { text: input }, "said it in zone chat"),
-            Ask::Run => {
-                let mut words = input.split_whitespace();
-                let path = match script_path(words.next().unwrap_or_default().as_ref()) {
-                    Ok(path) => path,
-                    Err(e) => return self.say(e),
-                };
-                let mut args = Vec::new();
-                for word in words {
-                    match word.trim_start_matches("--arg=").split_once('=') {
-                        Some((key, value)) if !key.is_empty() => args.push((key.to_string(), value.to_string())),
-                        _ => return self.say(format!("{word} isn't KEY=VALUE")),
-                    }
-                }
-                self.recent.retain(|r| *r != input);
-                self.recent.push(input);
-                let shown = path.display().to_string();
-                self.act(fleet, Command::Run { script: path, args }, &format!("running {shown}"));
+        let mut words = input.split_whitespace();
+        let path = match script_path(words.next().unwrap_or_default().as_ref()) {
+            Ok(path) => path,
+            Err(e) => return self.say(e),
+        };
+        let mut args = Vec::new();
+        for word in words {
+            match word.trim_start_matches("--arg=").split_once('=') {
+                Some((key, value)) if !key.is_empty() => args.push((key.to_string(), value.to_string())),
+                _ => return self.say(format!("{word} isn't KEY=VALUE")),
             }
         }
+        self.recent.retain(|r| *r != input);
+        self.recent.push(input);
+        let shown = path.display().to_string();
+        self.act(fleet, Command::Run { script: path, args }, &format!("running {shown}"));
     }
 }
 
@@ -529,10 +515,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     let width = area.width as usize;
     let who = app.who(shown, width / 3);
     if let Some(prompt) = &app.prompt {
-        let (label, keys) = match prompt.ask {
-            Ask::Run => (format!(" run on {who}: "), hints(&[("tab", "complete"), ("↑↓", "recent"), ("esc", "cancel")])),
-            Ask::Chat => (format!(" zone chat as {who}: "), hints(&[("esc", "cancel")])),
-        };
+        let label = format!(" run on {who}: ");
+        let keys = hints(&[("tab", "complete"), ("↑↓", "recent"), ("esc", "cancel")]);
         let typed = vec![Span::raw(label).bold(), Span::raw(prompt.input.clone()), Span::raw("█")];
         return f.render_widget(Paragraph::new(spread(typed, keys, width.saturating_sub(1))), area);
     }
@@ -547,7 +531,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         vec![("i", "log in"), ("o", "log in and run")]
     } else {
         let pause = if app.all(shown, |s| s.paused) { "resume" } else { "pause" };
-        vec![("o", "run"), ("s", "stop"), ("r", "restart"), ("p", pause), ("x", "log out"), ("c", "chat")]
+        vec![("o", "run"), ("s", "stop"), ("r", "restart"), ("p", pause), ("x", "log out")]
     };
     keys.push(("space", "mark"));
     match (app.grid, offline) {
@@ -1459,7 +1443,7 @@ mod tests {
         assert_eq!(input(&app), format!("{root}farm.ts "));
         assert!(!screen(&fleet, &mut app, 100).contains("fight.js"));
 
-        app.prompt = Some(Prompt::new(Ask::Run));
+        app.prompt = Some(Prompt::new());
         typed(&mut app, &format!("{root}q"));
         press(&mut app, KeyCode::Tab);
         assert_eq!(input(&app), format!("{root}quests/"));

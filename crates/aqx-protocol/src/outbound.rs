@@ -41,7 +41,6 @@ pub enum Out<'a> {
     Walk { room: AreaId, x: i32, y: i32, speed: u32 },
     Goto { name: &'a str },
     GetMapItem { room: AreaId, id: u32 },
-    Chat { room: AreaId, text: &'a str },
     Raw(&'a str),
 }
 
@@ -115,7 +114,6 @@ impl Out<'_> {
             Out::Walk { room, x, y, speed } => write!(buf, "%xt%zm%mv%{room}%{x}%{y}%{speed}%").unwrap(),
             Out::Goto { name } => write!(buf, "%xt%zm%cmd%1%goto%{name}%").unwrap(),
             Out::GetMapItem { room, id } => write!(buf, "%xt%zm%getMapItem%{room}%{id}%").unwrap(),
-            Out::Chat { room, text } => write!(buf, "%xt%zm%message%{room}%{text}%zone%").unwrap(),
             Out::Raw(text) => buf.extend_from_slice(text.as_bytes()),
         }
         buf.push(0);
@@ -214,7 +212,6 @@ mod tests {
         let room = AreaId(7111);
         assert_eq!(encoded(Out::Join { user: "hero", map: "yulgar" }), "%xt%zm%cmd%1%tfer%hero%yulgar%\0");
         assert_eq!(encoded(Out::Goto { name: "ally" }), "%xt%zm%cmd%1%goto%ally%\0");
-        assert_eq!(encoded(Out::Chat { room, text: "hi all" }), "%xt%zm%message%7111%hi all%zone%\0");
         assert_eq!(encoded(Out::MoveToCell { room, cell: "Enter", pad: "Spawn" }), "%xt%zm%moveToCell%7111%Enter%Spawn%\0");
         assert_eq!(
             encoded(Out::RetrieveUserData { room, eid: EntityId(1001) }),

@@ -317,7 +317,7 @@ impl Bot {
                 Next::Login
             }
             Some(Command::Logout) | None => Next::Quit(Ok(())),
-            Some(Command::Login | Command::Pause | Command::Resume | Command::Chat { .. }) => Next::Idle,
+            Some(Command::Login | Command::Pause | Command::Resume) => Next::Idle,
         };
         if self.cell.has_commands() {
             session.stop_handle().stop();

@@ -467,16 +467,6 @@ impl Session {
         }
     }
 
-    pub fn chat(&mut self, text: &str) {
-        let text: String = text.chars().filter(|c| !matches!(c, '%' | '\0')).collect();
-        if self.phase != Phase::Ready || text.trim().is_empty() {
-            return;
-        }
-        let Some(room) = self.world.area.as_ref().map(|a| a.id) else { return };
-        self.pacer.sent(Kind::Free, Instant::now());
-        self.send(Out::Chat { room, text: &text });
-    }
-
     pub(crate) fn idle_until(&mut self, at: Instant) -> Result<(), Halt> {
         match self.pump_until(Some(at), |_| None::<()>) {
             Err(Halt::Timeout) => Ok(()),
