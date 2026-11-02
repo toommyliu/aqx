@@ -14,6 +14,7 @@ use crate::control::{Control, StopHandle};
 use crate::event::Event;
 use crate::pacer::{Kind, Pacer};
 use crate::record::Recorder;
+use crate::team::Membership;
 use crate::world::{self, Monster, State, World};
 
 pub const CLIENT_VERSION: &str = "5.31";
@@ -169,6 +170,8 @@ pub struct Session {
     aggro: Option<Aggro>,
     alarm: Option<Instant>,
     packets: HashSet<String>,
+    pub(crate) team: Option<Membership>,
+    pub(crate) team_seen: Option<(u64, bool)>,
     pub world: World,
     pub phase: Phase,
 }
@@ -208,6 +211,8 @@ impl Session {
             aggro: None,
             alarm: None,
             packets: HashSet::new(),
+            team: None,
+            team_seen: None,
             world: World::default(),
             phase: Phase::Connecting,
         }
@@ -340,6 +345,7 @@ impl Session {
 
     pub fn pump_until<T>(&mut self, deadline: Option<Instant>, mut done: impl FnMut(&Session) -> Option<T>) -> Result<T, Halt> {
         loop {
+            self.publish_member();
             if let Some(v) = done(self) {
                 return Ok(v);
             }
