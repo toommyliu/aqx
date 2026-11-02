@@ -91,7 +91,7 @@ enum Choice {
 impl Session {
     fn ready(&mut self, deadline: Option<Instant>) -> Result<(), ActError> {
         self.wait_for(deadline, "waiting to be alive and ready", |s| {
-            s.phase == Phase::Ready && s.world.me.as_ref().is_some_and(|m| m.vitals.state != State::Dead)
+            s.phase == Phase::Ready && !s.paused() && s.world.me.as_ref().is_some_and(|m| m.vitals.state != State::Dead)
         })
     }
 
@@ -528,6 +528,10 @@ impl Session {
 
     fn fight_target(&mut self, id: MonMapId, fight: &mut Fight, deadline: Option<Instant>) -> Result<bool, ActError> {
         loop {
+            if self.paused() {
+                self.wait_for(deadline, "waiting to resume", |s| !s.paused())?;
+                continue;
+            }
             let (Some(me), Some(area)) = (&self.world.me, &self.world.area) else { return Ok(false) };
             let Some(monster) = area.monsters.iter().find(|m| m.map_id == id) else { return Ok(false) };
             if !monster.alive() {

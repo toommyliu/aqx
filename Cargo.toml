@@ -12,8 +12,9 @@ aqx-protocol = { path = "crates/aqx-protocol" }
 aqx-script = { path = "crates/aqx-script" }
 base64 = "0.23"
 clap = { version = "4", features = ["derive"] }
-ctrlc = "3"
+ctrlc = { version = "3", features = ["termination"] }
 flate2 = "1"
+libc = "0.2"
 memchr = "2"
 mio = { version = "1", features = ["os-poll", "net"] }
 ratatui = "0.30"

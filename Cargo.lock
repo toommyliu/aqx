@@ -109,6 +109,7 @@ dependencies = [
  "aqx-script",
  "clap",
  "ctrlc",
+ "libc",
  "ratatui",
  "serde",
  "serde_json",

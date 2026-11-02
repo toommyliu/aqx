@@ -166,6 +166,7 @@ pub struct Session {
     pub(crate) casts: HashMap<String, Instant>,
     pub(crate) joined: Option<AreaId>,
     pub(crate) quest_outcomes: HashMap<QuestId, Result<(), String>>,
+    paused: bool,
     aggro: Option<Aggro>,
     alarm: Option<Instant>,
     packets: HashSet<String>,
@@ -205,6 +206,7 @@ impl Session {
             casts: HashMap::new(),
             joined: None,
             quest_outcomes: HashMap::new(),
+            paused: false,
             aggro: None,
             alarm: None,
             packets: HashSet::new(),
@@ -358,6 +360,9 @@ impl Session {
             if self.goal_met() {
                 return Err(Halt::GoalMet);
             }
+            if self.run_posted() {
+                continue;
+            }
             let now = Instant::now();
             self.run_timers(now);
             if deadline.is_some_and(|d| now >= d) {
@@ -419,12 +424,34 @@ impl Session {
         true
     }
 
+    fn run_posted(&mut self) -> bool {
+        let posted = self.control.take_posted();
+        let any = !posted.is_empty();
+        for f in posted {
+            f(self);
+        }
+        any
+    }
+
     pub fn sink(&self) -> Sink {
         self.sink.clone()
     }
 
     pub fn stop_handle(&self) -> StopHandle {
         self.control.stop_handle()
+    }
+
+    pub fn clear_stop(&self) {
+        self.control.clear_stop();
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        self.world.rev += 1;
     }
 
     pub fn set_aggro(&mut self, target: Option<Target>) {
@@ -441,6 +468,16 @@ impl Session {
         } else {
             self.packets.remove(cmd);
         }
+    }
+
+    pub fn chat(&mut self, text: &str) {
+        let text: String = text.chars().filter(|c| !matches!(c, '%' | '\0')).collect();
+        if self.phase != Phase::Ready || text.trim().is_empty() {
+            return;
+        }
+        let Some(room) = self.world.area.as_ref().map(|a| a.id) else { return };
+        self.pacer.sent(Kind::Free, Instant::now());
+        self.send(Out::Chat { room, text: &text });
     }
 
     pub(crate) fn idle_until(&mut self, at: Instant) -> Result<(), Halt> {
@@ -515,7 +552,7 @@ impl Session {
     }
 
     fn pull(&mut self, now: Instant) {
-        if self.phase != Phase::Ready {
+        if self.phase != Phase::Ready || self.paused {
             return;
         }
         let (Some(aggro), Some(me), Some(area)) = (&self.aggro, &self.world.me, &self.world.area) else { return };

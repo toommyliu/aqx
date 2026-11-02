@@ -1,93 +1,16 @@
-use std::fmt::Display;
-use std::io::Write;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
-use aqx_core::{Event, Place, World};
-use serde_json::{Value, json};
-
-pub enum Mode {
-    Plain,
-    Json,
-    Tui(SyncSender<Update>),
-}
-
-pub enum Update {
-    Say { t: u64, source: &'static str, text: String },
-    Event { t: u64, event: Event },
-}
+use aqx_core::{Event, Place};
 
 static START: OnceLock<Instant> = OnceLock::new();
-static MODE: OnceLock<Mode> = OnceLock::new();
-static DROPPED: AtomicUsize = AtomicUsize::new(0);
 
-pub fn init(mode: Mode) {
+pub fn start() {
     START.get_or_init(Instant::now);
-    let _ = MODE.set(mode);
 }
 
 pub fn now() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
-}
-
-pub fn dropped() -> usize {
-    DROPPED.load(Ordering::Relaxed)
-}
-
-fn send(tx: &SyncSender<Update>, update: Update) {
-    if tx.try_send(update).is_err() {
-        DROPPED.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-pub fn say(source: &'static str, text: impl Display) {
-    match MODE.get() {
-        Some(Mode::Tui(tx)) => send(tx, Update::Say { t: now(), source, text: text.to_string() }),
-        Some(Mode::Json) => json_line(json!({ "event": "log", "source": source, "text": text.to_string() })),
-        _ => plain_line(source, &text),
-    }
-}
-
-pub fn event(event: &Event) {
-    match MODE.get() {
-        Some(Mode::Tui(tx)) => send(tx, Update::Event { t: now(), event: event.clone() }),
-        Some(Mode::Json) => json_line(serde_json::to_value(event).unwrap_or(Value::Null)),
-        _ => {
-            if let Some((source, text)) = describe(event) {
-                plain_line(source, &text);
-            }
-        }
-    }
-}
-
-pub fn status(world: &World) {
-    let Some(me) = &world.me else { return };
-    let area = world.area.as_ref().map_or("", |a| a.name.as_str());
-    let players = world.area.as_ref().map_or(0, |a| a.players.len()) + 1;
-    let v = me.vitals;
-    match MODE.get() {
-        Some(Mode::Json) => json_line(json!({
-            "event": "status", "area": area, "cell": me.cell, "pad": me.pad,
-            "hp": v.hp, "max_hp": v.max_hp, "mp": v.mp, "max_mp": v.max_mp,
-            "items": world.inventory.len(), "players": players,
-        })),
-        Some(Mode::Tui(_)) => {}
-        _ => plain_line(
-            "aqx",
-            &format_args!(
-                "{area} {}/{}, hp {}/{}, mp {}/{}, {} items, {players} players",
-                me.cell,
-                me.pad,
-                v.hp,
-                v.max_hp,
-                v.mp,
-                v.max_mp,
-                world.inventory.len()
-            ),
-        ),
-    }
 }
 
 pub fn describe(event: &Event) -> Option<(&'static str, String)> {
@@ -135,18 +58,15 @@ pub fn describe(event: &Event) -> Option<(&'static str, String)> {
     })
 }
 
-fn plain_line(source: &str, text: &dyn Display) {
-    let _ = writeln!(std::io::stdout().lock(), "{}  {source:<6}  {text}", clock(now()));
-}
-
-fn json_line(mut value: Value) {
-    if let Value::Object(fields) = &mut value {
-        fields.insert("t".into(), now().into());
-    }
-    let _ = writeln!(std::io::stdout().lock(), "{value}");
-}
-
 pub fn clock(ms: u64) -> String {
     let (h, m, s, ms) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
     format!("{h}:{m:02}:{s:02}.{ms:03}")
+}
+
+pub fn span(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        _ => format!("{}h{:02}m", secs / 3600, secs / 60 % 60),
+    }
 }

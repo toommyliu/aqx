@@ -3,7 +3,7 @@ mod server;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use aqx_core::{ActError, Disconnect, Halt, Item, ItemRef, Monster, Phase, State, World};
+use aqx_core::{ActError, Disconnect, Fight, Halt, Item, ItemRef, Monster, Phase, State, World};
 use aqx_protocol::ItemId;
 use server::{FARM, Fake};
 
@@ -169,6 +169,30 @@ fn raw_packets_go_through_the_pacer() {
     let raw: Vec<&Instant> = sent.iter().filter(|(_, m)| m == "%xt%zm%cmd%5%tfer%hero%farm%").map(|(t, _)| t).collect();
     assert_eq!(raw.len(), 2);
     assert!(*raw[1] - *raw[0] >= Duration::from_millis(2950), "tfer keeps its 3 s lock: {:?}", *raw[1] - *raw[0]);
+}
+
+#[test]
+fn pause_holds_actions_and_the_fight_until_resume() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%gar%") {
+            wire.object(r#"{"cmd":"ct","m":{"2":{"intHP":500,"intState":2}}}"#);
+        }
+    });
+    let handle = fake.session.stop_handle();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        handle.post(|s| s.set_paused(true));
+        std::thread::sleep(Duration::from_millis(1500));
+        handle.post(|s| s.set_paused(false));
+    });
+    let treeant = |_: &World, m: &Monster| m.name == "Treeant";
+    let started = Instant::now();
+    let result = fake.session.kill(&treeant, &mut Fight::default(), None, Some(Duration::from_millis(2500)));
+    assert!(matches!(result, Err(ActError::Timeout(_))), "{result:?}");
+    let sent = sent(fake);
+    let quiet = sent.iter().filter(|(t, m)| m.contains("%gar%") && *t > started + Duration::from_millis(400) && *t < started + Duration::from_millis(1750));
+    assert_eq!(quiet.count(), 0, "cast while paused");
+    assert!(sent.iter().any(|(t, m)| m.contains("%gar%") && *t > started + Duration::from_millis(1800)), "resumed casting");
 }
 
 #[test]
