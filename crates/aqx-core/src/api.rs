@@ -1,6 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Deserializer};
+use aqx_protocol::de::flag;
+use serde::Deserialize;
 
 #[derive(Debug)]
 pub struct Account {
@@ -94,21 +95,6 @@ fn parse_login(body: &str) -> Result<Account, LoginError> {
             login.and_then(|l| l.msg).or(reply.msg).unwrap_or_else(|| "no token in the reply".into()),
         )),
     }
-}
-
-fn flag<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Flag {
-        Bool(bool),
-        Int(i64),
-        Text(String),
-    }
-    Ok(match Flag::deserialize(d)? {
-        Flag::Bool(b) => b,
-        Flag::Int(n) => n != 0,
-        Flag::Text(s) => !matches!(s.as_str(), "" | "0" | "false"),
-    })
 }
 
 #[cfg(test)]

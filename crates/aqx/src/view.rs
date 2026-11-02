@@ -5,7 +5,7 @@ use aqx_protocol::{Decoder, Message, Xml};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::clock;
+use crate::output::clock;
 
 #[derive(Deserialize)]
 struct Row {

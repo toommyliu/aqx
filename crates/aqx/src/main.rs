@@ -1,20 +1,18 @@
 mod config;
+mod output;
 mod view;
 
-use std::fmt::Display;
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use aqx_core::{CLIENT_VERSION, Control, Disconnect, Event, Halt, Login, Phase, Recorder, Server, Session, login};
+use aqx_core::{CLIENT_VERSION, Control, Disconnect, Halt, Login, Phase, Recorder, Server, Session, login};
 use clap::{Args, Parser, Subcommand};
+use output::say;
 
 const DEFAULT_API: &str = "https://game.aq.com";
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
-
-static START: OnceLock<Instant> = OnceLock::new();
+const STATUS_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Parser)]
 #[command(name = "aqx", version, about = "Headless AQW client")]
@@ -54,12 +52,16 @@ struct RunArgs {
     record: Option<PathBuf>,
     #[arg(long, value_name = "VERSION", default_value = CLIENT_VERSION, help = "Client version to log in with first")]
     client_version: String,
+    #[arg(long, help = "Print events as JSON lines")]
+    json: bool,
 }
 
 fn main() -> ExitCode {
-    START.get_or_init(Instant::now);
     let result = match Cli::parse().command {
-        Command::Run(args) => run(args),
+        Command::Run(args) => {
+            output::init(args.json);
+            run(args)
+        }
         Command::View(args) => view::view(&args.file, &args.cmd, args.full),
     };
     match result {
@@ -72,7 +74,7 @@ fn main() -> ExitCode {
 }
 
 fn run(args: RunArgs) -> Result<(), String> {
-    let RunArgs { script, account, config, server, record, client_version: mut version } = args;
+    let RunArgs { script, account, config, server, record, client_version: mut version, .. } = args;
     if let Some(script) = script {
         return Err(format!("can't run {}: scripts aren't supported yet. Run without one to log in", script.display()));
     }
@@ -95,10 +97,10 @@ fn run(args: RunArgs) -> Result<(), String> {
         say("aqx", format_args!("connecting to {}, client version {version}", server.name));
         let login = Login { user: &bot.user, token: &account.token, version: &version };
         let mut session =
-            Session::connect(control, server, login, recorder, print).map_err(|e| format!("can't reach {}: {e}", server.name))?;
+            Session::connect(control, server, login, recorder, output::event).map_err(|e| format!("can't reach {}: {e}", server.name))?;
         let outcome = session
             .pump_until(Some(Instant::now() + READY_TIMEOUT), |s| (s.phase == Phase::Ready).then_some(()))
-            .and_then(|()| session.pump_until(None, |_| None::<()>));
+            .and_then(|()| stay_online(&mut session));
         match outcome {
             Ok(()) => return Ok(()),
             Err(Halt::Stopped) => {
@@ -137,24 +139,11 @@ fn pick_server<'a>(servers: &'a [Server], name: Option<&str>, member: bool) -> R
     }
 }
 
-fn print(event: &Event) {
-    match event {
-        Event::LoggedIn { eid } => say("aqx", format_args!("logged in, entity {eid}")),
-        Event::Joined { area, players: 1 } => say("aqx", format_args!("joined {area}, alone")),
-        Event::Joined { area, players } => say("aqx", format_args!("joined {area}, {players} players")),
-        Event::Ready { items } => say("aqx", format_args!("ready, {items} items. Ctrl-C logs out")),
-        Event::ServerText(text) | Event::Warning(text) => say("server", text),
-        Event::Unreadable(what) => say("aqx", format_args!("unreadable message: {what}")),
-        Event::RecordingFailed(e) => say("aqx", format_args!("recording stopped: {e}")),
+fn stay_online(session: &mut Session) -> Result<(), Halt> {
+    loop {
+        match session.pump_until(Some(Instant::now() + STATUS_EVERY), |_| None::<()>) {
+            Err(Halt::Timeout) => output::status(&session.world),
+            other => return other,
+        }
     }
-}
-
-fn say(source: &str, text: impl Display) {
-    let ms = START.get_or_init(Instant::now).elapsed().as_millis() as u64;
-    let _ = writeln!(std::io::stdout(), "{}  {source:<6}  {text}", clock(ms));
-}
-
-fn clock(ms: u64) -> String {
-    let (h, m, s, ms) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000);
-    format!("{h}:{m:02}:{s:02}.{ms:03}")
 }

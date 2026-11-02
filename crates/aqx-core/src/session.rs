@@ -2,15 +2,15 @@ use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
-use aqx_protocol::{AreaId, Decoder, EntityId, Framer, Json, Message, Out, Xml, Xt};
+use aqx_protocol::{Decoder, Framer, Message, Out};
 use mio::net::TcpStream;
 use mio::{Events, Interest, Token};
-use serde::Deserialize;
 
 use crate::api::Server;
 use crate::control::Control;
+use crate::event::Event;
 use crate::record::Recorder;
-use crate::world::{Area, Me, World};
+use crate::world::{self, World};
 
 pub const CLIENT_VERSION: &str = "5.31";
 
@@ -31,6 +31,7 @@ pub enum Disconnect {
     ClientVersion(String),
     Rejected(String),
     LoggedOut,
+    LoggedInElsewhere,
     ConnectionLost(String),
     Protocol(String),
 }
@@ -41,6 +42,7 @@ impl std::fmt::Display for Disconnect {
             Disconnect::ClientVersion(v) => write!(f, "the server requires client version {v}"),
             Disconnect::Rejected(text) => write!(f, "login rejected: {text}"),
             Disconnect::LoggedOut => write!(f, "logged out"),
+            Disconnect::LoggedInElsewhere => write!(f, "this account logged in somewhere else"),
             Disconnect::ConnectionLost(e) => write!(f, "connection lost: {e}"),
             Disconnect::Protocol(e) => write!(f, "protocol error: {e}"),
         }
@@ -52,17 +54,6 @@ pub enum Halt {
     Timeout,
     Stopped,
     Closed(Disconnect),
-}
-
-#[derive(Debug)]
-pub enum Event<'a> {
-    LoggedIn { eid: EntityId },
-    Joined { area: &'a str, players: usize },
-    Ready { items: usize },
-    ServerText(&'a str),
-    Warning(&'a str),
-    Unreadable(String),
-    RecordingFailed(String),
 }
 
 pub struct Login<'a> {
@@ -203,7 +194,7 @@ impl Session {
         let mut decoder = std::mem::take(&mut self.decoder);
         let fed = framer.feed(data, |frame| match decoder.decode(frame) {
             Ok(text) => self.receive(text),
-            Err(e) => (self.sink)(&Event::Unreadable(format!("{e:?}"))),
+            Err(e) => (self.sink)(&Event::Unreadable { what: format!("{e:?}") }),
         });
         self.framer = framer;
         self.decoder = decoder;
@@ -223,75 +214,54 @@ impl Session {
             self.close(Disconnect::ClientVersion(version));
             return;
         }
-        match Message::parse(text) {
-            Ok(Message::Xml(xml)) => self.on_xml(xml),
-            Ok(Message::Json(json)) => self.on_json(json),
-            Ok(Message::Xt(xt)) => self.on_xt(xt),
-            Err(e) => (self.sink)(&Event::Unreadable(format!("{e:?}: {text:.80}"))),
+        let msg = match Message::parse(text) {
+            Ok(msg) => msg,
+            Err(e) => return (self.sink)(&Event::Unreadable { what: format!("{e:?}: {text:.80}") }),
+        };
+        if let Message::Xml(xml) = &msg {
+            match xml.action {
+                Some("apiOK") if self.phase == Phase::Handshaking => {
+                    let (user, token, version) = self.login.clone();
+                    self.send(Out::Login { user: &user, version: &version, token: &token });
+                    self.phase = Phase::LoggingIn;
+                }
+                Some("logout") => return self.close(Disconnect::LoggedOut),
+                _ => {}
+            }
+        }
+        for event in world::reduce(&mut self.world, &msg, Instant::now()) {
+            (self.sink)(&event);
+            self.react(&event);
         }
     }
 
-    fn on_xml(&mut self, xml: Xml) {
-        match xml.action {
-            Some("apiOK") if self.phase == Phase::Handshaking => {
-                let (user, token, version) = self.login.clone();
-                self.send(Out::Login { user: &user, version: &version, token: &token });
-                self.phase = Phase::LoggingIn;
+    fn react(&mut self, event: &Event) {
+        match event {
+            Event::LoggedIn { .. } if self.phase == Phase::LoggingIn => {
+                self.send(Out::FirstJoin);
+                self.send(Out::ClearIgnoreList);
+                self.phase = Phase::Loading;
             }
-            Some("joinOK") => {
-                let me = self.world.me.as_ref().map(|m| m.eid);
-                self.world.others = xml.user_ids().filter(|id| Some(*id) != me).collect();
+            Event::LoginRejected { reason } => self.close(Disconnect::Rejected(reason.clone())),
+            Event::LoggedInElsewhere => self.close(Disconnect::LoggedInElsewhere),
+            Event::Joined { .. } => self.on_joined(),
+            Event::InventoryLoaded { items } if self.phase == Phase::Loading => {
+                self.phase = Phase::Ready;
+                (self.sink)(&Event::Ready { items: *items });
             }
-            Some("uER") => self.world.others.extend(xml.user_ids()),
-            Some("userGone") => {
-                let gone: Vec<_> = xml.user_ids().collect();
-                self.world.others.retain(|id| !gone.contains(id));
-            }
-            Some("logout") => self.close(Disconnect::LoggedOut),
-            _ => {}
-        }
-    }
-
-    fn on_xt(&mut self, xt: Xt) {
-        match xt.cmd {
-            "loginResponse" if self.phase == Phase::LoggingIn => {
-                let eid = xt.arg(1).and_then(|s| s.parse().ok()).map(EntityId);
-                match (xt.arg(0), eid) {
-                    (Some("true"), Some(eid)) => {
-                        let user = xt.arg(2).unwrap_or(&self.login.0).to_string();
-                        (self.sink)(&Event::LoggedIn { eid });
-                        self.world.me = Some(Me { eid, user, char_id: None });
-                        self.send(Out::FirstJoin);
-                        self.send(Out::ClearIgnoreList);
-                        self.phase = Phase::Loading;
-                    }
-                    _ => {
-                        let text = xt.args().filter(|a| !a.is_empty()).last().unwrap_or("no reason given");
-                        self.close(Disconnect::Rejected(text.to_string()));
-                    }
-                }
-            }
-            "server" => {
-                let text = xt.arg(0).unwrap_or("");
-                if text.contains("You joined") {
-                    self.on_joined();
-                } else {
-                    (self.sink)(&Event::ServerText(text));
-                }
-            }
-            "warning" => (self.sink)(&Event::Warning(xt.arg(0).unwrap_or(""))),
             _ => {}
         }
     }
 
     fn on_joined(&mut self) {
-        let (Some(me), Some(area)) = (&self.world.me, &self.world.area) else { return };
+        let (Some(me), Some(area)) = (&mut self.world.me, &self.world.area) else { return };
+        me.cell = "Enter".into();
+        me.pad = "Spawn".into();
         let (eid, room) = (me.eid, area.id);
-        (self.sink)(&Event::Joined { area: &area.name, players: self.world.others.len() + 1 });
+        let others: Vec<_> = area.players.iter().map(|p| p.eid).collect();
         self.send(Out::MoveToCell { room, cell: "Enter", pad: "Spawn" });
         self.send(Out::RetrieveUserData { room, eid });
-        if !self.world.others.is_empty() {
-            let others = self.world.others.clone();
+        if !others.is_empty() {
             self.send(Out::RetrieveUserDatas { room, others: &others });
         }
         if !self.inventory_requested {
@@ -300,62 +270,12 @@ impl Session {
         }
     }
 
-    fn on_json(&mut self, json: Json) {
-        match json.cmd {
-            "moveToArea" => {
-                #[derive(Deserialize)]
-                struct MoveToArea<'a> {
-                    #[serde(rename = "areaId")]
-                    id: AreaId,
-                    #[serde(rename = "areaName")]
-                    name: &'a str,
-                    #[serde(rename = "strMapName")]
-                    map: &'a str,
-                }
-                match json.decode::<MoveToArea>() {
-                    Ok(m) => self.world.area = Some(Area { id: m.id, name: m.name.into(), map: m.map.into() }),
-                    Err(e) => (self.sink)(&Event::Unreadable(format!("moveToArea: {e}"))),
-                }
-            }
-            "initUserData" => {
-                #[derive(Deserialize)]
-                struct InitUserData {
-                    uid: EntityId,
-                    data: Data,
-                }
-                #[derive(Deserialize)]
-                struct Data {
-                    #[serde(rename = "CharID")]
-                    char_id: u32,
-                }
-                if let (Ok(init), Some(me)) = (json.decode::<InitUserData>(), &mut self.world.me)
-                    && init.uid == me.eid
-                {
-                    me.char_id = Some(init.data.char_id);
-                }
-            }
-            "loadInventoryBig" => {
-                #[derive(Deserialize)]
-                struct Inventory<'a> {
-                    #[serde(borrow)]
-                    items: Vec<&'a serde_json::value::RawValue>,
-                }
-                self.world.items = json.decode::<Inventory>().map(|i| i.items.len()).unwrap_or(0);
-                if self.phase == Phase::Loading {
-                    self.phase = Phase::Ready;
-                    (self.sink)(&Event::Ready { items: self.world.items });
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn record(&mut self, dir: &str, text: &str) {
         if let Some(recorder) = &mut self.recorder
             && let Err(e) = recorder.write(dir, text)
         {
             self.recorder = None;
-            (self.sink)(&Event::RecordingFailed(e.to_string()));
+            (self.sink)(&Event::RecordingFailed { error: e.to_string() });
         }
     }
 

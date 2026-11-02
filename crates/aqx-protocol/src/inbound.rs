@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
-use crate::EntityId;
+use crate::{AreaId, EntityId};
 
 #[derive(Debug)]
 pub enum Message<'a> {
@@ -41,13 +41,23 @@ impl<'a> Xml<'a> {
         Xml { action: attribute(text, "action"), text }
     }
 
-    pub fn user_ids(&self) -> impl Iterator<Item = EntityId> + 'a {
+    pub fn room(&self) -> Option<AreaId> {
+        attribute(self.text, "r")?.parse().ok().map(AreaId)
+    }
+
+    pub fn users(&self) -> impl Iterator<Item = (EntityId, &'a str)> + use<'a> {
         let tag = if self.action == Some("userGone") { "<user id=" } else { "<u i=" };
-        self.text.split(tag).skip(1).filter_map(|rest| {
-            let rest = rest.strip_prefix(['\'', '"'])?;
+        self.text.split(tag).skip(1).filter_map(|chunk| {
+            let rest = chunk.strip_prefix(['\'', '"'])?;
             let end = rest.find(|c: char| !c.is_ascii_digit())?;
-            rest[..end].parse().ok().map(EntityId)
+            let id = rest[..end].parse().ok().map(EntityId)?;
+            let name = chunk.split_once("<n><![CDATA[").and_then(|(_, n)| n.split_once("]]>")).map_or("", |(n, _)| n);
+            Some((id, name))
         })
+    }
+
+    pub fn user_ids(&self) -> impl Iterator<Item = EntityId> + use<'a> {
+        self.users().map(|(id, _)| id)
     }
 }
 
@@ -143,7 +153,8 @@ mod tests {
     fn lists_the_users_in_a_join() {
         let text = "<msg t='sys'><body action='joinOK' r='7111'><pid id='1'/><vars /><uLs r='7111'><u i='1002' m='0' s='0' p='1'><n><![CDATA[a]]></n><vars></vars></u><u i='1003' m='0' s='0' p='1'><n><![CDATA[b]]></n><vars></vars></u></uLs></body></msg>";
         let Ok(Message::Xml(xml)) = Message::parse(text) else { panic!("not xml") };
-        assert_eq!(xml.user_ids().collect::<Vec<_>>(), [EntityId(1002), EntityId(1003)]);
+        assert_eq!(xml.room(), Some(AreaId(7111)));
+        assert_eq!(xml.users().collect::<Vec<_>>(), [(EntityId(1002), "a"), (EntityId(1003), "b")]);
     }
 
     #[test]
