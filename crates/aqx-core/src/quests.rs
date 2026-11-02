@@ -28,6 +28,7 @@ pub struct Need {
     pub item: ItemId,
     pub name: String,
     pub qty: u32,
+    pub max_stack: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -35,6 +36,7 @@ pub struct Reward {
     pub item: ItemId,
     pub name: String,
     pub qty: u32,
+    pub max_stack: u32,
     pub kind: RewardKind,
     pub chance: f64,
 }
@@ -91,6 +93,14 @@ impl World {
             || me.level < quest.level
             || below_rep;
         Some(if locked { QuestStatus::Locked } else { QuestStatus::Available })
+    }
+
+    pub fn quest_value(&self, slot: i32) -> i32 {
+        self.me.as_ref().map_or(-1, |me| quest_value(me, slot))
+    }
+
+    pub fn achievement(&self, field: &str, bit: u32) -> bool {
+        self.me.as_ref().is_some_and(|me| achievement(me, field, bit))
     }
 }
 
@@ -175,11 +185,12 @@ struct RewardData {
     kind: i64,
 }
 
-fn names(items: &Value, into: &mut HashMap<u32, String>) {
+fn names(items: &Value, into: &mut HashMap<u32, (String, u32)>) {
     let Value::Object(map) = items else { return };
     for item in map.values() {
         if let (Some(id), Some(name)) = (item.get("ItemID").and_then(Value::as_u64), item.get("sName").and_then(Value::as_str)) {
-            into.insert(id as u32, name.to_string());
+            let max_stack = item.get("iStk").and_then(|n| n.as_u64().or_else(|| n.as_str()?.parse().ok())).unwrap_or(1);
+            into.insert(id as u32, (name.to_string(), max_stack.min(u32::MAX as u64) as u32));
         } else {
             names(item, into);
         }
@@ -192,8 +203,9 @@ impl QuestData {
         for items in [&self.turn_in_items, &self.hold_items, &self.reward_items] {
             names(items, &mut known);
         }
-        let name_of = |id: ItemId| known.get(&id.0).cloned().unwrap_or_else(|| format!("item {id}"));
-        let need = |n: NeedData| Need { item: n.item, name: name_of(n.item), qty: n.qty.clamp(0, u32::MAX as i64) as u32 };
+        let name_of = |id: ItemId| known.get(&id.0).map_or_else(|| format!("item {id}"), |(name, _)| name.clone());
+        let stack_of = |id: ItemId| known.get(&id.0).map_or(1, |(_, max_stack)| *max_stack);
+        let need = |n: NeedData| Need { item: n.item, name: name_of(n.item), qty: n.qty.clamp(0, u32::MAX as i64) as u32, max_stack: stack_of(n.item) };
         let rewards = self
             .reward
             .into_iter()
@@ -201,6 +213,7 @@ impl QuestData {
                 item: r.item,
                 name: name_of(r.item),
                 qty: r.qty.clamp(0, u32::MAX as i64) as u32,
+                max_stack: stack_of(r.item),
                 kind: match r.kind {
                     1 => RewardKind::Roll,
                     2 => RewardKind::Choice,
@@ -278,7 +291,7 @@ mod tests {
     fn reads_needs_and_rewards_by_kind() {
         let world = hero(0, '0');
         let twilly = &world.quests[&QuestId(11)];
-        assert_eq!(twilly.turn_in, [Need { item: ItemId(87), name: "Treeant Branch".into(), qty: 1 }]);
+        assert_eq!(twilly.turn_in, [Need { item: ItemId(87), name: "Treeant Branch".into(), qty: 1, max_stack: 1 }]);
         assert_eq!((twilly.rewards[0].name.as_str(), twilly.rewards[0].kind), ("Twilly Twig", RewardKind::Fixed));
         let scales = &world.quests[&QuestId(445)];
         assert_eq!(scales.rewards.iter().map(|r| (r.name.as_str(), r.kind)).collect::<Vec<_>>(), [
