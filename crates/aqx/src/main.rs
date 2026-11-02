@@ -207,6 +207,7 @@ fn spec(account: &AccountConfig, settings: Settings, version: &str, script: Opti
         server: settings.server,
         version: version.into(),
         script,
+        skua: account::skua_host(),
         room: settings.room,
         restart: settings.restart.unwrap_or_default(),
         stall_after: settings.stall_after.unwrap_or(STALL_AFTER),

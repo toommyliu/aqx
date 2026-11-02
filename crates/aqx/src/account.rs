@@ -28,6 +28,14 @@ pub fn expand_home(typed: &Path) -> PathBuf {
     }
 }
 
+pub fn skua_host() -> PathBuf {
+    std::env::var_os("AQX_SKUA").map_or_else(|| PathBuf::from("aqx-skua"), PathBuf::from)
+}
+
+fn is_skua(script: &Path) -> bool {
+    script.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("cs"))
+}
+
 pub fn script_path(typed: &Path) -> Result<PathBuf, String> {
     let path = expand_home(typed);
     let path = std::path::absolute(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -39,6 +47,7 @@ pub struct Spec {
     pub server: Option<String>,
     pub version: String,
     pub script: Option<Script>,
+    pub skua: PathBuf,
     pub room: Option<u32>,
     pub restart: Restart,
     pub stall_after: Duration,
@@ -233,7 +242,12 @@ impl Driver {
         self.cell.board().start_script(shown.clone(), script.args.clone(), Instant::now());
         self.say(format!("running {shown}"));
         let started = Instant::now();
-        match aqx_script::run(session, &script.path, &script.args, self.spec.room) {
+        let result = if is_skua(&script.path) {
+            aqx_remote::run(session, self.skua(&script))
+        } else {
+            aqx_script::run(session, &script.path, &script.args, self.spec.room)
+        };
+        match result {
             Ok(Outcome::Finished) => self.ended(session, Run::Done, "the script finished".into()),
             Ok(Outcome::Stopped(reason)) => {
                 self.ended(session, Run::Done, format!("the script stopped: {}", reason.as_deref().unwrap_or("no reason given")))
@@ -263,6 +277,15 @@ impl Driver {
                 if self.spec.exit_when_done { Next::Quit(Err(failure)) } else { self.go_idle(session) }
             }
         }
+    }
+
+    fn skua(&self, script: &Script) -> std::process::Command {
+        let mut host = std::process::Command::new(&self.spec.skua);
+        host.arg("serve").arg(&script.path);
+        for (key, value) in &script.args {
+            host.arg("--arg").arg(format!("{key}={value}"));
+        }
+        host
     }
 
     fn ended(&mut self, session: &mut Session, run: Run, text: String) -> Next {
@@ -369,6 +392,7 @@ mod tests {
             server: Some("Fake".into()),
             version: "5.31".into(),
             script: path.map(|path| Script { path, args: Vec::new() }),
+            skua: PathBuf::from("aqx-skua"),
             room: None,
             restart: Restart::Never,
             stall_after: Duration::from_secs(300),
@@ -492,6 +516,35 @@ mod tests {
         wait_for(&account.cell, "logged in again", |b| b.ready_since > first);
         assert_eq!(servers.logins.load(Ordering::SeqCst), 2);
         account.cell.send(Command::Logout).unwrap();
+        assert!(account.finish().is_ok());
+        servers.stop();
+    }
+
+    #[test]
+    fn a_cs_script_runs_through_the_skua_host() {
+        use std::os::unix::fs::PermissionsExt;
+        let servers = Servers::start(FARM, |_: &str, _: &mut Wire| {});
+        let dir = std::env::temp_dir().join(format!("aqx-account-tests-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = dir.join("skua-host");
+        std::fs::write(
+            &host,
+            r#"#!/bin/sh
+[ "$1" = serve ] || exit 1
+echo "{\"id\":1,\"call\":\"log\",\"args\":[\"info\",\"hello from $(basename "$2") with $4\"]}"
+read reply
+echo '{"done":{"outcome":"finished"}}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.join("farm.cs");
+        std::fs::write(&path, "public class Farm {}").unwrap();
+        let account = launch(&servers, None, |s| {
+            s.skua = host;
+            s.script = Some(Script { path, args: vec![("batch".into(), "5".into())] });
+        });
+        wait_for(&account.cell, "ran the skua script", |b| b.log.iter().any(|l| l.text == "hello from farm.cs with batch=5"));
         assert!(account.finish().is_ok());
         servers.stop();
     }
