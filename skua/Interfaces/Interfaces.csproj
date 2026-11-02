@@ -1,7 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <Import Project="../vendor/Skua/Directory.Build.props" />
-
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>Skua.Core.Interfaces</AssemblyName>
@@ -25,7 +23,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../vendor/Skua/Skua.Core.Models/Skua.Core.Models.csproj" />
+    <ProjectReference Include="../Models/Models.csproj" />
     <ProjectReference Include="../vendor/Skua/Skua.Core.Utils/Skua.Core.Utils.csproj" />
   </ItemGroup>
 
