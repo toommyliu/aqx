@@ -69,6 +69,8 @@ enum Cmd {
     },
     #[command(about = "Print a --record file one packet per line")]
     View(ViewArgs),
+    #[command(about = "Print the JSON Schema of aqx.toml, for editor completion and checks")]
+    Schema,
 }
 
 #[derive(Subcommand)]
@@ -150,6 +152,10 @@ fn main() -> ExitCode {
         Cmd::Ctl { bot, action } => ctl(&bot, action),
         Cmd::Servers { config } => servers(config.as_deref()),
         Cmd::View(args) => view::view(&args.file, &args.cmd, args.full),
+        Cmd::Schema => {
+            println!("{}", config::schema());
+            Ok(())
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

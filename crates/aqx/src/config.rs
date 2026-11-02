@@ -1,64 +1,113 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer};
 
 use crate::bot::Script;
 
-#[derive(Deserialize)]
+const SERVER: &str = "Game server to join, e.g. \"Twilly\". `aqx servers` lists them.";
+const API: &str = "Host that takes the login. Defaults to https://game.aq.com.";
+const ROOM: &str = "Room number scripts read as `settings.room`.";
+const STALL_AFTER: &str = "How long a running script can go without progress before the bot counts as stalled, like \"90s\", \"5m\" or \"1h\". Defaults to 5m.";
+const ON_STALL: &str = "What happens when the bot stalls. Defaults to warn.";
+const RESTART: &str = "Whether to rerun the script when it throws. Defaults to never.";
+
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(title = "aqx.toml")]
 pub struct Config {
     #[serde(default)]
+    #[schemars(description = "Settings for every bot. A [[bot]] can override each one.")]
     pub defaults: Settings,
     #[serde(default, rename = "bot")]
+    #[schemars(description = "One account to log in.")]
     pub bots: Vec<BotConfig>,
 }
 
-#[derive(Deserialize, Clone, Default, Debug, PartialEq, Eq)]
+#[derive(Deserialize, JsonSchema, Clone, Default, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
+    #[schemars(description = SERVER)]
     pub server: Option<String>,
+    #[schemars(description = API)]
     pub api: Option<String>,
+    #[schemars(description = ROOM)]
     pub room: Option<u32>,
     #[serde(default, deserialize_with = "duration")]
+    #[schemars(description = STALL_AFTER, schema_with = "duration_schema", transform = no_default)]
     pub stall_after: Option<Duration>,
+    #[schemars(description = ON_STALL)]
     pub on_stall: Option<OnStall>,
+    #[schemars(description = RESTART)]
     pub restart: Option<Restart>,
 }
 
-#[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum OnStall {
     #[default]
+    #[schemars(description = "Log a warning and keep going.")]
     Warn,
+    #[schemars(description = "Restart the script.")]
     Restart,
+    #[schemars(description = "Log out, log back in and start the script again.")]
     Relogin,
 }
 
-#[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Deserialize, JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Restart {
     #[default]
+    #[schemars(description = "Leave the bot idle when the script throws.")]
     Never,
+    #[schemars(description = "Rerun the script with backoff when it throws.")]
     OnError,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BotConfig {
+    #[schemars(description = "How aqx ps, aqx ctl, the TUI and the logs refer to the bot. Defaults to user.")]
     name: Option<String>,
+    #[schemars(description = "Account username.")]
     pub user: String,
+    #[schemars(description = "Account password.")]
     pub password: String,
+    #[schemars(description = "Script to run after login, relative to this file. Without one the bot waits for aqx ctl or the TUI.")]
     script: Option<PathBuf>,
     #[serde(default)]
+    #[schemars(description = "Script input read by script.args(). Values are strings, numbers or booleans.", schema_with = "args_schema")]
     args: toml::Table,
+    #[schemars(description = SERVER)]
     server: Option<String>,
+    #[schemars(description = API)]
     api: Option<String>,
+    #[schemars(description = ROOM)]
     room: Option<u32>,
     #[serde(default, deserialize_with = "duration")]
+    #[schemars(description = STALL_AFTER, schema_with = "duration_schema", transform = no_default)]
     stall_after: Option<Duration>,
+    #[schemars(description = ON_STALL)]
     on_stall: Option<OnStall>,
+    #[schemars(description = RESTART)]
     restart: Option<Restart>,
+}
+
+fn duration_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "string", "pattern": r"^\s*\d+\s*(ms|s|m|h)?\s*$" })
+}
+
+fn no_default(schema: &mut Schema) {
+    schema.remove("default");
+}
+
+fn args_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "object", "additionalProperties": { "type": ["string", "number", "boolean"] } })
+}
+
+pub fn schema() -> String {
+    serde_json::to_string_pretty(&schemars::schema_for!(Config)).expect("a schema serializes")
 }
 
 pub fn load(explicit: Option<&Path>) -> Result<(Config, PathBuf), String> {

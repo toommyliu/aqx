@@ -19,6 +19,7 @@ memchr = "2"
 mio = { version = "1", features = ["os-poll", "net"] }
 ratatui = "0.30"
 rquickjs = { version = "0.14", features = ["loader"] }
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 swc_common = "27"
