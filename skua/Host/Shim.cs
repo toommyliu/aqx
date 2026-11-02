@@ -62,6 +62,7 @@ public sealed partial class Shim
         Drops();
         Accounts();
         Skills();
+        Quests();
         Validate();
     }
 
