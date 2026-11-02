@@ -1,13 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-use aqx_protocol::de::{flag, int};
+use aqx_protocol::de::{flag, int, text};
 use aqx_protocol::{AreaId, CharItemId, EntityId, FactionId, ItemId, Json, Message, MonId, MonMapId, Xml, Xt};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 use crate::event::{Event, Place};
 
 const RANK_REP: [u32; 9] = [900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500];
+const GOLD_CAP: i64 = 100_000_000;
 
 #[derive(Clone, Default)]
 pub struct World {
@@ -17,6 +20,7 @@ pub struct World {
     pub temp: Vec<Item>,
     pub factions: Vec<Faction>,
     pub drops: Vec<Item>,
+    pub rev: u64,
 }
 
 #[derive(Clone)]
@@ -114,6 +118,7 @@ pub struct Aura {
     pub name: String,
     pub stacks: u32,
     pub until: Option<Instant>,
+    pub persist: bool,
 }
 
 #[derive(Clone)]
@@ -126,6 +131,8 @@ pub struct Skill {
 
 pub fn reduce(world: &mut World, msg: &Message, now: Instant) -> Vec<Event> {
     let mut events = Vec::new();
+    world.rev += 1;
+    world.expire_auras(now);
     match msg {
         Message::Xml(xml) => world.on_xml(xml),
         Message::Xt(xt) => world.on_xt(xt, &mut events),
@@ -156,20 +163,33 @@ struct Patch {
     pad: Option<String>,
 }
 
+impl Patch {
+    fn place(&self, vitals: &mut Vitals, cell: &mut String, pad: &mut String) {
+        vitals.apply(self);
+        if let Some(c) = &self.cell {
+            cell.clone_from(c);
+        }
+        if let Some(p) = &self.pad {
+            pad.clone_from(p);
+        }
+    }
+}
+
+impl Monster {
+    fn apply(&mut self, patch: &Patch) {
+        self.vitals.apply(patch);
+        if self.vitals.state == State::Dead {
+            self.auras.clear();
+        }
+    }
+}
+
 impl Vitals {
     fn apply(&mut self, p: &Patch) {
-        let clamp = |v: i64| v.clamp(0, u32::MAX as i64) as u32;
-        if let Some(v) = p.hp {
-            self.hp = clamp(v);
-        }
-        if let Some(v) = p.max_hp {
-            self.max_hp = clamp(v);
-        }
-        if let Some(v) = p.mp {
-            self.mp = clamp(v);
-        }
-        if let Some(v) = p.max_mp {
-            self.max_mp = clamp(v);
+        for (value, field) in [(p.hp, &mut self.hp), (p.max_hp, &mut self.max_hp), (p.mp, &mut self.mp), (p.max_mp, &mut self.max_mp)] {
+            if let Some(v) = value {
+                *field = qty(v);
+            }
         }
         if let Some(s) = p.state {
             self.state = match s {
@@ -187,7 +207,7 @@ struct ItemData {
     id: Option<ItemId>,
     #[serde(rename = "CharItemID")]
     char_item: Option<CharItemId>,
-    #[serde(rename = "sName", default)]
+    #[serde(rename = "sName", default, deserialize_with = "text")]
     name: String,
     #[serde(rename = "iQty", default, deserialize_with = "int")]
     qty: i64,
@@ -195,9 +215,9 @@ struct ItemData {
     qty_now: Option<i64>,
     #[serde(rename = "iStk", default, deserialize_with = "int")]
     max_stack: i64,
-    #[serde(rename = "sType", default)]
+    #[serde(rename = "sType", default, deserialize_with = "text")]
     kind: String,
-    #[serde(rename = "sES", default)]
+    #[serde(rename = "sES", default, deserialize_with = "text")]
     slot: String,
     #[serde(rename = "bEquip", default, deserialize_with = "flag")]
     equipped: bool,
@@ -218,13 +238,12 @@ impl ItemData {
     }
 
     fn into_item(self, id: ItemId) -> Item {
-        let qty = self.qty_now.unwrap_or(self.qty);
         Item {
             id,
             char_item: self.char_item,
             name: self.name,
-            qty: qty.clamp(0, u32::MAX as i64) as u32,
-            max_stack: self.max_stack.clamp(0, u32::MAX as i64) as u32,
+            qty: qty(self.qty_now.unwrap_or(self.qty)),
+            max_stack: qty(self.max_stack),
             kind: self.kind,
             slot: self.slot,
             equipped: self.equipped,
@@ -249,6 +268,8 @@ struct AuraAdd {
     nam: String,
     dur: Option<f64>,
     stk: Option<u32>,
+    #[serde(default, deserialize_with = "flag")]
+    persist: bool,
 }
 
 #[derive(Deserialize)]
@@ -268,6 +289,26 @@ struct Tick {
 
 fn qty(n: i64) -> u32 {
     n.clamp(0, u32::MAX as i64) as u32
+}
+
+fn each<T: DeserializeOwned>(values: Vec<Value>, what: &str, events: &mut Vec<Event>) -> Vec<T> {
+    let mut skipped = 0;
+    let mut first = None;
+    let parsed = values
+        .into_iter()
+        .filter_map(|v| {
+            serde_json::from_value(v)
+                .map_err(|e| {
+                    skipped += 1;
+                    first.get_or_insert(e.to_string());
+                })
+                .ok()
+        })
+        .collect();
+    if let Some(error) = first {
+        events.push(Event::Unreadable { what: format!("skipped {skipped} {what} entries, first: {error}") });
+    }
+    parsed
 }
 
 impl World {
@@ -314,7 +355,7 @@ impl World {
             "server" => {
                 let text = xt.arg(0).unwrap_or_default();
                 match &self.area {
-                    Some(area) if text.contains("You joined") => {
+                    Some(area) if text.starts_with("You joined \"") => {
                         events.push(Event::Joined { area: area.name.clone(), players: area.players.len() + 1 })
                     }
                     _ => events.push(Event::ServerText { text: text.into() }),
@@ -324,7 +365,8 @@ impl World {
             "notify" | "logoutWarning" => events.push(Event::ServerText { text: xt.arg(0).unwrap_or_default().into() }),
             "multiLoginWarning" => events.push(Event::LoggedInElsewhere),
             "chatm" => {
-                let (channel, text) = xt.arg(0).unwrap_or_default().split_once('~').unwrap_or(("zone", ""));
+                let payload = xt.arg(0).unwrap_or_default();
+                let (channel, text) = payload.split_once('~').unwrap_or(("zone", payload));
                 let sender = xt.arg(1).unwrap_or_default();
                 events.push(Event::Chat { channel: channel.into(), sender: sender.into(), text: text.into() });
             }
@@ -356,13 +398,8 @@ impl World {
 
     fn on_json(&mut self, json: &Json, now: Instant, events: &mut Vec<Event>) -> serde_json::Result<()> {
         match json.cmd {
-            "moveToArea" => self.move_to_area(json.decode()?),
+            "moveToArea" => self.move_to_area(json.decode()?, events),
             "initUserData" => {
-                #[derive(Deserialize)]
-                struct Init {
-                    uid: EntityId,
-                    data: UserData,
-                }
                 let init: Init = json.decode()?;
                 self.user_data(init.uid, init.data);
             }
@@ -370,11 +407,6 @@ impl World {
                 #[derive(Deserialize)]
                 struct Inits {
                     a: Vec<Init>,
-                }
-                #[derive(Deserialize)]
-                struct Init {
-                    uid: EntityId,
-                    data: UserData,
                 }
                 for init in json.decode::<Inits>()?.a {
                     self.user_data(init.uid, init.data);
@@ -397,7 +429,7 @@ impl World {
                 }
                 let update: Update = json.decode()?;
                 if let Some(m) = self.monster(update.id) {
-                    m.vitals.apply(&update.o);
+                    m.apply(&update.o);
                 }
             }
             "ct" | "cb" => {
@@ -407,7 +439,7 @@ impl World {
                 }
                 for (id, patch) in &tick.m {
                     if let Some(m) = id.parse().ok().and_then(|id| self.monster(MonMapId(id))) {
-                        m.vitals.apply(patch);
+                        m.apply(patch);
                     }
                 }
                 for change in tick.a {
@@ -415,26 +447,37 @@ impl World {
                 }
             }
             "aura+" | "aura++" | "aura-" | "aura--" => self.aura(json.decode()?, now),
+            "clearAuras" => {
+                if let Some(me) = &mut self.me {
+                    me.auras.retain(|a| a.persist);
+                }
+            }
             "loadInventoryBig" => {
                 #[derive(Deserialize)]
                 struct Inventory {
                     #[serde(default)]
-                    items: Vec<ItemData>,
+                    items: Vec<Value>,
                     #[serde(default)]
-                    factions: Vec<FactionData>,
+                    factions: Vec<Value>,
                 }
                 #[derive(Deserialize)]
                 struct FactionData {
                     #[serde(rename = "FactionID")]
                     id: FactionId,
-                    #[serde(rename = "sName")]
+                    #[serde(rename = "sName", default, deserialize_with = "text")]
                     name: String,
-                    #[serde(rename = "iRep", deserialize_with = "int")]
+                    #[serde(rename = "iRep", default, deserialize_with = "int")]
                     rep: i64,
                 }
                 let inventory: Inventory = json.decode()?;
-                self.inventory = inventory.items.into_iter().filter_map(|d| d.id.map(|id| d.into_item(id))).collect();
-                self.factions = inventory.factions.into_iter().map(|f| Faction { id: f.id, name: f.name, rep: qty(f.rep) }).collect();
+                self.inventory = each::<ItemData>(inventory.items, "inventory item", events)
+                    .into_iter()
+                    .filter_map(|d| d.id.map(|id| d.into_item(id)))
+                    .collect();
+                self.factions = each::<FactionData>(inventory.factions, "faction", events)
+                    .into_iter()
+                    .map(|f| Faction { id: f.id, name: f.name, rep: qty(f.rep) })
+                    .collect();
                 events.push(Event::InventoryLoaded { items: self.inventory.len() });
             }
             "addItems" => {
@@ -547,6 +590,42 @@ impl World {
                     events.push(Event::Killed { monster });
                 }
             }
+            "sellItem" => {
+                #[derive(Deserialize)]
+                struct Sold {
+                    #[serde(rename = "CharItemID")]
+                    char_item: CharItemId,
+                    #[serde(rename = "iQty", default, deserialize_with = "int")]
+                    qty: i64,
+                    #[serde(rename = "intAmount", default, deserialize_with = "int")]
+                    amount: i64,
+                    #[serde(rename = "bCoins", default, deserialize_with = "flag")]
+                    ac: bool,
+                }
+                let sold: Sold = json.decode()?;
+                if let Some(me) = self.me.as_mut().filter(|me| !sold.ac && me.gold < GOLD_CAP) {
+                    me.gold += sold.amount;
+                }
+                if let Some(at) = self.inventory.iter().position(|i| i.char_item == Some(sold.char_item)) {
+                    let item = &mut self.inventory[at];
+                    item.qty = item.qty.saturating_sub(qty(sold.qty));
+                    events.push(Event::ItemChanged { item: item.name.clone(), qty: item.qty, place: Place::Inventory });
+                    if item.qty == 0 {
+                        self.inventory.remove(at);
+                    }
+                }
+            }
+            "balance" => {
+                #[derive(Deserialize)]
+                struct Balance {
+                    #[serde(rename = "intGold", deserialize_with = "int")]
+                    gold: i64,
+                }
+                let balance: Balance = json.decode()?;
+                if let Some(me) = &mut self.me {
+                    me.gold = balance.gold;
+                }
+            }
             "sAct" => {
                 #[derive(Deserialize)]
                 struct Actions {
@@ -628,11 +707,11 @@ impl World {
         Ok(())
     }
 
-    fn move_to_area(&mut self, m: MoveToArea) {
-        let names: HashMap<MonId, String> = m.defs.into_iter().map(|d| (d.id, d.name)).collect();
-        let mut states: HashMap<MonMapId, Patch> = m.states.into_iter().map(|s| (s.map_id, s.patch)).collect();
-        let monsters = m
-            .spots
+    fn move_to_area(&mut self, m: MoveToArea, events: &mut Vec<Event>) {
+        let names: HashMap<MonId, String> = each::<MonDef>(m.defs, "monster type", events).into_iter().map(|d| (d.id, d.name)).collect();
+        let mut states: HashMap<MonMapId, Patch> =
+            each::<MonState>(m.states, "monster state", events).into_iter().map(|s| (s.map_id, s.patch)).collect();
+        let monsters = each::<MonSpot>(m.spots, "monster", events)
             .into_iter()
             .map(|spot| {
                 let mut vitals = Vitals::default();
@@ -654,7 +733,7 @@ impl World {
             _ => Vec::new(),
         };
         self.area = Some(Area { id: m.id, name: m.name, map: m.map, monsters, players });
-        for avatar in m.avatars {
+        for avatar in each::<Avatar>(m.avatars, "player", events) {
             let me = self.me.as_mut().filter(|me| me.eid == avatar.eid);
             if let Some(me) = me {
                 me.apply(&avatar.patch);
@@ -702,6 +781,17 @@ impl World {
         }
     }
 
+    fn expire_auras(&mut self, now: Instant) {
+        let live = |a: &Aura| a.until.is_none_or(|until| until > now);
+        if let Some(me) = &mut self.me {
+            me.auras.retain(live);
+        }
+        if let Some(area) = &mut self.area {
+            area.monsters.iter_mut().for_each(|m| m.auras.retain(live));
+            area.players.iter_mut().for_each(|p| p.auras.retain(live));
+        }
+    }
+
     fn monster(&mut self, id: MonMapId) -> Option<&mut Monster> {
         self.area.as_mut()?.monsters.iter_mut().find(|m| m.map_id == id)
     }
@@ -722,14 +812,15 @@ impl World {
         match change.cmd.as_str() {
             "aura+" | "aura++" => {
                 for add in change.auras {
-                    let until = add.dur.filter(|d| *d > 0.0).map(|d| now + Duration::from_secs_f64(d));
-                    let stacks = add.stk.unwrap_or(1);
-                    match auras.iter_mut().find(|a| a.name == add.nam) {
-                        Some(aura) => {
-                            aura.stacks = stacks;
-                            aura.until = until;
-                        }
-                        None => auras.push(Aura { name: add.nam, stacks, until }),
+                    let until = add
+                        .dur
+                        .filter(|d| *d > 0.0)
+                        .and_then(|d| Duration::try_from_secs_f64(d).ok())
+                        .and_then(|d| now.checked_add(d));
+                    let aura = Aura { name: add.nam, stacks: add.stk.unwrap_or(1), until, persist: add.persist };
+                    match auras.iter_mut().find(|a| a.name == aura.name) {
+                        Some(existing) => *existing = aura,
+                        None => auras.push(aura),
                     }
                 }
             }
@@ -761,13 +852,7 @@ impl Me {
     }
 
     fn apply(&mut self, patch: &Patch) {
-        self.vitals.apply(patch);
-        if let Some(cell) = &patch.cell {
-            self.cell.clone_from(cell);
-        }
-        if let Some(pad) = &patch.pad {
-            self.pad.clone_from(pad);
-        }
+        patch.place(&mut self.vitals, &mut self.cell, &mut self.pad);
     }
 }
 
@@ -785,14 +870,14 @@ impl Player {
     }
 
     fn apply(&mut self, patch: &Patch) {
-        self.vitals.apply(patch);
-        if let Some(cell) = &patch.cell {
-            self.cell.clone_from(cell);
-        }
-        if let Some(pad) = &patch.pad {
-            self.pad.clone_from(pad);
-        }
+        patch.place(&mut self.vitals, &mut self.cell, &mut self.pad);
     }
+}
+
+#[derive(Deserialize)]
+struct Init {
+    uid: EntityId,
+    data: UserData,
 }
 
 #[derive(Deserialize)]
@@ -816,20 +901,20 @@ struct MoveToArea {
     #[serde(rename = "strMapName")]
     map: String,
     #[serde(rename = "mondef", default)]
-    defs: Vec<MonDef>,
+    defs: Vec<Value>,
     #[serde(rename = "monmap", default)]
-    spots: Vec<MonSpot>,
+    spots: Vec<Value>,
     #[serde(rename = "monBranch", default)]
-    states: Vec<MonState>,
+    states: Vec<Value>,
     #[serde(rename = "uoBranch", default)]
-    avatars: Vec<Avatar>,
+    avatars: Vec<Value>,
 }
 
 #[derive(Deserialize)]
 struct MonDef {
     #[serde(rename = "MonID")]
     id: MonId,
-    #[serde(rename = "strMonName")]
+    #[serde(rename = "strMonName", default, deserialize_with = "text")]
     name: String,
 }
 
@@ -839,7 +924,7 @@ struct MonSpot {
     map_id: MonMapId,
     #[serde(rename = "MonID")]
     mon_id: MonId,
-    #[serde(rename = "strFrame")]
+    #[serde(rename = "strFrame", default, deserialize_with = "text")]
     cell: String,
 }
 
@@ -855,7 +940,7 @@ struct MonState {
 struct Avatar {
     #[serde(rename = "entID")]
     eid: EntityId,
-    #[serde(rename = "uoName", default)]
+    #[serde(rename = "uoName", default, deserialize_with = "text")]
     name: String,
     #[serde(rename = "intLevel", default, deserialize_with = "int")]
     level: i64,
@@ -1020,6 +1105,74 @@ mod tests {
         let mut world = joined();
         assert_eq!(feed(&mut world, "%xt%multiLoginWarning%-1%"), [Event::LoggedInElsewhere]);
         assert_eq!(feed(&mut world, "%xt%notify%-1%Server restarting soon%"), [Event::ServerText { text: "Server restarting soon".into() }]);
+    }
+
+    #[test]
+    fn auras_clear_expire_and_die_with_their_monster() {
+        let mut world = joined();
+        let now = Instant::now();
+        reduce(
+            &mut world,
+            &Message::parse(&json(
+                r#"{"cmd":"ct","a":[{"cmd":"aura+","tInf":"p:1001","auras":[{"nam":"Haste","dur":5},{"nam":"Pact","persist":true},{"nam":"Forever","dur":1e300}]},
+                                    {"cmd":"aura+","tInf":"m:1","auras":[{"nam":"Burn","dur":30}]}]}"#,
+            ))
+            .unwrap(),
+            now,
+        );
+        let names = |w: &World| w.me.as_ref().unwrap().auras.iter().map(|a| a.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&world), ["Haste", "Pact", "Forever"]);
+
+        reduce(&mut world, &Message::parse("%xt%hi%-1%").unwrap(), now + Duration::from_secs(6));
+        assert_eq!(names(&world), ["Pact", "Forever"]);
+        feed(&mut world, &json(r#"{"cmd":"clearAuras"}"#));
+        assert_eq!(names(&world), ["Pact"]);
+
+        feed(&mut world, &json(r#"{"cmd":"ct","m":{"1":{"intHP":0,"intState":0}}}"#));
+        assert!(world.area.as_ref().unwrap().monsters[0].auras.is_empty());
+    }
+
+    #[test]
+    fn selling_pays_gold_and_balance_sets_it() {
+        let mut world = joined();
+        feed(
+            &mut world,
+            &json(r#"{"cmd":"loadInventoryBig","items":[{"ItemID":5,"CharItemID":77,"sName":"Sword","iQty":2,"iStk":5}],"factions":[]}"#),
+        );
+        feed(&mut world, &json(r#"{"cmd":"balance","intGold":1000}"#));
+        assert_eq!(
+            feed(&mut world, &json(r#"{"cmd":"sellItem","CharItemID":77,"iQty":1,"iQtyNow":1,"intAmount":250,"bCoins":false}"#)),
+            [Event::ItemChanged { item: "Sword".into(), qty: 1, place: Place::Inventory }]
+        );
+        assert_eq!((world.me.as_ref().unwrap().gold, world.inventory[0].qty), (1250, 1));
+        feed(&mut world, &json(r#"{"cmd":"sellItem","CharItemID":77,"iQty":1,"iQtyNow":0,"intAmount":5,"bCoins":true}"#));
+        assert_eq!(world.me.as_ref().unwrap().gold, 1250);
+        assert!(world.inventory.is_empty());
+    }
+
+    #[test]
+    fn one_bad_item_does_not_lose_the_inventory() {
+        let mut world = joined();
+        let events = feed(
+            &mut world,
+            &json(r#"{"cmd":"loadInventoryBig","items":[{"ItemID":5,"sName":null,"iQty":1},{"ItemID":"oops"},{"ItemID":6,"sName":"Bow","iQty":1}],"factions":[]}"#),
+        );
+        assert_eq!(world.inventory.iter().map(|i| i.id).collect::<Vec<_>>(), [ItemId(5), ItemId(6)]);
+        assert!(events.contains(&Event::InventoryLoaded { items: 2 }));
+        assert!(events.iter().any(|e| matches!(e, Event::Unreadable { what } if what.starts_with("skipped 1 inventory item"))));
+    }
+
+    #[test]
+    fn only_the_join_notice_counts_as_joining() {
+        let mut world = joined();
+        assert_eq!(
+            feed(&mut world, "%xt%server%-1%You joined the party.%"),
+            [Event::ServerText { text: "You joined the party.".into() }]
+        );
+        assert_eq!(
+            feed(&mut world, "%xt%chatm%-1%hello%ally%"),
+            [Event::Chat { channel: "zone".into(), sender: "ally".into(), text: "hello".into() }]
+        );
     }
 
     #[test]

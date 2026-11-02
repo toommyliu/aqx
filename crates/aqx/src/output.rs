@@ -1,6 +1,7 @@
 use std::fmt::Display;
 use std::io::Write;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
@@ -20,6 +21,7 @@ pub enum Update {
 
 static START: OnceLock<Instant> = OnceLock::new();
 static MODE: OnceLock<Mode> = OnceLock::new();
+static DROPPED: AtomicUsize = AtomicUsize::new(0);
 
 pub fn init(mode: Mode) {
     START.get_or_init(Instant::now);
@@ -30,11 +32,19 @@ pub fn now() -> u64 {
     START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
+pub fn dropped() -> usize {
+    DROPPED.load(Ordering::Relaxed)
+}
+
+fn send(tx: &SyncSender<Update>, update: Update) {
+    if tx.try_send(update).is_err() {
+        DROPPED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 pub fn say(source: &'static str, text: impl Display) {
     match MODE.get() {
-        Some(Mode::Tui(tx)) => {
-            let _ = tx.try_send(Update::Say { t: now(), source, text: text.to_string() });
-        }
+        Some(Mode::Tui(tx)) => send(tx, Update::Say { t: now(), source, text: text.to_string() }),
         Some(Mode::Json) => json_line(json!({ "event": "log", "source": source, "text": text.to_string() })),
         _ => plain_line(source, &text),
     }
@@ -42,9 +52,7 @@ pub fn say(source: &'static str, text: impl Display) {
 
 pub fn event(event: &Event) {
     match MODE.get() {
-        Some(Mode::Tui(tx)) => {
-            let _ = tx.try_send(Update::Event { t: now(), event: event.clone() });
-        }
+        Some(Mode::Tui(tx)) => send(tx, Update::Event { t: now(), event: event.clone() }),
         Some(Mode::Json) => json_line(serde_json::to_value(event).unwrap_or(Value::Null)),
         _ => {
             if let Some((source, text)) = describe(event) {

@@ -187,27 +187,38 @@ fn watch_until<T>(
     deadline: Option<Instant>,
     mut done: impl FnMut(&Session) -> Option<T>,
 ) -> Result<T, Halt> {
-    loop {
-        let tick = match watch {
-            Watch::Status => STATUS_EVERY,
-            Watch::Snapshots(slot) => {
-                if let Ok(mut view) = slot.lock() {
-                    *view = Some(tui::View { phase: session.phase.clone(), server: server.into(), world: session.world.clone() });
-                }
-                SNAPSHOT_EVERY
+    let mut published = None;
+    let mut publish = |session: &Session| {
+        if let Watch::Snapshots(slot) = watch {
+            let version = (session.world.rev, session.phase.clone());
+            if published.as_ref() != Some(&version)
+                && let Ok(mut view) = slot.lock()
+            {
+                *view = Some(Arc::new(tui::View { phase: session.phase.clone(), server: server.into(), world: session.world.clone() }));
+                published = Some(version);
             }
-        };
+        }
+    };
+    let tick = match watch {
+        Watch::Status => STATUS_EVERY,
+        Watch::Snapshots(_) => SNAPSHOT_EVERY,
+    };
+    loop {
+        publish(session);
         let wake = Instant::now() + tick;
-        match session.pump_until(Some(deadline.map_or(wake, |d| d.min(wake))), &mut done) {
-            Err(Halt::Timeout) if deadline.is_some_and(|d| Instant::now() >= d) => return Err(Halt::Timeout),
-            Err(Halt::Timeout) => {
+        let outcome = session.pump_until(Some(deadline.map_or(wake, |d| d.min(wake))), &mut done);
+        match outcome {
+            Err(Halt::Timeout) if deadline.is_none_or(|d| Instant::now() < d) => {
                 if let Watch::Status = watch
                     && session.phase == Phase::Ready
                 {
                     output::status(&session.world);
                 }
             }
-            other => return other,
+            other => {
+                publish(session);
+                return other;
+            }
         }
     }
 }

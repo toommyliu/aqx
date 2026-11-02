@@ -26,7 +26,7 @@ pub struct View {
     pub world: World,
 }
 
-pub type Slot = Arc<Mutex<Option<View>>>;
+pub type Slot = Arc<Mutex<Option<Arc<View>>>>;
 
 struct LogLine {
     t: u64,
@@ -102,7 +102,7 @@ impl App {
     }
 
     fn sample(&mut self, now: u64, view: Option<&View>) {
-        if let Some(me) = view.and_then(|v| v.world.me.as_ref())
+        if let Some(me) = view.filter(|v| v.phase == Phase::Ready).and_then(|v| v.world.me.as_ref())
             && self.gold.back().is_none_or(|(t, _)| now - t >= 5000)
         {
             self.gold.push_back((now, me.gold));
@@ -126,11 +126,14 @@ pub fn run(rx: Receiver<Update>, slot: Slot, stop: StopHandle, bot: JoinHandle<R
         while let Ok(update) = rx.try_recv() {
             app.push(update);
         }
-        let view = slot.lock().map(|v| v.clone()).unwrap_or_default();
+        let view = slot.lock().ok().and_then(|v| v.clone());
         let now = output::now();
-        app.sample(now, view.as_ref());
-        let _ = terminal.draw(|f| draw(f, &app, view.as_ref(), now));
+        app.sample(now, view.as_deref());
+        let _ = terminal.draw(|f| draw(f, &app, view.as_deref(), now));
         if bot.is_finished() {
+            while let Ok(update) = rx.try_recv() {
+                app.push(update);
+            }
             break bot.join().unwrap_or_else(|_| Err("the bot thread crashed".into()));
         }
         if !event::poll(Duration::from_millis(250)).unwrap_or(false) {
@@ -317,7 +320,10 @@ fn draw_log(f: &mut Frame, area: Rect, app: &App) {
             ])
         })
         .collect();
-    let title = format!(" Log · {} ", app.filter.label());
+    let title = match output::dropped() {
+        0 => format!(" Log · {} ", app.filter.label()),
+        n => format!(" Log · {} · {n} lines dropped ", app.filter.label()),
+    };
     f.render_widget(Paragraph::new(lines).block(panel(title)), area);
 }
 
@@ -428,6 +434,17 @@ mod tests {
         app.scroll = 500;
         let shown = screen(&app, None, 100);
         assert!(shown.contains("line 0") && shown.contains("line 4"));
+    }
+
+    #[test]
+    fn gold_is_sampled_only_once_the_session_is_ready() {
+        let mut world = World::default();
+        reduce(&mut world, &Message::parse("%xt%loginResponse%-1%true%1001%hero%Welcome!%").unwrap(), Instant::now());
+        let mut app = App::default();
+        app.sample(1_000, Some(&View { phase: Phase::Loading, server: "Twilly".into(), world: world.clone() }));
+        assert!(app.gold.is_empty());
+        app.sample(2_000, Some(&View { phase: Phase::Ready, server: "Twilly".into(), world }));
+        assert_eq!(app.gold.len(), 1);
     }
 
     #[test]

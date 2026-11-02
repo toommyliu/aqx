@@ -238,6 +238,9 @@ impl Session {
     fn react(&mut self, event: &Event) {
         match event {
             Event::LoggedIn { .. } if self.phase == Phase::LoggingIn => {
+                if let Some(me) = self.world.me.as_mut().filter(|me| me.user.is_empty()) {
+                    me.user.clone_from(&self.login.0);
+                }
                 self.send(Out::FirstJoin);
                 self.send(Out::ClearIgnoreList);
                 self.phase = Phase::Loading;
