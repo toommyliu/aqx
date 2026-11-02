@@ -10,26 +10,30 @@ public class BotProxy : DispatchProxy
     static readonly ConcurrentDictionary<MethodInfo, Func<object, object?[], object?>> Defaults = new();
 
     string path = "Bot";
+    Shim shim = null!;
     readonly ConcurrentDictionary<string, object> children = new();
 
-    public static IScriptInterface Create() => (IScriptInterface)Make(typeof(IScriptInterface), "Bot");
+    public static IScriptInterface Create(Shim shim) => (IScriptInterface)Make(typeof(IScriptInterface), "Bot", shim);
 
-    static object Make(Type type, string path)
+    static object Make(Type type, string path, Shim shim)
     {
         object proxy = Create(type, typeof(BotProxy));
         ((BotProxy)proxy).path = path;
+        ((BotProxy)proxy).shim = shim;
         return proxy;
     }
 
     protected override object? Invoke(MethodInfo? method, object?[]? args)
     {
         MethodInfo called = method!;
+        if (shim.TryGet(called, out Handler? handler))
+            return handler(args ?? []);
         if (!called.IsAbstract)
             return Defaults.GetOrAdd(called, DefaultBody)(this, args ?? []);
 
         string member = Describe(called);
         if (called.IsSpecialName && called.Name.StartsWith("get_") && called.GetParameters().Length == 0 && IsSkuaInterface(called.ReturnType))
-            return children.GetOrAdd(called.Name, _ => Make(called.ReturnType, $"{path}.{member}"));
+            return children.GetOrAdd(called.Name, _ => Make(called.ReturnType, $"{path}.{member}", shim));
         throw new NotImplementedException($"{path}.{member} is not implemented");
     }
 

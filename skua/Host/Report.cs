@@ -23,10 +23,12 @@ public static class Report
         return failed.Count == 0 ? 0 : 1;
     }
 
-    public static void Failure(ScriptCompiler compiler, Failed failed)
+    public static string Describe(ScriptCompiler compiler, Failed failed)
     {
-        Console.Error.WriteLine(failed.Cause == failed.Path ? $"{compiler.Relative(failed.Path)} fails" : $"{compiler.Relative(failed.Path)} includes {compiler.Relative(failed.Cause)}, which fails");
-        Errors(failed);
+        string what = failed.Cause == failed.Path
+            ? $"{compiler.Relative(failed.Path)} doesn't compile"
+            : $"{compiler.Relative(failed.Path)} includes {compiler.Relative(failed.Cause)}, which doesn't compile";
+        return string.Join("\n", failed.Errors.Prepend(what));
     }
 
     static void Errors(Failed failed)

@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Runtime.Loader;
 using Skua.Core.Interfaces;
 
@@ -6,31 +7,30 @@ namespace Aqx.Skua;
 
 public static class Runner
 {
-    public static int Run(ScriptCompiler compiler, string script)
+    public static void Start(Built built, Shim shim)
     {
-        Outcome outcome = compiler.Build([script])[0];
-        if (outcome is Failed failed)
-        {
-            Report.Failure(compiler, failed);
-            return 1;
-        }
-
-        Built built = (Built)outcome;
         ScriptContext context = new([.. built.Closure, built]);
         Type entry = context.LoadFromAssemblyName(new AssemblyName(built.Name)).ExportedTypes.First();
-        IScriptInterface bot = BotProxy.Create();
+        MethodInfo main = entry.GetMethod("ScriptMain") ?? throw new InvalidOperationException($"{entry.Name} has no ScriptMain");
+        IScriptInterface bot = BotProxy.Create(shim);
         typeof(IScriptInterface).GetProperty(nameof(IScriptInterface.Instance))!.SetValue(null, bot);
-
-        try
+        Unwrapped(() =>
         {
             object instance = Activator.CreateInstance(entry)!;
-            entry.GetMethod("ScriptMain")!.Invoke(instance, [bot]);
-            return 0;
+            shim.Config.Attach(instance);
+            main.Invoke(instance, [bot]);
+        });
+    }
+
+    static void Unwrapped(Action action)
+    {
+        try
+        {
+            action();
         }
         catch (TargetInvocationException e) when (e.InnerException is not null)
         {
-            Console.Error.WriteLine(e.InnerException);
-            return 1;
+            ExceptionDispatchInfo.Capture(e.InnerException).Throw();
         }
     }
 
