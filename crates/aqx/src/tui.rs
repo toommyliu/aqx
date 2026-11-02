@@ -26,7 +26,7 @@ const CARD_HEIGHT: u16 = 8;
 
 type Field = Vec<Span<'static>>;
 
-const BOT_KEYS: [(&str, &str); 9] = [
+const BOT_KEYS: [(&str, &str); 11] = [
     ("", "Bots"),
     ("↑ ↓", "pick"),
     ("tab", "next"),
@@ -36,6 +36,8 @@ const BOT_KEYS: [(&str, &str); 9] = [
     ("i", "log in"),
     ("x", "log out"),
     ("q", "detach"),
+    ("Q", "log out all and end"),
+    ("ctrl+c", "end or detach"),
 ];
 
 const SCRIPT_KEYS: [(&str, &str); 12] = [
@@ -129,6 +131,7 @@ struct App {
     grid_top: Cell<usize>,
     grid_cols: Cell<usize>,
     prompt: Option<Prompt>,
+    ending: bool,
     recent: Vec<String>,
     note: Option<(String, Instant)>,
     log: Vec<LogLine>,
@@ -227,8 +230,12 @@ impl App {
     }
 
     fn act(&mut self, fleet: &Fleet, command: Command, done: &str) {
+        self.act_on(self.targets(), fleet, command, done);
+    }
+
+    fn act_on(&mut self, bots: Vec<usize>, fleet: &Fleet, command: Command, done: &str) {
         let (mut sent, mut same, mut said) = (Vec::new(), Vec::new(), Vec::new());
-        for i in self.targets() {
+        for i in bots {
             let Some(cell) = fleet.cells.get(i) else { continue };
             match socket::ctl(&fleet.socket, &cell.name, &command) {
                 Ok(true) => sent.push(cell.name.as_str()),
@@ -247,10 +254,26 @@ impl App {
 
     fn handle(&mut self, key: KeyEvent, fleet: &Fleet, shown: &[Shown]) -> bool {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return true;
+            if self.ending {
+                return true;
+            }
+            self.ending = true;
+            return false;
         }
         if self.keys {
             self.keys = false;
+            return false;
+        }
+        if self.ending {
+            match key.code {
+                KeyCode::Enter => {
+                    self.ending = false;
+                    self.act_on((0..fleet.cells.len()).collect(), fleet, Command::Logout, "logging out; the session ends once every bot is offline");
+                }
+                KeyCode::Char('q') => return true,
+                KeyCode::Esc => self.ending = false,
+                _ => {}
+            }
             return false;
         }
         if let Some(prompt) = &mut self.prompt {
@@ -291,6 +314,7 @@ impl App {
         let line = bots < 2 || key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Char('q') => return true,
+            KeyCode::Char('Q') => self.ending = true,
             KeyCode::Char('?') => self.keys = true,
             KeyCode::Char('g') => self.grid = !self.grid,
             KeyCode::Char('d' | 'l') | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End if self.grid => {}
@@ -386,6 +410,9 @@ fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
     draw_footer(f, footer, app, shown);
     if app.keys {
         draw_keys(f, body);
+    }
+    if app.ending {
+        draw_ending(f, body, shown.len());
     }
 }
 
@@ -988,11 +1015,29 @@ fn draw_keys(f: &mut Frame, area: Rect) {
         .collect();
     lines.push(Line::default());
     lines.push(Line::raw("Keys act on the marked bots, or the selected one.").dark_gray());
-    let width = 61.min(area.width);
-    let height = (lines.len() as u16 + 2).min(area.height);
-    let rect = Rect { x: area.x + (area.width - width) / 2, y: area.y + area.height.saturating_sub(height) / 2, width, height };
+    let rect = centered(area, 61, lines.len() as u16 + 2);
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(lines).block(Block::bordered().title(" keys ").padding(Padding::horizontal(1))), rect);
+}
+
+fn draw_ending(f: &mut Frame, area: Rect, bots: usize) {
+    f.buffer_mut().set_style(area, Style::new().fg(Color::DarkGray));
+    let (who, them) = if bots == 1 { ("the bot".to_string(), "it") } else { (format!("all {bots} bots"), "them") };
+    let lines = vec![
+        Line::raw(format!("Log out {who} and end the session?")).bold(),
+        Line::raw(format!("Detaching leaves {them} running.")).dark_gray(),
+        Line::default(),
+        Line::from(hints(&[("enter", "end it"), ("q", "detach"), ("esc", "stay")])),
+    ];
+    let widest = lines.iter().map(Line::width).max().unwrap_or(0) as u16;
+    let rect = centered(area, widest + 4, lines.len() as u16 + 2);
+    f.render_widget(Clear, rect);
+    f.render_widget(Paragraph::new(lines).block(Block::bordered().title(" end session ").padding(Padding::horizontal(1))), rect);
+}
+
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let (width, height) = (width.min(area.width), height.min(area.height));
+    Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - height) / 2, width, height }
 }
 
 fn grouped(n: u64) -> String {
@@ -1376,6 +1421,56 @@ mod tests {
         press(&fleet, &mut app, KeyCode::Char('x'));
         assert!(!screen(&fleet, &mut app, 100).contains("filter the log"));
         assert!(app.note.is_none(), "closing the list doesn't also log out");
+    }
+
+    #[test]
+    fn enter_in_the_end_dialog_logs_every_bot_out() {
+        let controls: Vec<aqx_core::Control> = (0..2).map(|_| aqx_core::Control::new().unwrap()).collect();
+        let cells: Vec<Arc<BotCell>> = ["main", "alt"].iter().zip(&controls).map(|(b, c)| Arc::new(BotCell::local(b, c.stop_handle()))).collect();
+        for cell in &cells {
+            cell.board().online = true;
+        }
+        let name = format!("tui-end-{}", std::process::id());
+        let hub = Arc::new(Hub::new(&name, cells.clone(), Print::Quiet));
+        let (_, listener, _listening) = socket::bind(&name, false).unwrap();
+        socket::serve(listener, hub, None).unwrap();
+        let fleet = Fleet { title: name.clone(), cells: cells.clone(), socket: socket::pick(Some(&name)).unwrap().1 };
+        let mut app = App::default();
+        let logouts = || cells.iter().filter(|c| matches!(c.take_command(), Some(Command::Logout))).count();
+
+        press(&fleet, &mut app, KeyCode::Char('Q'));
+        assert!(screen(&fleet, &mut app, 100).contains("Log out all 2 bots and end the session?"));
+        press(&fleet, &mut app, KeyCode::Char('x'));
+        assert!(screen(&fleet, &mut app, 100).contains("end the session?"), "other keys leave the dialog open");
+        assert_eq!(logouts(), 0, "and don't act, even x");
+
+        press(&fleet, &mut app, KeyCode::Enter);
+        assert_eq!(logouts(), 2);
+        assert!(!screen(&fleet, &mut app, 100).contains("end the session?"));
+    }
+
+    #[test]
+    fn ctrl_c_and_shift_q_ask_whether_to_end_the_session_or_detach() {
+        let (fleet, _hub) = fleet(&["main", "alt"]);
+        let mut app = App::default();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let key = |app: &mut App, key: KeyEvent| {
+            let shown = gather(&fleet, app);
+            app.handle(key, &fleet, &shown)
+        };
+
+        assert!(!key(&mut app, ctrl_c), "the first ctrl+c only asks");
+        let asked = screen(&fleet, &mut app, 100);
+        assert!(asked.contains("Log out all 2 bots and end the session?") && asked.contains("enter end it  q detach  esc stay"), "{asked}");
+        assert!(!key(&mut app, KeyEvent::from(KeyCode::Esc)), "esc stays");
+        assert!(!screen(&fleet, &mut app, 100).contains("end the session?"));
+
+        key(&mut app, KeyEvent::from(KeyCode::Char('Q')));
+        assert!(key(&mut app, KeyEvent::from(KeyCode::Char('q'))), "q detaches");
+
+        let mut app = App::default();
+        key(&mut app, ctrl_c);
+        assert!(key(&mut app, ctrl_c), "a second ctrl+c detaches");
     }
 
     #[test]
