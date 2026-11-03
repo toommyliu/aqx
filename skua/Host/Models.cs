@@ -23,6 +23,7 @@ public static class Models
             ["bCoins"] = (bool?)item["ac"] ?? false,
             ["bUpg"] = (bool?)item["member"] ?? false,
             ["bTemp"] = temp,
+            ["EnhLvl"] = (int?)item["enhancement"]?["level"] ?? 0,
         }.ToObject<T>()!;
 
     public static Faction Faction(JsonNode faction) =>

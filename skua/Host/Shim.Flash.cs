@@ -40,6 +40,7 @@ public sealed partial class Shim
     {
         _ when path.StartsWith("uoPref.") => JsonConvert.SerializeObject(preferences.GetValueOrDefault(path["uoPref.".Length..], true)),
         _ when path.StartsWith("world.lock.") => "{\"TS\":0,\"CD\":0}",
+        _ when path.StartsWith("world.invTree.") => InventoryTree(path["world.invTree.".Length..]),
         _ when path == "world.shopinfo" || path.StartsWith("world.shopinfo.") => Walk(ShopInfo(), path["world.shopinfo".Length..])?.ToJsonString(),
         "ui.mcPopup.currentLabel" => "\"\"",
         "ui.monsterIcon.redX.visible" => "false",
@@ -52,6 +53,22 @@ public sealed partial class Shim
         "world.strMapName" or "world.strMapFileName" => JsonConvert.SerializeObject(MapName),
         _ => Missing($"Flash game object {path}"),
     };
+
+    string? InventoryTree(string path)
+    {
+        string[] parts = path.Split('.', 2);
+        JsonNode? item = (View("inventory") as JsonArray)?.FirstOrDefault(i => parts[0] == $"{i?["id"]}");
+        if (item is null || parts.Length < 2)
+            return null;
+        JsonNode? enhancement = item["enhancement"];
+        return parts[1] switch
+        {
+            "iEnh" or "EnhID" => JsonConvert.SerializeObject((int?)enhancement?["id"] ?? 0),
+            "EnhLvl" => JsonConvert.SerializeObject((int?)enhancement?["level"] ?? 0),
+            "ProcID" => null,
+            _ => Missing($"Flash game object world.invTree.{path}"),
+        };
+    }
 
     static JsonNode? Walk(JsonNode? node, string path) =>
         path.Split('.', StringSplitOptions.RemoveEmptyEntries).Aggregate(node, (at, key) => at switch

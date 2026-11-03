@@ -92,6 +92,7 @@ fn item(i: &Item) -> Value {
         "equipped": i.equipped,
         "ac": i.ac,
         "member": i.member,
+        "enhancement": i.enhancement.map(|e| json!({ "id": e.id, "level": e.level })),
     })
 }
 
