@@ -259,6 +259,8 @@ declare module "aqx" {
     /** The monster a `kill` or `farm` is fighting right now. */
     readonly target: Monster | null;
     readonly gold: number;
+    /** Adventure Coins. */
+    readonly coins: number;
     readonly member: boolean;
     /** Name of the equipped class, `""` before the server sends it. */
     readonly class: string;

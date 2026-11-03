@@ -23,6 +23,7 @@ pub fn player(world: &World) -> Value {
         "afk": me.afk,
         "target": world.target.and_then(|id| world.area.as_ref()?.monsters.iter().find(|m| m.map_id == id)).map_or(Value::Null, monster),
         "gold": me.gold,
+        "coins": me.coins,
         "member": me.member,
         "class": me.class,
         "stats": {
