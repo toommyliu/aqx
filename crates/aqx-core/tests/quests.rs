@@ -46,3 +46,23 @@ fn a_choice_quest_needs_one_of_its_rewards_before_anything_is_sent() {
     let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
     assert_eq!(sent.iter().filter(|m| m.contains("%tryQuestComplete%")).collect::<Vec<_>>(), ["%xt%zm%tryQuestComplete%5%3577%24772%false%1%wvz%"]);
 }
+
+#[test]
+fn loading_quests_sends_again_when_the_server_says_to_slow_down() {
+    let mut asked = 0;
+    let mut fake = Fake::start(FARM, move |msg, wire| {
+        if msg.contains("%getQuests%") {
+            asked += 1;
+            if asked == 1 {
+                wire.send("%xt%warning%-1%Please slow down. Last action was too soon!%");
+            } else {
+                wire.object(QUESTS);
+            }
+        }
+    });
+    let started = std::time::Instant::now();
+    fake.session.load_quests(&[QuestId(11)]).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+    assert_eq!(sent.iter().filter(|m| m.contains("%getQuests%")).count(), 2, "{sent:#?}");
+}

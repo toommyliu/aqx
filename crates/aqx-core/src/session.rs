@@ -165,6 +165,7 @@ pub struct Session {
     died_in: Option<(String, String)>,
     pub(crate) joined: Option<AreaId>,
     pub(crate) quest_outcomes: HashMap<QuestId, Result<(), String>>,
+    pub(crate) slowed: u32,
     paused: bool,
     aggro: Option<Aggro>,
     alarm: Option<Instant>,
@@ -204,6 +205,7 @@ impl Session {
             died_in: None,
             joined: None,
             quest_outcomes: HashMap::new(),
+            slowed: 0,
             paused: false,
             aggro: None,
             alarm: None,
@@ -726,7 +728,10 @@ impl Session {
                 self.pacer.sent(Kind::Free, Instant::now());
                 self.send(Out::Afk(false));
             }
-            Event::Warning { text } if SLOW_DOWN.iter().any(|w| text.to_lowercase().contains(w)) => self.pacer.warned(Instant::now()),
+            Event::Warning { text } if SLOW_DOWN.iter().any(|w| text.to_lowercase().contains(w)) => {
+                self.pacer.warned(Instant::now());
+                self.slowed += 1;
+            }
             Event::InventoryLoaded { items } if self.phase == Phase::Loading => {
                 self.phase = Phase::Ready;
                 (self.sink)(&Event::Ready { items: *items });
