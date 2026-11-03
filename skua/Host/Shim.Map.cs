@@ -52,6 +52,12 @@ public sealed partial class Shim
 
     List<Monster> MapMonsters() => Models.Monsters(View("map")?["monsters"]);
 
+    Newtonsoft.Json.Linq.JArray CellMonsterData()
+    {
+        string cell = (string?)Me["cell"] ?? "";
+        return new(View("map")?["monsters"] is JsonArray monsters ? monsters.Where(m => (string?)m?["cell"] == cell).Select(m => Models.MonsterData(m!)) : []);
+    }
+
     List<Monster> CellMonsters()
     {
         string cell = (string?)Me["cell"] ?? "";

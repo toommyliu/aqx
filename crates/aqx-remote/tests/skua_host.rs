@@ -470,6 +470,8 @@ public class ReadStats
         var s = bot.Player.Stats!;
         bot.Log($"{s.Strength} {s.AttackPower} {s.SpellPower} {s.CriticalChance} {s.CriticalMultiplier} {s.Haste}");
         bot.Log($"id {bot.Player.ID}, in r2: {string.Join(", ", bot.Map.CellPlayers!.Select(p => $"{p.Name} {p.EntID}"))}");
+        var monsters = Newtonsoft.Json.Linq.JArray.Parse(bot.Flash.Call("availableMonsters")!);
+        bot.Log($"monsters in r2: {string.Join(", ", monsters.Select(m => $"{m["strMonName"]} {m["MonMapID"]} {m["intHP"]}"))}");
     }
 }
 "#;
@@ -499,6 +501,7 @@ fn a_script_reads_the_players_id_cell_and_combat_stats() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.contains(&"info: 7 14 37 0.08 1.66 0.03".to_string()), "{logged:#?}");
     assert!(logged.contains(&"info: id 1001, in r2: hero 1001".to_string()), "{logged:#?}");
+    assert!(logged.iter().any(|l| l.starts_with("info: monsters in r2: Treeant 2 ")), "{logged:#?}");
 }
 
 const LOGOUT: &str = r#"

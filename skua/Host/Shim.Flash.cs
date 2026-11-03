@@ -35,6 +35,7 @@ public sealed partial class Shim
             JsonConvert.SerializeObject(Buy(Convert.ToInt32(item["ItemID"]), Convert.ToInt32(item["ShopItemID"]), Convert.ToInt32(item["iQty"]))),
         ("canUseSkill", [int slot]) => JsonConvert.SerializeObject((bool?)Aqx.Call("can_cast", slot) ?? false),
         ("useSkill", [int slot]) => JsonConvert.SerializeObject((bool?)Aqx.Call("cast", slot) ?? false),
+        ("availableMonsters", []) => CellMonsterData().ToString(Formatting.None),
         ("isNull", [string path]) => JsonConvert.SerializeObject(GameObject(path) is null),
         _ => Missing($"Flash.Call(\"{function}\", {string.Join(", ", args.Select(a => $"{a}"))})"),
     };

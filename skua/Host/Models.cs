@@ -64,7 +64,9 @@ public static class Models
     public static List<Monster> Monsters(JsonNode? monsters) =>
         monsters is JsonArray list ? list.Select(m => Monster(m!)).ToList() : [];
 
-    public static Monster Monster(JsonNode monster) =>
+    public static Monster Monster(JsonNode monster) => MonsterData(monster).ToObject<Monster>()!;
+
+    public static JObject MonsterData(JsonNode monster) =>
         new JObject
         {
             ["MonMapID"] = (int)monster["mapId"]!,
@@ -74,5 +76,5 @@ public static class Models
             ["intHP"] = (int)monster["hp"]!,
             ["intHPMax"] = (int)monster["maxHp"]!,
             ["intState"] = (bool)monster["alive"]! ? 1 : 0,
-        }.ToObject<Monster>()!;
+        };
 }
