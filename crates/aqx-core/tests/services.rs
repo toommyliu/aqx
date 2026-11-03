@@ -120,6 +120,7 @@ fn potion() -> Item {
         member: false,
         link: "potion".into(),
         meta: "457".into(),
+        enhancement: None,
     }
 }
 

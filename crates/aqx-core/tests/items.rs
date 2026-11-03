@@ -37,6 +37,7 @@ fn makai_stack() -> Item {
         member: false,
         link: String::new(),
         meta: String::new(),
+        enhancement: None,
     }
 }
 
