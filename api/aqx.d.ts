@@ -30,6 +30,10 @@ declare module "aqx" {
     readonly wis: number;
     readonly end: number;
     readonly luk: number;
+    readonly attackPower: number;
+    readonly spellPower: number;
+    /** Damage of a critical hit as a multiple of a normal one, e.g. 1.5. */
+    readonly critMultiplier: number;
     /** Fractions, e.g. 0.25 = 25%. `haste` is capped at the 0.5 the server honours. */
     readonly haste: number;
     readonly crit: number;
