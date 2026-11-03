@@ -49,6 +49,10 @@ declare module "aqx" {
     readonly name: string;
     readonly rep: number;
     readonly rank: number;
+    /** Rep earned since reaching the current rank. */
+    readonly repInRank: number;
+    /** Rep the current rank spans, 0 at rank 10. */
+    readonly repForNextRank: number;
   }
 
   export interface Monster {
@@ -94,6 +98,7 @@ declare module "aqx" {
     readonly equipped: boolean;
     readonly ac: boolean;
     readonly member: boolean;
+    readonly enhancement: { readonly id: number; readonly level: number } | null;
   }
 
   export interface Items {
