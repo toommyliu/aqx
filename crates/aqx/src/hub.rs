@@ -79,6 +79,9 @@ pub enum Command {
     Restart,
     Pause,
     Resume,
+    PickUp {
+        items: Vec<String>,
+    },
     Logout,
     Relogin,
 }
@@ -524,6 +527,11 @@ impl AccountCell {
                 let paused = matches!(command, Command::Pause);
                 board.paused = paused;
                 stop.post(move |s| s.set_paused(paused));
+                return Ok(true);
+            }
+            Command::PickUp { items } => {
+                let items = items.clone();
+                stop.post(move |s| items.iter().for_each(|item| s.request_pickup(item)));
                 return Ok(true);
             }
             _ => {}

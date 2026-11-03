@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::hub::{Command, Hub, LogLine, Snapshot};
 
-pub const PROTOCOL: u32 = 6;
+pub const PROTOCOL: u32 = 7;
 const BUILD: &str = env!("AQX_BUILD");
 const TICK: Duration = Duration::from_millis(250);
 const FRESH: Duration = Duration::from_millis(300);
@@ -485,7 +485,7 @@ mod tests {
              snapshot.progress snapshot.progress.current snapshot.progress.eta_secs snapshot.progress.label \
              snapshot.progress.total snapshot.run snapshot.script snapshot.server snapshot.stalled \
              snapshot.status snapshot.up_secs snapshot.user";
-        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (6, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
+        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (7, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
     }
 
     #[test]

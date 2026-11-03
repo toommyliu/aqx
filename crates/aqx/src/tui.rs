@@ -338,7 +338,10 @@ struct App {
     max_scroll: Cell<usize>,
     log_width: Cell<usize>,
     list: Option<Section>,
-    list_at: usize,
+    list_at: Cell<usize>,
+    list_len: Cell<usize>,
+    cursor: usize,
+    picked: BTreeSet<String>,
     list_max: Cell<usize>,
     rail: Cell<Option<(Rect, [usize; 5])>>,
     unseen_from: Option<u64>,
@@ -456,6 +459,10 @@ fn snapshot(shown: &[Shown], i: usize) -> Option<&Snapshot> {
     shown.get(i)?.snapshot.as_ref()
 }
 
+fn drop_names(shown: &[Shown], i: usize) -> Vec<String> {
+    snapshot(shown, i).iter().flat_map(|s| &s.game).flat_map(|g| &g.drops).map(|d| d.name.clone()).collect()
+}
+
 fn is_offline(s: &Snapshot) -> bool {
     s.phase == "OFFLINE"
 }
@@ -565,27 +572,54 @@ impl App {
         if i != self.selected {
             self.selected = i;
             self.scroll = 0;
-            self.list_at = 0;
+            self.reset_list();
         }
     }
 
     fn open(&mut self, list: Option<Section>) {
         self.list = list;
-        self.list_at = 0;
+        self.reset_list();
+    }
+
+    fn reset_list(&mut self) {
+        self.list_at.set(0);
+        self.cursor = 0;
+        self.picked.clear();
     }
 
     fn up(&mut self, lines: usize) {
+        let last = self.list_len.get().saturating_sub(1);
         match self.list {
-            Some(_) => self.list_at = self.list_at.min(self.list_max.get()).saturating_sub(lines),
+            Some(Section::Drops) => self.cursor = self.cursor.min(last).saturating_sub(lines),
+            Some(_) => self.list_at.set(self.list_at.get().min(self.list_max.get()).saturating_sub(lines)),
             None => self.scroll = self.scroll.saturating_add(lines).min(self.max_scroll.get()),
         }
     }
 
     fn down(&mut self, lines: usize) {
         match self.list {
-            Some(_) => self.list_at = self.list_at.saturating_add(lines).min(self.list_max.get()),
+            Some(Section::Drops) => self.cursor = self.cursor.saturating_add(lines).min(self.list_len.get().saturating_sub(1)),
+            Some(_) => self.list_at.set(self.list_at.get().saturating_add(lines).min(self.list_max.get())),
             None => self.scroll = self.scroll.saturating_sub(lines),
         }
+    }
+
+    fn pick_up(&mut self, fleet: &Fleet, shown: &[Shown]) {
+        let mut wanted = self.picked.clone();
+        if wanted.is_empty() {
+            let drops = drop_names(shown, self.selected);
+            wanted.extend(drops.get(self.cursor.min(drops.len().saturating_sub(1))).cloned());
+        }
+        let Some(cell) = fleet.cells.all().get(self.selected).cloned() else { return };
+        let items: Vec<String> =
+            cell.board().snapshot.iter().flat_map(|s| &s.game).flat_map(|g| &g.drops).filter(|d| wanted.contains(&self.mask.hide(&d.name))).map(|d| d.name.clone()).collect();
+        let done = match items.as_slice() {
+            [] => return,
+            [only] => format!("picking up {only}"),
+            many => format!("picking up {} drops", many.len()),
+        };
+        self.picked.clear();
+        self.act_on(fleet, vec![(self.selected, Command::PickUp { items })], &done);
     }
 
     fn mouse(&mut self, mouse: MouseEvent, shown: &[Shown]) {
@@ -763,6 +797,7 @@ impl App {
         let visible = order(shown, &self.query);
         let cols = self.grid_cols.get() as isize;
         let line = accounts < 2 || key.modifiers.contains(KeyModifiers::SHIFT);
+        let picking = self.list == Some(Section::Drops) && !self.grid;
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('Q') => self.ending = true,
@@ -774,6 +809,25 @@ impl App {
             KeyCode::Right if self.grid => self.step(shown, 1, false),
             KeyCode::Up if self.grid => self.step(shown, -cols, false),
             KeyCode::Down if self.grid => self.step(shown, cols, false),
+            KeyCode::Up if picking => self.up(1),
+            KeyCode::Down if picking => self.down(1),
+            KeyCode::Char(' ') if picking => {
+                if let Some(name) = drop_names(shown, self.selected).get(self.cursor).cloned()
+                    && !self.picked.remove(&name)
+                {
+                    self.picked.insert(name);
+                }
+            }
+            KeyCode::Char('a') if picking => {
+                let drops = drop_names(shown, self.selected);
+                if drops.iter().all(|d| self.picked.contains(d)) {
+                    self.picked.clear();
+                } else {
+                    self.picked.extend(drops);
+                }
+            }
+            KeyCode::Enter if picking => self.pick_up(fleet, shown),
+            KeyCode::Esc if !self.picked.is_empty() => self.picked.clear(),
             KeyCode::Up if line => self.up(1),
             KeyCode::Down if line => self.down(1),
             KeyCode::Up => self.step(shown, -1, false),
@@ -1093,10 +1147,14 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
 }
 
 fn list_keys(app: &App) -> Vec<(&'static str, &'static str)> {
-    let mut keys = vec![("v", "next list"), ("esc", "back to log")];
-    if app.list_max.get() > 0 {
+    let mut keys = Vec::new();
+    if app.list == Some(Section::Drops) && app.list_len.get() > 0 {
+        let accept = if app.picked.is_empty() { "accept" } else { "accept marked" };
+        keys.extend([("↑↓", "pick"), ("space", "mark"), ("a", "mark all"), ("enter", accept)]);
+    } else if app.list_max.get() > 0 {
         keys.push(("PgUp PgDn", "scroll"));
     }
+    keys.extend([("v", "next list"), ("esc", if app.picked.is_empty() { "back to log" } else { "clear marks" })]);
     keys
 }
 
@@ -1223,7 +1281,10 @@ fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
                 Some(g) => rule.extend(counts(g, app.list)),
                 None => rule.extend(section.title(g)),
             }
-            let (at, max) = (app.list_at.min(app.list_max.get()), app.list_max.get());
+            if !app.picked.is_empty() {
+                rule.push(Span::raw(format!(" · {} marked", app.picked.len())));
+            }
+            let (at, max) = (app.list_at.get().min(app.list_max.get()), app.list_max.get());
             if at > 0 {
                 rule.push(Span::raw(format!(" · ↑{at}")));
             }
@@ -1392,22 +1453,36 @@ fn entry(indent: usize, name: String, value: Field, width: usize) -> Field {
 
 fn draw_section(f: &mut Frame, area: Rect, g: &Game, section: Section, app: &App) {
     let entries = section.entries(g);
+    app.list_len.set(entries.len());
     if entries.is_empty() {
         app.list_max.set(0);
         return f.render_widget(Paragraph::new(Line::raw(format!("  {}", section.nothing(g))).dark_gray()), area);
     }
     let width = usize::from(area.width);
     let widest = entries.iter().map(|(name, value)| Span::raw(name.as_str()).width() + spans_width(value)).max().unwrap_or(0);
-    let cols = (width / (widest + 4).clamp(COLUMN_MIN, COLUMN_MAX)).max(1);
-    let column = width / cols;
+    let picker = section == Section::Drops;
+    let cols = if picker { 1 } else { (width / (widest + 4).clamp(COLUMN_MIN, COLUMN_MAX)).max(1) };
+    let column = if picker { COLUMN_MAX.min(width) } else { width / cols };
     let rows = entries.len().div_ceil(cols);
     let height = usize::from(area.height);
     app.list_max.set(rows.saturating_sub(height));
-    let at = app.list_at.min(app.list_max.get());
+    let cursor = picker.then(|| app.cursor.min(entries.len() - 1));
+    let mut at = app.list_at.get().min(app.list_max.get());
+    if let Some(row) = cursor.map(|i| i % rows) {
+        at = at.min(row).max((row + 1).saturating_sub(height));
+    }
+    app.list_at.set(at);
+    let marks = |i: usize, name: &String| -> Field {
+        let Some(cursor) = cursor else { return vec![Span::raw("  ")] };
+        vec![Span::raw(if i == cursor { "▌" } else { " " }).fg(ACCENT), Span::raw(if app.picked.contains(name) { "◆" } else { " " }).fg(ACCENT)]
+    };
     let lines: Vec<Line> = (at..rows.min(at + height))
         .map(|row| {
-            let cells = (0..cols).filter_map(|col| entries.get(col * rows + row));
-            Line::from(cells.flat_map(|(name, value)| entry(2, name.clone(), value.clone(), column.saturating_sub(2)).into_iter().chain([Span::raw("  ")])).collect::<Field>())
+            let cells = (0..cols).map(|col| col * rows + row).filter_map(|i| Some((i, entries.get(i)?)));
+            let spans = cells.flat_map(|(i, (name, value))| {
+                marks(i, name).into_iter().chain(entry(0, name.clone(), value.clone(), column.saturating_sub(4))).chain([Span::raw("  ")])
+            });
+            Line::from(spans.collect::<Field>())
         })
         .collect();
     f.render_widget(Paragraph::new(lines), area);
@@ -2091,6 +2166,44 @@ mod tests {
     }
 
     #[test]
+    fn the_drops_list_marks_drops_and_enter_accepts_them() {
+        let control = aqx_core::Control::new().unwrap();
+        let cell = Arc::new(AccountCell::local("main", control.stop_handle()));
+        let name = format!("tui-drops-{}", std::process::id());
+        let hub = Arc::new(Hub::new(&name, vec![cell.clone()], Print::Quiet));
+        let (_, listener, _listening) = socket::bind(&name, false).unwrap();
+        socket::serve(listener, hub.clone(), None).unwrap();
+        let fleet = Fleet { title: name.clone(), cells: Arc::new(Cells::new(vec![cell.clone()])), socket: socket::pick(Some(&name)).unwrap().1 };
+        publish(&hub, &cell, &farm_world());
+        stock(&cell, 10);
+        let mut app = App { list: Some(Section::Drops), ..App::default() };
+        let keys = |app: &mut App, codes: &[KeyCode]| codes.iter().for_each(|&code| press(&fleet, app, code));
+        let note = |app: &App| app.note.as_ref().map(|(text, _)| text.clone()).unwrap_or_default();
+
+        let shown = screen_of(&fleet, &mut app, 150, 30);
+        assert!(row(&shown, "Spider Drop 0").starts_with(" ▌ Spider Drop 0"), "the cursor starts on the newest drop: {shown}");
+        assert!(shown.contains("↑↓ pick  space mark  a mark all  enter accept  v next list  esc back to log"), "{shown}");
+        keys(&mut app, &[KeyCode::Char(' '), KeyCode::Down, KeyCode::Down, KeyCode::Char(' ')]);
+        let marked = screen_of(&fleet, &mut app, 150, 30);
+        assert!(row(&marked, "Spider Drop 0").starts_with("  ◆Spider Drop 0") && row(&marked, "Spider Drop 2").starts_with(" ▌◆Spider Drop 2"), "{marked}");
+        assert!(row(&marked, "Spider Drop 1").starts_with("   Spider Drop 1"), "{marked}");
+        assert!(marked.contains("── drops 8 · last changed first · 2 marked") && marked.contains("enter accept marked"), "{marked}");
+
+        keys(&mut app, &[KeyCode::Enter]);
+        assert_eq!(note(&app), "main: picking up 2 drops");
+        assert!(app.picked.is_empty() && app.list == Some(Section::Drops), "accepting clears the marks and keeps the list open");
+        keys(&mut app, &[KeyCode::Down, KeyCode::Enter]);
+        assert_eq!(note(&app), "main: picking up Spider Drop 3", "with nothing marked, enter takes the drop under the cursor");
+
+        keys(&mut app, &[KeyCode::Char('a')]);
+        assert_eq!(app.picked.len(), 8);
+        keys(&mut app, &[KeyCode::Esc]);
+        assert!(app.picked.is_empty() && app.list == Some(Section::Drops), "esc clears the marks first");
+        keys(&mut app, &[KeyCode::Esc]);
+        assert!(app.list.is_none());
+    }
+
+    #[test]
     fn a_long_list_scrolls_with_the_log_keys() {
         let (fleet, hub) = fleet(&["main"]);
         let cell = &fleet.cells.all()[0];
@@ -2110,7 +2223,7 @@ mod tests {
         let end = screen_of(&fleet, &mut app, 150, 30);
         assert!(end.contains("Banked 299") && !end.contains("Banked 000") && end.contains(&format!("· ↑{below} ─")), "{end}");
         app.mouse(pointer(MouseEventKind::ScrollUp, 50, 15), &[]);
-        assert_eq!(app.list_at, below - WHEEL_LINES);
+        assert_eq!(app.list_at.get(), below - WHEEL_LINES);
         press(&fleet, &mut app, KeyCode::Home);
         assert!(screen_of(&fleet, &mut app, 150, 30).contains("Banked 000"));
         assert_eq!(app.scroll, 0, "the log keeps its own place");

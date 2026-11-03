@@ -160,12 +160,22 @@ impl Session {
 
     pub fn pickup(&mut self, name: &str) -> Result<(), ActError> {
         self.ready(None)?;
-        let Some(item) = self.world.drops.iter().find(|d| d.name.eq_ignore_ascii_case(name)).map(|d| d.id) else {
+        let Some(item) = self.drop_named(name) else {
             return Err(ActError::NotFound(format!("a drop named {name}")));
         };
         let Some(room) = self.world.area.as_ref().map(|a| a.id) else { return Err(ActError::NotFound("a map".into())) };
         self.send_paced(Out::PickUp { room, item }, Kind::Free)?;
         self.wait_for(Some(Instant::now() + PICKUP_TIMEOUT), &format!("picking up {name}"), |s| s.world.drops.iter().all(|d| d.id != item))
+    }
+
+    pub fn request_pickup(&mut self, name: &str) {
+        if let (Some(item), Ok(room)) = (self.drop_named(name), self.room()) {
+            self.send_now(Out::PickUp { room, item }, Kind::Free);
+        }
+    }
+
+    fn drop_named(&self, name: &str) -> Option<ItemId> {
+        self.world.drops.iter().find(|d| d.name.eq_ignore_ascii_case(name)).map(|d| d.id)
     }
 
     fn room(&self) -> Result<AreaId, ActError> {
