@@ -343,4 +343,22 @@ mod tests {
         std::fs::set_permissions(&twins, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         assert!(load(Some(&twins)).err().unwrap().contains("two accounts are named hero"));
     }
+
+    #[test]
+    fn the_config_reference_documents_every_setting_and_its_example_loads() {
+        let page = include_str!("../../../docs/config.md");
+        let example = page.split_once("```toml\n").and_then(|(_, rest)| rest.split_once("```")).expect("a toml example").0;
+        let config: Config = toml::from_str(example).unwrap();
+        assert!(config.account(Some("alt")).is_ok());
+
+        let schema: serde_json::Value = serde_json::from_str(&schema()).unwrap();
+        let defs = schema["$defs"].as_object().unwrap().values();
+        let names = defs.flat_map(|def| {
+            let fields = def["properties"].as_object().into_iter().flat_map(|p| p.keys().cloned());
+            let values = def["oneOf"].as_array().into_iter().flatten().filter_map(|v| v["const"].as_str().map(String::from));
+            fields.chain(values).collect::<Vec<_>>()
+        });
+        let missing: std::collections::BTreeSet<String> = names.filter(|name| !page.contains(&format!("`{name}`"))).collect();
+        assert!(missing.is_empty(), "docs/config.md doesn't mention {missing:?}");
+    }
 }
