@@ -36,6 +36,20 @@ public static class Models
     public static PlayerStats Stats(JsonNode? stats) =>
         new JObject(StatNames.Select(n => new JProperty(n.Skua, (double?)stats?[n.Aqx] ?? 0))).ToObject<PlayerStats>()!;
 
+    public static PlayerInfo Player(JsonNode player) =>
+        new JObject
+        {
+            ["entID"] = (int?)player["id"] ?? 0,
+            ["uoName"] = (string?)player["name"] ?? "",
+            ["intLevel"] = (int?)player["level"] ?? 0,
+            ["intHP"] = (int?)player["hp"] ?? 0,
+            ["intHPMax"] = (int?)player["maxHp"] ?? 0,
+            ["intMP"] = (int?)player["mp"] ?? 0,
+            ["strFrame"] = (string?)player["cell"] ?? "",
+            ["strPad"] = (string?)player["pad"] ?? "",
+            ["afk"] = (bool?)player["afk"] ?? false,
+        }.ToObject<PlayerInfo>()!;
+
     public static Faction Faction(JsonNode faction) =>
         new JObject
         {

@@ -21,6 +21,7 @@ public sealed partial class Shim
         On("IScriptServers.get_LastName()", _ => lastName ?? (string?)Aqx.Call("session")?["server"]?["name"] ?? "");
         On("IScriptServers.set_LastName(String)", args => lastName = (string?)args[0]);
         On("IScriptServers.SetLoginInfo(String, String)", _ => null);
+        On("IScriptServers.Logout()", _ => Logout());
         On("IScriptServers.Relogin(String)", args => Act("relogin", args[0]));
         On("IScriptServers.Relogin(Server)", args => Act("relogin", ((Server?)args[0])?.Name));
         On("IScriptServers.EnsureRelogin(String)", args => Act("relogin", args[0]));
@@ -28,6 +29,15 @@ public sealed partial class Shim
         On("IScriptServers.EnsureRelogin(String, CancellationToken)", args => Task.FromResult(Act("relogin", args[0])));
         On("IScriptServers.add_PropertyChanged(PropertyChangedEventHandler)", _ => null);
         On("IScriptServers.remove_PropertyChanged(PropertyChangedEventHandler)", _ => null);
+    }
+
+    object? Logout()
+    {
+        if (settings.GetValueOrDefault("IScriptOption.AutoRelogin") is true)
+            return Act("relogin", (object?)null);
+        Aqx.Call("log", "warn", "the script logged out with AutoRelogin off, so it stops here");
+        Stop(true);
+        return null;
     }
 
     List<Server> CachedServers() => cachedServers ??= FetchServers();

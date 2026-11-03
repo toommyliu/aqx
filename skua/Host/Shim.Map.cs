@@ -1,6 +1,8 @@
 using System.Text.Json.Nodes;
 using Skua.Core.Models.Monsters;
 
+using Skua.Core.Models.Players;
+
 namespace Aqx.Skua;
 
 public sealed partial class Shim
@@ -20,6 +22,8 @@ public sealed partial class Shim
         On("IScriptMap.get_Loaded()", _ => MapLoaded);
         On("IScriptMap.get_Loading()", _ => !MapLoaded);
         On("IScriptMap.get_PlayerNames()", _ => PlayerNames());
+        On("IScriptMap.get_Players()", _ => Players());
+        On("IScriptMap.get_CellPlayers()", _ => Players().FindAll(p => p.Cell == ((string?)Me["cell"] ?? "")));
         On("IScriptMap.get_PlayerCount()", _ => PlayerNames().Count);
         On("IScriptMap.get_Cells()", _ => Cells());
         On("IScriptMap.get_LastMap()", _ => lastMap);
@@ -52,6 +56,14 @@ public sealed partial class Shim
     {
         string cell = (string?)Me["cell"] ?? "";
         return MapMonsters().FindAll(m => m.Cell == cell);
+    }
+
+    List<PlayerInfo> Players()
+    {
+        List<PlayerInfo> players = View("map")?["players"] is JsonArray others ? others.Select(p => Models.Player(p!)).ToList() : [];
+        if (Me is { Count: > 0 } me)
+            players.Insert(0, Models.Player(me));
+        return players;
     }
 
     List<string> PlayerNames()

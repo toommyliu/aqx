@@ -469,13 +469,14 @@ public class ReadStats
             bot.Sleep(20);
         var s = bot.Player.Stats!;
         bot.Log($"{s.Strength} {s.AttackPower} {s.SpellPower} {s.CriticalChance} {s.CriticalMultiplier} {s.Haste}");
+        bot.Log($"id {bot.Player.ID}, in r2: {string.Join(", ", bot.Map.CellPlayers!.Select(p => $"{p.Name} {p.EntID}"))}");
     }
 }
 "#;
 
 #[test]
 #[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
-fn a_script_reads_the_players_combat_stats() {
+fn a_script_reads_the_players_id_cell_and_combat_stats() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-stats");
     let home = dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -497,4 +498,38 @@ fn a_script_reads_the_players_combat_stats() {
     let logged = logged.lock().unwrap().clone();
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.contains(&"info: 7 14 37 0.08 1.66 0.03".to_string()), "{logged:#?}");
+    assert!(logged.contains(&"info: id 1001, in r2: hero 1001".to_string()), "{logged:#?}");
+}
+
+const LOGOUT: &str = r#"
+using Skua.Core.Interfaces;
+
+public class LogOut
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Options.AutoRelogin = false;
+        bot.Servers.Logout();
+        bot.Sleep(5000);
+        bot.Log("still running");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn logging_out_without_auto_relogin_stops_the_script() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-logout");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("LogOut.cs");
+    std::fs::write(&script, LOGOUT).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, |_, _| {}, sink);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Stopped(_))), "{result:?}\n{logged:#?}");
+    assert!(!logged.iter().any(|l| l.contains("still running")), "{logged:#?}");
 }
