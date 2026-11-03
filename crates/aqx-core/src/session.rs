@@ -690,6 +690,11 @@ impl Session {
                 self.on_joined();
                 self.joined = self.world.area.as_ref().map(|a| a.id);
             }
+            Event::PlayerEntered { eid } => {
+                if let Some(room) = self.world.area.as_ref().map(|a| a.id) {
+                    self.send(Out::RetrieveUserData { room, eid: *eid });
+                }
+            }
             Event::Died => {
                 self.respawn_at = Some(Instant::now() + RESPAWN_DELAY);
                 self.died_in = self.world.me.as_ref().map(|m| (m.cell.clone(), m.pad.clone()));
