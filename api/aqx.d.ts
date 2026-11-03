@@ -97,6 +97,8 @@ declare module "aqx" {
 
   export interface Item {
     readonly id: number;
+    /** The server's id for this copy of the item, `null` for temp items. */
+    readonly charItem: number | null;
     readonly name: string;
     readonly qty: number;
     readonly maxStack: number;

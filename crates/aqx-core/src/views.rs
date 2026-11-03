@@ -102,6 +102,7 @@ pub fn items(items: &[Item]) -> Value {
 fn item(i: &Item) -> Value {
     json!({
         "id": i.id,
+        "charItem": i.char_item,
         "name": i.name,
         "qty": i.qty,
         "maxStack": i.max_stack,
