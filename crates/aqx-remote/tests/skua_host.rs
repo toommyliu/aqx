@@ -1575,3 +1575,69 @@ fn core_story_kills_for_a_quest_and_turns_it_in() {
     assert!(sent.iter().any(|m| m.starts_with("%xt%zm%tryQuestComplete%5%11%")), "{sent:#?}");
     assert!(logged.iter().any(|l| l.ends_with("holding 1 Twilly Twig")), "{logged:#?}");
 }
+
+const MAP_ITEM_QUEST: &str = r#"
+//cs_include Scripts/CoreBots.cs
+//cs_include Scripts/CoreStory.cs
+using Skua.Core.Interfaces;
+
+public class StoryMapItem
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+    public CoreStory Story = new();
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Core.SetOptions();
+        Story.MapItemQuest(12, "farm", 55);
+        Core.Logger($"quest 12 done {Bot.Quests.IsUnlocked(13)}");
+        Core.SetOptions(false);
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn core_story_picks_up_a_map_item_for_a_quest() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-story-map-item");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("StoryMapItem.cs");
+    std::fs::write(&script, MAP_ITEM_QUEST).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%getQuests%") {
+                wire.object(
+                    r#"{"cmd":"getQuests","quests":{
+                    "12":{"QuestID":12,"sName":"Find the Note","bOnce":true,"iSlot":3,"iValue":1,"bUpg":false,"iLvl":0,"turnin":[{"ItemID":900,"iQty":1}],
+                    "oItems":{"900":{"ItemID":900,"sName":"Note Shard","iStk":1,"bTemp":1}},"oRewards":{},"reward":[]},
+                    "13":{"QuestID":13,"sName":"Next","bOnce":true,"iSlot":3,"iValue":2,"bUpg":false,"iLvl":0,"turnin":[],"oItems":{},"oRewards":{},"reward":[]}}}"#,
+                );
+            } else if msg.starts_with("%xt%zm%acceptQuest%5%12%") {
+                wire.object(r#"{"cmd":"acceptQuest","bSuccess":1,"QuestID":12,"msg":"success"}"#);
+            } else if msg.starts_with("%xt%zm%getMapItem%5%55%") {
+                wire.object(r#"{"cmd":"addItems","items":{"900":{"ItemID":900,"sName":"Note Shard","iQty":1,"iStk":1,"bTemp":1}}}"#);
+            } else if msg.starts_with("%xt%zm%tryQuestComplete%5%12%") {
+                wire.object(r#"{"cmd":"turnIn","sItems":"900:1"}"#);
+                wire.object(r#"{"cmd":"ccqr","bSuccess":1,"QuestID":12,"sName":"Find the Note","rewardObj":{"intGold":0}}"#);
+                wire.object(r#"{"cmd":"updateQuest","iIndex":3,"iValue":1}"#);
+            }
+        },
+        sink,
+    );
+    fake.session.world.me.as_mut().unwrap().quest_slots = vec!["0".repeat(100)];
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    if std::env::var_os("AQX_SKUA_LOG").is_some() {
+        eprintln!("{logged:#?}\n{sent:#?}");
+    }
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(sent.iter().any(|m| m.starts_with("%xt%zm%getMapItem%5%55%")), "{sent:#?}");
+    assert!(logged.iter().any(|l| l.ends_with("quest 12 done True")), "{logged:#?}");
+}
