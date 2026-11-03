@@ -1367,12 +1367,13 @@ fn stacked(s: &Stack) -> (String, Field) {
 }
 
 fn held(s: &Stack) -> Field {
-    match () {
+    match s.rank {
         _ if s.equipped => vec![Span::raw("equipped").dark_gray()],
-        _ if s.max > 1 && s.qty >= s.max => vec![Span::raw(format!("{}/{} ✓", s.qty, s.max)).green()],
-        _ if s.max > 1 => vec![Span::raw(format!("{}/{}", s.qty, s.max))],
-        _ if s.qty > 1 => vec![Span::raw(s.qty.to_string())],
-        _ => Vec::new(),
+        Some(rank) => vec![Span::raw(format!("rank {rank}"))],
+        None if s.max > 1 && s.qty >= s.max => vec![Span::raw(format!("{}/{} ✓", s.qty, s.max)).green()],
+        None if s.max > 1 => vec![Span::raw(format!("{}/{}", s.qty, s.max))],
+        None if s.qty > 1 => vec![Span::raw(s.qty.to_string())],
+        None => Vec::new(),
     }
 }
 
@@ -1848,13 +1849,19 @@ mod tests {
     }
 
     fn stock(cell: &AccountCell, items: usize) {
-        let stack = |name: String, qty, max, equipped| Stack { name, qty, max, equipped };
-        let named = [("Fishing Bait", 533, 999, false), ("Master Ranger", 1, 1, true), ("Treasure Chest", 6, 99, false), ("Paint", 99, 99, false)];
+        let stack = |name: &str, qty, max| Stack { name: name.into(), qty, max, ..Stack::default() };
+        let named = [
+            stack("Fishing Bait", 533, 999),
+            Stack { equipped: true, rank: Some(10), ..stack("Master Ranger", 302500, 1) },
+            stack("Treasure Chest", 6, 99),
+            stack("Paint", 99, 99),
+            Stack { rank: Some(4), ..stack("Rogue", 21980, 1) },
+        ];
         let mut board = cell.board();
         let g = board.snapshot.as_mut().and_then(|s| s.game.as_mut()).expect("a published game");
-        g.drops = (0..8).map(|i| stack(format!("Spider Drop {i}"), i + 1, 99, false)).collect();
-        g.temp = vec![stack("Spider Silk".into(), 4, 10, false), stack("Slime Sample".into(), 10, 10, false)];
-        g.inventory = (0..items).map(|i| named.get(i).map_or_else(|| stack(format!("Spare Part {i:02}"), 1, 1, false), |&(n, q, m, e)| stack(n.into(), q, m, e))).collect();
+        g.drops = (0..8).map(|i| stack(&format!("Spider Drop {i}"), i + 1, 99)).collect();
+        g.temp = vec![stack("Spider Silk", 4, 10), stack("Slime Sample", 10, 10)];
+        g.inventory = (0..items).map(|i| named.get(i).cloned().unwrap_or_else(|| stack(&format!("Spare Part {i:02}"), 1, 1))).collect();
         (g.bag_used, g.bag_slots, g.misc_used, g.misc_slots, g.bank_used, g.bank_slots) = (items as u32, 40, 40, 100, 120, 200);
     }
 
@@ -2059,7 +2066,8 @@ mod tests {
         assert!(inventory.contains("── inventory 38/40 · misc 40/100 · equipped first, then last changed ─"), "{inventory}");
         let first = inventory.lines().skip_while(|l| !l.contains("── inventory")).nth(1).unwrap();
         assert!(first.starts_with("   Master Ranger") && first.contains("equipped"), "equipped items lead the full list: {inventory}");
-        assert_eq!(inventory.matches("Spare Part").count(), 34, "a 40-slot inventory fits without scrolling: {inventory}");
+        assert_eq!(inventory.matches("Spare Part").count(), 33, "a 40-slot inventory fits without scrolling: {inventory}");
+        assert!(row(&inventory, "Rogue").contains("rank 4") && !inventory.contains("21980"), "a class shows its rank, not its points: {inventory}");
         assert!(row(&inventory, "Fishing Bait").contains("533/999") && row(&inventory, "Paint").contains("99/99 ✓"));
         assert!(!rail(&inventory).iter().any(|(heading, shown, _)| heading.starts_with("Inventory") && *shown > 0), "the open list shrinks to its heading in the rail: {inventory}");
 
@@ -2085,7 +2093,7 @@ mod tests {
         publish(&hub, cell, &farm_world());
         stock(cell, 10);
         cell.board().snapshot.as_mut().unwrap().game.as_mut().unwrap().bank =
-            Some((0..300).map(|i| Stack { name: format!("Banked {i:03}"), qty: 1, max: 1, equipped: false }).collect());
+            Some((0..300).map(|i| Stack { name: format!("Banked {i:03}"), qty: 1, max: 1, ..Stack::default() }).collect());
         let mut app = App { list: Some(Section::Bank), ..App::default() };
         let top = screen_of(&fleet, &mut app, 150, 30);
         println!("{top}");

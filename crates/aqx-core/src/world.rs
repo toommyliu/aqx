@@ -232,6 +232,10 @@ impl Item {
             _ => Pool::Bag,
         }
     }
+
+    pub fn class_rank(&self) -> Option<u32> {
+        (self.pool() == Pool::Class).then(|| rank_for(self.qty))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1789,7 +1793,7 @@ mod tests {
                 {"ItemID":1,"CharItemID":11,"sName":"Sword","iQty":1,"iStk":1,"sType":"Sword"},
                 {"ItemID":2,"CharItemID":12,"sName":"Health Potion","iQty":5,"iStk":10,"sType":"Item","sMeta":"457"},
                 {"ItemID":3,"CharItemID":13,"sName":"Junk","iQty":1,"iStk":1,"sType":"Misc"},
-                {"ItemID":4,"CharItemID":14,"sName":"Rogue","iQty":1,"iStk":1,"sType":"Class"},
+                {"ItemID":4,"CharItemID":14,"sName":"Rogue","iQty":21980,"iStk":1,"sType":"Class"},
                 {"ItemID":5,"CharItemID":15,"sName":"Bone Dust","iQty":3,"iStk":50,"sType":"Resource"},
                 {"ItemID":6,"CharItemID":16,"sName":"Defeated Makai","iQty":50,"iStk":50,"sType":"Quest Item"},
                 {"ItemID":7,"CharItemID":17,"sName":"Voucher","iQty":1,"iStk":1,"sType":"Item"},
@@ -1807,6 +1811,7 @@ mod tests {
         assert!(world.full_for(&new("Axe")) && world.full_for(&new("Resource")), "both pools are at their limit");
         assert!(!world.full_for(&owned("Health Potion")) && !world.full_for(&owned("Bone Dust")), "a stack with room takes more");
         assert!(!world.full_for(&new("Class")), "classes have no limit");
+        assert_eq!((owned("Rogue").class_rank(), owned("Sword").class_rank()), (Some(4), None), "a class item's quantity is its class points");
 
         feed(&mut world, &json(r#"{"cmd":"loadInventoryBig","factions":[],"items":[]}"#));
         assert_eq!(world.misc_slots, 100, "the client allows 100 misc items when the server names no limit");
