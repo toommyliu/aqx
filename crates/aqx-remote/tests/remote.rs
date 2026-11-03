@@ -9,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use aqx_core::{Event, Halt, Outcome, ScriptError, Sink};
+use aqx_protocol::QuestId;
 use serde_json::{Value, json};
 use server::{FARM, Fake, Wire};
 
@@ -174,4 +175,18 @@ fn run_talks_to_a_child_process_and_logs_what_it_prints_to_stderr() {
     let result = aqx_remote::run(&mut fake.session, host);
     assert!(matches!(&result, Ok(Outcome::Stopped(Some(why))) if why == "saw hero"), "{result:?}");
     assert!(logged.lock().unwrap().iter().any(|line| line == "warn: compiling"), "{:?}", logged.lock().unwrap());
+}
+
+#[test]
+fn abandoning_a_quest_drops_it_from_the_active_list_without_a_packet() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    fake.session.world.active.push(QuestId(11));
+    let result = remote(&mut fake, |host| {
+        assert_eq!(host.call(1, "abandon", json!([11])), json!({ "id": 1, "ok": null }));
+        host.finish();
+    });
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}");
+    assert!(fake.session.world.active.is_empty());
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+    assert!(!sent.iter().any(|m| m.contains("%11%")), "{sent:#?}");
 }

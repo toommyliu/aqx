@@ -231,6 +231,11 @@ fn op(name: &str) -> Option<Op> {
             Ok(s.world.quests.get(&id).map_or(Value::Null, |q| quest(&s.world, q)))
         }),
         "quests" => I(|s, _| Ok(Value::Array(s.world.quests.values().map(|q| quest(&s.world, q)).collect()))),
+        "abandon" => I(|s, a| {
+            let (id,): (QuestId,) = args(a)?;
+            s.world.active.retain(|q| *q != id);
+            done()
+        }),
         "quest_value" => I(|s, a| {
             let (slot,): (i32,) = args(a)?;
             Ok(json!(s.world.quest_value(slot)))

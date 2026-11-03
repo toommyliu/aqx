@@ -24,6 +24,7 @@ public sealed partial class Shim
         ("getGameObject" or "getGameObjectS", [string path]) => GameObject(path),
         ("setGameObject" or "setGameObjectKey", _) => null,
         ("callGameFunction0", ["world.toggleMonsters" or "world.toggleQuestLog"]) => null,
+        ("callGameFunction", ["world.abandonQuest", int quest]) => JsonConvert.SerializeObject(Aqx.Call("abandon", quest)),
         ("callGameFunction", ["world.maximumQuestTurnIns", int quest]) => JsonConvert.SerializeObject(EnsureLoad(quest) is { } q ? TurnIns(q) : 0),
         ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool _, int times]) => JsonConvert.SerializeObject(Complete(quest, reward, times)),
         ("callGameFunction", ["loaderInfo.applicationDomain.hasDefinition", "InvCat"]) => "false",
