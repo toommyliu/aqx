@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.Json.Nodes;
 using Newtonsoft.Json;
 
 namespace Aqx.Skua;
@@ -23,6 +24,10 @@ public sealed partial class Shim
         ("getGameObject" or "getGameObjectS", [string path]) => GameObject(path),
         ("setGameObject" or "setGameObjectKey", _) => null,
         ("callGameFunction0", ["world.toggleMonsters"]) => null,
+        ("callGameFunction", ["loaderInfo.applicationDomain.hasDefinition", "InvCat"]) => "false",
+        ("callGameFunction", ["world.sendLoadShopRequest", int shop]) => JsonConvert.SerializeObject(Act("load_shop", shop)),
+        ("callGameFunction", ["world.sendBuyItemRequestWithQuantity", IDictionary<string, object?> item]) =>
+            JsonConvert.SerializeObject(Buy(Convert.ToInt32(item["ItemID"]), Convert.ToInt32(item["ShopItemID"]), Convert.ToInt32(item["iQty"]))),
         ("canUseSkill", [int slot]) => JsonConvert.SerializeObject((bool?)Aqx.Call("can_cast", slot) ?? false),
         ("useSkill", [int slot]) => JsonConvert.SerializeObject((bool?)Aqx.Call("cast", slot) ?? false),
         ("isNull", [string path]) => JsonConvert.SerializeObject(GameObject(path) is null),
@@ -33,6 +38,7 @@ public sealed partial class Shim
     {
         _ when path.StartsWith("uoPref.") => JsonConvert.SerializeObject(preferences.GetValueOrDefault(path["uoPref.".Length..], true)),
         _ when path.StartsWith("world.lock.") => "{\"TS\":0,\"CD\":0}",
+        _ when path == "world.shopinfo" || path.StartsWith("world.shopinfo.") => Walk(ShopInfo(), path["world.shopinfo".Length..])?.ToJsonString(),
         "ui.mcPopup.currentLabel" => "\"\"",
         "ui.monsterIcon.redX.visible" => "false",
         "world.myAvatar.objData.guild.Name" => "\"\"",
@@ -44,6 +50,14 @@ public sealed partial class Shim
         "world.strMapName" or "world.strMapFileName" => JsonConvert.SerializeObject(MapName),
         _ => Missing($"Flash game object {path}"),
     };
+
+    static JsonNode? Walk(JsonNode? node, string path) =>
+        path.Split('.', StringSplitOptions.RemoveEmptyEntries).Aggregate(node, (at, key) => at switch
+        {
+            JsonObject o => o[key],
+            JsonArray a when int.TryParse(key, out int i) && i >= 0 && i < a.Count => a[i],
+            _ => null,
+        });
 
     string? Missing(string what)
     {

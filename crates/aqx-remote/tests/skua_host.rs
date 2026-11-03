@@ -189,3 +189,65 @@ fn core_bots_hunts_a_monster_for_a_quest_item_and_turns_it_in() {
     assert!(at("%getDrop%5%87%") < at("%tryQuestComplete%5%11%"));
     assert!(logged.iter().any(|l| l.contains("holding 1 Twilly Twig")), "{logged:#?}");
 }
+
+const BUY: &str = r#"
+//cs_include Scripts/CoreBots.cs
+//cs_include Scripts/CoreAdvanced.cs
+using Skua.Core.Interfaces;
+
+public class BuyFromShop
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+    private CoreAdvanced Adv = new();
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Core.SetOptions();
+        Core.BuyItem("farm", 1348, "Sword");
+        Adv.BuyItem("farm", 1348, "Hat");
+        Core.Logger($"holding {Bot.Inventory.GetQuantity("Sword")} Sword and {Bot.Inventory.GetQuantity("Hat")} Hat");
+        Core.SetOptions(false);
+    }
+}
+"#;
+
+fn shop_server(msg: &str, wire: &mut Wire) {
+    if msg.contains("%loadShop%5%1348%") {
+        wire.object(
+            r#"{"cmd":"loadShop","shopinfo":{"ShopID":1348,"sName":"Featured Gear Shop","iIndex":-1,"items":[
+            {"ItemID":102658,"ShopItemID":68071,"sName":"Sword","iCost":300,"bCoins":false,"bUpg":false,"iStk":1,"iQty":1,"sType":"Sword","sES":"Weapon","turnin":[]},
+            {"ItemID":5,"ShopItemID":6,"sName":"Hat","iCost":100,"bCoins":false,"bUpg":false,"iStk":1,"iQty":1,"sType":"Helm","sES":"he","turnin":[]}]}}"#,
+        );
+    } else if msg.contains("%buyItem%5%102658%1348%68071%1%") {
+        wire.object(r#"{"cmd":"buyItem","bitSuccess":1,"ItemID":102658,"CharItemID":77,"iQty":1,"bBank":0}"#);
+    } else if msg.contains("%buyItem%5%5%1348%6%1%") {
+        wire.object(r#"{"cmd":"buyItem","bitSuccess":1,"ItemID":5,"CharItemID":78,"iQty":1,"bBank":0}"#);
+    }
+}
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn core_bots_and_core_advanced_buy_from_a_shop() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-buy");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("BuyFromShop.cs");
+    std::fs::write(&script, BUY).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, shop_server, sink);
+    let me = fake.session.world.me.as_mut().unwrap();
+    (me.gold, me.bag_slots) = (1000, 30);
+    fake.session.world.set_bank(Vec::new());
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    if std::env::var_os("AQX_SKUA_LOG").is_some() {
+        eprintln!("{logged:#?}\n{sent:#?}");
+    }
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert_eq!(sent.iter().filter(|m| m.contains("%buyItem%5%102658%1348%68071%1%")).count(), 1, "{sent:#?}\n{logged:#?}");
+    assert!(logged.iter().any(|l| l.contains("holding 1 Sword and 1 Hat")), "{logged:#?}");
+}
