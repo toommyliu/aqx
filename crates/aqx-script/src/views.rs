@@ -67,6 +67,7 @@ pub fn monster(m: &Monster) -> Value {
         "hp": m.vitals.hp,
         "maxHp": m.vitals.max_hp,
         "alive": m.alive(),
+        "state": state(m.vitals.state),
         "auras": auras(&m.auras),
     })
 }
