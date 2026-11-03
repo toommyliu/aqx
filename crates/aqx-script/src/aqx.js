@@ -120,6 +120,7 @@ export const player = live(
   { rest: () => native.rest() },
   () => view("player"),
   [
+    "id",
     "name",
     "level",
     "hp",

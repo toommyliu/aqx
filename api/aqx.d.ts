@@ -73,6 +73,8 @@ declare module "aqx" {
   }
 
   export interface OtherPlayer {
+    /** The entity id that raw packets use for this player, as in `p:{id}`. */
+    readonly id: number;
     readonly name: string;
     readonly level: number;
     readonly cell: string;
@@ -243,6 +245,8 @@ declare module "aqx" {
   }
 
   export const player: {
+    /** The entity id that raw packets use for the player, as in `p:{id}`. */
+    readonly id: number;
     readonly name: string;
     readonly level: number;
     readonly hp: number;

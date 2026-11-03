@@ -8,6 +8,7 @@ pub fn player(world: &World) -> Value {
     let Some(me) = &world.me else { return Value::Null };
     let stat = |key: &str| me.stats.get(key).copied().unwrap_or(0.0);
     json!({
+        "id": me.eid,
         "name": me.user,
         "level": me.level,
         "hp": me.vitals.hp,
@@ -78,6 +79,7 @@ pub fn monster(m: &Monster) -> Value {
 
 fn other(p: &Player) -> Value {
     json!({
+        "id": p.eid,
         "name": p.name,
         "level": p.level,
         "cell": p.cell,
