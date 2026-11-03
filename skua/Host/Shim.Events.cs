@@ -11,12 +11,10 @@ namespace Aqx.Skua;
 
 public sealed partial class Shim
 {
-    static readonly TimeSpan StoppingTimeout = TimeSpan.FromSeconds(2);
-
     const string PacketEvent = nameof(IScriptEvent.ExtensionPacketReceived);
 
     readonly ConcurrentDictionary<string, Delegate?> events = new();
-    volatile bool runStopping = true;
+    volatile bool runStopping;
     bool listeningToPackets;
 
     void Events()
@@ -147,7 +145,7 @@ public sealed partial class Shim
 
     public void ScriptStopping(Exception? exception)
     {
-        if (!runStopping || events.GetValueOrDefault(nameof(IScriptEvent.ScriptStopping)) is not { } handlers)
+        if (!runStopping && exception is null || events.GetValueOrDefault(nameof(IScriptEvent.ScriptStopping)) is not { } handlers)
             return;
         Task raised = Task.Run(() =>
         {
@@ -167,6 +165,12 @@ public sealed partial class Shim
                 }
             }
         });
-        raised.Wait(StoppingTimeout);
+        try
+        {
+            raised.Wait(Aqx.Stopping);
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 }

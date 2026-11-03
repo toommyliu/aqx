@@ -14,6 +14,7 @@ public delegate object? TypedHandler(object?[] args, Type returns);
 public sealed partial class Shim
 {
     public const string ScriptThread = "Script Thread";
+    const int SleepChunk = 500;
 
     static readonly ConcurrentDictionary<(Type Owner, MethodInfo Method), string> Keys = new();
 
@@ -97,7 +98,11 @@ public sealed partial class Shim
             Sleep((int)args[0]!);
             return null;
         });
-        On("IScriptInterface.Log(String)", args => Aqx.Call("log", "info", args[0] ?? ""));
+        On("IScriptInterface.Log(String)", args =>
+        {
+            ExitIfStopped();
+            return Aqx.Call("log", "info", args[0] ?? "");
+        });
         On("IScriptInterface.Stop(Boolean)", args =>
         {
             Stop((bool)args[0]!);
@@ -106,7 +111,7 @@ public sealed partial class Shim
         On("IScriptInterface.StopAsync(Boolean)", args =>
         {
             Stop((bool)args[0]!);
-            return Task.CompletedTask;
+            return Thread.CurrentThread.Name == ScriptThread ? Task.FromCanceled(new CancellationToken(true)) : Task.CompletedTask;
         });
         On("IScriptInterface.get_Random()", _ => random);
         On("IScriptInterface.set_Random(Random)", args => random = (Random)args[0]!);
@@ -156,9 +161,23 @@ public sealed partial class Shim
 
     public void Sleep(int ms)
     {
+        ExitIfStopped();
+        if (ms <= SleepChunk * 2)
+        {
+            Thread.Sleep(ms);
+            return;
+        }
+        for (int left = ms; left > 0; left -= SleepChunk)
+        {
+            ExitIfStopped();
+            Thread.Sleep(Math.Min(SleepChunk, left));
+        }
+    }
+
+    void ExitIfStopped()
+    {
         if (ShouldExit && Thread.CurrentThread.Name == ScriptThread)
             throw new OperationCanceledException();
-        Thread.Sleep(ms);
     }
 
     object? Dismiss(object?[] args, object? answer)

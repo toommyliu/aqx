@@ -745,3 +745,55 @@ fn core_bots_reads_the_account_equips_and_drinks_a_potion_and_hears_afk() {
     assert!(sent.iter().any(|m| m.contains("%gar%") && m.contains("i1>")), "{sent:#?}");
     assert!(logged.contains(&"info: afk True".to_string()), "{logged:#?}");
 }
+
+const STOPS: &str = r#"
+using Skua.Core.Interfaces;
+
+public class Stops
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Events.ScriptStopping += e =>
+        {
+            bot.Sleep(2500);
+            bot.Log($"stopping handler finished, crashed {e is not null}");
+            return true;
+        };
+        if ("MODE" == "finish")
+            return;
+        bot.StopAsync(true).GetAwaiter().GetResult();
+        bot.Map.Jump("r2", "Left");
+    }
+}
+"#;
+
+fn run_stops(mode: &str) -> (Result<Outcome, ScriptError>, Vec<String>, Vec<String>) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("skua-stops-{mode}"));
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("Stops.cs");
+    std::fs::write(&script, STOPS.replace("MODE", mode)).unwrap();
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, |_, _| {}, sink);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent = fake.finish().into_iter().map(|(_, m)| m).collect();
+    let logged = logged.lock().unwrap().clone();
+    (result, logged, sent)
+}
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn stopping_from_the_script_unwinds_it_and_lets_its_stopping_handlers_finish() {
+    let (result, logged, sent) = run_stops("stop");
+    assert!(matches!(result, Ok(Outcome::Stopped(_))), "{result:?}\n{logged:#?}");
+    assert!(!sent.iter().any(|m| m.contains("%moveToCell%5%r2%")), "{sent:#?}");
+    assert!(logged.contains(&"info: stopping handler finished, crashed False".to_string()), "{logged:#?}");
+}
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn a_script_that_returns_raises_no_script_stopping() {
+    let (result, logged, _) = run_stops("finish");
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(!logged.iter().any(|l| l.contains("stopping handler")), "{logged:#?}");
+}
