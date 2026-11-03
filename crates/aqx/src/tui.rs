@@ -11,6 +11,8 @@ use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
+use tui_input::Input as TextInput;
+use tui_input::backend::crossterm::EventHandler;
 use unicode_width::UnicodeWidthChar;
 
 use aqx_script::Arg;
@@ -231,21 +233,21 @@ impl Section {
 }
 
 struct Prompt {
-    input: String,
-    draft: String,
+    input: TextInput,
+    draft: TextInput,
     pick: Option<usize>,
     matches: Vec<String>,
 }
 
 impl Prompt {
     fn new() -> Self {
-        let mut prompt = Prompt { input: String::new(), draft: String::new(), pick: None, matches: Vec::new() };
+        let mut prompt = Prompt { input: TextInput::default(), draft: TextInput::default(), pick: None, matches: Vec::new() };
         prompt.find_matches();
         prompt
     }
 
     fn find_matches(&mut self) {
-        self.matches = scripts_matching(&self.input);
+        self.matches = scripts_matching(self.input.value());
     }
 
     fn recall(&mut self, recent: &[Recent], older: bool) {
@@ -264,7 +266,7 @@ impl Prompt {
             (Some(i), false) => i - 1,
         };
         self.pick = Some(pick);
-        self.input.clone_from(&recent[recent.len() - 1 - pick].typed);
+        self.input = TextInput::new(recent[recent.len() - 1 - pick].typed.clone());
     }
 }
 
@@ -282,7 +284,7 @@ struct Ask {
     asked: Vec<Arg>,
     accounts: Vec<(usize, String)>,
     answers: Vec<String>,
-    input: String,
+    input: TextInput,
     recalled: bool,
 }
 
@@ -309,13 +311,13 @@ impl Ask {
     fn recall(&mut self, remembered: &HashMap<Slot, String>, shared: bool) {
         let (script, key, account) = self.slot(shared);
         let value = account.and_then(|i| remembered.get(&(script.clone(), key.clone(), Some(i)))).or_else(|| remembered.get(&(script, key, None)));
-        self.input = value.cloned().unwrap_or_default();
-        self.recalled = !self.input.is_empty();
+        self.input = value.cloned().map(TextInput::new).unwrap_or_default();
+        self.recalled = !self.input.value().is_empty();
     }
 
     fn edit(&mut self) {
         if std::mem::take(&mut self.recalled) {
-            self.input.clear();
+            self.input.reset();
         }
     }
 
@@ -371,7 +373,7 @@ struct App {
     grid_top: Cell<usize>,
     grid_cols: Cell<usize>,
     prompt: Option<Prompt>,
-    query: String,
+    query: TextInput,
     querying: bool,
     ask: Option<Ask>,
     share_args: bool,
@@ -568,14 +570,14 @@ impl App {
     }
 
     fn step(&mut self, shown: &[Shown], by: isize, wrap: bool) {
-        let order = order(shown, &self.query);
+        let order = order(shown, self.query.value());
         let Some(at) = order.iter().position(|&i| i == self.selected) else { return };
         let (at, n) = (at as isize + by, order.len() as isize);
         self.pick(order[if wrap { at.rem_euclid(n) } else { at.clamp(0, n - 1) } as usize]);
     }
 
     fn jump(&mut self, shown: &[Shown], by: isize) {
-        let order = order(shown, &self.query);
+        let order = order(shown, self.query.value());
         let offline = |i| snapshot(shown, i).is_some_and(is_offline);
         let starts: Vec<usize> = (0..order.len()).filter(|&at| at == 0 || offline(order[at]) != offline(order[at - 1])).collect();
         let Some(at) = order.iter().position(|&i| i == self.selected) else { return };
@@ -584,7 +586,7 @@ impl App {
     }
 
     fn refilter(&mut self, shown: &[Shown]) {
-        let order = order(shown, &self.query);
+        let order = order(shown, self.query.value());
         if let Some(&first) = order.first().filter(|_| !order.contains(&self.selected)) {
             self.pick(first);
         }
@@ -670,7 +672,7 @@ impl App {
         self.dragging = list.is_some_and(|l| column + 1 == l.right() || column == l.right());
         let Some(list) = list.filter(|l| !self.dragging && l.contains(Position::new(column, row))) else { return };
         let at = self.list_top.get() + usize::from(row - list.y);
-        if let Some(&i) = list_rows(shown, &self.query).get(at..).and_then(|rows| rows.iter().flatten().next()) {
+        if let Some(&i) = list_rows(shown, self.query.value()).get(at..).and_then(|rows| rows.iter().flatten().next()) {
             self.pick(i);
         }
     }
@@ -746,23 +748,19 @@ impl App {
                     self.submit(prompt, fleet);
                 }
                 KeyCode::Up | KeyCode::Down if !self.recent.is_empty() => prompt.recall(&self.recent, key.code == KeyCode::Up),
-                KeyCode::Backspace => {
-                    prompt.pick = None;
-                    prompt.input.pop();
-                }
                 KeyCode::Tab => {
                     prompt.pick = None;
                     match prompt.matches.as_slice() {
                         [] => {}
-                        [only] if !only.ends_with('/') => prompt.input = format!("{only} "),
-                        many => prompt.input = shared_prefix(many).to_string(),
+                        [only] if !only.ends_with('/') => prompt.input = TextInput::new(format!("{only} ")),
+                        many => prompt.input = TextInput::new(shared_prefix(many).to_string()),
                     }
                 }
-                KeyCode::Char(c) => {
-                    prompt.pick = None;
-                    prompt.input.push(c);
+                _ => {
+                    if prompt.input.handle_event(&Input::Key(key)).is_some_and(|changed| changed.value) {
+                        prompt.pick = None;
+                    }
                 }
-                _ => {}
             }
             if let Some(prompt) = &mut self.prompt {
                 prompt.find_matches();
@@ -772,21 +770,19 @@ impl App {
         if self.querying {
             match key.code {
                 KeyCode::Esc => {
-                    self.query.clear();
+                    self.query.reset();
                     self.querying = false;
                 }
                 KeyCode::Enter => self.querying = false,
                 KeyCode::Up => self.step(shown, -1, false),
                 KeyCode::Down => self.step(shown, 1, false),
-                KeyCode::Backspace => {
-                    self.query.pop();
-                }
                 KeyCode::Tab => {
-                    let names: Vec<&str> = order(shown, &self.query).into_iter().map(|i| shown[i].name.as_str()).collect();
-                    self.query = complete(&self.query, &names);
+                    let names: Vec<&str> = order(shown, self.query.value()).into_iter().map(|i| shown[i].name.as_str()).collect();
+                    self.query = TextInput::new(complete(self.query.value(), &names));
                 }
-                KeyCode::Char(c) => self.query.push(c),
-                _ => {}
+                _ => {
+                    self.query.handle_event(&Input::Key(key));
+                }
             }
             self.refilter(shown);
             return false;
@@ -796,12 +792,12 @@ impl App {
                 KeyCode::Esc => self.ask = None,
                 KeyCode::Tab if ask.can_share() => {
                     self.share_args = !self.share_args;
-                    if ask.recalled || ask.input.is_empty() {
+                    if ask.recalled || ask.input.value().is_empty() {
                         ask.recall(&self.remembered, self.share_args);
                     }
                 }
-                KeyCode::Enter if !ask.input.trim().is_empty() || ask.asking(self.share_args).0.default.is_some() => {
-                    let value = std::mem::take(&mut ask.input).trim().to_string();
+                KeyCode::Enter if !ask.input.value().trim().is_empty() || ask.asking(self.share_args).0.default.is_some() => {
+                    let value = std::mem::take(&mut ask.input).value().trim().to_string();
                     self.remembered.insert(ask.slot(self.share_args), value.clone());
                     ask.answers.push(value);
                     if ask.left(self.share_args) == 0 {
@@ -811,20 +807,20 @@ impl App {
                         ask.recall(&self.remembered, self.share_args);
                     }
                 }
-                KeyCode::Backspace if ask.recalled => ask.edit(),
-                KeyCode::Backspace => {
-                    ask.input.pop();
+                KeyCode::Backspace | KeyCode::Delete if ask.recalled => ask.edit(),
+                _ => {
+                    if matches!(key.code, KeyCode::Char(_)) && key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+                        ask.edit();
+                    }
+                    if ask.input.handle_event(&Input::Key(key)).is_some() {
+                        ask.recalled = false;
+                    }
                 }
-                KeyCode::Char(c) => {
-                    ask.edit();
-                    ask.input.push(c);
-                }
-                _ => {}
             }
             return false;
         }
         let accounts = shown.len();
-        let visible = order(shown, &self.query);
+        let visible = order(shown, self.query.value());
         let cols = self.grid_cols.get() as isize;
         let line = accounts < 2 || key.modifiers.contains(KeyModifiers::SHIFT);
         let picking = self.list == Some(Section::Drops) && !self.grid;
@@ -903,7 +899,7 @@ impl App {
     }
 
     fn submit(&mut self, prompt: Prompt, fleet: &Fleet) {
-        let input = prompt.input.trim().to_string();
+        let input = prompt.input.value().trim().to_string();
         if input.is_empty() {
             return;
         }
@@ -924,7 +920,7 @@ impl App {
         }
         let cells = fleet.cells.all();
         let accounts = targets.into_iter().filter_map(|i| Some((i, self.mask.hide(&cells.get(i)?.name)))).collect();
-        let mut ask = Ask { typed: input, script: path, given: args, asked, accounts, answers: Vec::new(), input: String::new(), recalled: false };
+        let mut ask = Ask { typed: input, script: path, given: args, asked, accounts, answers: Vec::new(), input: TextInput::default(), recalled: false };
         ask.recall(&self.remembered, self.share_args);
         self.ask = Some(ask);
     }
@@ -939,7 +935,7 @@ impl App {
 
 fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
     let matches: Vec<String> = match &app.prompt {
-        _ if app.querying => order(shown, &app.query).into_iter().map(|i| shown[i].name.clone()).collect(),
+        _ if app.querying => order(shown, app.query.value()).into_iter().map(|i| shown[i].name.clone()).collect(),
         Some(prompt) => prompt.matches.clone(),
         None => Vec::new(),
     };
@@ -1057,12 +1053,12 @@ fn draw_header(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App, shown: &[Sho
         let online = shown.iter().filter(|s| s.snapshot.as_ref().is_some_and(|s| s.phase != "OFFLINE")).count();
         left.push(Span::raw(format!("  {online} of {} online", shown.len())).dark_gray());
     } else if let Some(account) = shown.get(app.selected).filter(|_| shown.len() > 1) {
-        let order = order(shown, &app.query);
+        let order = order(shown, app.query.value());
         let at = order.iter().position(|&i| i == app.selected).unwrap_or(0);
         left.push(Span::raw(format!("  {} {}/{}", account.name, at + 1, order.len())).dark_gray());
     }
-    if !app.query.is_empty() {
-        left.push(Span::raw(format!(" · filter \"{}\"", app.query)).dark_gray());
+    if !app.query.value().is_empty() {
+        left.push(Span::raw(format!(" · filter \"{}\"", app.query.value())).dark_gray());
     }
     if !app.marked.is_empty() {
         left.push(Span::raw(format!(" · {} marked", app.marked.len())).dark_gray());
@@ -1085,7 +1081,7 @@ fn name_width(shown: &[Shown]) -> usize {
 fn draw_list(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     let inner = usize::from(area.width.saturating_sub(1));
     let name_col = name_width(shown).min(inner.saturating_sub(4));
-    let rows = list_rows(shown, &app.query);
+    let rows = list_rows(shown, app.query.value());
     let offline = rows.iter().flatten().filter(|&&i| snapshot(shown, i).is_some_and(is_offline)).count();
     let height = (area.height as usize).max(1);
     let at = rows.iter().position(|&row| row == Some(app.selected)).unwrap_or(0);
@@ -1134,18 +1130,30 @@ fn list_row(account: &Shown, selected: bool, marked: bool, frame: usize, name_co
     fit(spans, inner)
 }
 
+fn typed_spans(input: &TextInput) -> Vec<Span<'static>> {
+    let value = input.value();
+    let at = value.char_indices().nth(input.cursor()).map_or(value.len(), |(i, _)| i);
+    let (before, after) = value.split_at(at);
+    let mut after = after.chars();
+    let cursor = match after.next() {
+        Some(c) => Span::raw(c.to_string()).reversed(),
+        None => Span::raw("█"),
+    };
+    vec![Span::raw(before.to_string()), cursor, Span::raw(after.as_str().to_string())]
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     let width = area.width as usize;
     let who = app.who(shown, width / 3);
     if app.querying {
         let keys = hints(&[("↑↓", "pick"), ("tab", "complete"), ("enter", "done"), ("esc", "clear")]);
-        let typed = vec![Span::raw(" filter accounts: ").bold(), Span::raw(app.query.clone()), Span::raw("█")];
+        let typed = [vec![Span::raw(" filter accounts: ").bold()], typed_spans(&app.query)].concat();
         return f.render_widget(Paragraph::new(spread(typed, keys, width.saturating_sub(1))), area);
     }
     if let Some(prompt) = &app.prompt {
         let label = format!(" run on {who}: ");
         let keys = hints(&[("tab", "complete"), ("↑↓", "recent"), ("esc", "cancel")]);
-        let typed = vec![Span::raw(label).bold(), Span::raw(prompt.input.clone()), Span::raw("█")];
+        let typed = [vec![Span::raw(label).bold()], typed_spans(&prompt.input)].concat();
         return f.render_widget(Paragraph::new(spread(typed, keys, width.saturating_sub(1))), area);
     }
     if let Some(ask) = &app.ask {
@@ -1162,9 +1170,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         }
         keys.push(("esc", "cancel"));
         let keys = hints(&keys);
-        let input = if ask.recalled { Span::raw(ask.input.clone()).reversed() } else { Span::raw(ask.input.clone()) };
-        let mut typed = vec![Span::raw(label).bold(), input, Span::raw("█")];
-        if let Some(default) = arg.default.as_deref().filter(|_| ask.input.is_empty()) {
+        let input = if ask.recalled { vec![Span::raw(ask.input.value().to_string()).reversed(), Span::raw("█")] } else { typed_spans(&ask.input) };
+        let mut typed = [vec![Span::raw(label).bold()], input].concat();
+        if let Some(default) = arg.default.as_deref().filter(|_| ask.input.value().is_empty()) {
             typed.push(Span::raw(if default.is_empty() { "optional" } else { default }.to_string()).dark_gray());
         }
         return f.render_widget(Paragraph::new(spread(typed, keys, width.saturating_sub(1))), area);
@@ -1225,7 +1233,7 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     let cols = usize::from(area.width / CARD_WIDTH).max(1);
     let rows = usize::from(area.height / CARD_HEIGHT).max(1);
     app.grid_cols.set(cols);
-    let order = order(shown, &app.query);
+    let order = order(shown, app.query.value());
     let row = order.iter().position(|&i| i == app.selected).unwrap_or(0) / cols;
     let top = app.grid_top.get().min(row).max((row + 1).saturating_sub(rows));
     app.grid_top.set(top);
@@ -2559,12 +2567,12 @@ mod tests {
         assert_eq!(list(&mut app), ["▌ ⠋ healer  starting", "⠋ Healbot starting", "", "", ""]);
         assert_eq!(app.selected, 1, "the pick moves to the first match");
         press(&fleet, &mut app, KeyCode::Tab);
-        assert_eq!(app.query, "heal", "tab completes as far as every match agrees");
+        assert_eq!(app.query.value(), "heal", "tab completes as far as every match agrees");
         typed(&mut app, "e");
         press(&fleet, &mut app, KeyCode::Tab);
-        assert_eq!(app.query, "healer", "and the whole name once one is left");
+        assert_eq!(app.query.value(), "healer", "and the whole name once one is left");
         press(&fleet, &mut app, KeyCode::Esc);
-        assert!(!app.querying && app.query.is_empty() && list(&mut app)[4].contains("Healbot"), "esc clears the filter");
+        assert!(!app.querying && app.query.value().is_empty() && list(&mut app)[4].contains("Healbot"), "esc clears the filter");
 
         press(&fleet, &mut app, KeyCode::Char('/'));
         typed(&mut app, "FARM");
@@ -2794,6 +2802,31 @@ mod tests {
     }
 
     #[test]
+    fn the_run_prompt_edits_anywhere_in_the_line() {
+        let (fleet, _hub) = fleet(&["main"]);
+        let mut app = App::default();
+        let key = |app: &mut App, code: KeyCode, modifiers: KeyModifiers| {
+            let shown = gather(&fleet, app);
+            app.handle(KeyEvent::new(code, modifiers), &fleet, &shown);
+        };
+        let typed = |app: &mut App, text: &str| text.chars().for_each(|c| press(&fleet, app, KeyCode::Char(c)));
+        let line = |app: &mut App| screen(&fleet, app, 100).lines().find(|l| l.contains(" run on ")).unwrap_or_default().to_string();
+
+        press(&fleet, &mut app, KeyCode::Char('o'));
+        typed(&mut app, "/srv/frm.ts rounds=3");
+        press(&fleet, &mut app, KeyCode::Home);
+        (0..6).for_each(|_| press(&fleet, &mut app, KeyCode::Right));
+        typed(&mut app, "a");
+        assert!(line(&mut app).contains(": /srv/farm.ts rounds=3 ") && !line(&mut app).contains('█'), "{}", line(&mut app));
+        press(&fleet, &mut app, KeyCode::End);
+        assert!(line(&mut app).contains(": /srv/farm.ts rounds=3█"), "{}", line(&mut app));
+        key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert!(line(&mut app).contains(": /srv/farm.ts rounds=█"), "ctrl+w deletes back to the =: {}", line(&mut app));
+        key(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert!(line(&mut app).contains(": █"), "ctrl+u clears the line: {}", line(&mut app));
+    }
+
+    #[test]
     fn arrows_in_the_run_prompt_walk_back_through_what_was_typed() {
         let dir = std::env::temp_dir().join(format!("aqx-tui-recent-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2817,7 +2850,7 @@ mod tests {
                 .iter()
                 .map(|&code| {
                     press(&fleet, app, code);
-                    app.prompt.as_ref().unwrap().input.clone()
+                    app.prompt.as_ref().unwrap().input.value().to_string()
                 })
                 .collect::<Vec<_>>()
         };
@@ -2913,6 +2946,9 @@ mod tests {
         assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target: █"), "backspace clears a recalled answer");
         press(&fleet, &mut app, KeyCode::Tab);
         assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target for main: Bob Smith█"), "each account recalls its own answer");
+        press(&fleet, &mut app, KeyCode::Left);
+        typed(&mut app, "x");
+        assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target for main: Bob Smitxh "), "moving the cursor keeps a recalled answer to edit");
         press(&fleet, &mut app, KeyCode::Esc);
 
         let spaced = "target=Bob Smith rounds=3 class=Dark Caster wait=5";
@@ -3064,7 +3100,7 @@ mod tests {
         let mut app = App::default();
         let press = |app: &mut App, code: KeyCode| app.handle(KeyEvent::from(code), &fleet, &[]);
         let typed = |app: &mut App, text: &str| text.chars().for_each(|c| _ = press(app, KeyCode::Char(c)));
-        let input = |app: &App| app.prompt.as_ref().unwrap().input.clone();
+        let input = |app: &App| app.prompt.as_ref().unwrap().input.value().to_string();
 
         press(&mut app, KeyCode::Char('o'));
         typed(&mut app, &format!(" {root}"));

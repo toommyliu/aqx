@@ -26,6 +26,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 swc_common = "27"
 swc_ts_fast_strip = "60"
 toml = "1"
+tui-input = "0.15"
 unicode-width = "0.2"
 ureq = "3"
 
