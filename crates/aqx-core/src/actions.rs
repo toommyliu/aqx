@@ -369,7 +369,7 @@ impl Session {
 
     pub fn withdraw(&mut self, item: &ItemRef) -> Result<(), ActError> {
         self.ready(None)?;
-        if self.world.inventory.iter().any(|i| item.matches(i)) {
+        if self.world.carried().any(|i| item.matches(i)) {
             return Ok(());
         }
         if !self.world.bank_loaded {
@@ -379,17 +379,22 @@ impl Session {
             return Err(ActError::NotFound(format!("{item} in the bank")));
         };
         if self.world.full_for(&found) {
-            return Err(ActError::Rejected(format!("the {} is full", if found.pool() == Pool::Misc { "misc inventory" } else { "inventory" })));
+            let pool = match found.pool() {
+                Pool::Misc => "misc inventory",
+                Pool::House => "house inventory",
+                _ => "inventory",
+            };
+            return Err(ActError::Rejected(format!("the {pool} is full")));
         }
         let char_item = found.char_item.ok_or_else(|| ActError::NotFound(format!("a character item id for {item}")))?;
         let room = self.room()?;
         self.send_expecting("withdrawing", Out::Withdraw { room, item: found.id, char_item }, Kind::Free)?;
-        self.refused_or("withdrawing", &format!("withdrawing {item}"), |s| s.world.inventory.iter().any(|i| i.id == found.id))
+        self.refused_or("withdrawing", &format!("withdrawing {item}"), |s| s.world.carried().any(|i| i.id == found.id))
     }
 
     pub fn deposit(&mut self, item: &ItemRef) -> Result<(), ActError> {
         self.ready(None)?;
-        let Some(found) = self.world.inventory.iter().find(|i| item.matches(i)).cloned() else {
+        let Some(found) = self.world.carried().find(|i| item.matches(i)).cloned() else {
             if !self.world.bank_loaded {
                 self.load_bank()?;
             }
@@ -467,7 +472,7 @@ impl Session {
 
     pub fn sell(&mut self, item: &ItemRef, qty: u32) -> Result<(), ActError> {
         self.ready(None)?;
-        let Some(found) = self.world.inventory.iter().find(|i| item.matches(i)).cloned() else {
+        let Some(found) = self.world.carried().find(|i| item.matches(i)).cloned() else {
             return Err(ActError::NotFound(format!("{item} in the inventory")));
         };
         if found.equipped {

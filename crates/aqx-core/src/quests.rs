@@ -62,12 +62,12 @@ impl World {
     }
 
     pub fn count_of(&self, item: &crate::world::ItemRef) -> u32 {
-        self.inventory.iter().chain(&self.temp).filter(|i| item.matches(i)).map(|i| i.qty).sum()
+        self.carried().chain(&self.temp).filter(|i| item.matches(i)).map(|i| i.qty).sum()
     }
 
     pub fn name_of(&self, item: &crate::world::ItemRef) -> String {
         let crate::world::ItemRef::Id(id) = item else { return item.to_string() };
-        let held = self.inventory.iter().chain(&self.temp).chain(&self.drops).chain(self.bank.iter()).find(|i| i.id == *id).map(|i| i.name.clone());
+        let held = self.carried().chain(&self.temp).chain(&self.drops).chain(self.bank.iter()).find(|i| i.id == *id).map(|i| i.name.clone());
         held.or_else(|| self.quests.values().flat_map(|q| q.turn_in.iter().chain(&q.hold)).find(|n| n.item == *id).map(|n| n.name.clone()))
             .unwrap_or_else(|| item.to_string())
     }
