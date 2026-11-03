@@ -81,6 +81,7 @@ pub struct Me {
     pub achievements: HashMap<String, i64>,
     pub class_points: u32,
     pub boosts: HashMap<Boost, Instant>,
+    pub left_combat: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -259,7 +260,7 @@ pub fn reduce(world: &mut World, msg: &Message, now: Instant) -> Vec<Event> {
     world.expire_auras(now);
     match msg {
         Message::Xml(xml) => world.on_xml(xml, &mut events),
-        Message::Xt(xt) => world.on_xt(xt, &mut events),
+        Message::Xt(xt) => world.on_xt(xt, now, &mut events),
         Message::Json(json) => {
             if let Err(e) = world.on_json(json, now, &mut events) {
                 events.push(Event::Unreadable { what: format!("{}: {e}", json.cmd) });
@@ -540,7 +541,7 @@ impl World {
         }
     }
 
-    fn on_xt(&mut self, xt: &Xt, events: &mut Vec<Event>) {
+    fn on_xt(&mut self, xt: &Xt, now: Instant, events: &mut Vec<Event>) {
         match xt.cmd {
             "loginResponse" => match (xt.arg(0), xt.arg(1).and_then(|s| s.parse().ok())) {
                 (Some("true"), Some(eid)) => {
@@ -610,7 +611,7 @@ impl World {
                     me.x = x.unwrap_or(me.x);
                     me.y = y.unwrap_or(me.y);
                 }
-                self.patch_named(name, &patch, events);
+                self.patch_named(name, &patch, now, events);
             }
             _ => {}
         }
@@ -639,7 +640,7 @@ impl World {
                     o: Patch,
                 }
                 let update: Update = json.decode()?;
-                self.patch_named(&update.unm, &update.o, events);
+                self.patch_named(&update.unm, &update.o, now, events);
             }
             "mtls" => {
                 #[derive(Deserialize)]
@@ -655,7 +656,7 @@ impl World {
             "ct" | "cb" => {
                 let tick: Tick = json.decode()?;
                 for (name, patch) in &tick.p {
-                    self.patch_named(name, patch, events);
+                    self.patch_named(name, patch, now, events);
                 }
                 for (id, patch) in &tick.m {
                     if let Some(m) = id.parse().ok().and_then(|id| self.monster(MonMapId(id))) {
@@ -1308,7 +1309,7 @@ impl World {
         }
     }
 
-    fn patch_named(&mut self, name: &str, patch: &Patch, events: &mut Vec<Event>) {
+    fn patch_named(&mut self, name: &str, patch: &Patch, now: Instant, events: &mut Vec<Event>) {
         if let Some(me) = self.me.as_mut().filter(|m| m.user.eq_ignore_ascii_case(name)) {
             let was = me.vitals.state;
             let spot = (me.cell.clone(), me.pad.clone());
@@ -1316,6 +1317,9 @@ impl World {
             if (&me.cell, &me.pad) != (&spot.0, &spot.1) {
                 (me.x, me.y) = (0, 0);
                 events.push(Event::Moved { cell: me.cell.clone(), pad: me.pad.clone() });
+            }
+            if was == State::Combat && me.vitals.state != State::Combat {
+                me.left_combat = Some(now);
             }
             match (was, me.vitals.state) {
                 (State::Dead, State::Dead) => {}
@@ -1501,6 +1505,7 @@ impl Me {
             achievements: HashMap::new(),
             class_points: 0,
             boosts: HashMap::new(),
+            left_combat: None,
         }
     }
 
