@@ -1463,3 +1463,57 @@ fn core_bots_equips_its_farm_class_and_moves_items_through_the_bank() {
     assert!(logged.iter().any(|l| l.ends_with("has dust True, in inventory True")), "{logged:#?}");
     assert!(logged.iter().any(|l| l.ends_with("after banking, in bank True")), "{logged:#?}");
 }
+
+const JOIN: &str = r#"
+//cs_include Scripts/CoreBots.cs
+using Skua.Core.Interfaces;
+
+public class JoinAnother
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Core.SetOptions();
+        Core.Join("yulgar", "Room", "Center");
+        Core.Logger($"now in {Bot.Map.FullName} at {Bot.Player.Cell}");
+        Core.SetOptions(false);
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn core_bots_joins_another_map_in_a_private_room() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-join");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("JoinAnother.cs");
+    std::fs::write(&script, JOIN).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if let Some(room) = msg.strip_prefix("%xt%zm%cmd%1%tfer%hero%yulgar-").and_then(|r| r.split('%').next()) {
+                wire.object(&format!(
+                    r#"{{"cmd":"moveToArea","areaId":7,"areaName":"yulgar-{room}","strMapName":"yulgar","mondef":[],"monmap":[],"monBranch":[],
+                    "uoBranch":[{{"entID":1001,"uoName":"hero","strFrame":"Enter","strPad":"Spawn","intHP":3000,"intHPMax":3000,"intMP":100,"intMPMax":100,"intState":1}}]}}"#
+                ));
+                wire.send(&format!("%xt%server%-1%You joined \"yulgar-{room}\"%"));
+            }
+        },
+        sink,
+    );
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    if std::env::var_os("AQX_SKUA_LOG").is_some() {
+        eprintln!("{logged:#?}\n{sent:#?}");
+    }
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.iter().any(|l| l.contains("now in yulgar-") && l.ends_with("at Room")), "{logged:#?}");
+    assert!(sent.iter().any(|m| m.starts_with("%xt%zm%moveToCell%7%Room%Center%")), "{sent:#?}");
+}
