@@ -208,6 +208,7 @@ public class BuyFromShop
         Core.BuyItem("farm", 1348, "Sword");
         Adv.BuyItem("farm", 1348, "Hat");
         Core.Logger($"holding {Bot.Inventory.GetQuantity("Sword")} Sword and {Bot.Inventory.GetQuantity("Hat")} Hat");
+        Core.Logger($"shops loaded: {string.Join(", ", Bot.Shops.LoadedCache.Select(s => $"{s.ID} with {s.Items.Count} items"))}");
         Core.SetOptions(false);
     }
 }
@@ -251,6 +252,7 @@ fn core_bots_and_core_advanced_buy_from_a_shop() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert_eq!(sent.iter().filter(|m| m.contains("%buyItem%5%102658%1348%68071%1%")).count(), 1, "{sent:#?}\n{logged:#?}");
     assert!(logged.iter().any(|l| l.contains("holding 1 Sword and 1 Hat")), "{logged:#?}");
+    assert!(logged.iter().any(|l| l.contains("shops loaded: 1348 with 2 items")), "{logged:#?}");
 }
 
 #[test]

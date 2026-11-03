@@ -30,7 +30,7 @@ public sealed partial class Shim
         ("callGameFunction", ["loaderInfo.applicationDomain.hasDefinition", "InvCat"]) => "false",
         ("callGameFunction", ["world.getQuestValue", int slot]) => JsonConvert.SerializeObject(QuestValue(slot)),
         ("callGameFunction", ["world.getAchievement", string field, int index]) => JsonConvert.SerializeObject((bool?)Aqx.Call("achievement", field, index) ?? false),
-        ("callGameFunction", ["world.sendLoadShopRequest", int shop]) => JsonConvert.SerializeObject(Act("load_shop", shop)),
+        ("callGameFunction", ["world.sendLoadShopRequest", int shop]) => JsonConvert.SerializeObject(LoadShop(shop)),
         ("callGameFunction", ["world.sendBuyItemRequestWithQuantity", IDictionary<string, object?> item]) =>
             JsonConvert.SerializeObject(Buy(Convert.ToInt32(item["ItemID"]), Convert.ToInt32(item["ShopItemID"]), Convert.ToInt32(item["iQty"]))),
         ("canUseSkill", [int slot]) => JsonConvert.SerializeObject((bool?)Aqx.Call("can_cast", slot) ?? false),

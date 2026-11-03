@@ -14,7 +14,13 @@ public sealed partial class Shim
         On("IScriptShop.get_ID()", _ => Int(ShopInfo()?["ShopID"]));
         On("IScriptShop.get_Name()", _ => (string?)ShopInfo()?["sName"] ?? "");
         On("IScriptShop.get_Items()", _ => ShopItems());
-        On("IScriptShop.Load(Int32)", args => Act("load_shop", args[0]));
+        On("IScriptShop.Load(Int32)", args => LoadShop((int)args[0]!));
+        On("IScriptShop.get_LoadedCache()", _ => Locked(loadedShops, () => loadedShops.ToList()));
+        On("IScriptShop.set_LoadedCache(List`1)", args => Locked(loadedShops, () =>
+        {
+            loadedShops.Clear();
+            loadedShops.AddRange((List<ShopInfo>?)args[0] ?? []);
+        }));
         On("IScriptShop.BuyItem(String, Int32)", args =>
             Buy(i => i.Name.Equals((string)args[0]!, StringComparison.OrdinalIgnoreCase), (int)args[1]!));
         On("IScriptShop.BuyItem(Int32, Int32, Int32)", args =>
@@ -22,6 +28,21 @@ public sealed partial class Shim
         On("IScriptShop.SellItem(String, Int32)", args =>
             Sell(InventoryItems().Find(i => i.Name.Equals((string)args[0]!, StringComparison.OrdinalIgnoreCase)), (int)args[1]!));
         On("IScriptShop.SellItem(Int32, Int32)", args => Sell(InventoryItems().Find(i => i.ID == (int)args[0]!), (int)args[1]!));
+    }
+
+    readonly List<ShopInfo> loadedShops = [];
+
+    bool LoadShop(int id)
+    {
+        if (!Act("load_shop", id))
+            return false;
+        ShopInfo shop = new(id, (string?)ShopInfo()?["sName"] ?? "", ShopItems());
+        Locked(loadedShops, () =>
+        {
+            if (!loadedShops.Exists(s => s.ID == id))
+                loadedShops.Add(shop);
+        });
+        return true;
     }
 
     JsonObject? ShopInfo() => Aqx.Call("shopinfo") as JsonObject;
