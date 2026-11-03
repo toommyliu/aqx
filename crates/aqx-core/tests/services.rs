@@ -339,5 +339,5 @@ fn the_map_file_gives_the_cells() {
     let mut fake = Fake::start(FARM, |_, _| {});
     let cells = |s: &aqx_core::Session| s.world.area.as_ref().map(|a| a.cells.clone()).filter(|c| !c.is_empty());
     let first = fake.session.pump_until(Some(Instant::now() + Duration::from_secs(5)), cells);
-    assert_eq!(first.unwrap(), ["Enter", "r1", "r2", "Blank"]);
+    assert_eq!(first.unwrap(), ["Enter", "r1", "r2", "Side1", "Blank"]);
 }

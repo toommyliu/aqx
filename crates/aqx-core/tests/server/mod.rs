@@ -156,7 +156,7 @@ fn serve_api(listener: TcpListener, game: u16, logins: Arc<AtomicUsize>, done: A
             logins.fetch_add(1, Ordering::SeqCst);
             format!(r#"{{"login":{{"bSuccess":1,"sToken":"t","iUpg":0}},"servers":{servers}}}"#).into_bytes()
         } else if head.starts_with("get /game/gamefiles/maps/farm/farm.swf") {
-            map_swf(&["Enter", "r1", "r2", "Blank"])
+            map_swf(&["Enter", "r1", "r2", "Side1", "Blank"])
         } else {
             servers.clone().into_bytes()
         };
