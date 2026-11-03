@@ -1686,3 +1686,46 @@ fn core_bots_turns_in_registered_quests_while_it_hunts() {
     assert!(sent.iter().any(|m| m.starts_with("%xt%zm%tryQuestComplete%5%11%")), "{sent:#?}");
     assert!(logged.iter().any(|l| l.ends_with("holding 1 Twilly Twig")), "{logged:#?}");
 }
+
+const KILL_MONSTER: &str = r#"
+//cs_include Scripts/CoreBots.cs
+using Skua.Core.Interfaces;
+
+public class KillInCell
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Core.SetOptions();
+        Core.EnsureAccept(11);
+        Core.KillMonster("farm", "r2", "Left", "Treeant", "Treeant Branch", 1, isTemp: false);
+        Core.Logger($"branches {Bot.Inventory.GetQuantity("Treeant Branch")} from {Bot.Player.Cell}");
+        Core.SetOptions(false);
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn core_bots_kills_a_monster_in_a_named_cell_for_an_item() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-kill-monster");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("KillInCell.cs");
+    std::fs::write(&script, KILL_MONSTER).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, farm_quest_server, sink);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    if std::env::var_os("AQX_SKUA_LOG").is_some() {
+        eprintln!("{logged:#?}\n{sent:#?}");
+    }
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(sent.iter().any(|m| m.starts_with("%xt%zm%moveToCell%5%r2%Left%")), "{sent:#?}");
+    assert!(logged.iter().any(|l| l.contains("branches 1 from")), "{logged:#?}");
+}
