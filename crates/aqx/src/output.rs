@@ -48,6 +48,7 @@ pub fn describe(event: &Event) -> Option<(&'static str, String)> {
         Event::Unreadable { what } => ("aqx", format!("unreadable message: {what}")),
         Event::RecordingFailed { error } => ("aqx", format!("recording stopped: {error}")),
         Event::LoginRejected { .. }
+        | Event::PlayerEntered { .. }
         | Event::LoggedInElsewhere
         | Event::InventoryLoaded { .. }
         | Event::Afk { afk: false }

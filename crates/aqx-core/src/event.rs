@@ -17,6 +17,7 @@ pub enum Event {
     LoginRejected { reason: String },
     LoggedInElsewhere,
     Joined { area: String, players: usize },
+    PlayerEntered { eid: EntityId },
     InventoryLoaded { items: usize },
     BankLoaded { items: usize },
     Ready { items: usize },

@@ -235,7 +235,7 @@ pub fn reduce(world: &mut World, msg: &Message, now: Instant) -> Vec<Event> {
     world.rev += 1;
     world.expire_auras(now);
     match msg {
-        Message::Xml(xml) => world.on_xml(xml),
+        Message::Xml(xml) => world.on_xml(xml, &mut events),
         Message::Xt(xt) => world.on_xt(xt, &mut events),
         Message::Json(json) => {
             if let Err(e) = world.on_json(json, now, &mut events) {
@@ -489,7 +489,7 @@ impl World {
         (now.saturating_duration_since(*start).as_secs_f64() / cooldown.as_secs_f64()).min(1.0)
     }
 
-    fn on_xml(&mut self, xml: &Xml) {
+    fn on_xml(&mut self, xml: &Xml, events: &mut Vec<Event>) {
         let me = self.me.as_ref().map(|m| m.eid);
         match xml.action {
             Some("joinOK") => {
@@ -502,6 +502,7 @@ impl World {
                     for (eid, name) in xml.users() {
                         if Some(eid) != me && !area.players.iter().any(|p| p.eid == eid) {
                             area.players.push(Player::new(eid, name));
+                            events.push(Event::PlayerEntered { eid });
                         }
                     }
                 }
@@ -1716,10 +1717,14 @@ mod tests {
     #[test]
     fn players_come_move_and_go() {
         let mut world = joined();
-        feed(&mut world, "<msg t='sys'><body action='uER' r='5'><u i='1003' m='0' s='0' p='2'><n><![CDATA[newbie]]></n></u></body></msg>");
+        let entered = "<msg t='sys'><body action='uER' r='5'><u i='1003' m='0' s='0' p='2'><n><![CDATA[newbie]]></n></u></body></msg>";
+        assert_eq!(feed(&mut world, entered), [Event::PlayerEntered { eid: EntityId(1003) }]);
+        assert_eq!(feed(&mut world, entered), []);
         feed(&mut world, "%xt%uotls%-1%newbie%strFrame:r2,strPad:Left,px:500,py:375%");
+        feed(&mut world, &json(r#"{"cmd":"initUserData","uid":1003,"data":{"intLevel":42}}"#));
         let players = &world.area.as_ref().unwrap().players;
-        assert_eq!(players.iter().find(|p| p.name == "newbie").map(|p| p.cell.as_str()), Some("r2"));
+        let newbie = players.iter().find(|p| p.name == "newbie").map(|p| (p.cell.as_str(), p.level));
+        assert_eq!(newbie, Some(("r2", 42)));
         feed(&mut world, "<msg t='sys'><body action='userGone' r='5'><user id='1003' /></body></msg>");
         feed(&mut world, "%xt%exitArea%-1%1002%ally%");
         assert!(world.area.as_ref().unwrap().players.is_empty());

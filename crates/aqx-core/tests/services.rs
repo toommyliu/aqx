@@ -339,3 +339,18 @@ fn skills_the_class_rank_has_not_unlocked_are_never_cast() {
     assert!(sent.iter().any(|(_, m)| m.contains("%a1>")), "{:?}", messages(&sent));
     assert!(!sent.iter().any(|(_, m)| m.contains("%a2>")), "{:?}", messages(&sent));
 }
+
+#[test]
+fn a_player_who_enters_after_us_is_asked_for_their_level() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%moveToCell%5%r2%") {
+            wire.send("<msg t='sys'><body action='uER' r='5'><u i='1003' m='0' s='0' p='2'><n><![CDATA[newbie]]></n></u></body></msg>");
+        } else if msg.contains("%retrieveUserData%5%1003%") {
+            wire.object(r#"{"cmd":"initUserData","uid":1003,"data":{"intLevel":42}}"#);
+        }
+    });
+    fake.session.jump("r2", "Left").unwrap();
+    pump_for(&mut fake, Duration::from_millis(300));
+    let level = fake.session.world.area.as_ref().and_then(|a| a.players.iter().find(|p| p.name == "newbie")).map(|p| p.level);
+    assert_eq!(level, Some(42));
+}
