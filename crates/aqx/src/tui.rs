@@ -36,11 +36,12 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 type Field = Vec<Span<'static>>;
 
-const ACCOUNT_KEYS: [(&str, &str); 12] = [
+const ACCOUNT_KEYS: [(&str, &str); 13] = [
     ("", "Accounts"),
     ("↑ ↓", "pick"),
     ("tab", "next"),
     ("{ }", "online / offline"),
+    ("/", "filter by name"),
     ("space", "mark"),
     ("a", "mark all / none"),
     ("esc", "clear marks"),
@@ -221,6 +222,8 @@ struct App {
     grid_top: Cell<usize>,
     grid_cols: Cell<usize>,
     prompt: Option<Prompt>,
+    query: String,
+    querying: bool,
     ask: Option<Ask>,
     share_args: bool,
     ending: bool,
@@ -309,9 +312,21 @@ fn is_offline(s: &Snapshot) -> bool {
     s.phase == "OFFLINE"
 }
 
-fn order(shown: &[Shown]) -> Vec<usize> {
-    let (online, offline): (Vec<usize>, Vec<usize>) = (0..shown.len()).partition(|&i| !snapshot(shown, i).is_some_and(is_offline));
+fn order(shown: &[Shown], query: &str) -> Vec<usize> {
+    let query = query.to_lowercase();
+    let (online, offline): (Vec<usize>, Vec<usize>) =
+        (0..shown.len()).filter(|&i| shown[i].name.to_lowercase().contains(&query)).partition(|&i| !snapshot(shown, i).is_some_and(is_offline));
     [online, offline].concat()
+}
+
+fn complete(query: &str, names: &[&str]) -> String {
+    if let [only] = names {
+        return only.to_string();
+    }
+    let mut lower: Vec<String> = names.iter().map(|name| name.to_lowercase()).collect();
+    lower.sort();
+    let prefix = shared_prefix(&lower);
+    if prefix.contains(&query.to_lowercase()) { prefix.to_string() } else { query.to_string() }
 }
 
 enum Mark {
@@ -376,19 +391,26 @@ impl App {
     }
 
     fn step(&mut self, shown: &[Shown], by: isize, wrap: bool) {
-        let order = order(shown);
+        let order = order(shown, &self.query);
         let Some(at) = order.iter().position(|&i| i == self.selected) else { return };
         let (at, n) = (at as isize + by, order.len() as isize);
         self.pick(order[if wrap { at.rem_euclid(n) } else { at.clamp(0, n - 1) } as usize]);
     }
 
     fn jump(&mut self, shown: &[Shown], by: isize) {
-        let order = order(shown);
+        let order = order(shown, &self.query);
         let offline = |i| snapshot(shown, i).is_some_and(is_offline);
         let starts: Vec<usize> = (0..order.len()).filter(|&at| at == 0 || offline(order[at]) != offline(order[at - 1])).collect();
         let Some(at) = order.iter().position(|&i| i == self.selected) else { return };
         let group = starts.iter().rposition(|&start| start <= at).unwrap_or(0) as isize;
         self.pick(order[starts[(group + by).rem_euclid(starts.len() as isize) as usize]]);
+    }
+
+    fn refilter(&mut self, shown: &[Shown]) {
+        let order = order(shown, &self.query);
+        if let Some(&first) = order.first().filter(|_| !order.contains(&self.selected)) {
+            self.pick(first);
+        }
     }
 
     fn pick(&mut self, i: usize) {
@@ -415,7 +437,7 @@ impl App {
         self.dragging = list.is_some_and(|l| column + 1 == l.right() || column == l.right());
         let Some(list) = list.filter(|l| !self.dragging && l.contains(Position::new(column, row))) else { return };
         let at = self.list_top.get() + usize::from(row - list.y);
-        if let Some(&i) = list_rows(shown).get(at..).and_then(|rows| rows.iter().flatten().next()) {
+        if let Some(&i) = list_rows(shown, &self.query).get(at..).and_then(|rows| rows.iter().flatten().next()) {
             self.pick(i);
         }
     }
@@ -514,6 +536,28 @@ impl App {
             }
             return false;
         }
+        if self.querying {
+            match key.code {
+                KeyCode::Esc => {
+                    self.query.clear();
+                    self.querying = false;
+                }
+                KeyCode::Enter => self.querying = false,
+                KeyCode::Up => self.step(shown, -1, false),
+                KeyCode::Down => self.step(shown, 1, false),
+                KeyCode::Backspace => {
+                    self.query.pop();
+                }
+                KeyCode::Tab => {
+                    let names: Vec<&str> = order(shown, &self.query).into_iter().map(|i| shown[i].name.as_str()).collect();
+                    self.query = complete(&self.query, &names);
+                }
+                KeyCode::Char(c) => self.query.push(c),
+                _ => {}
+            }
+            self.refilter(shown);
+            return false;
+        }
         if let Some(ask) = &mut self.ask {
             match key.code {
                 KeyCode::Esc => self.ask = None,
@@ -539,6 +583,7 @@ impl App {
             return false;
         }
         let accounts = shown.len();
+        let visible = order(shown, &self.query);
         let cols = self.grid_cols.get() as isize;
         let line = accounts < 2 || key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
@@ -565,8 +610,9 @@ impl App {
                     self.marked.insert(self.selected);
                 }
             }
-            KeyCode::Char('a') if self.marked.len() == accounts => self.marked.clear(),
-            KeyCode::Char('a') => self.marked = (0..accounts).collect(),
+            KeyCode::Char('a') if visible.iter().all(|i| self.marked.contains(i)) => self.marked.retain(|i| !visible.contains(i)),
+            KeyCode::Char('a') => self.marked.extend(visible),
+            KeyCode::Char('/') => self.querying = true,
             KeyCode::Esc => self.marked.clear(),
             KeyCode::PageUp => self.scroll = (self.scroll + 10).min(self.max_scroll.get()),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
@@ -629,7 +675,11 @@ impl App {
 }
 
 fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
-    let matches = app.prompt.as_ref().map_or(&[][..], |p| &p.matches);
+    let matches: Vec<String> = match &app.prompt {
+        _ if app.querying => order(shown, &app.query).into_iter().map(|i| shown[i].name.clone()).collect(),
+        Some(prompt) => prompt.matches.clone(),
+        None => Vec::new(),
+    };
     let [header, body, suggestions, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -637,7 +687,7 @@ fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
         Constraint::Length(1),
     ])
     .areas(f.area());
-    draw_matches(f, suggestions, matches);
+    draw_matches(f, suggestions, &matches);
     let list = !app.grid && !app.list_hidden && body.width >= WIDE && shown.len() > 1;
     app.list_area.set(None);
     draw_header(f, header, fleet, app, shown, list || app.grid);
@@ -727,8 +777,12 @@ fn draw_header(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App, shown: &[Sho
         let online = shown.iter().filter(|s| s.snapshot.as_ref().is_some_and(|s| s.phase != "OFFLINE")).count();
         left.push(Span::raw(format!("  {online} of {} online", shown.len())).dark_gray());
     } else if let Some(account) = shown.get(app.selected).filter(|_| shown.len() > 1) {
-        let at = order(shown).iter().position(|&i| i == app.selected).unwrap_or(0);
-        left.push(Span::raw(format!("  {} {}/{}", account.name, at + 1, shown.len())).dark_gray());
+        let order = order(shown, &app.query);
+        let at = order.iter().position(|&i| i == app.selected).unwrap_or(0);
+        left.push(Span::raw(format!("  {} {}/{}", account.name, at + 1, order.len())).dark_gray());
+    }
+    if !app.query.is_empty() {
+        left.push(Span::raw(format!(" · filter \"{}\"", app.query)).dark_gray());
     }
     if !app.marked.is_empty() {
         left.push(Span::raw(format!(" · {} marked", app.marked.len())).dark_gray());
@@ -738,7 +792,7 @@ fn draw_header(f: &mut Frame, area: Rect, fleet: &Fleet, app: &App, shown: &[Sho
         keys.push(("tab", "next"));
     }
     if shown.len() > 1 {
-        keys.push(("g", "dashboard"));
+        keys.extend([("g", "dashboard"), ("/", "filter")]);
     }
     keys.extend([("?", "keys"), ("q", "detach")]);
     f.render_widget(Paragraph::new(spread(left, hints(&keys), area.width.saturating_sub(1) as usize)), area);
@@ -751,8 +805,8 @@ fn name_width(shown: &[Shown]) -> usize {
 fn draw_list(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     let inner = usize::from(area.width.saturating_sub(1));
     let name_col = name_width(shown).min(inner.saturating_sub(4));
-    let rows = list_rows(shown);
-    let offline = shown.iter().filter(|s| s.snapshot.as_ref().is_some_and(is_offline)).count();
+    let rows = list_rows(shown, &app.query);
+    let offline = rows.iter().flatten().filter(|&&i| snapshot(shown, i).is_some_and(is_offline)).count();
     let height = (area.height as usize).max(1);
     let at = rows.iter().position(|&row| row == Some(app.selected)).unwrap_or(0);
     let top = app.list_top.get().min(at).max((at + 1).saturating_sub(height));
@@ -774,9 +828,9 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     f.render_widget(Paragraph::new(lines).block(rule), area);
 }
 
-fn list_rows(shown: &[Shown]) -> Vec<Option<usize>> {
-    let mut rows: Vec<Option<usize>> = order(shown).into_iter().map(Some).collect();
-    let offline = shown.iter().filter(|s| s.snapshot.as_ref().is_some_and(is_offline)).count();
+fn list_rows(shown: &[Shown], query: &str) -> Vec<Option<usize>> {
+    let mut rows: Vec<Option<usize>> = order(shown, query).into_iter().map(Some).collect();
+    let offline = rows.iter().flatten().filter(|&&i| snapshot(shown, i).is_some_and(is_offline)).count();
     if 0 < offline && offline < rows.len() {
         rows.insert(rows.len() - offline, None);
     }
@@ -803,6 +857,11 @@ fn list_row(account: &Shown, selected: bool, marked: bool, frame: usize, name_co
 fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     let width = area.width as usize;
     let who = app.who(shown, width / 3);
+    if app.querying {
+        let keys = hints(&[("↑↓", "pick"), ("tab", "complete"), ("enter", "done"), ("esc", "clear")]);
+        let typed = vec![Span::raw(" filter accounts: ").bold(), Span::raw(app.query.clone()), Span::raw("█")];
+        return f.render_widget(Paragraph::new(spread(typed, keys, width.saturating_sub(1))), area);
+    }
     if let Some(prompt) = &app.prompt {
         let label = format!(" run on {who}: ");
         let keys = hints(&[("tab", "complete"), ("↑↓", "recent"), ("esc", "cancel")]);
@@ -868,7 +927,7 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     let cols = usize::from(area.width / CARD_WIDTH).max(1);
     let rows = usize::from(area.height / CARD_HEIGHT).max(1);
     app.grid_cols.set(cols);
-    let order = order(shown);
+    let order = order(shown, &app.query);
     let row = order.iter().position(|&i| i == app.selected).unwrap_or(0) / cols;
     let top = app.grid_top.get().min(row).max((row + 1).saturating_sub(rows));
     app.grid_top.set(top);
@@ -1623,6 +1682,43 @@ mod tests {
         press(&fleet, &mut app, KeyCode::Enter);
         assert!(screen(&fleet, &mut app, 140).contains("── log"), "enter opens the picked account");
         assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn slash_filters_the_accounts_by_name_and_tab_completes_the_name() {
+        let (fleet, _hub) = fleet(&["main", "healer", "farmer1", "farmer2", "Healbot"]);
+        let mut app = App::default();
+        let typed = |app: &mut App, text: &str| text.chars().for_each(|c| press(&fleet, app, KeyCode::Char(c)));
+        let list = |app: &mut App| -> Vec<String> {
+            screen(&fleet, app, 120).lines().skip(1).take(5).map(|l| l.split('│').next().unwrap().trim().to_string()).collect()
+        };
+
+        press(&fleet, &mut app, KeyCode::Char('/'));
+        typed(&mut app, "ea");
+        let shown = screen(&fleet, &mut app, 120);
+        assert!(shown.contains(" filter accounts: ea█") && shown.contains(" healer  Healbot"), "{shown}");
+        assert_eq!(list(&mut app), ["▌ ⠋ healer  starting", "⠋ Healbot starting", "", "", ""]);
+        assert_eq!(app.selected, 1, "the pick moves to the first match");
+        press(&fleet, &mut app, KeyCode::Tab);
+        assert_eq!(app.query, "heal", "tab completes as far as every match agrees");
+        typed(&mut app, "e");
+        press(&fleet, &mut app, KeyCode::Tab);
+        assert_eq!(app.query, "healer", "and the whole name once one is left");
+        press(&fleet, &mut app, KeyCode::Esc);
+        assert!(!app.querying && app.query.is_empty() && list(&mut app)[4].contains("Healbot"), "esc clears the filter");
+
+        press(&fleet, &mut app, KeyCode::Char('/'));
+        typed(&mut app, "FARM");
+        press(&fleet, &mut app, KeyCode::Enter);
+        let shown = screen(&fleet, &mut app, 120);
+        assert!(row(&shown, "0 of 5 online").contains("· filter \"FARM\"") && !shown.contains("filter accounts"), "enter keeps the filter: {shown}");
+        press(&fleet, &mut app, KeyCode::Char('a'));
+        assert_eq!(app.marked, BTreeSet::from([2, 3]), "a marks only the accounts the filter shows");
+        press(&fleet, &mut app, KeyCode::Tab);
+        press(&fleet, &mut app, KeyCode::Tab);
+        assert_eq!(app.selected, 2, "tab wraps within the filter");
+        press(&fleet, &mut app, KeyCode::Char('a'));
+        assert!(app.marked.is_empty());
     }
 
     #[test]
