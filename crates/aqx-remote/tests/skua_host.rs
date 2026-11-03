@@ -1729,3 +1729,57 @@ fn core_bots_kills_a_monster_in_a_named_cell_for_an_item() {
     assert!(sent.iter().any(|m| m.starts_with("%xt%zm%moveToCell%5%r2%Left%")), "{sent:#?}");
     assert!(logged.iter().any(|l| l.contains("branches 1 from")), "{logged:#?}");
 }
+
+const HOUSE: &str = r#"
+//cs_include Scripts/CoreBots.cs
+using Skua.Core.Interfaces;
+
+public class HouseItems
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Core.Logger($"owns balloons {Core.CheckInventory("Blue Balloons")}, house {Bot.House.UsedSlots}/{Bot.House.Slots}, in the bag {Bot.Inventory.Contains("Blue Balloons")}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn core_bots_finds_an_item_kept_in_the_house() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-house");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("HouseItems.cs");
+    std::fs::write(&script, HOUSE).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, |_, _| {}, sink);
+    fake.session.world.me.as_mut().unwrap().house_slots = 95;
+    fake.session.world.house.push(Item {
+        id: ItemId(70),
+        char_item: Some(CharItemId(22)),
+        name: "Blue Balloons".into(),
+        qty: 1,
+        max_stack: 1,
+        kind: "Floor Item".into(),
+        slot: "hi".into(),
+        equipped: false,
+        ac: false,
+        member: false,
+        house: true,
+        link: String::new(),
+        file: String::new(),
+        icon: String::new(),
+        meta: String::new(),
+        level: 0,
+        enhancement: None,
+    });
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.iter().any(|l| l.ends_with("owns balloons True, house 1/95, in the bag False")), "{logged:#?}");
+}

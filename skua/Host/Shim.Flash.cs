@@ -72,6 +72,7 @@ public sealed partial class Shim
         "world.myAvatar.objData.strClassName" => JsonConvert.SerializeObject((string?)Me["class"] ?? ""),
         "world.strMapName" or "world.strMapFileName" => JsonConvert.SerializeObject(MapName),
         "world.myAvatar.items" => Models.ItemArray(View("inventory")).ToString(Formatting.None),
+        "world.myAvatar.houseitems" => Models.ItemArray(View("house")).ToString(Formatting.None),
         "world.bankinfo.items" => Models.ItemArray(View("bank")).ToString(Formatting.None),
         _ => Missing($"Flash game object {path}"),
     };

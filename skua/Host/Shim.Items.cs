@@ -19,9 +19,12 @@ public sealed partial class Shim
 
         On("IScriptTempInv.get_Items()", _ => Models.Items<ItemBase>(View("temp"), temp: true));
 
-        On("IScriptHouseInv.get_Items()", _ => new List<InventoryItem>());
-        On("IScriptHouseInv.get_Slots()", _ => 0);
-        On("IScriptHouseInv.get_UsedSlots()", _ => 0);
+        On("IScriptHouseInv.get_Items()", _ => Models.Items<InventoryItem>(View("house")));
+        On("IScriptHouseInv.get_Slots()", _ => Int(View("slots")!["house"]));
+        On("IScriptHouseInv.get_UsedSlots()", _ => Int(View("slots")!["houseUsed"]));
+        On("IScriptHouseInv.ToBank(InventoryItem)", args => Act("deposit", ((InventoryItem)args[0]!).ID));
+        On("IScriptHouseInv.EnsureToBank(String)", args => Act("deposit", args[0]));
+        On("IScriptHouseInv.EnsureToBank(Int32)", args => Act("deposit", args[0]));
 
         On("IScriptBank.get_Items()", _ => Models.Items<InventoryItem>(View("bank")));
         On("IScriptBank.get_Slots()", _ => Int(View("slots")!["bank"]));

@@ -439,6 +439,7 @@ fn view(session: &mut Session, a: &Value) -> Reply {
         "map" => views::map(world),
         "inventory" => views::items(&world.inventory),
         "temp" => views::items(&world.temp),
+        "house" => views::items(&world.house),
         "drops" => views::items(&world.drops),
         "bank" if world.bank_loaded => views::items(&world.bank),
         "bank" => Value::Null,
