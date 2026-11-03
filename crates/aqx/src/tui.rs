@@ -218,6 +218,9 @@ struct App {
     filter: Filter,
     scroll: usize,
     max_scroll: Cell<usize>,
+    log_width: Cell<usize>,
+    unseen_from: Option<u64>,
+    jump_area: Cell<Option<Rect>>,
     list_top: Cell<usize>,
     grid_top: Cell<usize>,
     grid_cols: Cell<usize>,
@@ -278,6 +281,9 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
         app.log.clear();
         app.log_of = Some(app.selected);
     }
+    if app.scroll == 0 {
+        app.unseen_from = None;
+    }
     let shown: Vec<Shown> = fleet
         .cells
         .all()
@@ -288,7 +294,14 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
             if i == app.selected {
                 let from = app.log.last().map_or(0, |l| l.seq + 1);
                 let fresh = board.log.iter().rev().take_while(|l| l.seq >= from).count();
-                app.log.extend(board.log.iter().skip(board.log.len() - fresh).cloned());
+                let fresh = board.log.iter().skip(board.log.len() - fresh);
+                if app.scroll > 0 {
+                    for line in fresh.clone().filter(|l| app.filter.shows(&l.source)) {
+                        app.scroll += pieces(line, app.log_width.get(), app.filter == Filter::All).1.len();
+                        app.unseen_from.get_or_insert(line.seq);
+                    }
+                }
+                app.log.extend(fresh.cloned());
                 let over = app.log.len().saturating_sub(LOG_LINES);
                 app.log.drain(..over);
             }
@@ -433,6 +446,10 @@ impl App {
     }
 
     fn click(&mut self, column: u16, row: u16, shown: &[Shown]) {
+        if self.jump_area.get().is_some_and(|pill| pill.contains(Position::new(column, row))) {
+            self.scroll = 0;
+            return;
+        }
         let list = self.list_area.get();
         self.dragging = list.is_some_and(|l| column + 1 == l.right() || column == l.right());
         let Some(list) = list.filter(|l| !self.dragging && l.contains(Position::new(column, row))) else { return };
@@ -690,6 +707,7 @@ fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
     draw_matches(f, suggestions, &matches);
     let list = !app.grid && !app.list_hidden && body.width >= WIDE && shown.len() > 1;
     app.list_area.set(None);
+    app.jump_area.set(None);
     draw_header(f, header, fleet, app, shown, list || app.grid);
     if app.grid {
         draw_grid(f, body, app, shown);
@@ -1012,7 +1030,8 @@ fn task(s: &Snapshot) -> Field {
 fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
     let width = area.width as usize;
     let mut lines = detail(account, app.details, app.frame, width);
-    let log = log_lines(app, (area.height as usize).saturating_sub(lines.len() + 1), width);
+    let pill_row = usize::from(app.scroll > 0);
+    let log = log_lines(app, (area.height as usize).saturating_sub(lines.len() + 1 + pill_row), width);
     let mut rule = format!("── log · {}", app.filter.label());
     let scrolled = app.scroll.min(app.max_scroll.get());
     if scrolled > 0 {
@@ -1020,8 +1039,21 @@ fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
     }
     let fill = width.saturating_sub(rule.chars().count() + 1);
     lines.push(Line::raw(format!("{rule} {}", "─".repeat(fill))).dark_gray());
+    let has_log = !log.is_empty();
     lines.extend(log);
     f.render_widget(Paragraph::new(lines), area);
+    if scrolled > 0 && has_log {
+        draw_jump(f, area, app);
+    }
+}
+
+fn draw_jump(f: &mut Frame, area: Rect, app: &App) {
+    let unseen = app.unseen_from.map_or(0, |from| app.log.iter().filter(|l| l.seq >= from && app.filter.shows(&l.source)).count());
+    let label = if unseen > 0 { format!(" {unseen} new · jump to bottom (end) ↓ ") } else { " jump to bottom (end) ↓ ".to_string() };
+    let width = (label.chars().count() as u16).min(area.width);
+    let pill = Rect { x: area.x + (area.width - width) / 2, y: area.bottom() - 1, width, height: 1 };
+    app.jump_area.set(Some(pill));
+    f.render_widget(Paragraph::new(label).style(Style::new().fg(Color::White).bg(Color::DarkGray)), pill);
 }
 
 fn detail(account: &Shown, full: bool, frame: usize, width: usize) -> Vec<Line<'static>> {
@@ -1265,6 +1297,7 @@ fn spans_width(spans: &[Span]) -> usize {
 }
 
 fn log_lines(app: &App, height: usize, width: usize) -> Vec<Line<'static>> {
+    app.log_width.set(width);
     let tagged = app.filter == Filter::All;
     let lines: Vec<&LogLine> = app.log.iter().filter(|l| app.filter.shows(&l.source)).collect();
     let sizes: Vec<usize> = lines.iter().map(|l| pieces(l, width, tagged).1.len()).collect();
@@ -1781,6 +1814,48 @@ mod tests {
         let mut app = App { scroll: 500, ..App::default() };
         let shown = screen(&fleet, &mut app, 100);
         assert!(shown.contains("line 0") && shown.contains("line 4"));
+    }
+
+    #[test]
+    fn a_scrolled_log_holds_its_place_as_lines_arrive() {
+        let (fleet, hub) = fleet(&["main"]);
+        let cell = &fleet.cells.all()[0];
+        for i in 0..50 {
+            hub.say(cell, "aqx", format!("line {i:02}"));
+        }
+        let mut app = App::default();
+        screen(&fleet, &mut app, 100);
+        press(&fleet, &mut app, KeyCode::PageUp);
+        let before = screen(&fleet, &mut app, 100);
+        hub.say(cell, "aqx", "fresh");
+        hub.say(cell, "script", format!("long {}", "word ".repeat(40)));
+        let after = screen(&fleet, &mut app, 100);
+        let log = |shown: &str| shown.lines().filter(|l| l.contains("line ")).map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(log(&before), log(&after), "{after}");
+        assert!(before.contains(" jump to bottom (end) ↓ ") && !before.contains("new ·"), "{before}");
+        assert!(after.contains(" 2 new · jump to bottom (end) ↓ ") && !after.contains("fresh"), "{after}");
+
+        press(&fleet, &mut app, KeyCode::End);
+        let tail = screen(&fleet, &mut app, 100);
+        assert!(tail.contains("fresh") && !tail.contains("jump to bottom"), "{tail}");
+    }
+
+    #[test]
+    fn clicking_the_jump_pill_returns_to_the_newest_lines() {
+        let (fleet, hub) = fleet(&["main"]);
+        for i in 0..50 {
+            hub.say(&fleet.cells.all()[0], "aqx", format!("line {i:02}"));
+        }
+        let mut app = App::default();
+        screen(&fleet, &mut app, 100);
+        press(&fleet, &mut app, KeyCode::PageUp);
+        let shown = screen(&fleet, &mut app, 100);
+        let (row, line) = shown.lines().enumerate().find(|(_, l)| l.contains("jump to bottom")).unwrap_or_else(|| panic!("no pill:\n{shown}"));
+        let column = line.chars().position(|c| c == 'j').unwrap() as u16;
+        let shown = gather(&fleet, &mut app);
+        app.mouse(pointer(MouseEventKind::Down(MouseButton::Left), column, row as u16), &shown);
+        assert_eq!(app.scroll, 0);
+        assert!(screen(&fleet, &mut app, 100).contains("line 49"));
     }
 
     #[test]
