@@ -70,6 +70,8 @@ enum Cmd {
         account: Option<String>,
         #[arg(short, long, help = "Keep printing new lines")]
         follow: bool,
+        #[arg(long, help = "Include game lines: moves, kills, drops, items and quests")]
+        all: bool,
     },
     #[command(about = "Control an account in a running aqx process")]
     Ctl {
@@ -175,7 +177,7 @@ fn main() -> ExitCode {
         Some(Cmd::Serve { wanted, json, quiet }) => serve(&wanted, json, quiet),
         Some(Cmd::Down { config }) => down(config.as_deref()),
         Some(Cmd::Ps) => ps(),
-        Some(Cmd::Logs { account, follow }) => logs(account.as_deref(), follow),
+        Some(Cmd::Logs { account, follow, all }) => logs(account.as_deref(), follow, all),
         Some(Cmd::Ctl { account, action }) => ctl(&account, action),
         Some(Cmd::Servers { config }) => servers(config.as_deref()),
         Some(Cmd::View(args)) => view::view(&args.file, &args.cmd, args.full),
@@ -516,11 +518,7 @@ fn mirror(cells: &Cells, message: &serde_json::Value) {
         Some("log") => {
             let (Some(account), Ok(line)) = (message["account"].as_str(), serde_json::from_value::<hub::LogLine>(message["line"].clone())) else { return };
             if let Some(cell) = find(account) {
-                let mut board = cell.board();
-                if board.log.len() == hub::LOG_LINES {
-                    board.log.pop_front();
-                }
-                board.log.push_back(line);
+                cell.board().log.push(line);
             }
         }
         Some("snapshot") => {
@@ -558,7 +556,7 @@ fn ps() -> Result<(), String> {
     Ok(())
 }
 
-fn logs(account: Option<&str>, follow: bool) -> Result<(), String> {
+fn logs(account: Option<&str>, follow: bool, all: bool) -> Result<(), String> {
     let path = match account {
         Some(account) => socket::find_account(account)?,
         None => socket::pick(None)?.1,
@@ -567,6 +565,7 @@ fn logs(account: Option<&str>, follow: bool) -> Result<(), String> {
     conn.send(&json!({ "op": "logs", "account": account, "follow": follow }))?;
     while let Some(message) = conn.recv() {
         match message["type"].as_str() {
+            Some("log") if !all && message["line"]["source"] == "game" => {}
             Some("log") => {
                 let line = &message["line"];
                 println!(

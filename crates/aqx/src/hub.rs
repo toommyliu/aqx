@@ -22,6 +22,49 @@ pub struct LogLine {
     pub text: String,
 }
 
+impl LogLine {
+    pub fn is_game(&self) -> bool {
+        self.source == "game"
+    }
+}
+
+#[derive(Default)]
+pub struct Log {
+    lines: VecDeque<LogLine>,
+    game: usize,
+}
+
+impl Log {
+    pub fn push(&mut self, line: LogLine) {
+        let game = line.is_game();
+        self.game += usize::from(game);
+        self.lines.push_back(line);
+        let kept = if game { self.game } else { self.lines.len() - self.game };
+        if kept > LOG_LINES
+            && let Some(at) = self.lines.iter().position(|l| l.is_game() == game)
+        {
+            self.lines.remove(at);
+            self.game -= usize::from(game);
+        }
+    }
+
+    pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, LogLine> {
+        self.lines.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn last(&self) -> Option<&LogLine> {
+        self.lines.back()
+    }
+
+    pub fn clear(&mut self) {
+        *self = Log::default();
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
@@ -177,7 +220,7 @@ struct Rate {
 
 pub struct Board {
     pub snapshot: Option<Snapshot>,
-    pub log: VecDeque<LogLine>,
+    pub log: Log,
     pub next_seq: u64,
     pub run: Run,
     pub script: Option<String>,
@@ -202,7 +245,7 @@ impl Default for Board {
     fn default() -> Self {
         Board {
             snapshot: None,
-            log: VecDeque::new(),
+            log: Log::default(),
             next_seq: 0,
             run: Run::Idle,
             script: None,
@@ -229,10 +272,7 @@ impl Board {
     pub fn push_log(&mut self, t: u64, source: &str, text: String) -> LogLine {
         let line = LogLine { seq: self.next_seq, t, source: source.into(), text };
         self.next_seq += 1;
-        if self.log.len() == LOG_LINES {
-            self.log.pop_front();
-        }
-        self.log.push_back(line.clone());
+        self.log.push(line.clone());
         line
     }
 
