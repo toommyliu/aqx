@@ -175,8 +175,11 @@ pub fn quest(world: &World, quest: &Quest) -> Value {
         "id": quest.id,
         "name": quest.name,
         "status": status,
-        "requirements": quest.turn_in.iter().map(|n| json!({ "item": n.item, "name": n.name, "qty": n.qty })).collect::<Vec<_>>(),
+        "requirements": quest.turn_in.iter().map(|n| json!({ "item": n.item, "name": n.name, "qty": n.qty, "temp": n.temp })).collect::<Vec<_>>(),
         "rewards": rewards,
+        "class": quest.class.map(|(item, points)| json!({ "item": item, "points": points })),
+        "gold": quest.gold,
+        "experience": quest.experience,
     })
 }
 
