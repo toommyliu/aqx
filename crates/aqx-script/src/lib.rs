@@ -5,6 +5,7 @@ mod views;
 
 use std::fmt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use aqx_core::{Event, Halt, Session};
 use rquickjs::function::Rest;
@@ -12,6 +13,8 @@ use rquickjs::{CatchResultExt, CaughtError, Coerced, Context, Ctx, FromJs, Funct
 
 const MEMORY_LIMIT: usize = 32 << 20;
 const TIMERS: &str = include_str!("timers.js");
+const DESCRIBE_FOR: Duration = Duration::from_millis(500);
+const SILENT_CONSOLE: &str = "globalThis.console = { debug() {}, log() {}, info() {}, warn() {}, error() {} };";
 
 #[derive(Debug)]
 pub enum Outcome {
@@ -38,7 +41,7 @@ impl fmt::Display for ScriptError {
 
 pub fn check(path: &Path) -> Result<(), String> {
     let (name, code) = source(path)?;
-    let runtime = runtime(loader::Load { checking: true })?;
+    let runtime = runtime(loader::Load::Check)?;
     let context = Context::full(&runtime).map_err(|e| e.to_string())?;
     context.with(|ctx| {
         let result = Module::declare(ctx.clone(), name, loader::halted(&code))
@@ -50,6 +53,31 @@ pub fn check(path: &Path) -> Result<(), String> {
             Err(e) => Err(describe(e)),
             Ok(()) => Ok(()),
         }
+    })
+}
+
+#[derive(Debug, PartialEq)]
+pub struct Arg {
+    pub key: String,
+    pub default: Option<String>,
+}
+
+pub fn script_args(path: &Path) -> Vec<Arg> {
+    let Ok((name, code)) = source(path) else { return Vec::new() };
+    let Ok(runtime) = runtime(loader::Load::Describe) else { return Vec::new() };
+    let deadline = Instant::now() + DESCRIBE_FOR;
+    runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() > deadline)));
+    let Ok(context) = Context::full(&runtime) else { return Vec::new() };
+    context.with(|ctx| {
+        let result = ctx
+            .eval::<(), _>(SILENT_CONSOLE)
+            .and_then(|()| Module::declare(ctx.clone(), name, code))
+            .and_then(|module| module.eval())
+            .and_then(|(_, promise)| promise.finish::<()>())
+            .catch(&ctx);
+        let Err(CaughtError::Value(thrown)) = result else { return Vec::new() };
+        let declared: Vec<Object> = thrown.into_object().and_then(|o| o.get(loader::DECLARED).ok()).unwrap_or_default();
+        declared.iter().filter_map(|arg| Some(Arg { key: arg.get("key").ok()?, default: arg.get("default").ok()? })).collect()
     })
 }
 
@@ -70,7 +98,7 @@ fn runtime(load: loader::Load) -> Result<Runtime, String> {
 
 pub fn run(session: &mut Session, path: &Path, args: &[(String, String)], room: Option<u32>) -> Result<Outcome, ScriptError> {
     let (name, code) = source(path).map_err(ScriptError::Load)?;
-    let runtime = runtime(loader::Load { checking: false }).map_err(ScriptError::Load)?;
+    let runtime = runtime(loader::Load::Run).map_err(ScriptError::Load)?;
     let stop = session.stop_handle();
     runtime.set_interrupt_handler(Some(Box::new(move || bridge::interrupted(&stop))));
     let context = Context::full(&runtime).map_err(|e| ScriptError::Load(e.to_string()))?;

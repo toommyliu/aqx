@@ -10,7 +10,7 @@ use swc_common::sync::Lrc;
 use swc_common::{GLOBALS, Globals, SourceMap};
 use swc_ts_fast_strip::{Mode, Options};
 
-use crate::native::Native;
+use crate::native::{NAMES, Native};
 
 const API: &str = include_str!("aqx.js");
 
@@ -38,13 +38,30 @@ pub fn halted(code: &str) -> String {
     format!("throw {CHECKED:?};{code}")
 }
 
-pub struct Load {
-    pub checking: bool,
+pub const DECLARED: &str = "aqx: declared args";
+
+fn describing_native() -> String {
+    let export = |name: &str| match name {
+        "args" => format!(
+            "export function args(defaults) {{ throw {{ {DECLARED:?}: Object.entries(defaults).map(([key, value]) => ({{ key, default: typeof value === \"function\" ? null : String(value) }})) }}; }}"
+        ),
+        _ => format!("export function {name}() {{}}"),
+    };
+    NAMES.iter().map(|name| export(name)).collect::<Vec<_>>().join("\n")
+}
+
+pub enum Load {
+    Run,
+    Check,
+    Describe,
 }
 
 impl Load {
     fn declare<'js>(&self, ctx: &Ctx<'js>, name: &str, code: &str) -> Result<Module<'js, Declared>> {
-        if self.checking { Module::declare(ctx.clone(), name, halted(code)) } else { Module::declare(ctx.clone(), name, code) }
+        match self {
+            Load::Check => Module::declare(ctx.clone(), name, halted(code)),
+            Load::Run | Load::Describe => Module::declare(ctx.clone(), name, code),
+        }
     }
 }
 
@@ -52,6 +69,7 @@ impl Loader for Load {
     fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str, _: Option<ImportAttributes<'js>>) -> Result<Module<'js, Declared>> {
         match name {
             "aqx" => self.declare(ctx, name, API),
+            "aqx:native" if matches!(self, Load::Describe) => Module::declare(ctx.clone(), name, describing_native()),
             "aqx:native" => Module::declare_def::<Native, _>(ctx.clone(), name),
             _ => {
                 let source = std::fs::read_to_string(name).map_err(|e| load_error(ctx, name, e))?;
