@@ -1001,3 +1001,41 @@ fn a_quest_whose_held_item_is_missing_is_not_available() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.contains(&"info: available False".to_string()), "{logged:#?}");
 }
+
+const REST: &str = r#"
+using System.Diagnostics;
+using Skua.Core.Interfaces;
+
+public class Rest
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Stopwatch clock = Stopwatch.StartNew();
+        bot.Player.Rest();
+        long quick = clock.ElapsedMilliseconds;
+        bot.Player.Rest(true);
+        bot.Log($"rest {(quick < 1000 ? "returned" : "blocked")}, full rest gave up {(clock.ElapsedMilliseconds - quick < 5000 ? "after 2 s" : "late")}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn resting_sends_once_and_waits_for_full_only_briefly() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-rest");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("Rest.cs");
+    std::fs::write(&script, REST).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, |_, _| {}, sink);
+    fake.session.world.me.as_mut().unwrap().vitals.hp = 100;
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: rest returned, full rest gave up after 2 s".to_string()), "{logged:#?}");
+    assert_eq!(sent.iter().filter(|m| m.starts_with("%xt%zm%restRequest%")).count(), 2, "{sent:#?}");
+}

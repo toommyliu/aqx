@@ -6,6 +6,9 @@ namespace Aqx.Skua;
 
 public sealed partial class Shim
 {
+    const int RestPolls = 20;
+    const int RestPoll = 100;
+
     void Player()
     {
         On("IScriptPlayer.get_LoggedIn()", _ => Phase is "loading" or "ready");
@@ -35,9 +38,22 @@ public sealed partial class Shim
         On("IScriptPlayer.SetSpawnPoint(String, String)", args => Aqx.Call("respawn", args[0], args[1]));
         On("IScriptPlayer.Goto(String)", args => Act("goto", args[0]));
         On("IScriptPlayer.WalkTo(Int32, Int32, Int32)", args => Act("walk", args[0], args[1]));
-        On("IScriptPlayer.Rest(Boolean)", _ => Act("rest"));
+        On("IScriptPlayer.Rest(Boolean)", args =>
+        {
+            Rest((bool)args[0]!);
+            return null;
+        });
         On("IScriptFaction.get_FactionList()", _ => Me["factions"] is JsonArray factions ? factions.Select(f => Models.Faction(f!)).ToList() : []);
     }
+
+    void Rest(bool full)
+    {
+        Act("send", "%xt%zm%restRequest%1%%");
+        for (int i = 0; full && i < RestPolls && !Rested(Me); i++)
+            Sleep(RestPoll);
+    }
+
+    static bool Rested(JsonObject me) => Int(me["hp"]) >= Int(me["maxHp"]) && Int(me["mp"]) >= Int(me["maxMp"]);
 
     bool Playing
     {
