@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use aqx_core::{Enhancement, Event, Item, Outcome, ScriptError, Sink};
+use aqx_core::{Aura, Enhancement, Event, Item, Outcome, ScriptError, Sink};
 use aqx_protocol::{CharItemId, ItemId};
 use server::{FARM, Fake, Wire};
 
@@ -1303,4 +1303,41 @@ fn relogging_by_name_matches_part_of_a_server_name() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.contains(&"info: relogged True".to_string()), "{logged:#?}");
     assert_eq!(logins, 2, "{logged:#?}");
+}
+
+const AURA_TIME: &str = r#"
+using Skua.Core.Interfaces;
+
+public class AuraTime
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        var seal = bot.Self.GetAura("Righteous Seal");
+        bot.Log($"seal x{seal?.Value} with {(seal?.RemainingTime is >= 8 and <= 10 ? "about 10 s" : $"{seal?.RemainingTime} s")} left");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn an_aura_reports_the_time_it_has_left() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-aura-time");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("AuraTime.cs");
+    std::fs::write(&script, AURA_TIME).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, |_, _| {}, sink);
+    fake.session.world.me.as_mut().unwrap().auras.push(Aura {
+        name: "Righteous Seal".into(),
+        stacks: 2,
+        until: Some(std::time::Instant::now() + std::time::Duration::from_secs(12)),
+        persist: false,
+    });
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: seal x2 with about 10 s left".to_string()), "{logged:#?}");
 }

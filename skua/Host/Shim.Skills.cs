@@ -46,10 +46,19 @@ public sealed partial class Shim
             new(() => bot.Wait));
     }
 
-    static List<Aura> Auras(JsonNode? auras) =>
-        auras is JsonArray list
-            ? list.Select(a => new Aura { Name = (string?)a?["name"] ?? "", Value = (float?)a?["stacks"] ?? 1 }).ToList()
+    static List<Aura> Auras(JsonNode? auras)
+    {
+        long now = DateTimeOffset.Now.ToUnixTimeMilliseconds();
+        return auras is JsonArray list
+            ? list.Select(a => new Aura
+            {
+                Name = (string?)a?["name"] ?? "",
+                Value = (float?)a?["stacks"] ?? 1,
+                UnixTimeStamp = now,
+                Duration = a?["expiresAt"] is JsonValue expires ? (int)Math.Max(0, (expires.GetValue<long>() - now) / 1000) : 0,
+            }).ToList()
             : [];
+    }
 
     static Aura? Find(List<Aura> auras, string name) => auras.Find(a => a.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
 }
