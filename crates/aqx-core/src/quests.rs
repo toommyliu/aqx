@@ -21,6 +21,9 @@ pub struct Quest {
     pub member: bool,
     pub level: u32,
     pub reputation: Option<(FactionId, u32)>,
+    pub class: Option<(ItemId, u32)>,
+    pub gold: u32,
+    pub experience: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +32,7 @@ pub struct Need {
     pub name: String,
     pub qty: u32,
     pub max_stack: u32,
+    pub temp: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -91,7 +95,8 @@ impl World {
             || (quest.slot >= 0 && quest_value(me, quest.slot) < quest.value - 1)
             || quest.hold.iter().any(|n| self.count(n.item) < n.qty)
             || me.level < quest.level
-            || below_rep;
+            || below_rep
+            || quest.class.is_some_and(|(class, points)| self.carried().find(|i| i.id == class).map_or(0, |i| i.qty) < points);
         Some(if locked { QuestStatus::Locked } else { QuestStatus::Available })
     }
 
@@ -163,6 +168,14 @@ pub(crate) struct QuestData {
     faction: i64,
     #[serde(rename = "iReqRep", default, deserialize_with = "int")]
     rep: i64,
+    #[serde(rename = "iClass", default, deserialize_with = "int")]
+    class: i64,
+    #[serde(rename = "iReqCP", default, deserialize_with = "int")]
+    class_points: i64,
+    #[serde(rename = "iGold", default, deserialize_with = "int")]
+    gold: i64,
+    #[serde(rename = "iExp", default, deserialize_with = "int")]
+    experience: i64,
 }
 
 #[derive(Deserialize)]
@@ -185,12 +198,19 @@ struct RewardData {
     kind: i64,
 }
 
-fn names(items: &Value, into: &mut HashMap<u32, (String, u32)>) {
+struct Known {
+    name: String,
+    max_stack: u32,
+    temp: bool,
+}
+
+fn names(items: &Value, into: &mut HashMap<u32, Known>) {
     let Value::Object(map) = items else { return };
     for item in map.values() {
         if let (Some(id), Some(name)) = (item.get("ItemID").and_then(Value::as_u64), item.get("sName").and_then(Value::as_str)) {
             let max_stack = item.get("iStk").and_then(|n| n.as_u64().or_else(|| n.as_str()?.parse().ok())).unwrap_or(1);
-            into.insert(id as u32, (name.to_string(), max_stack.min(u32::MAX as u64) as u32));
+            let temp = item.get("bTemp").is_some_and(|t| t.as_bool().unwrap_or_else(|| t.as_u64().or_else(|| t.as_str()?.parse().ok()) == Some(1)));
+            into.insert(id as u32, Known { name: name.to_string(), max_stack: max_stack.min(u32::MAX as u64) as u32, temp });
         } else {
             names(item, into);
         }
@@ -203,9 +223,10 @@ impl QuestData {
         for items in [&self.turn_in_items, &self.hold_items, &self.reward_items] {
             names(items, &mut known);
         }
-        let name_of = |id: ItemId| known.get(&id.0).map_or_else(|| format!("item {id}"), |(name, _)| name.clone());
-        let stack_of = |id: ItemId| known.get(&id.0).map_or(1, |(_, max_stack)| *max_stack);
-        let need = |n: NeedData| Need { item: n.item, name: name_of(n.item), qty: n.qty.clamp(0, u32::MAX as i64) as u32, max_stack: stack_of(n.item) };
+        let name_of = |id: ItemId| known.get(&id.0).map_or_else(|| format!("item {id}"), |k| k.name.clone());
+        let stack_of = |id: ItemId| known.get(&id.0).map_or(1, |k| k.max_stack);
+        let temp_of = |id: ItemId| known.get(&id.0).is_some_and(|k| k.temp);
+        let need = |n: NeedData| Need { item: n.item, name: name_of(n.item), qty: n.qty.clamp(0, u32::MAX as i64) as u32, max_stack: stack_of(n.item), temp: temp_of(n.item) };
         let rewards = self
             .reward
             .into_iter()
@@ -236,6 +257,9 @@ impl QuestData {
             member: self.member,
             level: self.level.max(0) as u32,
             reputation: (self.faction > 1 && self.rep > 0).then_some((FactionId(self.faction as u32), self.rep as u32)),
+            class: (self.class > 0).then_some((ItemId(self.class as u32), self.class_points.max(0) as u32)),
+            gold: self.gold.max(0) as u32,
+            experience: self.experience.max(0) as u32,
         }
     }
 }
@@ -288,10 +312,30 @@ mod tests {
     }
 
     #[test]
+    fn a_class_quest_stays_locked_until_the_class_has_the_points() {
+        let mut world = hero(0, '0');
+        feed(
+            &mut world,
+            &json(
+                r#"{"cmd":"getQuests","quests":{"3000":{"QuestID":3000,"sName":"Rank Up","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,
+                "iClass":15652,"iReqCP":3600,"iGold":500,"iExp":1200,"turnin":[{"ItemID":900,"iQty":2}],"oItems":{"900":{"ItemID":900,"sName":"Spark","bTemp":1}}}}}"#,
+            ),
+        );
+        let rank_up = world.quests[&QuestId(3000)].clone();
+        assert_eq!((rank_up.class, rank_up.gold, rank_up.experience, rank_up.turn_in[0].temp), (Some((ItemId(15652), 3600)), 500, 1200, true));
+        let class = |points: i64| json(&format!(r#"{{"cmd":"loadInventoryBig","factions":[],"items":[{{"ItemID":15652,"CharItemID":1,"sName":"Rogue","iQty":{points},"iStk":1,"sType":"Class"}}]}}"#));
+        assert_eq!(world.quest_status(QuestId(3000)), Some(QuestStatus::Locked), "without the class");
+        feed(&mut world, &class(900));
+        assert_eq!(world.quest_status(QuestId(3000)), Some(QuestStatus::Locked), "below rank 3");
+        feed(&mut world, &class(3600));
+        assert_eq!(world.quest_status(QuestId(3000)), Some(QuestStatus::Available));
+    }
+
+    #[test]
     fn reads_needs_and_rewards_by_kind() {
         let world = hero(0, '0');
         let twilly = &world.quests[&QuestId(11)];
-        assert_eq!(twilly.turn_in, [Need { item: ItemId(87), name: "Treeant Branch".into(), qty: 1, max_stack: 1 }]);
+        assert_eq!(twilly.turn_in, [Need { item: ItemId(87), name: "Treeant Branch".into(), qty: 1, max_stack: 1, temp: false }]);
         assert_eq!((twilly.rewards[0].name.as_str(), twilly.rewards[0].kind), ("Twilly Twig", RewardKind::Fixed));
         let scales = &world.quests[&QuestId(445)];
         assert_eq!(scales.rewards.iter().map(|r| (r.name.as_str(), r.kind)).collect::<Vec<_>>(), [

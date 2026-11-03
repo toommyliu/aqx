@@ -146,6 +146,8 @@ declare module "aqx" {
   export interface Requirement extends Goal {
     readonly item: number;
     readonly name: string;
+    /** The item only lasts until logout, like most kill drops. */
+    readonly temp: boolean;
   }
 
   export interface Quest {
@@ -160,6 +162,10 @@ declare module "aqx" {
       /** "choice" rewards need `reward` in `quests.complete`. */
       readonly kind: "fixed" | "choice" | "roll" | "random";
     }[];
+    /** The class the quest needs and the class points it needs in it, `null` for most quests. A quest stays locked until then. */
+    readonly class: { readonly item: number; readonly points: number } | null;
+    readonly gold: number;
+    readonly experience: number;
   }
 
   export interface ShopItem {
