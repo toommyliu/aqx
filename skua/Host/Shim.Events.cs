@@ -68,6 +68,7 @@ public sealed partial class Shim
         switch (name)
         {
             case "death":
+                stopAttacking = false;
                 Raise("PlayerDeath");
                 break;
             case "afk" when data is not null && (bool?)data["afk"] == true:

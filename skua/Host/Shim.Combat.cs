@@ -5,7 +5,7 @@ namespace Aqx.Skua;
 public sealed partial class Shim
 {
     bool stopAttacking;
-    bool counterHandler = true;
+    bool counterHandler;
 
     void Combat()
     {
@@ -25,7 +25,7 @@ public sealed partial class Shim
         });
         On("IScriptCombat.CancelTarget()", _ => Untarget());
         On("IScriptCombat.CancelAutoAttack()", _ => Untarget());
-        On("IScriptCombat.Exit()", _ => Act("exit_combat"));
+        On("IScriptCombat.Exit()", _ => ExitCombat());
         On("IScriptCombat.UntargetSelf()", _ => null);
         On("IScriptCombat.ApproachTarget()", _ => null);
         On("IScriptCombat.AttackPlayer(String)", _ => false);
@@ -46,4 +46,12 @@ public sealed partial class Shim
     }
 
     object? Untarget() => Aqx.Call("target", (object?)null);
+
+    object? ExitCombat()
+    {
+        if (State(Me) == 1)
+            return null;
+        Untarget();
+        return Act("exit_combat");
+    }
 }

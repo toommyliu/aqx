@@ -157,6 +157,7 @@ public sealed partial class Shim
     {
         runStopping = runScriptStoppingEvent;
         stopRequested = true;
+        stopAttacking = false;
     }
 
     public void Sleep(int ms)

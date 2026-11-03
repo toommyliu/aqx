@@ -878,3 +878,38 @@ fn core_bots_picks_a_choice_reward_and_reads_an_items_char_id_and_pattern() {
     assert!(sent.iter().any(|m| m.starts_with("%xt%zm%tryQuestComplete%5%13%1027%")), "{sent:#?}");
     assert!(logged.iter().any(|l| l.ends_with("completed True")), "{logged:#?}");
 }
+
+const IN_PLACE: &str = r#"
+using Skua.Core.Interfaces;
+
+public class InPlace
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Map.Jump("Enter", "Spawn");
+        bot.Map.Join("farm-99999", "r2", "Left");
+        bot.Log($"last map {bot.Map.LastMap}, counter handler {bot.Combat.EnableCounterHandler}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn jumping_in_place_still_sends_and_joining_the_current_map_does_nothing() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-in-place");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("InPlace.cs");
+    std::fs::write(&script, IN_PLACE).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, |_, _| {}, sink);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert_eq!(sent.iter().filter(|m| m.starts_with("%xt%zm%moveToCell%5%Enter%Spawn%")).count(), 2, "{sent:#?}");
+    assert!(!sent.iter().any(|m| m.contains("%tfer%") || m.contains("%r2%")), "{sent:#?}");
+    assert!(logged.contains(&"info: last map farm, counter handler False".to_string()), "{logged:#?}");
+}

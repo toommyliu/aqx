@@ -31,9 +31,14 @@ public sealed partial class Shim
         On("IScriptMap.get_FilePath()", _ => filePath);
         On("IScriptMap.set_FilePath(String)", args => filePath = (string)args[0]!);
         On("IScriptMap.get_FileName()", _ => "");
-        On("IScriptMap.Join(String, String, String, Boolean, Boolean)", args => Join((string)args[0]!, (string?)args[1], (string?)args[2]));
+        On("IScriptMap.Join(String, String, String, Boolean, Boolean)", args =>
+        {
+            string map = (string)args[0]!;
+            lastMap = map.Split('-')[0];
+            return lastMap.Equals(MapName, StringComparison.OrdinalIgnoreCase) || Join(map, (string?)args[1], (string?)args[2]);
+        });
         On("IScriptMap.JoinPacket(String, String, String)", args => Join((string)args[0]!, (string?)args[1], (string?)args[2]));
-        On("IScriptMap.Jump(String, String, Boolean, Boolean)", args => Act("jump", args[0], args[1]));
+        On("IScriptMap.Jump(String, String, Boolean, Boolean)", args => Jump((string)args[0]!, (string)args[1]!));
         On("IScriptMap.GetMapItem(Int32)", args => Act("send", $"%xt%zm%getMapItem%{Int(View("map")!["areaId"])}%{args[0]}%"));
         On("IScriptMap.Reload()", _ => null);
     }
@@ -89,9 +94,16 @@ public sealed partial class Shim
         return cells.Distinct().ToList();
     }
 
+    bool Jump(string cell, string pad)
+    {
+        JsonObject me = Me;
+        return (string?)me["cell"] == cell && (string?)me["pad"] == pad
+            ? Act("send", $"%xt%zm%moveToCell%{Int(View("map")!["areaId"])}%{cell}%{pad}%")
+            : Act("jump", cell, pad);
+    }
+
     bool Join(string map, string? cell, string? pad)
     {
-        lastMap = MapName;
         return Act("join", map) && Act("jump", string.IsNullOrEmpty(cell) ? "Enter" : cell, string.IsNullOrEmpty(pad) ? "Spawn" : pad);
     }
 }
