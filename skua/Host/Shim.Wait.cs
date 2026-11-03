@@ -21,6 +21,8 @@ public sealed partial class Shim
         On("IScriptManager.get_ShouldExit()", _ => ShouldExit);
         On("IScriptManager.get_LoadedScript()", _ => Script);
         On("IScriptStatus.get_CompiledScript()", _ => CompiledScript());
+        On("IScriptStatus.RestartScriptAsync()", _ => Task.CompletedTask);
+        On("IScriptManager.RestartScriptAsync()", _ => Task.CompletedTask);
     }
 
     string CompiledScript() =>
