@@ -317,7 +317,7 @@ impl Driver {
                 Next::Login
             }
             Some(Command::Logout) | None => Next::Quit(Ok(())),
-            Some(Command::Login | Command::Pause | Command::Resume) => Next::Idle,
+            Some(Command::Login | Command::Pause | Command::Resume | Command::PickUp { .. }) => Next::Idle,
         };
         if self.cell.has_commands() {
             session.stop_handle().stop();
@@ -458,6 +458,28 @@ mod tests {
         let last = board.snapshot.as_ref().expect("a final snapshot though nobody watched");
         assert_eq!((last.state(), last.detail.as_str()), ("OFFLINE", "this account logged in somewhere else"));
         servers.stop();
+    }
+
+    #[test]
+    fn a_pick_up_takes_only_the_named_drops_and_leaves_the_script_running() {
+        let servers = Servers::start(FARM, |msg: &str, wire: &mut Wire| {
+            if msg.contains("%moveToCell%5%Enter%") {
+                wire.object(r#"{"cmd":"dropItem","items":{"1528":{"ItemID":1528,"sName":"Bone Dust","iQty":2}}}"#);
+                wire.object(r#"{"cmd":"dropItem","items":{"7":{"ItemID":7,"sName":"Old Map","iQty":1}}}"#);
+            } else if msg.contains("%getDrop%5%1528%") {
+                wire.object(r#"{"cmd":"getDrop","bSuccess":1,"ItemID":1528,"CharItemID":77,"iQty":2,"iQtyNow":2,"bBank":0}"#);
+            }
+        });
+        let path = script("forever", r#"import { wait } from "aqx"; wait.until(() => false);"#);
+        let account = launch(&servers, Some(path), |s| s.exit_when_done = false);
+        wait_for(&account.cell, "was offered both drops", |b| b.run == Run::Running && b.log.iter().filter(|l| l.text.starts_with("drop offered")).count() == 2);
+        account.cell.send(Command::PickUp { items: vec!["bone dust".into()] }).unwrap();
+        wait_for(&account.cell, "picked up the bone dust", |b| b.log.iter().any(|l| l.text == "Bone Dust: 2 in the inventory"));
+        assert_eq!(account.cell.board().run, Run::Running, "picking up doesn't stop the script");
+        account.cell.send(Command::Logout).unwrap();
+        assert!(account.finish().is_ok());
+        let asked: Vec<String> = servers.stop().into_iter().map(|(_, m)| m).filter(|m| m.contains("%getDrop%")).collect();
+        assert_eq!(asked, ["%xt%zm%getDrop%5%1528%"], "the old map stays offered");
     }
 
     #[test]

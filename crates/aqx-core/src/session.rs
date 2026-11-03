@@ -489,9 +489,13 @@ impl Session {
         let waited = self.idle_until(ready);
         self.hook = hook;
         waited?;
+        self.send_now(out, kind);
+        Ok(())
+    }
+
+    pub(crate) fn send_now(&mut self, out: Out, kind: Kind) {
         self.pacer.sent(kind, Instant::now());
         self.send(out);
-        Ok(())
     }
 
     pub(crate) fn pacer_ready_at(&self, kind: Kind, now: Instant) -> Instant {
