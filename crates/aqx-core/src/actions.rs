@@ -636,7 +636,7 @@ impl Session {
     fn castable_at(&self, slot: usize, now: Instant) -> Option<Instant> {
         let me = self.world.me.as_ref()?;
         let skill = me.skills.get(slot)?;
-        if skill.slot.starts_with('i') && self.equipped_item().is_none() {
+        if skill.locked || (skill.slot.starts_with('i') && self.equipped_item().is_none()) {
             return None;
         }
         if f64::from(skill.mana) * me.stats.get("$cmc").copied().unwrap_or(1.0) > f64::from(me.vitals.mp) {
@@ -692,6 +692,9 @@ impl Session {
             let Some(skill) = self.world.me.as_ref().and_then(|m| m.skills.get(slot)).cloned() else {
                 return Err(ActError::NotFound(format!("a skill in slot {slot}")));
             };
+            if skill.locked {
+                return Err(ActError::Rejected(format!("{} is locked at this class rank", skill.name)));
+            }
             if skill.slot.starts_with('i') && self.equipped_item().is_none() {
                 return Err(ActError::NotFound("a consumable equipped in slot 5".into()));
             }

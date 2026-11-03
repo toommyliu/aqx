@@ -283,3 +283,26 @@ fn the_end_of_a_script_stops_the_background_attack() {
     let sent = sent(fake);
     assert_eq!(attacks(&sent).len(), 1, "{:?}", attacks(&sent));
 }
+
+#[test]
+fn skills_the_class_rank_has_not_unlocked_are_never_cast() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%moveToCell%5%r2%") {
+            wire.object(
+                r#"{"cmd":"sAct","actions":{"active":[
+                {"ref":"aa","nam":"Auto Attack","cd":2000,"mp":0,"tgt":"h","tgtMax":1,"isOK":true},
+                {"ref":"a1","nam":"Footwork","cd":3000,"mp":10,"tgt":"h","tgtMax":1,"isOK":false}]}}"#,
+            );
+        }
+    });
+    fake.session.jump("r2", "Left").unwrap();
+    pump_for(&mut fake, Duration::from_millis(200));
+    fake.session.set_target(Some(MonMapId(2)));
+
+    assert!(!fake.session.can_cast(1));
+    assert!(!fake.session.cast_now(1));
+    let used = fake.session.use_skill(1, None);
+    assert!(matches!(&used, Err(ActError::Rejected(why)) if why.contains("Footwork is locked")), "{used:?}");
+    let sent = sent(fake);
+    assert!(!sent.iter().any(|(_, m)| m.contains("%a1>")), "{:?}", messages(&sent));
+}
