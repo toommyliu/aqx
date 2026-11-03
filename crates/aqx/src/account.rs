@@ -29,7 +29,12 @@ pub fn expand_home(typed: &Path) -> PathBuf {
 }
 
 pub fn skua_host() -> PathBuf {
-    std::env::var_os("AQX_SKUA").map_or_else(|| PathBuf::from("aqx-skua"), PathBuf::from)
+    std::env::var_os("AQX_SKUA").map_or_else(published_skua_host, PathBuf::from)
+}
+
+fn published_skua_host() -> PathBuf {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap_or(Path::new("."));
+    repo.join("skua/Host/bin/publish/aqx-skua")
 }
 
 fn is_skua(script: &Path) -> bool {
@@ -518,6 +523,13 @@ mod tests {
         account.cell.send(Command::Logout).unwrap();
         assert!(account.finish().is_ok());
         servers.stop();
+    }
+
+    #[test]
+    fn without_aqx_skua_the_host_is_the_one_published_in_this_repo() {
+        let host = published_skua_host();
+        assert!(host.ends_with("skua/Host/bin/publish/aqx-skua"), "{}", host.display());
+        assert!(host.ancestors().nth(5).unwrap().join("skua/mise.toml").is_file(), "{}", host.display());
     }
 
     #[test]

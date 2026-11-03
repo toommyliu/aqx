@@ -1,2 +1,6 @@
 [tools]
 dotnet = "10.0.403"
+
+[tasks.publish]
+description = "Build the Skua host self-contained, where aqx looks for it"
+run = "dotnet publish Host/Host.csproj -c Release -r osx-arm64 --self-contained -o Host/bin/publish"
