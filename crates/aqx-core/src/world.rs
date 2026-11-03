@@ -1097,6 +1097,36 @@ impl World {
                     events.push(Event::ItemChanged { item: name, qty: total, place: Place::Bank });
                 }
             }
+            "enhanceItemShop" => {
+                #[derive(Deserialize)]
+                struct Enhanced {
+                    #[serde(rename = "bSuccess", default, deserialize_with = "flag")]
+                    ok: bool,
+                    #[serde(rename = "ItemIDs", default)]
+                    items: Vec<Value>,
+                    #[serde(rename = "EnhID", default, deserialize_with = "int")]
+                    id: i64,
+                    #[serde(rename = "EnhLvl", default, deserialize_with = "int")]
+                    level: i64,
+                    #[serde(rename = "EnhPID", default, deserialize_with = "int")]
+                    pattern: i64,
+                    #[serde(rename = "iCost", default, deserialize_with = "int")]
+                    cost: i64,
+                }
+                let enhanced: Enhanced = json.decode()?;
+                if !enhanced.ok {
+                    events.push(Event::Refused { action: "enhancing".into(), reason: "the server refused it".into() });
+                    return Ok(());
+                }
+                let ids: Vec<u64> = enhanced.items.iter().filter_map(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok())).collect();
+                let enhancement = Enhancement { id: qty(enhanced.id), level: qty(enhanced.level), pattern: qty(enhanced.pattern) };
+                for item in self.inventory.iter_mut().filter(|i| ids.contains(&u64::from(i.id.0))) {
+                    item.enhancement = Some(enhancement);
+                }
+                if let Some(me) = &mut self.me {
+                    me.gold -= enhanced.cost;
+                }
+            }
             "seia" => {
                 #[derive(Deserialize)]
                 struct Equipped {
@@ -2134,6 +2164,22 @@ mod tests {
         assert_eq!(feed(&mut world, "%xt%uotls%-1%hero%afk:true%"), [Event::Afk { afk: true }]);
         assert_eq!(feed(&mut world, "%xt%uotls%-1%hero%afk:true%"), []);
         assert_eq!(feed(&mut world, "%xt%uotls%-1%hero%afk:false%"), [Event::Afk { afk: false }]);
+    }
+
+    #[test]
+    fn an_enhancement_from_a_shop_updates_the_item_and_costs_gold() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"initUserData","uid":1001,"data":{"intGold":50000}}"#));
+        feed(
+            &mut world,
+            &json(r#"{"cmd":"loadInventoryBig","factions":[],"items":[{"ItemID":540,"CharItemID":41,"sName":"Healer","iQty":302500,"iStk":1,"sType":"Class","sES":"ar","EnhID":1,"EnhLvl":10,"EnhPatternID":2}]}"#),
+        );
+        feed(
+            &mut world,
+            &json(r#"{"cmd":"enhanceItemShop","ItemIDs":[540],"EnhID":664,"EnhPID":7,"EnhLvl":100,"EnhRty":5,"EnhDPS":100,"EnhRng":10,"EnhName":"Healer Armor Enhancement","iCost":10060,"bSuccess":1}"#),
+        );
+        assert_eq!(world.inventory[0].enhancement, Some(Enhancement { id: 664, level: 100, pattern: 7 }));
+        assert_eq!(world.me.as_ref().unwrap().gold, 50000 - 10060);
     }
 
     fn item(id: u32, name: &str, ac: bool) -> Value {
