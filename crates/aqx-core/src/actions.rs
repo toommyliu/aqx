@@ -779,6 +779,7 @@ impl Session {
             area.players.iter().find(|p| p.name.eq_ignore_ascii_case(name)).map(|p| (p.cell.clone(), p.pad.clone()))
         };
         if spot(self).is_none() {
+            self.out_of_combat()?;
             let before = self.joined;
             self.send_paced(Out::Goto { name }, Kind::Free)?;
             self.wait_for(Some(Instant::now() + JOIN_TIMEOUT), &format!("going to {name}"), |s| s.joined.is_some() && s.joined != before)?;
