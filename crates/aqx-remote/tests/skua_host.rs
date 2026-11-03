@@ -333,7 +333,10 @@ fn skua_boosts_use_a_boost_item_until_the_boost_is_running() {
         member: false,
         house: false,
         link: String::new(),
+        file: String::new(),
+        icon: String::new(),
         meta: String::new(),
+        level: 0,
         enhancement: None,
     });
     let result = aqx_remote::run(&mut fake.session, host(&script, &home));
@@ -649,4 +652,96 @@ fn a_quest_may_list_the_same_reward_twice() {
     let logged = logged.lock().unwrap().clone();
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.iter().any(|l| l.starts_with("info: Twice rewards Twilly Twig")), "{logged:#?}");
+}
+
+const ACCOUNT_AND_POTION: &str = r#"
+using System.Dynamic;
+using System.Linq;
+using Newtonsoft.Json;
+using Skua.Core.Interfaces;
+
+public class AccountAndPotion
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bool afk = false;
+        bot.Events.PlayerAFK += () => afk = true;
+        bot.Log($"char {bot.Flash.GetGameObject<int>("world.myAvatar.objData.CharID")}, aq {bot.Flash.GetGameObject<int>("world.myAvatar.objData.intAQ")}, verified {bot.Flash.CallGameFunction<bool>("world.myAvatar.isEmailVerified")}");
+
+        var potion = bot.Inventory.Items.First(i => i.ID == 11857);
+        bot.Log($"potion {potion.ItemGroup} {potion.Meta} {bot.Flash.GetGameObject<string>("world.invTree.11857.sLink")} {bot.Flash.GetGameObject<string>("world.invTree.11857.sFile")}");
+
+        dynamic item = new ExpandoObject();
+        item.ItemID = potion.ID;
+        item.sLink = bot.Flash.GetGameObject<string>($"world.invTree.{potion.ID}.sLink");
+        bot.Flash.CallGameFunction("toggleItemEquip", item);
+        bot.Log($"equipped {bot.Inventory.IsEquipped(11857)}");
+
+        var skill = bot.Flash.GetArrayObject<dynamic>("world.actions.active", 5);
+        bot.Flash.CallGameFunction("world.testAction", JsonConvert.DeserializeObject<ExpandoObject>(JsonConvert.SerializeObject(skill)));
+
+        bot.Map.Jump("r2", "Left");
+        for (int i = 0; i < 50 && !afk; i++)
+            bot.Sleep(20);
+        bot.Log($"afk {afk}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn core_bots_reads_the_account_equips_and_drinks_a_potion_and_hears_afk() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-account");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("AccountAndPotion.cs");
+    std::fs::write(&script, ACCOUNT_AND_POTION).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%geia%") {
+                wire.object(r#"{"cmd":"seia","o":{"id":457,"cd":60000,"tgt":"f"},"iRes":1}"#);
+            } else if msg.contains("%moveToCell%5%r2%") {
+                wire.send("%xt%uotls%-1%hero%afk:true%");
+            }
+        },
+        sink,
+    );
+    let me = fake.session.world.me.as_mut().unwrap();
+    (me.char_id, me.aq_linked, me.email_verified) = (Some(42), true, true);
+    fake.session.world.inventory.push(Item {
+        id: ItemId(11857),
+        char_item: None,
+        name: "Health Potion".into(),
+        qty: 3,
+        max_stack: 10,
+        kind: "Item".into(),
+        slot: "None".into(),
+        equipped: false,
+        ac: false,
+        member: false,
+        house: false,
+        link: "potion".into(),
+        file: "items/potion.swf".into(),
+        icon: String::new(),
+        meta: "457".into(),
+        level: 0,
+        enhancement: None,
+    });
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    if std::env::var_os("AQX_SKUA_LOG").is_some() {
+        eprintln!("{logged:#?}\n{sent:#?}");
+    }
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: char 42, aq 1, verified True".to_string()), "{logged:#?}");
+    assert!(logged.contains(&"info: potion None 457 potion items/potion.swf".to_string()), "{logged:#?}");
+    assert!(logged.contains(&"info: equipped True".to_string()), "{logged:#?}");
+    assert!(sent.iter().any(|m| m.contains("%geia%") && m.contains("%potion%457%11857%")), "{sent:#?}");
+    assert!(sent.iter().any(|m| m.contains("%gar%") && m.contains("i1>")), "{sent:#?}");
+    assert!(logged.contains(&"info: afk True".to_string()), "{logged:#?}");
 }

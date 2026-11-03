@@ -24,6 +24,10 @@ public sealed partial class Shim
         ("getGameObject" or "getGameObjectS", [string path]) => GameObject(path),
         ("setGameObject" or "setGameObjectKey", _) => null,
         ("callGameFunction0", ["world.toggleMonsters" or "world.toggleQuestLog"]) => null,
+        ("callGameFunction0", ["world.myAvatar.isEmailVerified"]) => JsonConvert.SerializeObject((bool?)Me["emailVerified"] ?? false),
+        ("callGameFunction", ["world.loadMap" or "world.myAvatar.addItem", _]) => null,
+        ("callGameFunction", ["toggleItemEquip", IDictionary<string, object?> item]) => JsonConvert.SerializeObject(Act("equip", Convert.ToInt32(item["ItemID"]))),
+        ("callGameFunction", ["world.testAction", IDictionary<string, object?> skill]) => JsonConvert.SerializeObject((bool?)Aqx.Call("cast", Convert.ToInt32(skill["slot"])) ?? false),
         ("callGameFunction", ["world.abandonQuest", int quest]) => JsonConvert.SerializeObject(Aqx.Call("abandon", quest)),
         ("callGameFunction", ["world.maximumQuestTurnIns", int quest]) => JsonConvert.SerializeObject(EnsureLoad(quest) is { } q ? TurnIns(q) : 0),
         ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool _, int times]) => JsonConvert.SerializeObject(Complete(quest, reward, times)),
@@ -37,6 +41,7 @@ public sealed partial class Shim
         ("useSkill", [int slot]) => JsonConvert.SerializeObject((bool?)Aqx.Call("cast", slot) ?? false),
         ("availableMonsters", []) => CellMonsterData().ToString(Formatting.None),
         ("isNull", [string path]) => JsonConvert.SerializeObject(GameObject(path) is null),
+        ("getArrayObject", ["world.actions.active", int slot]) => View("skills") is JsonArray skills && slot >= 0 && slot < skills.Count ? skills[slot]?.ToJsonString() : null,
         _ => Missing($"Flash.Call(\"{function}\", {string.Join(", ", args.Select(a => $"{a}"))})"),
     };
 
@@ -49,6 +54,8 @@ public sealed partial class Shim
         "ui.mcPopup.currentLabel" => "\"\"",
         "ui.monsterIcon.redX.visible" => "false",
         "world.myAvatar.objData.guild.Name" => "\"\"",
+        "world.myAvatar.objData.CharID" => JsonConvert.SerializeObject(Int(Me["charId"])),
+        "world.myAvatar.objData.intAQ" => JsonConvert.SerializeObject((bool?)Me["aqLinked"] == true ? 1 : 0),
         "sfc.myUserName" => JsonConvert.SerializeObject((string?)Me["name"] ?? ""),
         "world.myAvatar.objData.iUpgDays" => JsonConvert.SerializeObject((bool?)Me["member"] == true ? 0 : -1),
         "world.myAvatar.objData.intLevel" => JsonConvert.SerializeObject(Int(Me["level"])),
@@ -75,9 +82,12 @@ public sealed partial class Shim
             "iEnh" or "EnhID" => JsonConvert.SerializeObject((int?)enhancement?["id"] ?? 0),
             "EnhLvl" => JsonConvert.SerializeObject((int?)enhancement?["level"] ?? 0),
             "ProcID" => null,
+            "sLink" or "sFile" or "sIcon" or "sES" or "sMeta" => JsonConvert.SerializeObject((string?)item[TreeFields[parts[1]]] ?? ""),
             _ => Missing($"Flash game object world.invTree.{path}"),
         };
     }
+
+    static readonly Dictionary<string, string> TreeFields = new() { ["sLink"] = "link", ["sFile"] = "file", ["sIcon"] = "icon", ["sES"] = "slot", ["sMeta"] = "meta" };
 
     static JsonNode? Walk(JsonNode? node, string path) =>
         path.Split('.', StringSplitOptions.RemoveEmptyEntries).Aggregate(node, (at, key) => at switch

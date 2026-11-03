@@ -72,6 +72,9 @@ public sealed partial class Shim
             case "death":
                 Raise("PlayerDeath");
                 break;
+            case "afk" when data is not null && (bool?)data["afk"] == true:
+                Raise("PlayerAFK");
+                break;
             case "kill":
                 Raise("MonsterKilled", Int(data?["mapId"]));
                 break;
