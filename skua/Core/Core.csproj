@@ -25,6 +25,9 @@
     <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptSkill.cs" />
     <Compile Include="../vendor/Skua/Skua.Core/Skills/*.cs" />
     <Compile Include="../vendor/Skua/Skua.Core/Flash/*.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Threading/*.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/ViewModels/Dialogs/DialogViewModelBase.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/ViewModels/Dialogs/InputDialogViewModel.cs" />
     <Compile Include="*.cs" />
   </ItemGroup>
 
