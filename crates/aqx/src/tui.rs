@@ -16,7 +16,7 @@ use unicode_width::UnicodeWidthChar;
 use aqx_script::Arg;
 
 use crate::account::{expand_home, script_path};
-use crate::hub::{Bar, Cells, Command, Game, LOG_LINES, LogLine, Snapshot};
+use crate::hub::{Bar, Cells, Command, Game, Log, LogLine, Snapshot};
 use crate::output::{clock, span};
 use crate::socket;
 
@@ -78,37 +78,45 @@ pub struct Fleet {
 #[derive(Clone, Copy, PartialEq, Default)]
 enum Filter {
     #[default]
+    Main,
     All,
-    Aqx,
     Script,
+    Aqx,
     Server,
+    Game,
 }
 
 impl Filter {
     fn next(self) -> Self {
         match self {
-            Filter::All => Filter::Aqx,
-            Filter::Aqx => Filter::Script,
-            Filter::Script => Filter::Server,
-            Filter::Server => Filter::All,
+            Filter::Main => Filter::All,
+            Filter::All => Filter::Script,
+            Filter::Script => Filter::Aqx,
+            Filter::Aqx => Filter::Server,
+            Filter::Server => Filter::Game,
+            Filter::Game => Filter::Main,
         }
     }
 
-    fn shows(self, source: &str) -> bool {
+    fn shows(self, line: &LogLine) -> bool {
         match self {
+            Filter::Main => !line.is_game(),
             Filter::All => true,
-            Filter::Aqx => source == "aqx",
-            Filter::Script => source == "script",
-            Filter::Server => source == "server",
+            Filter::Script => line.source == "script",
+            Filter::Aqx => line.source == "aqx",
+            Filter::Server => line.source == "server",
+            Filter::Game => line.is_game(),
         }
     }
 
     fn label(self) -> &'static str {
         match self {
+            Filter::Main => "main",
             Filter::All => "all",
-            Filter::Aqx => "aqx",
             Filter::Script => "script",
+            Filter::Aqx => "aqx",
             Filter::Server => "server",
+            Filter::Game => "game",
         }
     }
 }
@@ -232,7 +240,7 @@ struct App {
     ending: bool,
     recent: Vec<Recent>,
     note: Option<(String, Instant)>,
-    log: Vec<LogLine>,
+    log: Log,
     log_of: Option<usize>,
 }
 
@@ -296,14 +304,14 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
                 let fresh = board.log.iter().rev().take_while(|l| l.seq >= from).count();
                 let fresh = board.log.iter().skip(board.log.len() - fresh);
                 if app.scroll > 0 {
-                    for line in fresh.clone().filter(|l| app.filter.shows(&l.source)) {
+                    for line in fresh.clone().filter(|l| app.filter.shows(l)) {
                         app.scroll += pieces(line, app.log_width.get()).1.len();
                         app.unseen_from.get_or_insert(line.seq);
                     }
                 }
-                app.log.extend(fresh.cloned());
-                let over = app.log.len().saturating_sub(LOG_LINES);
-                app.log.drain(..over);
+                for line in fresh {
+                    app.log.push(line.clone());
+                }
             }
             Shown { name: cell.name.clone(), snapshot: board.snapshot.clone() }
         })
@@ -1048,7 +1056,7 @@ fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
 }
 
 fn draw_jump(f: &mut Frame, area: Rect, app: &App) {
-    let unseen = app.unseen_from.map_or(0, |from| app.log.iter().filter(|l| l.seq >= from && app.filter.shows(&l.source)).count());
+    let unseen = app.unseen_from.map_or(0, |from| app.log.iter().filter(|l| l.seq >= from && app.filter.shows(l)).count());
     let label = if unseen > 0 { format!(" {unseen} new · jump to bottom (end) ↓ ") } else { " jump to bottom (end) ↓ ".to_string() };
     let width = (label.chars().count() as u16).min(area.width);
     let pill = Rect { x: area.x + (area.width - width) / 2, y: area.bottom() - 1, width, height: 1 };
@@ -1298,7 +1306,7 @@ fn spans_width(spans: &[Span]) -> usize {
 
 fn log_lines(app: &App, height: usize, width: usize) -> Vec<Line<'static>> {
     app.log_width.set(width);
-    let lines: Vec<&LogLine> = app.log.iter().filter(|l| app.filter.shows(&l.source)).collect();
+    let lines: Vec<&LogLine> = app.log.iter().filter(|l| app.filter.shows(l)).collect();
     let sizes: Vec<usize> = lines.iter().map(|l| pieces(l, width).1.len()).collect();
     let total: usize = sizes.iter().sum();
     app.max_scroll.set(total.saturating_sub(height));
@@ -1333,6 +1341,7 @@ fn log_rows(l: &LogLine, width: usize) -> Vec<Line<'static>> {
     let color = match l.source.as_str() {
         "server" => Color::Yellow,
         "script" => Color::Magenta,
+        "game" => Color::Blue,
         _ => Color::Cyan,
     };
     let (prefix, pieces) = pieces(l, width);
@@ -1446,7 +1455,7 @@ mod tests {
 
     use super::*;
     use crate::hub::AccountCell;
-    use crate::hub::{Board, Hub, Player, Print, SkillState};
+    use crate::hub::{Board, Hub, LOG_LINES, Player, Print, SkillState};
 
     fn rows(fleet: &Fleet, app: &mut App, width: u16) -> Vec<Vec<ratatui::buffer::Cell>> {
         let shown = gather(fleet, app);
@@ -1534,17 +1543,20 @@ mod tests {
             "void-aura.ts  Astral Ephemerite Essence in timespace",
             "4120/7500",
             "HP ████░░░░ 2000/4000  1 kill",
-            "aqx     killed Mosquito",
             "server  Profanity filter On.",
             "q detach",
         ] {
             assert!(shown.contains(expected), "missing {expected:?}");
         }
         assert!(!shown.contains("Barber"), "details stay hidden until d");
+        assert!(!shown.contains("killed Mosquito"), "game lines stay out of the main log");
         let narrow = screen(&fleet, &mut app, 60);
-        for expected in ["HP ████░░░░ 2000/4000", "Void Aura", "killed Mosquito", "q detach"] {
+        for expected in ["HP ████░░░░ 2000/4000", "Void Aura", "Profanity filter", "q detach"] {
             assert!(narrow.contains(expected), "narrow screen is missing {expected:?}");
         }
+        press(&fleet, &mut app, KeyCode::Char('l'));
+        let shown = screen(&fleet, &mut app, 110);
+        assert!(shown.contains("── log · all") && shown.contains("game    killed Mosquito"), "all brings the game lines back");
         for _ in 0..3 {
             press(&fleet, &mut app, KeyCode::Char('l'));
         }
@@ -1705,7 +1717,7 @@ mod tests {
             press(&fleet, &mut app, KeyCode::Char(key));
         }
         press(&fleet, &mut app, KeyCode::PageUp);
-        assert!(!app.details && app.filter == Filter::All && app.scroll == 0, "view keys for the hidden pane do nothing on the dashboard");
+        assert!(!app.details && app.filter == Filter::Main && app.scroll == 0, "view keys for the hidden pane do nothing on the dashboard");
         press(&fleet, &mut app, KeyCode::Down);
         assert_eq!(app.selected, 2, "down moves one row of three cards, to spare");
         press(&fleet, &mut app, KeyCode::Left);
@@ -2098,7 +2110,7 @@ mod tests {
     fn an_account_shows_starting_before_the_server_answers() {
         let (fleet, _hub) = fleet(&["main"]);
         let shown = screen(&fleet, &mut App::default(), 100);
-        for expected in ["⠋ starting", "waiting for the server", "── log · all"] {
+        for expected in ["⠋ starting", "waiting for the server", "── log · main"] {
             assert!(shown.contains(expected), "missing {expected:?}");
         }
     }
@@ -2176,7 +2188,22 @@ mod tests {
         gather(&fleet, &mut app);
         assert_eq!(app.log.len(), LOG_LINES);
         assert_eq!(app.log.last().map(|l| l.text.as_str()), Some(format!("line {}", LOG_LINES - 1).as_str()));
-        assert_eq!(app.log.first().map(|l| l.seq), Some(1));
+        assert_eq!(app.log.iter().next().map(|l| l.seq), Some(1));
+    }
+
+    #[test]
+    fn game_lines_never_push_script_lines_out_of_the_log() {
+        let (fleet, hub) = fleet(&["main"]);
+        let mut app = App::default();
+        hub.say(&fleet.cells.all()[0], "script", "farming");
+        for i in 0..LOG_LINES * 2 {
+            hub.say(&fleet.cells.all()[0], "game", format!("killed {i}"));
+        }
+        gather(&fleet, &mut app);
+        let shown: Vec<&str> = app.log.iter().filter(|l| app.filter.shows(l)).map(|l| l.text.as_str()).collect();
+        assert_eq!(shown, ["farming"], "the main filter hides game lines");
+        assert_eq!(app.log.iter().filter(|l| l.is_game()).count(), LOG_LINES);
+        assert_eq!(app.log.iter().rfind(|l| l.is_game()).map(|l| l.text.clone()), Some(format!("killed {}", LOG_LINES * 2 - 1)));
     }
 
     #[test]

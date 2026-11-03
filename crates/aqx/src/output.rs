@@ -23,25 +23,25 @@ pub fn describe(event: &Event) -> Option<(&'static str, String)> {
         Event::BankLoaded { items } => ("aqx", format!("bank loaded, {items} items")),
         Event::Died => ("aqx", "died".into()),
         Event::Respawned => ("aqx", "respawned".into()),
-        Event::Moved { cell, pad } => ("aqx", format!("moved to {cell}/{pad}")),
+        Event::Moved { cell, pad } => ("game", format!("moved to {cell}/{pad}")),
         Event::Afk { afk: true } => ("aqx", "marked away, answering".into()),
-        Event::Killed { monster, .. } => ("aqx", format!("killed {monster}")),
-        Event::DropOffered { item, qty, .. } => ("aqx", format!("drop offered: {item} x{qty}")),
+        Event::Killed { monster, .. } => ("game", format!("killed {monster}")),
+        Event::DropOffered { item, qty, .. } => ("game", format!("drop offered: {item} x{qty}")),
         Event::ItemChanged { item, qty, place } => {
             let place = match place {
                 Place::Inventory => "inventory",
                 Place::Temp => "temp inventory",
                 Place::Bank => "bank",
             };
-            ("aqx", format!("{item}: {qty} in the {place}"))
+            ("game", format!("{item}: {qty} in the {place}"))
         }
         Event::Chat { channel, sender, text } => ("server", format!("[{channel}] {sender}: {text}")),
-        Event::Progress { label, current, total } => ("aqx", format!("{label} {current}/{total}")),
+        Event::Progress { label, current, total } => ("script", format!("{label} {current}/{total}")),
         Event::Status { text } => ("script", text.clone()),
         Event::ScriptLog { level, text } if level == "log" || level == "info" => ("script", text.clone()),
         Event::ScriptLog { level, text } => ("script", format!("{level}: {text}")),
-        Event::QuestAccepted { name, .. } => ("aqx", format!("accepted {name}")),
-        Event::QuestCompleted { name, .. } => ("aqx", format!("completed {name}")),
+        Event::QuestAccepted { name, .. } => ("game", format!("accepted {name}")),
+        Event::QuestCompleted { name, .. } => ("game", format!("completed {name}")),
         Event::QuestRejected { id, reason } => ("aqx", format!("quest {id} refused: {reason}")),
         Event::Refused { action, reason } => ("aqx", format!("{action} refused: {reason}")),
         Event::ServerText { text } | Event::Warning { text } => ("server", text.clone()),
