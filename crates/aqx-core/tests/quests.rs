@@ -63,6 +63,7 @@ fn loading_quests_sends_again_when_the_server_says_to_slow_down() {
     let started = std::time::Instant::now();
     fake.session.load_quests(&[QuestId(11)]).unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
-    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
-    assert_eq!(sent.iter().filter(|m| m.contains("%getQuests%")).count(), 2, "{sent:#?}");
+    let asks: Vec<std::time::Instant> = fake.finish().into_iter().filter(|(_, m)| m.contains("%getQuests%")).map(|(at, _)| at).collect();
+    assert_eq!(asks.len(), 2);
+    assert!(asks[1] - asks[0] >= std::time::Duration::from_secs(1), "sent again after {:?}", asks[1] - asks[0]);
 }
