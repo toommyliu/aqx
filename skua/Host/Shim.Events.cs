@@ -11,6 +11,8 @@ namespace Aqx.Skua;
 
 public sealed partial class Shim
 {
+    static readonly TimeSpan StoppingTimeout = TimeSpan.FromSeconds(60);
+
     const string PacketEvent = nameof(IScriptEvent.ExtensionPacketReceived);
 
     readonly ConcurrentDictionary<string, Delegate?> events = new();
@@ -168,7 +170,8 @@ public sealed partial class Shim
         });
         try
         {
-            raised.Wait(Aqx.Stopping);
+            if (!raised.Wait(StoppingTimeout, Aqx.Stopping))
+                Aqx.Call("log", "warn", $"ScriptStopping handlers were still running after {StoppingTimeout.TotalSeconds:F0} s, so the script ends without them");
         }
         catch (OperationCanceledException)
         {
