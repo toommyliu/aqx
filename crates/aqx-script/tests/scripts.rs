@@ -587,3 +587,25 @@ fn check_loads_every_import_without_running_the_script() {
     check_fails("check-export", &[("main.ts", r#"import { y } from "./lib.ts";"#), ("lib.ts", "export const x = 1;")], "Could not find export 'y'");
     check_fails("check-enum", &[("main.ts", r#"import { E } from "./lib.ts";"#), ("lib.ts", "export enum E { A }")], "export enum E { A }\n  |        ^^^^^^^^^^^^");
 }
+
+#[test]
+fn the_player_reads_its_combat_stats() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%moveToCell%") {
+            wire.object(r#"{"cmd":"stu","sta":{"$STR":7,"$ap":14,"$sp":37,"$tcr":0.08,"$scm":1.66,"$tha":0.03}}"#);
+        }
+    });
+    let result = run_script(
+        &mut fake,
+        "stats",
+        r#"
+        import { map, player, wait } from "aqx";
+        map.jump("r2", "Left");
+        if (!wait.until(() => player.stats.critMultiplier > 0, 2000)) throw new Error("no stats arrived");
+        const { str, attackPower, spellPower, crit, critMultiplier } = player.stats;
+        const seen = [str, attackPower, spellPower, crit, critMultiplier].join();
+        if (seen !== "7,14,37,0.08,1.66") throw new Error(`stats: ${seen}`);
+        "#,
+    );
+    finished(result);
+}
