@@ -3,6 +3,7 @@ using Newtonsoft.Json.Linq;
 using Skua.Core.Models.Factions;
 using Skua.Core.Models.Items;
 using Skua.Core.Models.Monsters;
+using Skua.Core.Models.Players;
 
 namespace Aqx.Skua;
 
@@ -25,6 +26,15 @@ public static class Models
             ["bTemp"] = temp,
             ["EnhLvl"] = (int?)item["enhancement"]?["level"] ?? 0,
         }.ToObject<T>()!;
+
+    static readonly (string Skua, string Aqx)[] StatNames =
+    [
+        ("$STR", "str"), ("$INT", "int"), ("$DEX", "dex"), ("$WIS", "wis"), ("$END", "end"), ("$LCK", "luk"),
+        ("$ap", "attackPower"), ("$sp", "spellPower"), ("$tha", "haste"), ("$tcr", "crit"), ("$scm", "critMultiplier"), ("$tdo", "dodge"),
+    ];
+
+    public static PlayerStats Stats(JsonNode? stats) =>
+        new JObject(StatNames.Select(n => new JProperty(n.Skua, (double?)stats?[n.Aqx] ?? 0))).ToObject<PlayerStats>()!;
 
     public static Faction Faction(JsonNode faction) =>
         new JObject

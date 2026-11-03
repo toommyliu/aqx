@@ -454,3 +454,45 @@ fn skua_kills_a_monster_and_hunts_it_for_a_temp_item() {
     assert!(logged.contains(&"info: killed".to_string()), "{logged:#?}");
     assert!(logged.contains(&"info: holding 2 Treeant Sap".to_string()), "{logged:#?}");
 }
+
+const STATS: &str = r#"
+using Skua.Core.Interfaces;
+
+public class ReadStats
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Map.Jump("r2", "Left");
+        for (int i = 0; i < 50 && (bot.Player.Stats?.CriticalMultiplier ?? 0) == 0; i++)
+            bot.Sleep(20);
+        var s = bot.Player.Stats!;
+        bot.Log($"{s.Strength} {s.AttackPower} {s.SpellPower} {s.CriticalChance} {s.CriticalMultiplier} {s.Haste}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn a_script_reads_the_players_combat_stats() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-stats");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("ReadStats.cs");
+    std::fs::write(&script, STATS).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%moveToCell%") {
+                wire.object(r#"{"cmd":"stu","sta":{"$STR":7,"$ap":14,"$sp":37,"$tcr":0.08,"$scm":1.66,"$tha":0.03}}"#);
+            }
+        },
+        sink,
+    );
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: 7 14 37 0.08 1.66 0.03".to_string()), "{logged:#?}");
+}

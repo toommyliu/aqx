@@ -25,6 +25,7 @@ public sealed partial class Shim
         On("IScriptPlayer.get_Y()", _ => Int(Me["y"]));
         On("IScriptPlayer.get_AFK()", _ => (bool?)Me["afk"] ?? false);
         On("IScriptPlayer.get_IsMember()", _ => (bool?)Me["member"] ?? false);
+        On("IScriptPlayer.get_Stats()", _ => Models.Stats(Me["stats"]));
         On("IScriptPlayer.get_Target()", _ => Me["target"] is JsonObject target ? Models.Monster(target) : null);
         On("IScriptPlayer.get_HasTarget()", _ => Me["target"] is JsonObject target && (bool)target["alive"]!);
         On("IScriptPlayer.get_CurrentClass()", _ => Playing ? InventoryItems().Find(i => i is { Equipped: true, Category: ItemCategory.Class }) : null);
