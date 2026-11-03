@@ -382,3 +382,32 @@ fn going_to_a_player_waits_out_combat_since_the_server_ignores_it_during_and_jus
     fake.session.goto("ally").unwrap();
     assert_eq!(fake.session.world.area.as_ref().map(|a| a.name.as_str()), Some("town-2"));
 }
+
+#[test]
+fn a_goto_dropped_by_a_monster_pulling_the_player_back_into_combat_is_sent_again_at_once() {
+    let mut calm_since: Option<Instant> = None;
+    let mut gotos = 0;
+    let mut fake = Fake::start(FARM, move |msg, wire| {
+        if msg.contains("%gar%") {
+            calm_since = None;
+            wire.object(r#"{"cmd":"ct","p":{"hero":{"intState":2}},"m":{"2":{"intHP":800,"intState":2}}}"#);
+        } else if msg.contains("%moveToCell%") {
+            calm_since = Some(Instant::now());
+            wire.object(r#"{"cmd":"uotls","unm":"hero","o":{"intState":1}}"#);
+        } else if msg.contains("%goto%ally%") {
+            gotos += 1;
+            if gotos == 1 {
+                calm_since = None;
+                wire.object(r#"{"cmd":"ct","p":{"hero":{"intState":2}},"m":{"2":{"intHP":800,"intState":2}}}"#);
+            } else if calm_since.is_some_and(|at| at.elapsed() >= Duration::from_millis(1200)) {
+                wire.send("<msg t='sys'><body action='joinOK' r='6'><uLs r='6'><u i='1001'><n><![CDATA[hero]]></n></u></uLs></body></msg>");
+                wire.object(TOWN);
+                wire.send("%xt%server%-1%You joined \"town-2\"%");
+            }
+        }
+    });
+    let started = Instant::now();
+    fake.session.goto("ally").unwrap();
+    assert!(started.elapsed() < Duration::from_secs(8), "{:?}", started.elapsed());
+    assert_eq!(fake.session.world.area.as_ref().map(|a| a.name.as_str()), Some("town-2"));
+}
