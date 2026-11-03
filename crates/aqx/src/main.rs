@@ -27,7 +27,7 @@ use serde_json::json;
 
 use account::{Backoff, Script, Spec};
 use config::{AccountConfig, Config, Settings};
-use hub::{AccountCell, Command, Hub, Print};
+use hub::{AccountCell, Cells, Command, Hub, Print};
 use socket::Conn;
 
 const DEFAULT_API: &str = "https://game.aq.com";
@@ -350,11 +350,7 @@ fn serve(wanted: &Wanted, json: bool, quiet: bool) -> Result<(), String> {
     }
     let accounts = named(&config, &wanted.accounts)?;
     let command = command(wanted)?;
-    let mut launches = Vec::new();
-    for account in &config.accounts {
-        let spec = spec(account, account.settings(&config.defaults), CLIENT_VERSION, account.script(&path)?, false);
-        launches.push(Launch { name: account.name().into(), spec, recorder: None });
-    }
+    let launches = launches(&config, &path)?;
     let name = path.file_stem().map_or("aqx".into(), |s| s.to_string_lossy().into_owned());
     let print = match (json, quiet) {
         (true, _) => Print::Json,
@@ -365,6 +361,15 @@ fn serve(wanted: &Wanted, json: bool, quiet: bool) -> Result<(), String> {
     let results = start(&name, Some(&path), launches, print, &first)?;
     let failed: Vec<String> = results.into_iter().filter_map(|(account, r)| r.err().map(|e| format!("{account}: {e}"))).collect();
     if failed.is_empty() { Ok(()) } else { Err(failed.join("\n")) }
+}
+
+fn launches(config: &Config, path: &Path) -> Result<Vec<Launch>, String> {
+    let mut launches = Vec::new();
+    for account in &config.accounts {
+        let spec = spec(account, account.settings(&config.defaults), CLIENT_VERSION, account.script(path)?, false);
+        launches.push(Launch { name: account.name().into(), spec, recorder: None });
+    }
+    Ok(launches)
 }
 
 fn down(config: Option<&Path>) -> Result<(), String> {
@@ -389,20 +394,16 @@ fn end_session(session: &Path) -> Result<(), String> {
 
 type Outcomes = Vec<(String, Result<(), String>)>;
 
+struct Running {
+    name: String,
+    user: String,
+    thread: JoinHandle<Result<(), String>>,
+}
+
 fn start(name: &str, config: Option<&Path>, launches: Vec<Launch>, print: Print, first: &dyn Fn(&str) -> Option<Command>) -> Result<Outcomes, String> {
     let (name, listener, _listening) = socket::bind(name, true)?;
-    let mut cells = Vec::new();
-    let mut parts = Vec::new();
-    for launch in launches {
-        let control = Control::new().map_err(|e| e.to_string())?;
-        let cell = Arc::new(AccountCell::local(&launch.name, control.stop_handle()));
-        if let Some(command) = first(&launch.name) {
-            cell.send(command)?;
-        }
-        cells.push(cell.clone());
-        parts.push((launch, control, cell));
-    }
-    let hub = Arc::new(Hub::new(&name, cells, print));
+    let hub = Arc::new(Hub::new(&name, Vec::new(), print));
+    let mut running = launches.into_iter().map(|launch| run_account(&hub, launch, first)).collect::<Result<Vec<_>, String>>()?;
     socket::serve(listener, hub.clone(), config.map(Path::to_path_buf))?;
     let presses = Arc::new(AtomicUsize::new(0));
     {
@@ -415,28 +416,57 @@ fn start(name: &str, config: Option<&Path>, launches: Vec<Launch>, print: Print,
         })
         .map_err(|e| e.to_string())?;
     }
-    let threads: Vec<(String, JoinHandle<Result<(), String>>)> = parts
-        .into_iter()
-        .map(|(launch, control, cell)| {
-            let hub = hub.clone();
-            let thread = std::thread::Builder::new()
-                .name(launch.name.clone())
-                .spawn(move || account::run(launch.spec, launch.recorder, control, cell, hub))
-                .map_err(|e| e.to_string())?;
-            Ok((launch.name, thread))
-        })
-        .collect::<Result<_, String>>()?;
+    let mut seen = config.and_then(modified);
     while !hub.end_if_idle() {
         std::thread::sleep(Duration::from_millis(250));
+        let Some(config) = config else { continue };
+        if modified(config) == seen {
+            continue;
+        }
+        seen = modified(config);
+        match added_accounts(config, &running) {
+            Ok(launches) => {
+                for launch in launches {
+                    running.push(run_account(&hub, launch, &|_| None)?);
+                }
+            }
+            Err(e) => eprintln!("aqx: not adding accounts from {}: {e}", config.display()),
+        }
     }
-    for cell in &hub.cells {
+    for cell in hub.cells.all() {
         cell.close();
     }
-    Ok(threads.into_iter().map(|(account, t)| (account, t.join().unwrap_or_else(|_| Err("the account thread crashed".into())))).collect())
+    Ok(running.into_iter().map(|r| (r.name, r.thread.join().unwrap_or_else(|_| Err("the account thread crashed".into())))).collect())
+}
+
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+fn added_accounts(path: &Path, running: &[Running]) -> Result<Vec<Launch>, String> {
+    let (config, path) = config::load(Some(path))?;
+    let known = |launch: &Launch| running.iter().any(|r| r.name == launch.name || r.user.eq_ignore_ascii_case(&launch.spec.creds.user));
+    Ok(launches(&config, &path)?.into_iter().filter(|launch| !known(launch)).collect())
+}
+
+fn run_account(hub: &Arc<Hub>, launch: Launch, first: &dyn Fn(&str) -> Option<Command>) -> Result<Running, String> {
+    let control = Control::new().map_err(|e| e.to_string())?;
+    let cell = Arc::new(AccountCell::local(&launch.name, control.stop_handle()));
+    if let Some(command) = first(&launch.name) {
+        cell.send(command)?;
+    }
+    hub.cells.add(cell.clone());
+    let hub = hub.clone();
+    let (name, user) = (launch.name.clone(), launch.spec.creds.user.clone());
+    let thread = std::thread::Builder::new()
+        .name(name.clone())
+        .spawn(move || account::run(launch.spec, launch.recorder, control, cell, hub))
+        .map_err(|e| e.to_string())?;
+    Ok(Running { name, user, thread })
 }
 
 fn log_out_all(hub: &Hub) {
-    for cell in &hub.cells {
+    for cell in hub.cells.all() {
         let _ = cell.send(Command::Logout);
     }
 }
@@ -448,7 +478,7 @@ fn attach(path: &Path) -> Result<(), String> {
     socket::same_build(&hello)?;
     let name = hello["name"].as_str().unwrap_or("aqx").to_string();
     let accounts: Vec<String> = serde_json::from_value(hello["accounts"].clone()).map_err(|e| e.to_string())?;
-    let cells: Vec<Arc<AccountCell>> = accounts.iter().map(|name| Arc::new(AccountCell::mirror(name))).collect();
+    let cells = Arc::new(Cells::new(accounts.iter().map(|name| Arc::new(AccountCell::mirror(name))).collect()));
     let gone = Arc::new(AtomicBool::new(false));
     {
         let (cells, gone) = (cells.clone(), gone.clone());
@@ -462,7 +492,7 @@ fn attach(path: &Path) -> Result<(), String> {
     let fleet = tui::Fleet { title: name, cells, socket: path.to_path_buf() };
     tui::run(&fleet, || gone.load(Ordering::SeqCst))?;
     if gone.load(Ordering::SeqCst)
-        && let [only] = &fleet.cells[..]
+        && let [only] = &fleet.cells.all()[..]
     {
         let board = only.board();
         for line in board.log.iter().skip(board.log.len().saturating_sub(10)) {
@@ -472,11 +502,19 @@ fn attach(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn mirror(cells: &[Arc<AccountCell>], message: &serde_json::Value) {
+fn mirror(cells: &Cells, message: &serde_json::Value) {
+    let find = |account: &str| cells.all().into_iter().find(|c| c.name == account);
     match message["type"].as_str() {
+        Some("account") => {
+            if let Some(account) = message["account"].as_str()
+                && find(account).is_none()
+            {
+                cells.add(Arc::new(AccountCell::mirror(account)));
+            }
+        }
         Some("log") => {
             let (Some(account), Ok(line)) = (message["account"].as_str(), serde_json::from_value::<hub::LogLine>(message["line"].clone())) else { return };
-            if let Some(cell) = cells.iter().find(|c| c.name == account) {
+            if let Some(cell) = find(account) {
                 let mut board = cell.board();
                 if board.log.len() == hub::LOG_LINES {
                     board.log.pop_front();
@@ -486,7 +524,7 @@ fn mirror(cells: &[Arc<AccountCell>], message: &serde_json::Value) {
         }
         Some("snapshot") => {
             let Ok(snapshot) = serde_json::from_value::<hub::Snapshot>(message["snapshot"].clone()) else { return };
-            if let Some(cell) = cells.iter().find(|c| c.name == snapshot.account) {
+            if let Some(cell) = find(&snapshot.account) {
                 cell.board().snapshot = Some(snapshot);
             }
         }
@@ -597,4 +635,51 @@ fn servers(config: Option<&Path>) -> Result<(), String> {
         println!("{:<16}  {:>11}  {state}", s.name, format!("{}/{}", s.players, s.capacity));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+    use crate::fake::{FARM, Servers};
+
+    #[test]
+    fn a_session_adds_accounts_appended_to_its_config() {
+        let servers = Servers::start(FARM, |_, _| {});
+        let dir = std::env::temp_dir().join(format!("aqx-main-tests-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("aqx.toml");
+        std::fs::write(&path, format!("[defaults]\nserver = \"Fake\"\napi = \"{}\"\n\n[[account]]\nuser = \"hero\"\npassword = \"x\"\n", servers.api)).unwrap();
+        let path = std::fs::canonicalize(&path).unwrap();
+        let session = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let (config, path) = config::load(Some(&path)).unwrap();
+                start("adds-accounts", Some(&path), launches(&config, &path).unwrap(), Print::Quiet, &|_| Some(Command::Login))
+            })
+        };
+        let accounts = || socket::session_for(&path).ok().flatten().and_then(|s| socket::accounts(&s).ok()).unwrap_or_default();
+        let settle = |want: &[&str]| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while accounts() != want {
+                assert!(Instant::now() < deadline, "accounts: {:?}", accounts());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        settle(&["hero"]);
+
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "\n[[account]]\nname = \"renamed\"\nuser = \"HERO\"\npassword = \"x\"\n\n[[account]]\nuser = \"alt\"\npassword = \"y\"\n").unwrap();
+        drop(file);
+        settle(&["hero", "alt"]);
+
+        let socket = socket::session_for(&path).unwrap().unwrap();
+        let snapshots = socket::snapshot(&socket).unwrap();
+        assert_eq!(snapshots[1].phase, "OFFLINE", "an added account waits to be told to log in");
+        end_session(&socket).unwrap();
+        let outcomes = session.join().unwrap().unwrap();
+        assert!(outcomes.iter().all(|(_, r)| r.is_ok()), "{outcomes:?}");
+        servers.stop();
+    }
 }
