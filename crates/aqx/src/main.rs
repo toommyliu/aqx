@@ -250,7 +250,6 @@ fn open(wanted: &Wanted, redact: bool) -> Result<(), String> {
             if socket::other_build(&info) && restart_wanted(&info)? {
                 restart_session(&session, &path, &accounts, &command)?
             } else {
-                socket::same_build(&info)?;
                 if accounts.is_empty() && wanted.script.is_some() {
                     return Err("aqx is already running for this config; name the accounts to run the script on".into());
                 }
@@ -265,8 +264,11 @@ fn open(wanted: &Wanted, redact: bool) -> Result<(), String> {
 }
 
 fn restart_wanted(info: &serde_json::Value) -> Result<bool, String> {
+    if socket::same_build(info).is_err() {
+        eprintln!("aqx is already running for this config from an incompatible build. Restarting it with this one; its accounts log out and back in.");
+        return Ok(true);
+    }
     if !std::io::stdin().is_terminal() {
-        socket::same_build(info)?;
         return Err("aqx is already running for this config from a different build; run aqx down and start it again".into());
     }
     prompt::confirm("aqx is already running for this config from a different build. Restart it with this one? Its accounts log out and back in.")
