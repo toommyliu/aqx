@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Newtonsoft.Json.Linq;
+using Skua.Core.Models.Factions;
 using Skua.Core.Models.Items;
 using Skua.Core.Models.Monsters;
 
@@ -23,6 +24,17 @@ public static class Models
             ["bUpg"] = (bool?)item["member"] ?? false,
             ["bTemp"] = temp,
         }.ToObject<T>()!;
+
+    public static Faction Faction(JsonNode faction) =>
+        new JObject
+        {
+            ["FactionID"] = (int)faction["id"]!,
+            ["sName"] = (string?)faction["name"],
+            ["iRank"] = (int)faction["rank"]!,
+            ["iRep"] = (int)faction["rep"]!,
+            ["iSpillRep"] = (int)faction["repInRank"]!,
+            ["iRepToRank"] = (int)faction["repForNextRank"]!,
+        }.ToObject<Faction>()!;
 
     public static List<Monster> Monsters(JsonNode? monsters) =>
         monsters is JsonArray list ? list.Select(m => Monster(m!)).ToList() : [];

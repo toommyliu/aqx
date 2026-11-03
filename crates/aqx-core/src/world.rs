@@ -182,6 +182,18 @@ impl Faction {
     pub fn rank(&self) -> u32 {
         1 + RANK_REP.iter().filter(|&&threshold| self.rep >= threshold).count() as u32
     }
+
+    pub fn rep_in_rank(&self) -> u32 {
+        self.rep - self.rank_floor()
+    }
+
+    pub fn rep_for_next_rank(&self) -> u32 {
+        RANK_REP.get(self.rank() as usize - 1).map_or(0, |next| next - self.rank_floor())
+    }
+
+    fn rank_floor(&self) -> u32 {
+        self.rank().checked_sub(2).and_then(|i| RANK_REP.get(i as usize)).copied().unwrap_or(0)
+    }
 }
 
 #[derive(Clone)]
@@ -1599,6 +1611,15 @@ mod tests {
         );
         assert_eq!(feed(&mut world, &json(r#"{"cmd":"mtls","id":1,"o":{"intHP":540,"intState":1}}"#)), []);
         assert_eq!(world.area.as_ref().unwrap().monsters[0].vitals.state, State::Idle);
+    }
+
+    #[test]
+    fn faction_rank_progress_counts_from_the_start_of_the_rank() {
+        let at = |rep| Faction { id: FactionId(1), name: String::new(), rep };
+        let progress = |f: Faction| (f.rank(), f.rep_in_rank(), f.rep_for_next_rank());
+        assert_eq!(progress(at(0)), (1, 0, 900));
+        assert_eq!(progress(at(1000)), (2, 100, 2700));
+        assert_eq!(progress(at(310000)), (10, 7500, 0));
     }
 
     #[test]

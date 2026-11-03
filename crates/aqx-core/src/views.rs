@@ -37,7 +37,7 @@ pub fn player(world: &World) -> Value {
             "dodge": stat("$tdo"),
         },
         "auras": auras(&me.auras),
-        "factions": world.factions.iter().map(|f| json!({ "id": f.id, "name": f.name, "rep": f.rep, "rank": f.rank() })).collect::<Vec<_>>(),
+        "factions": world.factions.iter().map(|f| json!({ "id": f.id, "name": f.name, "rep": f.rep, "rank": f.rank(), "repInRank": f.rep_in_rank(), "repForNextRank": f.rep_for_next_rank() })).collect::<Vec<_>>(),
     })
 }
 

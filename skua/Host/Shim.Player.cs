@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Skua.Core.Models.Factions;
 using Skua.Core.Models.Items;
 
 namespace Aqx.Skua;
@@ -32,6 +33,7 @@ public sealed partial class Shim
         On("IScriptPlayer.Goto(String)", args => Act("goto", args[0]));
         On("IScriptPlayer.WalkTo(Int32, Int32, Int32)", args => Act("walk", args[0], args[1]));
         On("IScriptPlayer.Rest(Boolean)", _ => Act("rest"));
+        On("IScriptFaction.get_FactionList()", _ => Me["factions"] is JsonArray factions ? factions.Select(f => Models.Faction(f!)).ToList() : []);
     }
 
     bool Playing
