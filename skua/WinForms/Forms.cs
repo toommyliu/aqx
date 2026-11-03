@@ -63,3 +63,15 @@ public static class Application
 {
     public static void Run(Form form) { }
 }
+
+public enum DialogResult { None, OK, Cancel, Abort, Retry, Ignore, Yes, No }
+
+public enum MessageBoxButtons { OK, OKCancel, AbortRetryIgnore, YesNoCancel, YesNo, RetryCancel }
+
+public enum MessageBoxIcon { None, Error, Question, Warning, Information }
+
+public static class MessageBox
+{
+    public static DialogResult Show(string text, string caption = "", MessageBoxButtons buttons = MessageBoxButtons.OK, MessageBoxIcon icon = MessageBoxIcon.None) =>
+        DialogResult.Cancel;
+}
