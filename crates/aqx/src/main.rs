@@ -5,6 +5,7 @@ mod config;
 mod fake;
 mod hub;
 mod init;
+mod mask;
 mod output;
 mod prompt;
 mod socket;
@@ -42,6 +43,8 @@ struct Cli {
     command: Option<Cmd>,
     #[command(flatten)]
     open: Wanted,
+    #[arg(long, help = "Show accounts as account 1, account 2, ... and the home directory as ~, for screenshots")]
+    redact: bool,
 }
 
 #[derive(Subcommand)]
@@ -171,7 +174,7 @@ fn parse_arg(arg: &str) -> Result<(String, String), String> {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        None => open(&cli.open),
+        None => open(&cli.open, cli.redact),
         Some(Cmd::Run(args)) => run(args),
         Some(Cmd::Serve { wanted, json, quiet }) => serve(&wanted, json, quiet),
         Some(Cmd::Down { config }) => down(config.as_deref()),
@@ -233,7 +236,7 @@ fn run(args: RunArgs) -> Result<(), String> {
     results.into_iter().next().map_or(Ok(()), |(_, r)| r)
 }
 
-fn open(wanted: &Wanted) -> Result<(), String> {
+fn open(wanted: &Wanted, redact: bool) -> Result<(), String> {
     if !std::io::stdout().is_terminal() {
         return Err("aqx opens a TUI and needs a terminal; use aqx serve or aqx run".into());
     }
@@ -258,7 +261,7 @@ fn open(wanted: &Wanted) -> Result<(), String> {
             }
         }
     };
-    attach(&session)
+    attach(&session, redact)
 }
 
 fn restart_wanted(info: &serde_json::Value) -> Result<bool, String> {
@@ -472,7 +475,7 @@ fn log_out_all(hub: &Hub) {
     }
 }
 
-fn attach(path: &Path) -> Result<(), String> {
+fn attach(path: &Path, redact: bool) -> Result<(), String> {
     let mut conn = Conn::open(path)?;
     conn.send(&json!({ "op": "subscribe" }))?;
     let hello = conn.recv().ok_or("the aqx process closed the connection")?;
@@ -491,13 +494,15 @@ fn attach(path: &Path) -> Result<(), String> {
         });
     }
     let fleet = tui::Fleet { title: name, cells, socket: path.to_path_buf() };
-    tui::run(&fleet, || gone.load(Ordering::SeqCst))?;
+    tui::run(&fleet, redact, || gone.load(Ordering::SeqCst))?;
+    let all = fleet.cells.all();
     if gone.load(Ordering::SeqCst)
-        && let [only] = &fleet.cells.all()[..]
+        && let [only] = &all[..]
     {
+        let mask = if redact { tui::mask(&all) } else { mask::Mask::default() };
         let board = only.board();
         for line in board.log.iter().skip(board.log.len().saturating_sub(10)) {
-            println!("{}  {:<6}  {}", output::time_of_day(line.t), line.source, line.text);
+            println!("{}  {:<6}  {}", output::time_of_day(line.t), line.source, mask.hide(&line.text));
         }
     }
     Ok(())

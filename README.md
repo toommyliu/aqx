@@ -7,9 +7,10 @@ Skua scripts (`.cs`) run through the shim in `skua/` on the `skua/host` branch, 
 ## CLI
 
 ```
-aqx [ACCOUNT...] [-c FILE] [--script FILE [--arg KEY=VALUE]...]
+aqx [ACCOUNT...] [-c FILE] [--script FILE [--arg KEY=VALUE]...] [--redact]
     Open the TUI. Without accounts, a new session logs in every account.
     --script runs that script instead of each account's own; --arg feeds script.args().
+    --redact shows accounts as account 1, account 2, ... and the home directory as ~.
 
 aqx run [SCRIPT] [--arg KEY=VALUE]... [-a NAME] [-c FILE] [--server NAME]
         [--idle] [--record FILE] [--client-version VERSION] [--json]

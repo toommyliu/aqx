@@ -16,7 +16,8 @@ use unicode_width::UnicodeWidthChar;
 use aqx_script::Arg;
 
 use crate::account::{expand_home, script_path};
-use crate::hub::{Bar, Cells, Command, Game, Log, LogLine, Snapshot};
+use crate::hub::{AccountCell, Bar, Cells, Command, Game, Log, LogLine, Snapshot};
+use crate::mask::Mask;
 use crate::output::{span, time_of_day};
 use crate::socket;
 
@@ -242,6 +243,8 @@ struct App {
     note: Option<(String, Instant)>,
     log: Log,
     log_of: Option<usize>,
+    redact: bool,
+    mask: Mask,
 }
 
 struct Shown {
@@ -249,7 +252,7 @@ struct Shown {
     snapshot: Option<Snapshot>,
 }
 
-pub fn run(fleet: &Fleet, done: impl Fn() -> bool) -> Result<(), String> {
+pub fn run(fleet: &Fleet, redact: bool, done: impl Fn() -> bool) -> Result<(), String> {
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let restore = std::panic::take_hook();
@@ -257,7 +260,7 @@ pub fn run(fleet: &Fleet, done: impl Fn() -> bool) -> Result<(), String> {
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         restore(info);
     }));
-    let mut app = App::default();
+    let mut app = App { redact, ..App::default() };
     let started = Instant::now();
     loop {
         app.frame = (started.elapsed().as_millis() / FRAME.as_millis()) as usize;
@@ -292,9 +295,9 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
     if app.scroll == 0 {
         app.unseen_from = None;
     }
-    let shown: Vec<Shown> = fleet
-        .cells
-        .all()
+    let cells = fleet.cells.all();
+    app.mask = if app.redact { mask(&cells) } else { Mask::default() };
+    let shown: Vec<Shown> = cells
         .iter()
         .enumerate()
         .map(|(i, cell)| {
@@ -303,17 +306,16 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
                 let from = app.log.last().map_or(0, |l| l.seq + 1);
                 let fresh = board.log.iter().rev().take_while(|l| l.seq >= from).count();
                 let fresh = board.log.iter().skip(board.log.len() - fresh);
-                if app.scroll > 0 {
-                    for line in fresh.clone().filter(|l| app.filter.shows(l)) {
-                        app.scroll += pieces(line, app.log_width.get()).1.len();
+                for line in fresh {
+                    let line = LogLine { text: app.mask.hide(&line.text), ..line.clone() };
+                    if app.scroll > 0 && app.filter.shows(&line) {
+                        app.scroll += pieces(&line, app.log_width.get()).1.len();
                         app.unseen_from.get_or_insert(line.seq);
                     }
-                }
-                for line in fresh {
-                    app.log.push(line.clone());
+                    app.log.push(line);
                 }
             }
-            Shown { name: cell.name.clone(), snapshot: board.snapshot.clone() }
+            Shown { name: app.mask.hide(&cell.name), snapshot: board.snapshot.as_ref().and_then(|s| app.mask.hide_in(s)) }
         })
         .collect();
     for typed in shown.iter().filter_map(|s| s.snapshot.as_ref()?.script.clone()) {
@@ -323,6 +325,15 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
         }
     }
     shown
+}
+
+pub fn mask(cells: &[Arc<AccountCell>]) -> Mask {
+    let names = cells.iter().enumerate().flat_map(|(i, cell)| {
+        let user = cell.board().snapshot.as_ref().map(|s| s.user.clone());
+        let alias = format!("account {}", i + 1);
+        [Some(cell.name.clone()), user].into_iter().flatten().map(move |name| (name, alias.clone()))
+    });
+    Mask::new(std::env::var("HOME").ok(), names)
 }
 
 fn snapshot(shown: &[Shown], i: usize) -> Option<&Snapshot> {
@@ -474,7 +485,7 @@ impl App {
     }
 
     fn say(&mut self, text: impl Into<String>) {
-        self.note = Some((text.into(), Instant::now() + NOTE_FOR));
+        self.note = Some((self.mask.hide(&text.into()), Instant::now() + NOTE_FOR));
     }
 
     fn act(&mut self, fleet: &Fleet, command: Command, done: &str) {
@@ -687,7 +698,7 @@ impl App {
             return self.run(fleet, input, &path, each);
         }
         let cells = fleet.cells.all();
-        let accounts = targets.into_iter().filter_map(|i| Some((i, cells.get(i)?.name.clone()))).collect();
+        let accounts = targets.into_iter().filter_map(|i| Some((i, self.mask.hide(&cells.get(i)?.name)))).collect();
         self.ask = Some(Ask { typed: input, script: path, given: args, asked, accounts, answers: Vec::new(), input: String::new() });
     }
 
@@ -2222,6 +2233,18 @@ mod tests {
         publish(&hub, &fleet.cells.all()[0], &farm_world());
         let shown = screen(&fleet, &mut App::default(), 110);
         assert!(shown.contains(" hero · Twilly · farm-1"), "{shown}");
+    }
+
+    #[test]
+    fn redact_shows_each_account_by_number_in_the_header_and_the_log() {
+        let (fleet, hub) = fleet(&["sam"]);
+        let cell = &fleet.cells.all()[0];
+        publish(&hub, cell, &farm_world());
+        hub.record(cell, &Event::ServerText { text: "Hero joined; sam waved".into() });
+        let shown = screen(&fleet, &mut App { redact: true, ..App::default() }, 110);
+        assert!(shown.contains(" account 1 · Twilly · farm-1"), "{shown}");
+        assert!(shown.contains("account 1 joined; account 1 waved"), "{shown}");
+        assert!(!shown.contains("sam") && !shown.to_lowercase().contains("hero"), "{shown}");
     }
 
     #[test]
