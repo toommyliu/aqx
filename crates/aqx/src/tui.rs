@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{self, Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -23,6 +24,7 @@ const STATE_WIDTH: usize = 12;
 const ACCENT: Color = Color::Blue;
 const CARD_WIDTH: u16 = 44;
 const CARD_HEIGHT: u16 = 8;
+const WHEEL_LINES: usize = 3;
 
 type Field = Vec<Span<'static>>;
 
@@ -145,6 +147,12 @@ struct Shown {
 
 pub fn run(fleet: &Fleet, done: impl Fn() -> bool) -> Result<(), String> {
     let mut terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    let restore = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        restore(info);
+    }));
     let mut app = App::default();
     loop {
         let shown = gather(fleet, &mut app);
@@ -160,14 +168,17 @@ pub fn run(fleet: &Fleet, done: impl Fn() -> bool) -> Result<(), String> {
         if !event::poll(Duration::from_millis(250)).unwrap_or(false) {
             continue;
         }
-        let Ok(Input::Key(key)) = event::read() else { continue };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        if app.handle(key, fleet, &shown) {
-            break;
+        match event::read() {
+            Ok(Input::Key(key)) if key.kind == KeyEventKind::Press => {
+                if app.handle(key, fleet, &shown) {
+                    break;
+                }
+            }
+            Ok(Input::Mouse(mouse)) => app.wheel(mouse.kind),
+            _ => {}
         }
     }
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     Ok(())
 }
@@ -222,6 +233,15 @@ impl App {
         if i != self.selected {
             self.selected = i;
             self.scroll = 0;
+        }
+    }
+
+    fn wheel(&mut self, kind: MouseEventKind) {
+        match kind {
+            _ if self.grid => {}
+            MouseEventKind::ScrollUp => self.scroll = (self.scroll + WHEEL_LINES).min(self.max_scroll.get()),
+            MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_sub(WHEEL_LINES),
+            _ => {}
         }
     }
 
@@ -1387,6 +1407,28 @@ mod tests {
         let shown = gather(&two, &mut app);
         app.handle(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT), &two, &shown);
         assert_eq!((app.scroll, app.selected), (1, 0));
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_log_and_never_changes_the_account() {
+        let (two, hub) = fleet(&["main", "healer"]);
+        for i in 0..50 {
+            hub.say(&two.cells[0], "aqx", format!("line {i}"));
+        }
+        let mut app = App::default();
+        let bottom = screen(&two, &mut app, 100);
+        app.wheel(MouseEventKind::ScrollUp);
+        app.wheel(MouseEventKind::ScrollUp);
+        let up = screen(&two, &mut app, 100);
+        assert!(bottom.contains("line 49") && !up.contains("line 49") && up.contains("line 43"), "{up}");
+        assert_eq!(app.selected, 0);
+        app.wheel(MouseEventKind::ScrollDown);
+        app.wheel(MouseEventKind::ScrollDown);
+        assert_eq!(screen(&two, &mut app, 100), bottom);
+        app.grid = true;
+        app.wheel(MouseEventKind::ScrollUp);
+        app.grid = false;
+        assert_eq!(screen(&two, &mut app, 100), bottom, "the wheel does nothing on the dashboard");
     }
 
     #[test]
