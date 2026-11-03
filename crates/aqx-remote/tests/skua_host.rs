@@ -6,7 +6,8 @@ use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use aqx_core::{Event, Outcome, ScriptError, Sink};
+use aqx_core::{Event, Item, Outcome, ScriptError, Sink};
+use aqx_protocol::ItemId;
 use server::{FARM, Fake, Wire};
 
 const HELLO: &str = r#"
@@ -276,4 +277,70 @@ fn a_dropped_connection_stops_core_bots_without_crashing_the_host() {
     let errors = String::from_utf8_lossy(&output.stderr);
     assert!(matches!(result, Err(ScriptError::Halted(_))), "{result:?}");
     assert!(output.status.success(), "{}\n{errors}", output.status);
+}
+
+const BOOST: &str = r#"
+using Skua.Core.Interfaces;
+using Skua.Core.Models.Items;
+
+public class UseBoost
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Bot.Boosts.SetClassBoostID(false);
+        Bot.Boosts.UseClassBoost = true;
+        Bot.Boosts.Start();
+        Bot.Wait.ForTrue(() => Bot.Boosts.IsBoostActive(BoostType.Class), 20);
+        Bot.Log($"class boost {Bot.Boosts.ClassBoostID} active: {Bot.Boosts.IsBoostActive(BoostType.Class)}");
+        Bot.Boosts.Stop();
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn skua_boosts_use_a_boost_item_until_the_boost_is_running() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-boost");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("UseBoost.cs");
+    std::fs::write(&script, BOOST).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%serverUseItem%") && msg.contains("%+%22447%") {
+                wire.object(r#"{"cmd":"cpboost","op":"+","iSecsLeft":1200,"bShowShop":false}"#);
+            }
+        },
+        sink,
+    );
+    fake.session.world.inventory.push(Item {
+        id: ItemId(22447),
+        char_item: None,
+        name: "Daily Login Class Boost  (20 min)".into(),
+        qty: 15,
+        max_stack: 99,
+        kind: "ServerUse".into(),
+        slot: "None".into(),
+        equipped: false,
+        ac: false,
+        member: false,
+        link: String::new(),
+        meta: String::new(),
+        enhancement: None,
+    });
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    if std::env::var_os("AQX_SKUA_LOG").is_some() {
+        eprintln!("{logged:#?}\n{sent:#?}");
+    }
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert_eq!(sent.iter().filter(|m| m.contains("%serverUseItem%")).count(), 1, "{sent:#?}");
+    assert!(logged.iter().any(|l| l.contains("class boost 22447 active: True")), "{logged:#?}");
 }

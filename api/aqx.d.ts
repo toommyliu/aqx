@@ -261,6 +261,8 @@ declare module "aqx" {
     readonly class: string;
     /** Rank of the equipped class, 1-10, from its class points. */
     readonly classRank: number;
+    /** Seconds each boost has left, 0 when it isn't running. */
+    readonly boosts: { readonly class: number; readonly experience: number; readonly gold: number; readonly reputation: number };
     readonly stats: Stats;
     readonly auras: readonly Aura[];
     readonly factions: readonly Faction[];

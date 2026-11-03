@@ -1,6 +1,6 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::{Aura, Event, Item, Monster, Place, Player, Quest, QuestStatus, RewardKind, Server, Shop, SkillTarget, State, World};
+use crate::{Aura, Boost, Event, Item, Monster, Place, Player, Quest, QuestStatus, RewardKind, Server, Shop, SkillTarget, State, World};
 use aqx_protocol::Message;
 use serde_json::{Value, json};
 
@@ -25,6 +25,12 @@ pub fn player(world: &World) -> Value {
         "member": me.member,
         "class": me.class,
         "classRank": me.class_rank(),
+        "boosts": {
+            "class": me.boost_left(Boost::Class, Instant::now()).as_secs(),
+            "experience": me.boost_left(Boost::Experience, Instant::now()).as_secs(),
+            "gold": me.boost_left(Boost::Gold, Instant::now()).as_secs(),
+            "reputation": me.boost_left(Boost::Reputation, Instant::now()).as_secs(),
+        },
         "stats": {
             "str": stat("$STR"),
             "int": stat("$INT"),

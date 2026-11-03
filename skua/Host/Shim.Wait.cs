@@ -7,10 +7,12 @@ namespace Aqx.Skua;
 public sealed partial class Shim
 {
     ScriptWait? wait;
+    ScriptBoost? boosts;
 
     void Wait()
     {
         On("IScriptInterface.get_Wait()", _ => wait ??= MakeWait());
+        On("IScriptInterface.get_Boosts()", _ => boosts ??= MakeBoosts());
         On("IScriptStatus.get_ShouldExit()", _ => ShouldExit);
         On("IScriptManager.get_ShouldExit()", _ => ShouldExit);
         On("IScriptManager.get_LoadedScript()", _ => Script);
@@ -20,6 +22,19 @@ public sealed partial class Shim
     string CompiledScript() =>
         string.Join(Environment.NewLine, File.ReadAllLines(Script).Where(line =>
             !(line.TrimStart().StartsWith("//cs_") && line.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).Length == 2))).Trim();
+
+    static ScriptBoost MakeBoosts()
+    {
+        IScriptInterface bot = IScriptInterface.Instance;
+        return new ScriptBoost(
+            new(() => bot.Flash),
+            new(() => bot.Send),
+            new(() => bot.Map),
+            new(() => bot.Inventory),
+            new(() => bot.Bank),
+            new(() => bot.Player),
+            new(() => bot.Wait));
+    }
 
     static ScriptWait MakeWait()
     {
