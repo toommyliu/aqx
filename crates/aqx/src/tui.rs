@@ -114,13 +114,14 @@ impl Filter {
 
 struct Prompt {
     input: String,
+    draft: String,
     pick: Option<usize>,
     matches: Vec<String>,
 }
 
 impl Prompt {
     fn new() -> Self {
-        let mut prompt = Prompt { input: String::new(), pick: None, matches: Vec::new() };
+        let mut prompt = Prompt { input: String::new(), draft: String::new(), pick: None, matches: Vec::new() };
         prompt.find_matches();
         prompt
     }
@@ -128,6 +129,30 @@ impl Prompt {
     fn find_matches(&mut self) {
         self.matches = scripts_matching(&self.input);
     }
+
+    fn recall(&mut self, recent: &[Recent], older: bool) {
+        let pick = match (self.pick, older) {
+            (None, false) => return,
+            (None, true) => {
+                self.draft = std::mem::take(&mut self.input);
+                0
+            }
+            (Some(i), true) => (i + 1).min(recent.len() - 1),
+            (Some(0), false) => {
+                self.pick = None;
+                self.input = std::mem::take(&mut self.draft);
+                return;
+            }
+            (Some(i), false) => i - 1,
+        };
+        self.pick = Some(pick);
+        self.input.clone_from(&recent[recent.len() - 1 - pick].typed);
+    }
+}
+
+struct Recent {
+    typed: String,
+    script: PathBuf,
 }
 
 struct Ask {
@@ -199,7 +224,7 @@ struct App {
     ask: Option<Ask>,
     share_args: bool,
     ending: bool,
-    recent: Vec<String>,
+    recent: Vec<Recent>,
     note: Option<(String, Instant)>,
     log: Vec<LogLine>,
     log_of: Option<usize>,
@@ -223,11 +248,6 @@ pub fn run(fleet: &Fleet, done: impl Fn() -> bool) -> Result<(), String> {
     loop {
         app.frame = (started.elapsed().as_millis() / FRAME.as_millis()) as usize;
         let shown = gather(fleet, &mut app);
-        for script in shown.iter().filter_map(|s| s.snapshot.as_ref()?.script.clone()) {
-            if !app.recent.contains(&script) {
-                app.recent.push(script);
-            }
-        }
         let _ = terminal.draw(|f| draw(f, fleet, &app, &shown));
         if done() {
             break;
@@ -255,7 +275,7 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
         app.log.clear();
         app.log_of = Some(app.selected);
     }
-    fleet
+    let shown: Vec<Shown> = fleet
         .cells
         .all()
         .iter()
@@ -271,7 +291,14 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
             }
             Shown { name: cell.name.clone(), snapshot: board.snapshot.clone() }
         })
-        .collect()
+        .collect();
+    for typed in shown.iter().filter_map(|s| s.snapshot.as_ref()?.script.clone()) {
+        let script = PathBuf::from(&typed);
+        if !app.recent.iter().any(|r| r.script == script) {
+            app.recent.insert(0, Recent { typed, script });
+        }
+    }
+    shown
 }
 
 fn snapshot(shown: &[Shown], i: usize) -> Option<&Snapshot> {
@@ -463,25 +490,23 @@ impl App {
                     let prompt = self.prompt.take().expect("a prompt is open");
                     self.submit(prompt, fleet);
                 }
+                KeyCode::Up | KeyCode::Down if !self.recent.is_empty() => prompt.recall(&self.recent, key.code == KeyCode::Up),
                 KeyCode::Backspace => {
+                    prompt.pick = None;
                     prompt.input.pop();
                 }
-                KeyCode::Up | KeyCode::Down if !self.recent.is_empty() => {
-                    let n = self.recent.len();
-                    let at = match (prompt.pick, key.code) {
-                        (None, _) => 0,
-                        (Some(i), KeyCode::Up) => (i + 1) % n,
-                        (Some(i), _) => (i + n - 1) % n,
-                    };
-                    prompt.pick = Some(at);
-                    prompt.input.clone_from(&self.recent[n - 1 - at]);
+                KeyCode::Tab => {
+                    prompt.pick = None;
+                    match prompt.matches.as_slice() {
+                        [] => {}
+                        [only] if !only.ends_with('/') => prompt.input = format!("{only} "),
+                        many => prompt.input = shared_prefix(many).to_string(),
+                    }
                 }
-                KeyCode::Tab => match prompt.matches.as_slice() {
-                    [] => {}
-                    [only] if !only.ends_with('/') => prompt.input = format!("{only} "),
-                    many => prompt.input = shared_prefix(many).to_string(),
-                },
-                KeyCode::Char(c) => prompt.input.push(c),
+                KeyCode::Char(c) => {
+                    prompt.pick = None;
+                    prompt.input.push(c);
+                }
                 _ => {}
             }
             if let Some(prompt) = &mut self.prompt {
@@ -596,8 +621,8 @@ impl App {
     }
 
     fn run(&mut self, fleet: &Fleet, typed: String, script: &Path, each: Vec<(usize, Vec<(String, String)>)>) {
-        self.recent.retain(|r| *r != typed);
-        self.recent.push(typed);
+        self.recent.retain(|r| r.typed != typed);
+        self.recent.push(Recent { typed, script: script.to_path_buf() });
         let commands = each.into_iter().map(|(i, args)| (i, Command::Run { script: script.to_path_buf(), args })).collect();
         self.act_on(fleet, commands, &format!("running {}", script.display()));
     }
@@ -1786,6 +1811,44 @@ mod tests {
     }
 
     #[test]
+    fn arrows_in_the_run_prompt_walk_back_through_what_was_typed() {
+        let dir = std::env::temp_dir().join(format!("aqx-tui-recent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (fleet, _hub) = fleet(&["main"]);
+        show(&fleet.cells.all()[0], Snapshot { script: Some("/srv/farm.ts".into()), ..Snapshot::default() });
+        let mut app = App::default();
+        let typed = |app: &mut App, text: &str| text.chars().for_each(|c| press(&fleet, app, KeyCode::Char(c)));
+        let [a, b] = ["a.ts", "b.ts"].map(|name| {
+            std::fs::write(dir.join(name), "").unwrap();
+            format!("{} rounds=3", dir.join(name).display())
+        });
+        for command in [&a, &b] {
+            press(&fleet, &mut app, KeyCode::Char('o'));
+            typed(&mut app, command);
+            press(&fleet, &mut app, KeyCode::Enter);
+        }
+        press(&fleet, &mut app, KeyCode::Char('o'));
+        typed(&mut app, "dra");
+        let walk = |app: &mut App, codes: &[KeyCode]| {
+            codes
+                .iter()
+                .map(|&code| {
+                    press(&fleet, app, code);
+                    app.prompt.as_ref().unwrap().input.clone()
+                })
+                .collect::<Vec<_>>()
+        };
+        let (up, down) = (KeyCode::Up, KeyCode::Down);
+        let (a, b, farm) = (a.as_str(), b.as_str(), "/srv/farm.ts");
+        assert_eq!(walk(&mut app, &[up, up, up, up]), [b, a, farm, farm], "the running script sits behind what was typed");
+        assert_eq!(walk(&mut app, &[down, down, down, down]), [a, b, "dra", "dra"], "down past the newest gives back the draft");
+        walk(&mut app, &[up]);
+        typed(&mut app, "!");
+        assert_eq!(walk(&mut app, &[up, down]), [b.to_string(), format!("{b}!")], "an edited line becomes the draft");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn running_a_script_asks_each_account_for_the_args_it_was_not_given() {
         let dir = std::env::temp_dir().join(format!("aqx-tui-ask-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1843,7 +1906,7 @@ mod tests {
             press(&fleet, &mut app, KeyCode::Enter);
         }
         assert_eq!((ran(&cells[0]), ran(&cells[1])), ("rounds=3 target=Bob Smith wait=8".into(), "rounds=3 target=Ann class=Mage".into()));
-        assert_eq!(app.recent.last(), Some(&command), "per-account answers stay out of the history");
+        assert_eq!(app.recent.last().map(|r| &r.typed), Some(&command), "per-account answers stay out of the history");
 
         run(&mut app);
         press(&fleet, &mut app, KeyCode::Tab);
@@ -1854,7 +1917,7 @@ mod tests {
             press(&fleet, &mut app, KeyCode::Enter);
         }
         assert_eq!((ran(&cells[0]), ran(&cells[1])), ("rounds=3 target=Bob".into(), "rounds=3 target=Bob".into()));
-        assert_eq!(app.recent.last(), Some(&format!("{command} target=Bob")));
+        assert_eq!(app.recent.last().map(|r| &r.typed), Some(&format!("{command} target=Bob")));
         run(&mut app);
         assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target: █"), "the choice sticks");
         std::fs::remove_dir_all(&dir).unwrap();
