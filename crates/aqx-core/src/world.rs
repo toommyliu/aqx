@@ -15,6 +15,7 @@ const HASTE_CAP: f64 = 0.5;
 const RANK_POINTS: [u32; 9] = [900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500];
 const GOLD_CAP: i64 = 100_000_000;
 const DEFAULT_MISC_SLOTS: i64 = 100;
+const EMAIL_VERIFIED: i64 = 5;
 const COUNTER_AURA: &str = "Counter Attack";
 const COUNTER_WARNING: &str = "prepares a counter attack";
 const COUNTER_WINDOW: Duration = Duration::from_secs(10);
@@ -75,6 +76,8 @@ pub struct Me {
     pub skills: Vec<Skill>,
     pub stats: BTreeMap<String, f64>,
     pub member: bool,
+    pub aq_linked: bool,
+    pub email_verified: bool,
     pub coins: i64,
     pub bag_slots: u32,
     pub bank_slots: u32,
@@ -208,7 +211,10 @@ pub struct Item {
     pub member: bool,
     pub house: bool,
     pub link: String,
+    pub file: String,
+    pub icon: String,
     pub meta: String,
+    pub level: u32,
     pub enhancement: Option<Enhancement>,
 }
 
@@ -402,8 +408,14 @@ struct ItemData {
     bank: bool,
     #[serde(rename = "sLink", default, deserialize_with = "text")]
     link: String,
+    #[serde(rename = "sFile", default, deserialize_with = "text")]
+    file: String,
+    #[serde(rename = "sIcon", default, deserialize_with = "text")]
+    icon: String,
     #[serde(rename = "sMeta", default, deserialize_with = "text")]
     meta: String,
+    #[serde(rename = "iLvl", default, deserialize_with = "int")]
+    level: i64,
     #[serde(rename = "EnhID", default, deserialize_with = "int")]
     enhancement: i64,
     #[serde(rename = "EnhLvl", default, deserialize_with = "int")]
@@ -430,7 +442,10 @@ impl ItemData {
             member: self.member,
             house: self.house,
             link: self.link,
+            file: self.file,
+            icon: self.icon,
             meta: self.meta,
+            level: qty(self.level),
             enhancement: (self.enhancement > 0).then(|| Enhancement { id: qty(self.enhancement), level: qty(self.enhancement_level) }),
         }
     }
@@ -1328,6 +1343,8 @@ impl World {
                     ("intCoins", Some(n)) => me.coins = n,
                     ("iBagSlots", Some(n)) => me.bag_slots = qty(n),
                     ("iBankSlots", Some(n)) => me.bank_slots = qty(n),
+                    ("intAQ", Some(n)) => me.aq_linked = n > 0,
+                    ("intActivationFlag", Some(n)) => me.email_verified = n == EMAIL_VERIFIED,
                     (key, Some(secs)) => {
                         if let Some(boost) = Boost::ALL.into_iter().find(|b| b.user_data_key() == key) {
                             me.set_boost(boost, secs, now);
@@ -1560,6 +1577,8 @@ impl Me {
             skills: Vec::new(),
             stats: BTreeMap::new(),
             member: false,
+            aq_linked: false,
+            email_verified: false,
             coins: 0,
             bag_slots: 0,
             bank_slots: 0,
@@ -2078,6 +2097,32 @@ mod tests {
         feed(&mut world, &json(r#"{"cmd":"seia","o":{"id":457,"cd":60000,"tgt":"f"},"iRes":1}"#));
         assert_eq!(world.me.as_ref().unwrap().item_skill, Some(457));
         assert_eq!(world.inventory.iter().map(|i| i.equipped).collect::<Vec<_>>(), [true, false]);
+    }
+
+    #[test]
+    fn user_data_and_inventory_keep_the_fields_scripts_read() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"initUserData","uid":1001,"data":{"CharID":42,"intAQ":"1","intActivationFlag":"5"}}"#));
+        let me = world.me.as_ref().unwrap();
+        assert_eq!((me.char_id, me.aq_linked, me.email_verified), (Some(42), true, true));
+
+        feed(
+            &mut world,
+            &json(
+                r#"{"cmd":"loadInventoryBig","factions":[],"items":[{"ItemID":514,"CharItemID":7,"sName":"Scythe","iQty":1,"iStk":1,"sType":"Polearm",
+                "sES":"Weapon","sFile":"items/polearms/polearm09.swf","sLink":"","sIcon":"iwpolearm","iLvl":"30"}]}"#,
+            ),
+        );
+        let scythe = &world.inventory[0];
+        assert_eq!((scythe.slot.as_str(), scythe.file.as_str(), scythe.icon.as_str(), scythe.level), ("Weapon", "items/polearms/polearm09.swf", "iwpolearm", 30));
+    }
+
+    #[test]
+    fn going_away_and_coming_back_are_events() {
+        let mut world = joined();
+        assert_eq!(feed(&mut world, "%xt%uotls%-1%hero%afk:true%"), [Event::Afk { afk: true }]);
+        assert_eq!(feed(&mut world, "%xt%uotls%-1%hero%afk:true%"), []);
+        assert_eq!(feed(&mut world, "%xt%uotls%-1%hero%afk:false%"), [Event::Afk { afk: false }]);
     }
 
     fn item(id: u32, name: &str, ac: bool) -> Value {

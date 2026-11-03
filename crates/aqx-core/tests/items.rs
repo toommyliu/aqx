@@ -37,7 +37,10 @@ fn makai_stack() -> Item {
         member: false,
         house: false,
         link: String::new(),
+        file: String::new(),
+        icon: String::new(),
         meta: String::new(),
+        level: 0,
         enhancement: None,
     }
 }

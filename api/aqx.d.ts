@@ -98,6 +98,13 @@ declare module "aqx" {
     readonly maxStack: number;
     /** Server `sType`, e.g. "Class", "Sword", "Item", "Quest Item". */
     readonly type: string;
+    /** Server `sES`, the equipment slot, e.g. "Weapon", "ar", "he", "None". */
+    readonly slot: string;
+    readonly level: number;
+    readonly link: string;
+    readonly file: string;
+    readonly icon: string;
+    readonly meta: string;
     readonly equipped: boolean;
     readonly ac: boolean;
     readonly member: boolean;
@@ -220,6 +227,8 @@ declare module "aqx" {
     };
     /** A monster started telegraphing a counter attack, or its "Counter Attack" aura ended. */
     counter: { readonly monster: number; readonly active: boolean };
+    /** The server marked the player away, or back. */
+    afk: { readonly afk: boolean };
   }
 
   export interface Packet {
@@ -243,6 +252,8 @@ declare module "aqx" {
   export const player: {
     /** The entity id that raw packets use for the player, as in `p:{id}`. */
     readonly id: number;
+    /** The character id, as account.aq.com takes it. `null` until login sends it. */
+    readonly charId: number | null;
     readonly name: string;
     readonly level: number;
     readonly hp: number;
@@ -263,6 +274,9 @@ declare module "aqx" {
     /** Adventure Coins. */
     readonly coins: number;
     readonly member: boolean;
+    /** The account has an AdventureQuest character linked. */
+    readonly aqLinked: boolean;
+    readonly emailVerified: boolean;
     /** Name of the equipped class, `""` before the server sends it. */
     readonly class: string;
     readonly stats: Stats;

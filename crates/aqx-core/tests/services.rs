@@ -120,7 +120,10 @@ fn potion() -> Item {
         member: false,
         house: false,
         link: "potion".into(),
+        file: String::new(),
+        icon: String::new(),
         meta: "457".into(),
+        level: 0,
         enhancement: None,
     }
 }
