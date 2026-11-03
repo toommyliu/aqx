@@ -224,3 +224,35 @@ fn skills_use_waits_for_mana() {
     assert_eq!(all.iter().filter(|m| m.contains("%gar%")).count(), 1);
     assert!(all.iter().position(|m| m.contains("%gar%")).unwrap() > mana, "cast before the mana came back");
 }
+
+#[test]
+fn skills_the_class_rank_has_not_unlocked_are_never_cast() {
+    let mut casts = 0;
+    let mut fake = Fake::start(FARM, move |msg, wire| {
+        if msg.contains("%moveToCell%5%r2%") {
+            wire.object(
+                r#"{"cmd":"sAct","actions":{"active":[
+                {"ref":"aa","nam":"Auto Attack","cd":2000,"mp":0,"tgt":"h","tgtMax":1,"isOK":true},
+                {"ref":"a1","nam":"Viper's Kiss","cd":3000,"mp":0,"tgt":"h","tgtMax":1,"isOK":true},
+                {"ref":"a2","nam":"Footwork","cd":3000,"mp":0,"tgt":"h","tgtMax":1,"isOK":false}]}}"#,
+            );
+        } else if msg.contains("%gar%") {
+            casts += 1;
+            if casts >= 4 {
+                wire.object(r#"{"cmd":"ct","m":{"2":{"intHP":0,"intState":0}}}"#);
+            } else {
+                wire.object(r#"{"cmd":"ct","m":{"2":{"intHP":500,"intState":2}},"p":{"hero":{"intState":2}}}"#);
+            }
+        }
+    });
+    fake.session.jump("r2", "Left").unwrap();
+    pump_for(&mut fake, Duration::from_millis(200));
+
+    let used = fake.session.use_skill(2, None);
+    assert!(matches!(&used, Err(ActError::Rejected(why)) if why.contains("Footwork is locked")), "{used:?}");
+    let treeant = |_: &World, m: &Monster| m.name == "Treeant";
+    fake.session.kill(&treeant, &mut Fight::default(), None, Some(Duration::from_secs(10))).unwrap();
+    let sent = sent(fake);
+    assert!(sent.iter().any(|(_, m)| m.contains("%a1>")), "{:?}", messages(&sent));
+    assert!(!sent.iter().any(|(_, m)| m.contains("%a2>")), "{:?}", messages(&sent));
+}

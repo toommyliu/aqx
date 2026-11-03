@@ -199,6 +199,7 @@ pub struct Skill {
     pub mana: i32,
     pub target: SkillTarget,
     pub max_targets: u32,
+    pub locked: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,6 +392,10 @@ struct Anim {
     caster: String,
     #[serde(default, deserialize_with = "text")]
     msg: String,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn skill_target(tgt: &str) -> SkillTarget {
@@ -944,9 +949,6 @@ impl World {
                     #[serde(default, deserialize_with = "text")]
                     msg: String,
                 }
-                fn yes() -> bool {
-                    true
-                }
                 let moved: Moved = json.decode()?;
                 let withdrawing = json.cmd == "bankToInv";
                 if !moved.ok {
@@ -976,9 +978,6 @@ impl World {
                     o: Skill5,
                     #[serde(rename = "iRes", default = "yes", deserialize_with = "flag")]
                     ok: bool,
-                }
-                fn yes() -> bool {
-                    true
                 }
                 #[derive(Deserialize)]
                 struct Skill5 {
@@ -1074,6 +1073,8 @@ impl World {
                     tgt: String,
                     #[serde(rename = "tgtMax", default, deserialize_with = "int")]
                     max_targets: i64,
+                    #[serde(rename = "isOK", default = "yes", deserialize_with = "flag")]
+                    ok: bool,
                 }
                 let skills = json.decode::<Actions>()?.actions.active;
                 if let Some(me) = &mut self.me {
@@ -1086,6 +1087,7 @@ impl World {
                             mana: s.mp as i32,
                             target: skill_target(&s.tgt),
                             max_targets: qty(s.max_targets).max(1),
+                            locked: !s.ok,
                         })
                         .collect();
                 }
