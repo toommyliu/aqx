@@ -75,6 +75,6 @@ public static class Models
             ["strFrame"] = (string?)monster["cell"],
             ["intHP"] = (int)monster["hp"]!,
             ["intHPMax"] = (int)monster["maxHp"]!,
-            ["intState"] = (bool)monster["alive"]! ? 1 : 0,
+            ["intState"] = (string?)monster["state"] switch { "combat" => 2, "idle" => 1, _ => 0 },
         };
 }

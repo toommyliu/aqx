@@ -539,3 +539,46 @@ fn logging_out_without_auto_relogin_stops_the_script() {
     assert!(matches!(result, Ok(Outcome::Stopped(_))), "{result:?}\n{logged:#?}");
     assert!(!logged.iter().any(|l| l.contains("still running")), "{logged:#?}");
 }
+
+const TARGET_STATE: &str = r#"
+using Skua.Core.Interfaces;
+
+public class TargetState
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Map.Jump("r2", "Left");
+        bot.Combat.Attack("Treeant");
+        for (int i = 0; i < 50 && bot.Player.Target?.State != 2; i++)
+            bot.Sleep(20);
+        bot.Log($"target {bot.Player.Target?.Name} in state {bot.Player.Target?.State}");
+        bot.Combat.CancelTarget();
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn a_monster_in_combat_reads_as_state_2() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-target-state");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("TargetState.cs");
+    std::fs::write(&script, TARGET_STATE).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%gar%") {
+                wire.object(r#"{"cmd":"ct","m":{"2":{"intHP":800,"intState":2}}}"#);
+            }
+        },
+        sink,
+    );
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: target Treeant in state 2".to_string()), "{logged:#?}");
+}
