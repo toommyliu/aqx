@@ -206,3 +206,27 @@ fn aggro_pulls_the_monsters_in_the_cell_until_it_is_turned_off() {
     let pulls: Vec<&String> = sent.iter().filter(|m| m.contains("%aggroMon%")).collect();
     assert!(pulls.iter().any(|m| *m == "%xt%zm%aggroMon%5%2%"), "{sent:#?}");
 }
+
+#[test]
+fn listening_to_every_packet_forwards_each_one_until_it_is_turned_off() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%moveToCell%") {
+            wire.send("%xt%uotls%-1%hero%afk:false%");
+            wire.send("%xt%marker%-1%");
+        }
+    });
+    let result = remote(&mut fake, |host| {
+        host.call(1, "listen_all", json!([true]));
+        host.call(2, "jump", json!(["r2", "Left"]));
+        let packet = host.wait(|m| m["event"] == "packet" && m["data"]["cmd"] == "uotls");
+        assert_eq!(packet["data"]["raw"], "%xt%uotls%-1%hero%afk:false%");
+        host.call(3, "listen_all", json!([false]));
+        host.call(4, "listen", json!(["marker", true]));
+        host.unread.clear();
+        host.call(5, "jump", json!(["r1", "Left"]));
+        host.wait(|m| m["event"] == "packet" && m["data"]["cmd"] == "marker");
+        assert!(!host.unread.iter().any(|m| m["data"]["cmd"] == "uotls"), "{:?}", host.unread);
+        host.finish();
+    });
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}");
+}

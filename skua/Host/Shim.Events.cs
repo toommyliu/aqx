@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Reflection;
 using System.Text.Json.Nodes;
+using Newtonsoft.Json.Linq;
 using Skua.Core.Interfaces;
 using Skua.Core.Models.Items;
 
@@ -10,19 +11,51 @@ public sealed partial class Shim
 {
     static readonly TimeSpan StoppingTimeout = TimeSpan.FromSeconds(2);
 
+    const string PacketEvent = nameof(IScriptEvent.ExtensionPacketReceived);
+
     readonly ConcurrentDictionary<string, Delegate?> events = new();
     volatile bool runStopping = true;
+    bool listeningToPackets;
 
     void Events()
     {
         foreach (EventInfo e in typeof(IScriptEvent).GetEvents())
         {
             string name = e.Name;
-            On(Key(typeof(IScriptEvent), e.AddMethod!), args => events.AddOrUpdate(name, (Delegate)args[0]!, (_, d) => Delegate.Combine(d, (Delegate)args[0]!)));
-            On(Key(typeof(IScriptEvent), e.RemoveMethod!), args => events.AddOrUpdate(name, _ => null, (_, d) => Delegate.Remove(d, (Delegate)args[0]!)));
+            On(Key(typeof(IScriptEvent), e.AddMethod!), args => Subscribe(name, d => Delegate.Combine(d, (Delegate)args[0]!)));
+            On(Key(typeof(IScriptEvent), e.RemoveMethod!), args => Subscribe(name, d => Delegate.Remove(d, (Delegate)args[0]!)));
         }
         Aqx.Event += Forward;
     }
+
+    object? Subscribe(string name, Func<Delegate?, Delegate?> change)
+    {
+        lock (events)
+        {
+            Delegate? handlers = events[name] = change(events.GetValueOrDefault(name));
+            if (name == PacketEvent && (handlers is not null) != listeningToPackets)
+            {
+                listeningToPackets = handlers is not null;
+                try
+                {
+                    Aqx.Call("listen_all", listeningToPackets);
+                }
+                catch (AqxException e) when (e.Code == "cancelled")
+                {
+                }
+            }
+        }
+        return null;
+    }
+
+    static JObject? ExtensionPacket(string raw) => raw switch
+    {
+        ['{', ..] => ExtensionPacket("json", JObject.Parse(raw).SelectToken("b.o")),
+        ['%', _, ..] => ExtensionPacket("str", new JArray(raw[1..^1].Split('%').Skip(1).ToArray())),
+        _ => null,
+    };
+
+    static JObject ExtensionPacket(string type, JToken? data) => new() { ["params"] = new JObject { ["type"] = type, ["dataObj"] = data } };
 
     void Forward(string name, JsonNode? data)
     {
@@ -45,6 +78,9 @@ public sealed partial class Shim
                 break;
             case "drop" when data is not null:
                 Raise("ItemDropped", Models.Item<ItemBase>(data), false, Int(data["qty"]));
+                break;
+            case "packet" when ExtensionPacket((string?)data?["raw"] ?? "") is { } packet:
+                Raise(PacketEvent, packet);
                 break;
             case "counter":
                 bool active = (bool?)data?["active"] ?? false;

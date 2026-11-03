@@ -281,6 +281,11 @@ fn op(name: &str) -> Option<Op> {
             s.listen(&cmd, on);
             done()
         }),
+        "listen_all" => I(|s, a| {
+            let (on,): (bool,) = args(a)?;
+            s.listen_all(on);
+            done()
+        }),
         "status" => I(|s, a| {
             let (text,): (String,) = args(a)?;
             emit(s, Event::Status { text })
