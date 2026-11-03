@@ -17,7 +17,7 @@ use aqx_script::Arg;
 
 use crate::account::{expand_home, script_path};
 use crate::hub::{Bar, Cells, Command, Game, Log, LogLine, Snapshot};
-use crate::output::{clock, span};
+use crate::output::{span, time_of_day};
 use crate::socket;
 
 const WIDE: u16 = 90;
@@ -1333,7 +1333,7 @@ fn log_lines(app: &App, height: usize, width: usize) -> Vec<Line<'static>> {
 }
 
 fn pieces(l: &LogLine, width: usize, tagged: bool) -> (Vec<Span<'static>>, Vec<&str>) {
-    let mut head = vec![Span::raw(clock(l.t)).dark_gray(), Span::raw("  ")];
+    let mut head = vec![Span::raw(time_of_day(l.t)).dark_gray(), Span::raw("  ")];
     if tagged {
         let color = match l.source.as_str() {
             "server" => Color::Yellow,
@@ -1883,9 +1883,10 @@ mod tests {
         println!("{shown}");
         let rows: Vec<&str> = shown.lines().filter(|l| l.contains("word") || l.contains("at main")).collect();
         assert!(rows[0].contains("script  error: word"), "{shown}");
-        let indent = " ".repeat(1 + clock(0).len() + 10);
+        let indent = " ".repeat(1 + time_of_day(0).len() + 10);
         assert!(rows.len() >= 3 && rows[1..].iter().all(|r| r.starts_with(&indent)), "{shown}");
-        assert!(shown.contains("the end") && shown.contains("    at main (farm.ts:2:5)"), "{shown}");
+        let words = shown.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("the end") && shown.contains("    at main (farm.ts:2:5)"), "{shown}");
     }
 
     #[test]
@@ -1894,7 +1895,7 @@ mod tests {
         let line = LogLine { seq: 0, t: ten_hours, source: "script".into(), text: format!("error: {}the end", "word ".repeat(30)) };
         let rows: Vec<Line> = log_rows(&line, 60, true);
         let text: Vec<String> = rows.iter().map(Line::to_string).collect();
-        assert!(text[0].starts_with("10:00:00.000  script  error: word"), "{text:#?}");
+        assert!(text[0].starts_with(&format!("{}  script  error: word", time_of_day(ten_hours))), "{text:#?}");
         assert!(text[1..].iter().all(|r| r.starts_with(&" ".repeat(22)) && !r.starts_with(&" ".repeat(23))), "{text:#?}");
         assert!(rows.iter().all(|r| r.width() <= 60), "{text:#?}");
         assert_eq!(text.join(" ").matches("word").count(), 30);

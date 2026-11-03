@@ -1,16 +1,18 @@
-use std::sync::OnceLock;
-use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aqx_core::{Event, Place};
 
-static START: OnceLock<Instant> = OnceLock::new();
-
-pub fn start() {
-    START.get_or_init(Instant::now);
+pub fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
-pub fn now() -> u64 {
-    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+pub fn time_of_day(ms: u64) -> String {
+    let secs = (ms / 1000) as libc::time_t;
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut local) }.is_null() {
+        return clock(ms % 86_400_000);
+    }
+    format!("{:02}:{:02}:{:02}.{:03}", local.tm_hour, local.tm_min, local.tm_sec, ms % 1000)
 }
 
 pub fn describe(event: &Event) -> Option<(&'static str, String)> {

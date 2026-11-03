@@ -169,7 +169,6 @@ fn parse_arg(arg: &str) -> Result<(String, String), String> {
 }
 
 fn main() -> ExitCode {
-    output::start();
     let cli = Cli::parse();
     let result = match cli.command {
         None => open(&cli.open),
@@ -499,7 +498,7 @@ fn attach(path: &Path) -> Result<(), String> {
     {
         let board = only.board();
         for line in board.log.iter().skip(board.log.len().saturating_sub(10)) {
-            println!("{}  {:<6}  {}", output::clock(line.t), line.source, line.text);
+            println!("{}  {:<6}  {}", output::time_of_day(line.t), line.source, line.text);
         }
     }
     Ok(())
@@ -570,7 +569,7 @@ fn logs(account: Option<&str>, follow: bool, all: bool) -> Result<(), String> {
                 let line = &message["line"];
                 println!(
                     "{}  {:<10}  {:<6}  {}",
-                    output::clock(line["t"].as_u64().unwrap_or(0)),
+                    output::time_of_day(line["t"].as_u64().unwrap_or(0)),
                     message["account"].as_str().unwrap_or_default(),
                     line["source"].as_str().unwrap_or_default(),
                     line["text"].as_str().unwrap_or_default()
