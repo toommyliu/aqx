@@ -1,11 +1,12 @@
-use std::collections::VecDeque;
+use std::cmp::Reverse;
+use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
-use aqx_core::{Event, Phase, State, StopHandle, World};
+use aqx_core::{Event, Item, Phase, Pool, State, StopHandle, World};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -167,7 +168,16 @@ pub struct Game {
     pub auras: Vec<Aura>,
     pub target: Option<Target>,
     pub cell_players: Vec<Player>,
-    pub drops: Vec<Offer>,
+    pub drops: Vec<Stack>,
+    pub temp: Vec<Stack>,
+    pub inventory: Vec<Stack>,
+    pub bag_used: u32,
+    pub bag_slots: u32,
+    pub misc_used: u32,
+    pub misc_slots: u32,
+    pub bank: Option<Vec<Stack>>,
+    pub bank_used: u32,
+    pub bank_slots: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -190,9 +200,17 @@ pub struct Player {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Offer {
+pub struct Stack {
     pub name: String,
     pub qty: u32,
+    pub max: u32,
+    pub equipped: bool,
+}
+
+impl Stack {
+    fn of(item: &Item) -> Self {
+        Stack { name: item.name.clone(), qty: item.qty, max: item.max_stack, equipped: item.equipped }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -239,6 +257,7 @@ pub struct Board {
     deaths: u64,
     gold_from: Option<i64>,
     gold_now: i64,
+    touched: HashMap<String, Instant>,
 }
 
 impl Default for Board {
@@ -264,6 +283,7 @@ impl Default for Board {
             deaths: 0,
             gold_from: None,
             gold_now: 0,
+            touched: HashMap::new(),
         }
     }
 }
@@ -296,9 +316,16 @@ impl Board {
                 self.kills += 1;
                 self.progressed(now);
             }
-            Event::DropOffered { .. } => self.drops += 1,
+            Event::DropOffered { item, .. } => {
+                self.drops += 1;
+                self.touched.insert(item.clone(), now);
+            }
             Event::Died => self.deaths += 1,
-            Event::ItemChanged { .. } | Event::QuestCompleted { .. } | Event::Joined { .. } => self.progressed(now),
+            Event::ItemChanged { item, .. } => {
+                self.touched.insert(item.clone(), now);
+                self.progressed(now);
+            }
+            Event::QuestCompleted { .. } | Event::Joined { .. } => self.progressed(now),
             Event::Status { text } => self.status.clone_from(text),
             Event::Progress { label, current, total } => self.advance(label, *current, *total, now),
             _ => {}
@@ -375,7 +402,7 @@ impl Board {
             drops: self.drops,
             deaths: self.deaths,
             gold_gained: self.gold_from.map(|from| self.gold_now - from),
-            game: if self.online { game(world, now) } else { None },
+            game: if self.online { game(world, &self.touched, now) } else { None },
         }
     }
 }
@@ -393,8 +420,13 @@ fn describe_phase(phase: &Phase, now: Instant) -> (String, String) {
     }
 }
 
-fn game(world: &World, now: Instant) -> Option<Game> {
+fn game(world: &World, touched: &HashMap<String, Instant>, now: Instant) -> Option<Game> {
     let me = world.me.as_ref()?;
+    let latest_first = |items: &[Item]| -> Vec<Stack> {
+        let mut items: Vec<&Item> = items.iter().collect();
+        items.sort_by_key(|i| Reverse(touched.get(&i.name)));
+        items.into_iter().map(Stack::of).collect()
+    };
     let area = world.area.as_ref();
     let target = world
         .target
@@ -428,7 +460,16 @@ fn game(world: &World, now: Instant) -> Option<Game> {
             .filter(|p| p.cell == me.cell)
             .map(|p| Player { name: p.name.clone(), level: p.level })
             .collect(),
-        drops: world.drops.iter().map(|d| Offer { name: d.name.clone(), qty: d.qty }).collect(),
+        drops: latest_first(&world.drops),
+        temp: latest_first(&world.temp),
+        inventory: latest_first(&world.inventory),
+        bag_used: world.used(Pool::Bag),
+        bag_slots: me.bag_slots,
+        misc_used: world.used(Pool::Misc),
+        misc_slots: world.misc_slots,
+        bank: world.bank_loaded.then(|| latest_first(&world.bank)),
+        bank_used: world.bank_count,
+        bank_slots: me.bank_slots,
     })
 }
 
@@ -707,5 +748,34 @@ mod tests {
         assert_eq!(board.snapshot("main", "hero", &Phase::Loading, &reloading, now).gold_gained, Some(0));
         board.sample_gold(&world(Some(1500)));
         assert_eq!(board.snapshot("main", "hero", &Phase::Ready, &world(Some(1500)), now).gold_gained, Some(500));
+    }
+
+    #[test]
+    fn item_lists_put_what_changed_last_first() {
+        let start = Instant::now();
+        let mut board = Board { online: true, ..Board::default() };
+        let mut world = world(Some(0));
+        let json = |o: &str| format!(r#"{{"t":"xt","b":{{"r":-1,"o":{o}}}}}"#);
+        let messages = [
+            r#"{"cmd":"loadInventoryBig","items":[{"ItemID":1,"CharItemID":11,"sName":"Bone Dust","iQty":3,"iStk":50},
+                {"ItemID":2,"CharItemID":12,"sName":"Rogue","iQty":1,"iStk":1,"bEquip":1,"sType":"Class"},
+                {"ItemID":3,"CharItemID":13,"sName":"Fabric","iQty":5,"iStk":99}],"factions":[]}"#,
+            r#"{"cmd":"addItems","items":{"3":{"iQty":1,"iQtyNow":6,"CharItemID":13,"bBank":0}}}"#,
+            r#"{"cmd":"dropItem","items":{"7":{"ItemID":7,"sName":"Old Map","iQty":1}}}"#,
+            r#"{"cmd":"dropItem","items":{"8":{"ItemID":8,"sName":"Wolf Pelt","iQty":2}}}"#,
+        ];
+        for (i, message) in messages.iter().enumerate() {
+            let now = start + Duration::from_secs(i as u64);
+            for event in aqx_core::reduce(&mut world, &Message::parse(&json(message)).unwrap(), now) {
+                board.note(&event, now);
+            }
+        }
+        let game = board.snapshot("main", "hero", &Phase::Ready, &world, start).game.unwrap();
+        let names = |stacks: &[Stack]| stacks.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&game.inventory), ["Fabric", "Bone Dust", "Rogue"], "items nothing touched keep the server's order");
+        assert_eq!(names(&game.drops), ["Wolf Pelt", "Old Map"], "the newest drop comes first");
+        assert_eq!((game.inventory[0].qty, game.inventory[0].max, game.inventory[2].equipped), (6, 99, true));
+        assert_eq!(game.bank, None, "the bank is unknown until it is opened");
+        assert_eq!((game.inventory.len(), game.bag_used, game.misc_used, game.misc_slots), (3, 2, 0, 100), "a class takes no bag slot");
     }
 }
