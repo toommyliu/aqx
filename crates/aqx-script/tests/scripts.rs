@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use aqx_core::{Outcome, ScriptError};
-use aqx_script::{check, run};
+use aqx_script::{Arg, check, run, script_args};
 use server::{FARM, Fake, Wire};
 
 fn write(test: &str, files: &[(&str, &str)]) -> PathBuf {
@@ -132,6 +132,42 @@ fn args_take_their_type_from_the_defaults() {
     failed_with(run(&mut fake.session, &path, &given(&[("m", "3")]), None), "unknown --arg m; this script takes n, name, fast");
     failed_with(run(&mut fake.session, &path, &given(&[("n", "three")]), None), "--arg n=three isn't a number");
     fake.finish();
+}
+
+#[test]
+fn a_constructor_in_place_of_a_default_makes_the_arg_required() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    let source = r#"
+        import { script } from "aqx";
+        const { target, n, class: cls } = script.args({ target: String, n: Number, class: "" });
+        if (target !== "Bob Smith" || n !== 2 || cls !== "") throw new Error(JSON.stringify({ target, n, cls }));
+    "#;
+    let path = write("required", &[("main.ts", source)]);
+    let given = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+    finished(run(&mut fake.session, &path, &given(&[("target", "Bob Smith"), ("n", "2")]), None));
+    failed_with(run(&mut fake.session, &path, &given(&[("n", "2")]), None), "missing --arg target");
+    failed_with(run(&mut fake.session, &path, &[], None), "missing --arg target, --arg n");
+    fake.finish();
+}
+
+#[test]
+fn script_args_reads_each_arg_and_its_default_without_a_game() {
+    let main = r#"
+        import { player, script } from "./lib.ts";
+        console.log("starting");
+        const args = script.args({ target: String, class: "", rounds: Number, fast: false, n: 2 });
+        while (true) player.cell;
+    "#;
+    let lib = r#"export * from "aqx";"#;
+    let arg = |key: &str, default: Option<&str>| Arg { key: key.into(), default: default.map(String::from) };
+    let declared = [arg("target", None), arg("class", Some("")), arg("rounds", None), arg("fast", Some("false")), arg("n", Some("2"))];
+    assert_eq!(script_args(&write("describe", &[("main.ts", main), ("lib.ts", lib)])), declared);
+    let after_a_game_call = r#"import { map, script } from "aqx"; map.jump("r1"); script.args({ target: String });"#;
+    assert_eq!(script_args(&write("describe-late", &[("main.ts", after_a_game_call)])), [arg("target", None)]);
+    let endless = r#"import { script } from "aqx"; while (true) {} script.args({ target: String });"#;
+    for (test, source) in [("describe-endless", endless), ("describe-broken", "this is not js")] {
+        assert!(script_args(&write(test, &[("main.ts", source)])).is_empty(), "{test}");
+    }
 }
 
 #[test]

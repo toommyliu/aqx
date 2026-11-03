@@ -357,13 +357,15 @@ export const wait = {
   ms: (ms) => native.sleep(ms),
 };
 
-function parseArg(key, raw, fallback) {
-  if (typeof fallback === "number") {
+const kind = (fallback) => typeof (typeof fallback === "function" ? fallback() : fallback);
+
+function parseArg(key, raw, kind) {
+  if (kind === "number") {
     const n = Number(raw);
     if (raw.trim() === "" || !Number.isFinite(n)) throw new TypeError(`--arg ${key}=${raw} isn't a number`);
     return n;
   }
-  if (typeof fallback === "boolean") {
+  if (kind === "boolean") {
     if (raw !== "true" && raw !== "false") throw new TypeError(`--arg ${key}=${raw} isn't true or false`);
     return raw === "true";
   }
@@ -373,12 +375,15 @@ function parseArg(key, raw, fallback) {
 export const script = {
   args(defaults) {
     const out = { ...defaults };
-    for (const [key, raw] of Object.entries(native.args())) {
+    const given = native.args(defaults);
+    for (const [key, raw] of Object.entries(given)) {
       if (!Object.hasOwn(defaults, key)) {
         throw new TypeError(`unknown --arg ${key}; this script takes ${Object.keys(defaults).join(", ") || "no args"}`);
       }
-      out[key] = parseArg(key, raw, defaults[key]);
+      out[key] = parseArg(key, raw, kind(defaults[key]));
     }
+    const missing = Object.keys(defaults).filter((key) => typeof defaults[key] === "function" && !Object.hasOwn(given, key));
+    if (missing.length > 0) throw new TypeError(`missing ${missing.map((key) => `--arg ${key}`).join(", ")}`);
     return out;
   },
   status: (text) => native.status(String(text)),

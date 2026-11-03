@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,8 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthChar;
+
+use aqx_script::Arg;
 
 use crate::account::{expand_home, script_path};
 use crate::hub::{Bar, Cells, Command, Game, LOG_LINES, LogLine, Snapshot};
@@ -128,6 +130,53 @@ impl Prompt {
     }
 }
 
+struct Ask {
+    typed: String,
+    script: PathBuf,
+    given: Vec<(String, String)>,
+    asked: Vec<Arg>,
+    accounts: Vec<(usize, String)>,
+    answers: Vec<String>,
+    input: String,
+}
+
+impl Ask {
+    fn can_share(&self) -> bool {
+        self.accounts.len() > 1 && self.answers.is_empty()
+    }
+
+    fn per_account(&self, shared: bool) -> bool {
+        self.accounts.len() > 1 && !shared
+    }
+
+    fn asking(&self, shared: bool) -> (&Arg, Option<&str>) {
+        let n = self.answers.len();
+        let account = self.per_account(shared).then(|| self.accounts[n / self.asked.len()].1.as_str());
+        (&self.asked[n % self.asked.len()], account)
+    }
+
+    fn answered(&self, round: &[String]) -> impl Iterator<Item = (String, String)> {
+        self.asked.iter().zip(round).filter(|(_, value)| !value.is_empty()).map(|(arg, value)| (arg.key.clone(), value.clone()))
+    }
+
+    fn left(&self, shared: bool) -> usize {
+        let rounds = if self.per_account(shared) { self.accounts.len() } else { 1 };
+        rounds * self.asked.len() - self.answers.len()
+    }
+
+    fn args(&self, shared: bool) -> Vec<(usize, Vec<(String, String)>)> {
+        let per_account = self.per_account(shared);
+        self.accounts
+            .iter()
+            .enumerate()
+            .map(|(round, &(i, _))| {
+                let answers = &self.answers[if per_account { round * self.asked.len() } else { 0 }..];
+                (i, self.given.iter().cloned().chain(self.answered(answers)).collect())
+            })
+            .collect()
+    }
+}
+
 #[derive(Default)]
 struct App {
     selected: usize,
@@ -147,6 +196,8 @@ struct App {
     grid_top: Cell<usize>,
     grid_cols: Cell<usize>,
     prompt: Option<Prompt>,
+    ask: Option<Ask>,
+    share_args: bool,
     ending: bool,
     recent: Vec<String>,
     note: Option<(String, Instant)>,
@@ -353,22 +404,26 @@ impl App {
     }
 
     fn act(&mut self, fleet: &Fleet, command: Command, done: &str) {
-        self.act_on(self.targets(), fleet, command, done);
+        let commands = self.targets().into_iter().map(|i| (i, command.clone())).collect();
+        self.act_on(fleet, commands, done);
     }
 
-    fn act_on(&mut self, accounts: Vec<usize>, fleet: &Fleet, command: Command, done: &str) {
+    fn act_on(&mut self, fleet: &Fleet, commands: Vec<(usize, Command)>, done: &str) {
         let cells = fleet.cells.all();
-        let (mut sent, mut same, mut said) = (Vec::new(), Vec::new(), Vec::new());
-        for i in accounts {
+        let (mut sent, mut same, mut said, mut unchanged) = (Vec::new(), Vec::new(), Vec::new(), "");
+        for (i, command) in commands {
             let Some(cell) = cells.get(i) else { continue };
             match socket::ctl(&fleet.socket, &cell.name, &command) {
                 Ok(true) => sent.push(cell.name.as_str()),
-                Ok(false) => same.push(cell.name.as_str()),
+                Ok(false) => {
+                    same.push(cell.name.as_str());
+                    unchanged = command.unchanged();
+                }
                 Err(e) => said.push(e),
             }
         }
         if !same.is_empty() {
-            said.insert(0, format!("{}: {}", same.join(", "), command.unchanged()));
+            said.insert(0, format!("{}: {unchanged}", same.join(", ")));
         }
         if !sent.is_empty() {
             said.insert(0, format!("{}: {done}", sent.join(", ")));
@@ -392,7 +447,8 @@ impl App {
             match key.code {
                 KeyCode::Enter => {
                     self.ending = false;
-                    self.act_on((0..shown.len()).collect(), fleet, Command::Logout, "logging out; the session ends once every account is offline");
+                    let everyone = (0..shown.len()).map(|i| (i, Command::Logout)).collect();
+                    self.act_on(fleet, everyone, "logging out; the session ends once every account is offline");
                 }
                 KeyCode::Char('q') => return true,
                 KeyCode::Esc => self.ending = false,
@@ -430,6 +486,30 @@ impl App {
             }
             if let Some(prompt) = &mut self.prompt {
                 prompt.find_matches();
+            }
+            return false;
+        }
+        if let Some(ask) = &mut self.ask {
+            match key.code {
+                KeyCode::Esc => self.ask = None,
+                KeyCode::Tab if ask.can_share() => self.share_args = !self.share_args,
+                KeyCode::Enter if !ask.input.trim().is_empty() || ask.asking(self.share_args).0.default.is_some() => {
+                    let value = std::mem::take(&mut ask.input).trim().to_string();
+                    ask.answers.push(value);
+                    if ask.left(self.share_args) == 0 {
+                        let ask = self.ask.take().expect("an ask is open");
+                        let mut typed = ask.typed.clone();
+                        if !ask.per_account(self.share_args) {
+                            typed.extend(ask.answered(&ask.answers).map(|(key, value)| format!(" {key}={value}")));
+                        }
+                        self.run(fleet, typed, &ask.script, ask.args(self.share_args));
+                    }
+                }
+                KeyCode::Backspace => {
+                    ask.input.pop();
+                }
+                KeyCode::Char(c) => ask.input.push(c),
+                _ => {}
             }
             return false;
         }
@@ -504,10 +584,22 @@ impl App {
                 _ => return self.say(format!("{word} isn't KEY=VALUE")),
             }
         }
-        self.recent.retain(|r| *r != input);
-        self.recent.push(input);
-        let shown = path.display().to_string();
-        self.act(fleet, Command::Run { script: path, args }, &format!("running {shown}"));
+        let asked: Vec<Arg> = aqx_script::script_args(&path).into_iter().filter(|arg| !args.iter().any(|(given, _)| *given == arg.key)).collect();
+        let targets = self.targets();
+        if asked.is_empty() {
+            let each = targets.into_iter().map(|i| (i, args.clone())).collect();
+            return self.run(fleet, input, &path, each);
+        }
+        let cells = fleet.cells.all();
+        let accounts = targets.into_iter().filter_map(|i| Some((i, cells.get(i)?.name.clone()))).collect();
+        self.ask = Some(Ask { typed: input, script: path, given: args, asked, accounts, answers: Vec::new(), input: String::new() });
+    }
+
+    fn run(&mut self, fleet: &Fleet, typed: String, script: &Path, each: Vec<(usize, Vec<(String, String)>)>) {
+        self.recent.retain(|r| *r != typed);
+        self.recent.push(typed);
+        let commands = each.into_iter().map(|(i, args)| (i, Command::Run { script: script.to_path_buf(), args })).collect();
+        self.act_on(fleet, commands, &format!("running {}", script.display()));
     }
 }
 
@@ -690,6 +782,26 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         let label = format!(" run on {who}: ");
         let keys = hints(&[("tab", "complete"), ("↑↓", "recent"), ("esc", "cancel")]);
         let typed = vec![Span::raw(label).bold(), Span::raw(prompt.input.clone()), Span::raw("█")];
+        return f.render_widget(Paragraph::new(spread(typed, keys, width.saturating_sub(1))), area);
+    }
+    if let Some(ask) = &app.ask {
+        let script = ask.script.file_name().map_or_else(|| ask.script.display().to_string(), |name| name.to_string_lossy().into_owned());
+        let (arg, account) = ask.asking(app.share_args);
+        let account = account.map(|a| format!(" for {a}")).unwrap_or_default();
+        let label = match arg.default {
+            None => format!(" {script} needs {}{account}: ", arg.key),
+            Some(_) => format!(" {script} {}{account}: ", arg.key),
+        };
+        let mut keys = vec![("enter", if ask.left(app.share_args) > 1 { "next" } else { "run" })];
+        if ask.can_share() {
+            keys.push(("tab", if app.share_args { "ask each account" } else { "same for all" }));
+        }
+        keys.push(("esc", "cancel"));
+        let keys = hints(&keys);
+        let mut typed = vec![Span::raw(label).bold(), Span::raw(ask.input.clone()), Span::raw("█")];
+        if let Some(default) = arg.default.as_deref().filter(|_| ask.input.is_empty()) {
+            typed.push(Span::raw(if default.is_empty() { "optional" } else { default }.to_string()).dark_gray());
+        }
         return f.render_widget(Paragraph::new(spread(typed, keys, width.saturating_sub(1))), area);
     }
     if let Some((note, until)) = &app.note
@@ -1149,17 +1261,18 @@ fn draw_keys(f: &mut Frame, area: Rect) {
         }
         vec![Span::raw(format!("{key:<11}")).bold(), Span::raw(format!("{word:<w$}", w = width - 11))]
     };
+    let (left, right) = (32, 27);
     let rows = ACCOUNT_KEYS.len().max(SCRIPT_KEYS.len());
     let mut lines: Vec<Line> = (0..rows)
         .map(|i| {
-            let mut spans = ACCOUNT_KEYS.get(i).map_or_else(|| vec![Span::raw(" ".repeat(30))], |&k| cell(k, 30));
-            spans.extend(SCRIPT_KEYS.get(i).map(|&k| cell(k, 27)).unwrap_or_default());
+            let mut spans = ACCOUNT_KEYS.get(i).map_or_else(|| vec![Span::raw(" ".repeat(left))], |&k| cell(k, left));
+            spans.extend(SCRIPT_KEYS.get(i).map(|&k| cell(k, right)).unwrap_or_default());
             Line::from(spans)
         })
         .collect();
     lines.push(Line::default());
     lines.push(Line::raw("Keys act on the marked accounts, or the selected one.").dark_gray());
-    let rect = centered(area, 61, lines.len() as u16 + 2);
+    let rect = centered(area, (left + right) as u16 + 4, lines.len() as u16 + 2);
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(lines).block(Block::bordered().title(" keys ").padding(Padding::horizontal(1))), rect);
 }
@@ -1670,6 +1783,81 @@ mod tests {
         let home = std::env::var("HOME").unwrap();
         let note = app.note.map(|(text, _)| text).unwrap_or_default();
         assert_eq!(note, format!("{home}/aqx-no-such-script.ts isn't a file"));
+    }
+
+    #[test]
+    fn running_a_script_asks_each_account_for_the_args_it_was_not_given() {
+        let dir = std::env::temp_dir().join(format!("aqx-tui-ask-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("follow.ts");
+        std::fs::write(&script, r#"import { script } from "aqx"; script.args({ target: String, rounds: Number, class: "", wait: 5 });"#).unwrap();
+        let controls: Vec<aqx_core::Control> = (0..2).map(|_| aqx_core::Control::new().unwrap()).collect();
+        let cells: Vec<Arc<AccountCell>> = ["main", "alt"].iter().zip(&controls).map(|(name, c)| Arc::new(AccountCell::local(name, c.stop_handle()))).collect();
+        for cell in &cells {
+            cell.board().online = true;
+        }
+        let name = format!("tui-ask-{}", std::process::id());
+        let hub = Arc::new(Hub::new(&name, cells.clone(), Print::Quiet));
+        let (_, listener, _listening) = socket::bind(&name, false).unwrap();
+        socket::serve(listener, hub, None).unwrap();
+        let fleet = Fleet { title: name.clone(), cells: Arc::new(Cells::new(cells.clone())), socket: socket::pick(Some(&name)).unwrap().1 };
+        let mut app = App::default();
+        let typed = |app: &mut App, text: &str| text.chars().for_each(|c| press(&fleet, app, KeyCode::Char(c)));
+        let command = format!("{} rounds=3", script.display());
+        let ran = |cell: &AccountCell| match cell.take_command() {
+            Some(Command::Run { script: ran, args }) if ran == script => args.into_iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" "),
+            other => panic!("{other:?}"),
+        };
+        let run = |app: &mut App| {
+            press(&fleet, app, KeyCode::Char('o'));
+            typed(app, &command);
+            press(&fleet, app, KeyCode::Enter);
+        };
+
+        run(&mut app);
+        let shown = screen(&fleet, &mut app, 120);
+        assert!(shown.contains(" follow.ts needs target: █") && shown.contains("enter next") && !shown.contains("tab"), "one account isn't named: {shown}");
+        press(&fleet, &mut app, KeyCode::Enter);
+        press(&fleet, &mut app, KeyCode::Esc);
+        assert!(app.ask.is_none() && cells[0].take_command().is_none(), "an empty answer and esc run nothing");
+
+        press(&fleet, &mut app, KeyCode::Char('a'));
+        run(&mut app);
+        let shown = screen(&fleet, &mut app, 120);
+        assert!(shown.contains(" follow.ts needs target for main: █") && shown.contains("tab same for all"), "{shown}");
+        typed(&mut app, "Bob Smith");
+        press(&fleet, &mut app, KeyCode::Enter);
+        let shown = screen(&fleet, &mut app, 120);
+        assert!(shown.contains(" follow.ts class for main: █optional") && !shown.contains("tab"), "{shown}");
+        press(&fleet, &mut app, KeyCode::Enter);
+        assert!(screen(&fleet, &mut app, 120).contains(" follow.ts wait for main: █5"));
+        typed(&mut app, "8");
+        assert!(screen(&fleet, &mut app, 120).contains(" follow.ts wait for main: 8█ "), "typing hides the default");
+        press(&fleet, &mut app, KeyCode::Enter);
+        assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target for alt: █"));
+        press(&fleet, &mut app, KeyCode::Enter);
+        assert!(screen(&fleet, &mut app, 120).contains("enter next"));
+        assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target for alt: █"), "a required arg needs a value");
+        for answer in ["Ann", "Mage", ""] {
+            typed(&mut app, answer);
+            press(&fleet, &mut app, KeyCode::Enter);
+        }
+        assert_eq!((ran(&cells[0]), ran(&cells[1])), ("rounds=3 target=Bob Smith wait=8".into(), "rounds=3 target=Ann class=Mage".into()));
+        assert_eq!(app.recent.last(), Some(&command), "per-account answers stay out of the history");
+
+        run(&mut app);
+        press(&fleet, &mut app, KeyCode::Tab);
+        let shown = screen(&fleet, &mut app, 120);
+        assert!(shown.contains(" follow.ts needs target: █") && shown.contains("tab ask each account"), "{shown}");
+        for answer in ["Bob", "", ""] {
+            typed(&mut app, answer);
+            press(&fleet, &mut app, KeyCode::Enter);
+        }
+        assert_eq!((ran(&cells[0]), ran(&cells[1])), ("rounds=3 target=Bob".into(), "rounds=3 target=Bob".into()));
+        assert_eq!(app.recent.last(), Some(&format!("{command} target=Bob")));
+        run(&mut app);
+        assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target: █"), "the choice sticks");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

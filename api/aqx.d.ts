@@ -419,13 +419,19 @@ declare module "aqx" {
     ms(ms: number): void;
   };
 
+  export type ArgDefault = string | number | boolean | StringConstructor | NumberConstructor | BooleanConstructor;
+  export type ArgValue<D> = D extends StringConstructor ? string : D extends NumberConstructor ? number : D extends BooleanConstructor ? boolean : D;
+
   export const script: {
     /**
      * Script inputs. Each key's default fixes its type; `--arg key=value` on
-     * the CLI overrides it. Throws on unknown keys or values that don't parse
+     * the CLI overrides it. `String`, `Number` or `Boolean` in place of a default
+     * makes the arg required. Before running a script, the TUI asks for each arg
+     * that wasn't typed, offering the default; a required one needs a value.
+     * Throws on unknown keys, missing required args, or values that don't parse
      * as the default's type.
      */
-    args<T extends Record<string, string | number | boolean>>(defaults: T): T;
+    args<T extends Record<string, ArgDefault>>(defaults: T): { [K in keyof T]: ArgValue<T[K]> };
     /** One line describing what the script is doing. Shown in the TUI and logs. */
     status(text: string): void;
     /** Named progress bar with rate and ETA. `current` is absolute, not a delta. */

@@ -14,6 +14,8 @@ pub struct Native;
 
 macro_rules! natives {
     ($($name:ident),* $(,)?) => {
+        pub const NAMES: &[&str] = &[$(stringify!($name)),*];
+
         impl ModuleDef for Native {
             fn declare(d: &Declarations) -> Result<()> {
                 $(d.declare(stringify!($name))?;)*

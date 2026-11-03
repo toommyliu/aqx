@@ -1,7 +1,6 @@
 import { AqxError, combat, inventory, map, player, script, wait } from "aqx";
 
-const args = script.args({ target: "", class: "" });
-if (!args.target) script.stop("pass --arg target=<player name>");
+const args = script.args({ target: String, class: "" });
 if (args.class) inventory.equip(args.class);
 
 const name = args.target.toLowerCase();
