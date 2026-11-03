@@ -11,7 +11,7 @@ public sealed partial class Shim
     readonly Dictionary<int, long> lastAccept = [];
     readonly Dictionary<int, long> lastComplete = [];
     int registerInterval = 2000;
-    Thread? registeredLoop;
+    bool registeredLoop;
 
     void Quests()
     {
@@ -166,10 +166,10 @@ public sealed partial class Shim
         {
             foreach ((int id, int reward) in quests)
                 registered[id] = reward;
-            if (registeredLoop is null)
+            if (!registeredLoop)
             {
-                registeredLoop = new Thread(CompleteRegistered) { IsBackground = true, Name = "Skua registered quests" };
-                registeredLoop.Start();
+                registeredLoop = true;
+                Background("Skua registered quests", CompleteRegistered);
             }
         }
         return null;

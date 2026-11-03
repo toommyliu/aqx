@@ -77,7 +77,7 @@ public sealed partial class Shim
         if (grabbing is { IsCancellationRequested: false })
             return null;
         CancellationTokenSource running = grabbing = new();
-        new Thread(() => Grab(running.Token)) { IsBackground = true, Name = "Skua drops" }.Start();
+        Background("Skua drops", () => Grab(running.Token));
         return null;
     }
 

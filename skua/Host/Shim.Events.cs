@@ -83,6 +83,10 @@ public sealed partial class Shim
                 {
                     handler(exception);
                 }
+                catch (Exception) when (Aqx.Stopping.IsCancellationRequested)
+                {
+                    return;
+                }
                 catch (Exception e)
                 {
                     Aqx.Call("log", "warn", $"a ScriptStopping handler threw: {e.Message}");

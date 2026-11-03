@@ -2,11 +2,11 @@
 mod server;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use aqx_core::{Event, Outcome, Sink};
+use aqx_core::{Event, Outcome, ScriptError, Sink};
 use server::{FARM, Fake, Wire};
 
 const HELLO: &str = r#"
@@ -250,4 +250,30 @@ fn core_bots_and_core_advanced_buy_from_a_shop() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert_eq!(sent.iter().filter(|m| m.contains("%buyItem%5%102658%1348%68071%1%")).count(), 1, "{sent:#?}\n{logged:#?}");
     assert!(logged.iter().any(|l| l.contains("holding 1 Sword and 1 Hat")), "{logged:#?}");
+}
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn a_dropped_connection_stops_core_bots_without_crashing_the_host() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-hang-up");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("HuntForQuest.cs");
+    std::fs::write(&script, HUNT).unwrap();
+
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%gar%") {
+            wire.hang_up();
+        } else {
+            farm_quest_server(msg, wire);
+        }
+    });
+    let mut child = host(&script, &home).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let (to_host, from_host) = (child.stdin.take().unwrap(), child.stdout.take().unwrap());
+    let result = aqx_remote::serve(&mut fake.session, from_host, to_host);
+    let output = child.wait_with_output().unwrap();
+
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(matches!(result, Err(ScriptError::Halted(_))), "{result:?}");
+    assert!(output.status.success(), "{}\n{errors}", output.status);
 }

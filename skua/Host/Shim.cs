@@ -136,6 +136,18 @@ public sealed partial class Shim
         }
     }
 
+    void Background(string name, Action loop) =>
+        new Thread(() =>
+        {
+            try
+            {
+                loop();
+            }
+            catch (AqxException e) when (e.Code == "cancelled")
+            {
+            }
+        }) { IsBackground = true, Name = name }.Start();
+
     void Stop(bool runScriptStoppingEvent)
     {
         runStopping = runScriptStoppingEvent;
