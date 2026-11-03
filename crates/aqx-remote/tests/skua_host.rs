@@ -1380,3 +1380,86 @@ fn jump_wait_leaves_the_monster_cell_for_one_the_map_file_names() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.iter().any(|l| l.ends_with("cells Enter,r1,r2,Side1,Blank, waited in Side1")), "{logged:#?}");
 }
+
+const EVERYDAY: &str = r#"
+//cs_include Scripts/CoreBots.cs
+using Skua.Core.Interfaces;
+using Skua.Core.Options;
+
+public class Everyday
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Core.SetOptions();
+        Core.EquipClass(ClassType.Farm);
+        Core.Logger($"class {Bot.Player.CurrentClass?.Name}, skills running {Bot.Skills.TimerRunning}");
+        Core.Logger($"has dust {Core.CheckInventory("Bone Dust", 3)}, in inventory {Bot.Inventory.Contains("Bone Dust", 3)}");
+        Core.ToBank("Bone Dust");
+        Core.Logger($"after banking, in bank {Bot.Bank.Contains("Bone Dust")}");
+        Core.SetOptions(false);
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn core_bots_equips_its_farm_class_and_moves_items_through_the_bank() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-everyday");
+    let home = dir.join("home");
+    std::fs::create_dir_all(home.join("Skua/options")).unwrap();
+    std::fs::write(home.join("Skua/options/CBO_Storage(hero).txt"), "FarmClassSelect: Rogue\nFarmModeSelect: Base\n").unwrap();
+    let script = dir.join("Everyday.cs");
+    std::fs::write(&script, EVERYDAY).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%equipItem%5%15652%") {
+                wire.object(r#"{"cmd":"equipItem","uid":1001,"ItemID":15652,"strES":"ar"}"#);
+            } else if msg.contains("%bankToInv%5%5%15%") {
+                wire.object(r#"{"cmd":"bankToInv","ItemID":"5"}"#);
+            } else if msg.contains("%bankFromInv%5%5%15%") {
+                wire.object(r#"{"cmd":"bankFromInv","ItemID":5,"bSuccess":1}"#);
+            }
+        },
+        sink,
+    );
+    let class = Item {
+        id: ItemId(15652),
+        char_item: Some(CharItemId(78)),
+        name: "Rogue".into(),
+        qty: 21980,
+        max_stack: 1,
+        kind: "Class".into(),
+        slot: "ar".into(),
+        equipped: false,
+        ac: false,
+        member: false,
+        house: false,
+        link: String::new(),
+        file: String::new(),
+        icon: String::new(),
+        meta: String::new(),
+        level: 0,
+        enhancement: None,
+    };
+    let dust = Item { id: ItemId(5), char_item: Some(CharItemId(15)), name: "Bone Dust".into(), qty: 3, max_stack: 50, kind: "Resource".into(), slot: "None".into(), ..class.clone() };
+    fake.session.world.me.as_mut().unwrap().bank_slots = 10;
+    fake.session.world.inventory.push(class);
+    fake.session.world.set_bank(vec![dust]);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    if std::env::var_os("AQX_SKUA_LOG").is_some() {
+        eprintln!("{logged:#?}\n{sent:#?}");
+    }
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.iter().any(|l| l.ends_with("class Rogue, skills running True")), "{logged:#?}");
+    assert!(logged.iter().any(|l| l.ends_with("has dust True, in inventory True")), "{logged:#?}");
+    assert!(logged.iter().any(|l| l.ends_with("after banking, in bank True")), "{logged:#?}");
+}
