@@ -18,7 +18,10 @@
     <Compile Include="../vendor/Skua/Skua.Core/Options/Option.cs" />
     <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptWait.cs" />
     <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptBoost.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptKill.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptHunt.cs" />
     <Compile Include="../vendor/Skua/Skua.Core/Messaging/ScriptableEventMessages.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Messaging/MessageChannels.cs" />
     <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptSkill.cs" />
     <Compile Include="../vendor/Skua/Skua.Core/Skills/*.cs" />
     <Compile Include="../vendor/Skua/Skua.Core/Flash/*.cs" />

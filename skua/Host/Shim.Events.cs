@@ -1,7 +1,9 @@
 using System.Collections.Concurrent;
 using System.Reflection;
 using System.Text.Json.Nodes;
+using CommunityToolkit.Mvvm.Messaging;
 using Newtonsoft.Json.Linq;
+using Skua.Core.Messaging;
 using Skua.Core.Interfaces;
 using Skua.Core.Models.Items;
 
@@ -26,6 +28,7 @@ public sealed partial class Shim
             On(Key(typeof(IScriptEvent), e.RemoveMethod!), args => Subscribe(name, d => Delegate.Remove(d, (Delegate)args[0]!)));
         }
         Aqx.Event += Forward;
+        Aqx.Call("listen", "addItems", true);
     }
 
     object? Subscribe(string name, Func<Delegate?, Delegate?> change)
@@ -74,12 +77,16 @@ public sealed partial class Shim
                 Raise("MapChanged", (string?)data?["name"] ?? "");
                 break;
             case "cell":
-                Raise("CellChanged", MapName, (string?)data?["cell"] ?? "", (string?)data?["pad"] ?? "");
+                string map = MapName, cell = (string?)data?["cell"] ?? "", pad = (string?)data?["pad"] ?? "";
+                StrongReferenceMessenger.Default.Send<CellChangedMessage, int>(new(map, cell, pad), (int)MessageChannels.GameEvents);
+                Raise("CellChanged", map, cell, pad);
                 break;
             case "drop" when data is not null:
-                Raise("ItemDropped", Models.Item<ItemBase>(data), false, Int(data["qty"]));
+                Dropped(Models.Item<ItemBase>(data), false, 0);
                 break;
             case "packet" when ExtensionPacket((string?)data?["raw"] ?? "") is { } packet:
+                if ((string?)data?["cmd"] == "addItems")
+                    Added(packet["params"]!["dataObj"]!);
                 Raise(PacketEvent, packet);
                 break;
             case "counter":
@@ -88,6 +95,21 @@ public sealed partial class Shim
                 Raise("CounterAttack", !active);
                 break;
         }
+    }
+
+    void Added(JToken data)
+    {
+        if (data["items"] is not JObject { First: JProperty { Name: var key, Value: var added } } || !int.TryParse(key, out int id))
+            return;
+        ItemBase? item = (ItemBase?)InventoryItems().Find(i => i.ID == id) ?? Models.Items<ItemBase>(View("temp"), temp: true).Find(i => i.ID == id);
+        if (item is not null)
+            Dropped(item, true, (int?)added["iQtyNow"] ?? item.Quantity);
+    }
+
+    void Dropped(ItemBase item, bool added, int quantityNow)
+    {
+        StrongReferenceMessenger.Default.Send<ItemDroppedMessage, int>(new(item, added, quantityNow), (int)MessageChannels.GameEvents);
+        Raise("ItemDropped", item, added, quantityNow);
     }
 
     void Raise(string name, params object?[] args)

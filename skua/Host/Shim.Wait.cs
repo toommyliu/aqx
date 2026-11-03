@@ -8,11 +8,15 @@ public sealed partial class Shim
 {
     ScriptWait? wait;
     ScriptBoost? boosts;
+    ScriptKill? kill;
+    ScriptHunt? hunt;
 
     void Wait()
     {
         On("IScriptInterface.get_Wait()", _ => wait ??= MakeWait());
         On("IScriptInterface.get_Boosts()", _ => boosts ??= MakeBoosts());
+        On("IScriptInterface.get_Kill()", _ => kill ??= MakeKill());
+        On("IScriptInterface.get_Hunt()", _ => hunt ??= MakeHunt());
         On("IScriptStatus.get_ShouldExit()", _ => ShouldExit);
         On("IScriptManager.get_ShouldExit()", _ => ShouldExit);
         On("IScriptManager.get_LoadedScript()", _ => Script);
@@ -34,6 +38,40 @@ public sealed partial class Shim
             new(() => bot.Bank),
             new(() => bot.Player),
             new(() => bot.Wait));
+    }
+
+    static ScriptKill MakeKill()
+    {
+        IScriptInterface bot = IScriptInterface.Instance;
+        return new ScriptKill(
+            new(() => bot.Wait),
+            new(() => bot.Options),
+            new(() => bot.Combat),
+            new(() => bot.Player),
+            new(() => bot.Drops),
+            new(() => bot.Inventory),
+            new(() => bot.TempInv),
+            new(() => Ioc.Default.GetRequiredService<IScriptManager>()),
+            new(() => bot.Map),
+            Ioc.Default.GetRequiredService<ILogService>(),
+            new(() => bot.Monsters));
+    }
+
+    static ScriptHunt MakeHunt()
+    {
+        IScriptInterface bot = IScriptInterface.Instance;
+        return new ScriptHunt(
+            new(() => bot.Options),
+            new(() => bot.Combat),
+            new(() => bot.Player),
+            new(() => bot.Monsters),
+            new(() => bot.Drops),
+            new(() => bot.Inventory),
+            new(() => bot.TempInv),
+            new(() => Ioc.Default.GetRequiredService<IScriptManager>()),
+            new(() => bot.Map),
+            new(() => bot.Kill),
+            Ioc.Default.GetRequiredService<ILogService>());
     }
 
     static ScriptWait MakeWait()

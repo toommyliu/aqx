@@ -399,3 +399,53 @@ fn a_script_reads_raw_packets_the_way_skua_hands_them_over() {
     assert!(logged.contains(&"info: json: ct Treeant prepares a counter attack!".to_string()), "{logged:#?}");
     assert!(logged.contains(&"info: str: uotls -1 hero afk:true".to_string()), "{logged:#?}");
 }
+
+const KILL_AND_HUNT: &str = r#"
+using Skua.Core.Interfaces;
+
+public class KillAndHunt
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Map.Jump("r2", "Left");
+        bot.Kill.Monster("Treeant");
+        bot.Log("killed");
+        bot.Hunt.ForItem("Treeant", "Treeant Sap", 2, true);
+        bot.Log($"holding {bot.TempInv.GetQuantity("Treeant Sap")} Treeant Sap");
+    }
+}
+"#;
+
+fn treeant_drops_sap(msg: &str, wire: &mut Wire) {
+    static SAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if msg.contains("%gar%") && msg.contains(">m:2") {
+        wire.object(r#"{"cmd":"ct","m":{"2":{"intHP":0,"intState":0}}}"#);
+        wire.object(r#"{"cmd":"addGoldExp","intGold":10,"intExp":5,"typ":"m","id":2}"#);
+        let now = SAP.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        wire.object(&format!(r#"{{"cmd":"addItems","items":{{"88":{{"ItemID":88,"sName":"Treeant Sap","iQty":1,"iQtyNow":{now},"iStk":10,"bTemp":1}}}}}}"#));
+        wire.later(std::time::Duration::from_millis(50), "respawn", r#"{"cmd":"mtls","id":2,"o":{"intHP":540,"intState":1}}"#.into());
+    }
+}
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn skua_kills_a_monster_and_hunts_it_for_a_temp_item() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-kill-hunt");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("KillAndHunt.cs");
+    std::fs::write(&script, KILL_AND_HUNT).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, treeant_drops_sap, sink);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    if std::env::var_os("AQX_SKUA_LOG").is_some() {
+        eprintln!("{logged:#?}\n{sent:#?}");
+    }
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: killed".to_string()), "{logged:#?}");
+    assert!(logged.contains(&"info: holding 2 Treeant Sap".to_string()), "{logged:#?}");
+}
