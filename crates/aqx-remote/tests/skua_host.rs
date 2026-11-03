@@ -1517,3 +1517,61 @@ fn core_bots_joins_another_map_in_a_private_room() {
     assert!(logged.iter().any(|l| l.contains("now in yulgar-") && l.ends_with("at Room")), "{logged:#?}");
     assert!(sent.iter().any(|m| m.starts_with("%xt%zm%moveToCell%7%Room%Center%")), "{sent:#?}");
 }
+
+const KILL_QUEST: &str = r#"
+//cs_include Scripts/CoreBots.cs
+//cs_include Scripts/CoreStory.cs
+using Skua.Core.Interfaces;
+
+public class StoryKill
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+    public CoreStory Story = new();
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Core.SetOptions();
+        Story.KillQuest(11, "farm", "Treeant");
+        Core.Logger($"holding {Bot.Inventory.GetQuantity("Twilly Twig")} Twilly Twig");
+        Core.SetOptions(false);
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn core_story_kills_for_a_quest_and_turns_it_in() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-story-kill");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("StoryKill.cs");
+    std::fs::write(&script, KILL_QUEST).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%getQuests%") {
+                wire.object(&QUEST_11.replace(r#""iSlot":-1,"iValue":0"#, r#""iSlot":3,"iValue":1"#));
+            } else if msg.starts_with("%xt%zm%tryQuestComplete%5%11%") {
+                farm_quest_server(msg, wire);
+                wire.object(r#"{"cmd":"updateQuest","iIndex":3,"iValue":1}"#);
+            } else {
+                farm_quest_server(msg, wire);
+            }
+        },
+        sink,
+    );
+    fake.session.world.me.as_mut().unwrap().quest_slots = vec!["0".repeat(100)];
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    if std::env::var_os("AQX_SKUA_LOG").is_some() {
+        eprintln!("{logged:#?}\n{sent:#?}");
+    }
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(sent.iter().any(|m| m.starts_with("%xt%zm%tryQuestComplete%5%11%")), "{sent:#?}");
+    assert!(logged.iter().any(|l| l.ends_with("holding 1 Twilly Twig")), "{logged:#?}");
+}
