@@ -2,7 +2,19 @@
 
 A headless AQW client written in Rust that runs bot scripts written in TypeScript. Inspired by [aqw-python](https://github.com/Froztt13/aqw-python).
 
-Skua scripts (`.cs`) run through the shim in `skua/` on the `skua/host` branch, which compiles them against Skua's interfaces and forwards each game call to aqx. The shim is experimental.
+Skua scripts (`.cs`) run through the shim in `skua/` on the `skua/host` branch, which compiles them against Skua's interfaces and forwards each game call to aqx. The shim is experimental. To set it up, see [Run Skua scripts](docs/skua.md).
+
+## Install
+
+aqx runs on macOS and Linux. To build it, you need Rust 1.89 or later and a C compiler.
+
+```
+cargo install --locked --git https://github.com/toommyliu/aqx aqx
+```
+
+[Get started](docs/getting-started.md) shows how to install those tools, add an account, and run a first script.
+
+The terminal UI needs a terminal that shows UTF-8 and the 16 standard colors, with a font that has box-drawing and braille characters. The mouse is optional: the UI uses it for clicks, scrolling, and resizing the account list. `aqx run`, `aqx serve`, and `aqx logs` print plain lines, so they work over SSH and when piped to a file.
 
 ## CLI
 
