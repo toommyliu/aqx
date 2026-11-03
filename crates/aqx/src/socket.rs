@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::hub::{Command, Hub, LogLine, Snapshot};
 
-pub const PROTOCOL: u32 = 7;
+pub const PROTOCOL: u32 = 8;
 const BUILD: &str = env!("AQX_BUILD");
 const TICK: Duration = Duration::from_millis(250);
 const FRESH: Duration = Duration::from_millis(300);
@@ -472,8 +472,8 @@ mod tests {
              snapshot.game.bank.name snapshot.game.bank.qty snapshot.game.bank.rank snapshot.game.bank_slots \
              snapshot.game.bank_used snapshot.game.cell snapshot.game.cell_players \
              snapshot.game.cell_players.level snapshot.game.cell_players.name snapshot.game.class \
-             snapshot.game.dead snapshot.game.drops snapshot.game.drops.equipped snapshot.game.drops.max \
-             snapshot.game.drops.name snapshot.game.drops.qty snapshot.game.drops.rank snapshot.game.gold \
+             snapshot.game.class_rank snapshot.game.dead snapshot.game.drops snapshot.game.drops.equipped \
+             snapshot.game.drops.max snapshot.game.drops.name snapshot.game.drops.qty snapshot.game.drops.rank snapshot.game.gold \
              snapshot.game.hp snapshot.game.inventory snapshot.game.inventory.equipped \
              snapshot.game.inventory.max snapshot.game.inventory.name snapshot.game.inventory.qty \
              snapshot.game.inventory.rank snapshot.game.level snapshot.game.max_hp snapshot.game.max_mp \
@@ -485,7 +485,7 @@ mod tests {
              snapshot.progress snapshot.progress.current snapshot.progress.eta_secs snapshot.progress.label \
              snapshot.progress.total snapshot.run snapshot.script snapshot.server snapshot.stalled \
              snapshot.status snapshot.up_secs snapshot.user";
-        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (7, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
+        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (8, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
     }
 
     #[test]
