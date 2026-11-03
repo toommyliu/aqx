@@ -12,7 +12,7 @@ use crate::event::{Event, Place};
 use crate::quests::{Quest, QuestData, set_quest_value};
 
 const HASTE_CAP: f64 = 0.5;
-const RANK_REP: [u32; 9] = [900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500];
+const RANK_POINTS: [u32; 9] = [900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500];
 const GOLD_CAP: i64 = 100_000_000;
 const COUNTER_AURA: &str = "Counter Attack";
 const COUNTER_WARNING: &str = "prepares a counter attack";
@@ -79,6 +79,7 @@ pub struct Me {
     pub item_skill: Option<u32>,
     pub quest_slots: Vec<String>,
     pub achievements: HashMap<String, i64>,
+    pub class_points: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -187,7 +188,7 @@ pub struct Faction {
 
 impl Faction {
     pub fn rank(&self) -> u32 {
-        1 + RANK_REP.iter().filter(|&&threshold| self.rep >= threshold).count() as u32
+        rank_for(self.rep)
     }
 
     pub fn rep_in_rank(&self) -> u32 {
@@ -195,11 +196,11 @@ impl Faction {
     }
 
     pub fn rep_for_next_rank(&self) -> u32 {
-        RANK_REP.get(self.rank() as usize - 1).map_or(0, |next| next - self.rank_floor())
+        RANK_POINTS.get(self.rank() as usize - 1).map_or(0, |next| next - self.rank_floor())
     }
 
     fn rank_floor(&self) -> u32 {
-        self.rank().checked_sub(2).and_then(|i| RANK_REP.get(i as usize)).copied().unwrap_or(0)
+        self.rank().checked_sub(2).and_then(|i| RANK_POINTS.get(i as usize)).copied().unwrap_or(0)
     }
 }
 
@@ -417,6 +418,10 @@ struct Anim {
     caster: String,
     #[serde(default, deserialize_with = "text")]
     msg: String,
+}
+
+fn rank_for(points: u32) -> u32 {
+    1 + RANK_POINTS.iter().filter(|&&threshold| points >= threshold).count() as u32
 }
 
 fn yes() -> bool {
@@ -788,6 +793,8 @@ impl World {
                 struct Reward {
                     #[serde(rename = "intGold", default, deserialize_with = "int")]
                     gold: i64,
+                    #[serde(rename = "iCP", default, deserialize_with = "int")]
+                    class_points: i64,
                     #[serde(default)]
                     typ: String,
                     id: Option<MonMapId>,
@@ -795,6 +802,7 @@ impl World {
                 let reward: Reward = json.decode()?;
                 if let Some(me) = &mut self.me {
                     me.gold += reward.gold;
+                    me.class_points = me.class_points.saturating_add(qty(reward.class_points));
                 }
                 if let ("m", Some(id)) = (reward.typ.as_str(), reward.id) {
                     let monster = self.monster(id).map_or_else(|| format!("monster {id}"), |m| m.name.clone());
@@ -1135,10 +1143,13 @@ impl World {
                     uid: EntityId,
                     #[serde(rename = "sClassName")]
                     name: String,
+                    #[serde(rename = "iCP", default, deserialize_with = "int")]
+                    class_points: i64,
                 }
                 let class: Class = json.decode()?;
                 if let Some(me) = self.me.as_mut().filter(|m| m.eid == class.uid) {
                     me.class = class.name;
+                    me.class_points = qty(class.class_points);
                 }
             }
             "equipItem" | "unequipItem" => {
@@ -1405,6 +1416,10 @@ impl World {
 }
 
 impl Me {
+    pub fn class_rank(&self) -> u32 {
+        rank_for(self.class_points)
+    }
+
     fn new(eid: EntityId, user: &str) -> Self {
         Me {
             eid,
@@ -1429,6 +1444,7 @@ impl Me {
             item_skill: None,
             quest_slots: Vec::new(),
             achievements: HashMap::new(),
+            class_points: 0,
         }
     }
 
@@ -1632,6 +1648,16 @@ mod tests {
         assert_eq!(progress(at(0)), (1, 0, 900));
         assert_eq!(progress(at(1000)), (2, 100, 2700));
         assert_eq!(progress(at(310000)), (10, 7500, 0));
+    }
+
+    #[test]
+    fn class_points_follow_the_class_and_every_kill() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"updateClass","uid":1001,"sClassName":"Rogue","iCP":890}"#));
+        assert_eq!(world.me.as_ref().unwrap().class_rank(), 1);
+        feed(&mut world, &json(r#"{"cmd":"addGoldExp","intGold":10,"intExp":5,"iCP":22,"typ":"m","id":1}"#));
+        let me = world.me.as_ref().unwrap();
+        assert_eq!((me.class.as_str(), me.class_points, me.class_rank()), ("Rogue", 912, 2));
     }
 
     #[test]
