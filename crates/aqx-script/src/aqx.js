@@ -204,6 +204,15 @@ export const inventory = items(() => view("inventory"), {
   use: (item) => native.use_item(item),
 });
 
+export const house = items(() => view("house"), {
+  get slots() {
+    return view("slots").house;
+  },
+  get used() {
+    return view("slots").houseUsed;
+  },
+});
+
 export const bank = items(() => native.bank(), {
   get slots() {
     return view("slots").bank;

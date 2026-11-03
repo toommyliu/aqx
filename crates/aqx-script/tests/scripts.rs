@@ -645,3 +645,17 @@ fn the_inventory_reports_its_misc_pool_apart_from_the_bag() {
     );
     finished(result);
 }
+
+#[test]
+fn house_items_have_their_own_list() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    let result = run_script(
+        &mut fake,
+        "house",
+        r#"
+        import { house } from "aqx";
+        if (house.items.length !== 0 || house.used !== 0 || house.has("Crystal House")) throw new Error(`house ${house.items.length} ${house.used}`);
+        "#,
+    );
+    finished(result);
+}

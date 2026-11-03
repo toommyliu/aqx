@@ -209,7 +209,7 @@ declare module "aqx" {
     kill: Monster;
     drop: Drop;
     /** `qty` is the new total in that place, 0 once the item is gone. */
-    item: { readonly name: string; readonly qty: number; readonly where: "inventory" | "temp" | "bank" };
+    item: { readonly name: string; readonly qty: number; readonly where: "inventory" | "house" | "temp" | "bank" };
     quest: { readonly id: number; readonly change: "accepted" | "completed" };
     chat: {
       readonly from: string;
@@ -352,6 +352,12 @@ declare module "aqx" {
     equip(item: ItemRef): void;
     /** Uses a "ServerUse" item such as a boost. Returns once sent. */
     use(item: ItemRef): void;
+  };
+
+  /** Houses, floor and wall items, which the server keeps apart from the inventory. */
+  export const house: Items & {
+    readonly slots: number;
+    readonly used: number;
   };
 
   /** Reading `items` loads the bank on first use, except inside a predicate. */

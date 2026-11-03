@@ -32,6 +32,7 @@ pub fn describe(event: &Event) -> Option<(&'static str, String)> {
         Event::ItemChanged { item, qty, place } => {
             let place = match place {
                 Place::Inventory => "inventory",
+                Place::House => "house",
                 Place::Temp => "temp inventory",
                 Place::Bank => "bank",
             };

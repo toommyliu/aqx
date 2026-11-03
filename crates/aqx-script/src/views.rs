@@ -137,12 +137,14 @@ pub fn skills(world: &World) -> Value {
 }
 
 pub fn slots(world: &World) -> Value {
-    let (bag, bank) = world.me.as_ref().map_or((0, 0), |m| (m.bag_slots, m.bank_slots));
+    let (bag, bank, house) = world.me.as_ref().map_or((0, 0, 0), |m| (m.bag_slots, m.bank_slots, m.house_slots));
     json!({
         "bag": bag,
         "bagUsed": world.used(Pool::Bag),
         "misc": world.misc_slots,
         "miscUsed": world.used(Pool::Misc),
+        "house": house,
+        "houseUsed": world.used(Pool::House),
         "bank": bank,
         "bankUsed": world.bank_count,
     })
@@ -228,6 +230,7 @@ pub fn event(world: &World, event: &Event) -> Value {
         Event::ItemChanged { item, qty, place } => {
             let place = match place {
                 Place::Inventory => "inventory",
+                Place::House => "house",
                 Place::Temp => "temp",
                 Place::Bank => "bank",
             };
