@@ -80,6 +80,41 @@ pub struct Me {
     pub quest_slots: Vec<String>,
     pub achievements: HashMap<String, i64>,
     pub class_points: u32,
+    pub boosts: HashMap<Boost, Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Boost {
+    Class,
+    Experience,
+    Gold,
+    Reputation,
+}
+
+impl Boost {
+    const ALL: [Boost; 4] = [Boost::Class, Boost::Experience, Boost::Gold, Boost::Reputation];
+
+    fn user_data_key(self) -> &'static str {
+        match self {
+            Boost::Class => "iBoostCP",
+            Boost::Experience => "iBoostXP",
+            Boost::Gold => "iBoostG",
+            Boost::Reputation => "iBoostRep",
+        }
+    }
+
+    fn from_cmd(cmd: &str) -> Option<Boost> {
+        Boost::ALL.into_iter().find(|b| b.cmd() == cmd)
+    }
+
+    fn cmd(self) -> &'static str {
+        match self {
+            Boost::Class => "cpboost",
+            Boost::Experience => "xpboost",
+            Boost::Gold => "gboost",
+            Boost::Reputation => "repboost",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -586,7 +621,7 @@ impl World {
             "moveToArea" => self.move_to_area(json.decode()?, events),
             "initUserData" => {
                 let init: Init = json.decode()?;
-                self.user_data(init.uid, init.data);
+                self.user_data(init.uid, init.data, now);
             }
             "initUserDatas" => {
                 #[derive(Deserialize)]
@@ -594,7 +629,7 @@ impl World {
                     a: Vec<Init>,
                 }
                 for init in json.decode::<Inits>()?.a {
-                    self.user_data(init.uid, init.data);
+                    self.user_data(init.uid, init.data, now);
                 }
             }
             "uotls" => {
@@ -1161,7 +1196,21 @@ impl World {
                     }
                 }
             }
-            _ => {}
+            cmd => {
+                if let Some(boost) = Boost::from_cmd(cmd) {
+                    #[derive(Deserialize)]
+                    struct Boosted {
+                        #[serde(default, deserialize_with = "text")]
+                        op: String,
+                        #[serde(rename = "iSecsLeft", default, deserialize_with = "int")]
+                        secs: i64,
+                    }
+                    let boosted: Boosted = json.decode()?;
+                    if let Some(me) = &mut self.me {
+                        me.set_boost(boost, if boosted.op == "-" { 0 } else { boosted.secs }, now);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1216,7 +1265,7 @@ impl World {
         }
     }
 
-    fn user_data(&mut self, uid: EntityId, data: UserData) {
+    fn user_data(&mut self, uid: EntityId, data: UserData, now: Instant) {
         if let Some(me) = self.me.as_mut().filter(|m| m.eid == uid) {
             me.char_id = data.char_id.or(me.char_id);
             me.level = qty(data.level);
@@ -1233,6 +1282,11 @@ impl World {
                     ("intCoins", Some(n)) => me.coins = n,
                     ("iBagSlots", Some(n)) => me.bag_slots = qty(n),
                     ("iBankSlots", Some(n)) => me.bank_slots = qty(n),
+                    (key, Some(secs)) => {
+                        if let Some(boost) = Boost::ALL.into_iter().find(|b| b.user_data_key() == key) {
+                            me.set_boost(boost, secs, now);
+                        }
+                    }
                     _ => {}
                 }
                 if let Some(n) = key.strip_prefix("strQuests") {
@@ -1409,6 +1463,18 @@ impl Me {
         rank_for(self.class_points)
     }
 
+    pub fn boost_left(&self, boost: Boost, now: Instant) -> Duration {
+        self.boosts.get(&boost).map_or(Duration::ZERO, |until| until.saturating_duration_since(now))
+    }
+
+    fn set_boost(&mut self, boost: Boost, secs: i64, now: Instant) {
+        if secs > 0 {
+            self.boosts.insert(boost, now + Duration::from_secs(secs as u64));
+        } else {
+            self.boosts.remove(&boost);
+        }
+    }
+
     fn new(eid: EntityId, user: &str) -> Self {
         Me {
             eid,
@@ -1434,6 +1500,7 @@ impl Me {
             quest_slots: Vec::new(),
             achievements: HashMap::new(),
             class_points: 0,
+            boosts: HashMap::new(),
         }
     }
 
@@ -1638,6 +1705,20 @@ mod tests {
         feed(&mut world, &json(r#"{"cmd":"addGoldExp","intGold":10,"intExp":5,"iCP":22,"typ":"m","id":1}"#));
         let me = world.me.as_ref().unwrap();
         assert_eq!((me.class.as_str(), me.class_points, me.class_rank()), ("Rogue", 912, 2));
+    }
+
+    #[test]
+    fn boosts_run_out_after_the_seconds_the_server_gives() {
+        let mut world = joined();
+        let now = Instant::now();
+        reduce(&mut world, &Message::parse(&json(r#"{"cmd":"initUserData","uid":1001,"data":{"iBoostCP":"1195","iBoostXP":0}}"#)).unwrap(), now);
+        reduce(&mut world, &Message::parse(&json(r#"{"cmd":"gboost","op":"+","iSecsLeft":600,"bShowShop":false}"#)).unwrap(), now);
+        let me = world.me.as_ref().unwrap();
+        assert_eq!(me.boost_left(Boost::Class, now), Duration::from_secs(1195));
+        assert_eq!(me.boost_left(Boost::Gold, now + Duration::from_secs(60)), Duration::from_secs(540));
+        assert_eq!(me.boost_left(Boost::Experience, now), Duration::ZERO);
+        reduce(&mut world, &Message::parse(&json(r#"{"cmd":"cpboost","op":"-"}"#)).unwrap(), now);
+        assert_eq!(world.me.as_ref().unwrap().boost_left(Boost::Class, now), Duration::ZERO);
     }
 
     #[test]
