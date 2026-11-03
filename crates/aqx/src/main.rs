@@ -91,10 +91,10 @@ enum Cmd {
     View(ViewArgs),
     #[command(about = "Print the JSON Schema of aqx.toml, for editor completion and checks")]
     Schema,
-    #[command(about = "Write aqx.d.ts, tsconfig.json, a sample script and, in a terminal, an aqx.toml for one account. Rerun after upgrading aqx to update aqx.d.ts")]
+    #[command(about = "Write aqx.d.ts, tsconfig.json, a .gitignore, a sample script and, in a terminal, an aqx.toml for one account. Rerun after upgrading aqx to update aqx.d.ts")]
     Init {
-        #[arg(default_value = ".", help = "Directory to write into")]
-        dir: PathBuf,
+        #[arg(help = "Directory to write into [default: the folder of the config aqx would use, else $AQX_HOME or ~/aqx]")]
+        dir: Option<PathBuf>,
     },
     #[command(about = "Compile scripts and the files they import, without logging in or running them")]
     Check {
@@ -187,7 +187,10 @@ fn main() -> ExitCode {
             println!("{}", config::schema());
             Ok(())
         }
-        Some(Cmd::Init { dir }) => init::init(&dir, &config::user_config(), init::ask),
+        Some(Cmd::Init { dir }) => {
+            let dir = dir.unwrap_or_else(|| config::found().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(config::home));
+            init::init(&dir, init::ask)
+        }
         Some(Cmd::Check { scripts }) => check(&scripts),
     };
     match result {
@@ -261,7 +264,7 @@ fn open(wanted: &Wanted, redact: bool) -> Result<(), String> {
             }
         }
     };
-    attach(&session, redact)
+    attach(&session, path.parent().unwrap_or(Path::new("")), redact)
 }
 
 fn restart_wanted(info: &serde_json::Value) -> Result<bool, String> {
@@ -479,7 +482,7 @@ fn log_out_all(hub: &Hub) {
     }
 }
 
-fn attach(path: &Path, redact: bool) -> Result<(), String> {
+fn attach(path: &Path, home: &Path, redact: bool) -> Result<(), String> {
     let mut conn = Conn::open(path)?;
     conn.send(&json!({ "op": "subscribe" }))?;
     let hello = conn.recv().ok_or("the aqx process closed the connection")?;
@@ -497,7 +500,7 @@ fn attach(path: &Path, redact: bool) -> Result<(), String> {
             gone.store(true, Ordering::SeqCst);
         });
     }
-    let fleet = tui::Fleet { title: name, cells, socket: path.to_path_buf() };
+    let fleet = tui::Fleet { title: name, cells, socket: path.to_path_buf(), home: home.to_path_buf() };
     tui::run(&fleet, redact, || gone.load(Ordering::SeqCst))?;
     if gone.load(Ordering::SeqCst) {
         let all = fleet.cells.all();

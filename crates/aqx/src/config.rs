@@ -113,10 +113,7 @@ pub fn schema() -> String {
 pub fn load(explicit: Option<&Path>) -> Result<(Config, PathBuf), String> {
     let path = match explicit {
         Some(path) => path.to_path_buf(),
-        None => [PathBuf::from("aqx.toml"), user_config()]
-            .into_iter()
-            .find(|p| p.is_file())
-            .ok_or_else(|| format!("no config found at ./aqx.toml or {}", user_config().display()))?,
+        None => found().ok_or_else(|| format!("no config found at ./aqx.toml or {}", home().join("aqx.toml").display()))?,
     };
     let path = std::fs::canonicalize(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -224,13 +221,24 @@ pub fn parse_duration(text: &str) -> Option<Duration> {
     unit.checked_mul(u32::try_from(n).ok()?)
 }
 
-pub fn user_config() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
+pub fn found() -> Option<PathBuf> {
+    [PathBuf::from("aqx.toml"), home().join("aqx.toml")].into_iter().find(|p| p.is_file())
+}
+
+pub fn home() -> PathBuf {
+    std::env::var_os("AQX_HOME")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join("aqx")))
+        .unwrap_or_default()
+}
+
+pub fn user_state() -> Option<PathBuf> {
+    std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_default()
-        .join("aqx/aqx.toml")
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .map(|dir| dir.join("aqx"))
 }
 
 fn warn_if_others_can_read(path: &Path) {

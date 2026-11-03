@@ -20,17 +20,15 @@ pub struct Account {
     pub password: String,
 }
 
-pub fn init(dir: &Path, global: &Path, account: impl FnOnce() -> Result<Option<Account>, String>) -> Result<(), String> {
+pub fn init(dir: &Path, account: impl FnOnce() -> Result<Option<Account>, String>) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     write(dir, "aqx.d.ts", TYPES, true)?;
     write(dir, "tsconfig.json", TSCONFIG, false)?;
+    write(dir, ".gitignore", "aqx.toml\n", false)?;
     write(dir, "farm.ts", SAMPLE, false)?;
     let config = dir.join("aqx.toml");
     if config.exists() {
         println!("kept {}", config.display());
-    } else if global.exists() {
-        println!("skipped aqx.toml; aqx uses {}", global.display());
-        return Ok(());
     } else if let Some(account) = account()? {
         create_config(&config, &account)?;
         println!("wrote {}", config.display());
@@ -104,51 +102,44 @@ mod tests {
     fn a_new_folder_gets_a_config_that_runs_the_sample() {
         let dir = fresh("new");
         let account = || Ok(Some(Account { user: "Hero".into(), password: r#"p"a\ss"#.into() }));
-        init(&dir, &dir.join("no-global.toml"), account).unwrap();
+        init(&dir, account).unwrap();
         let path = dir.join("aqx.toml");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         let (config, path) = crate::config::load(Some(&path)).unwrap();
         let account = config.account(None).unwrap();
         assert_eq!((account.user.as_str(), account.password.as_str()), ("Hero", r#"p"a\ss"#));
         let script = account.script(&path).unwrap().unwrap().path;
+        assert_eq!(script, dir.canonicalize().unwrap().join("farm.ts"));
         assert_eq!(aqx_script::check(&script), Ok(()));
+        assert_eq!(std::fs::read_to_string(dir.join("aqx.d.ts")).unwrap(), TYPES);
+        assert!(dir.join("tsconfig.json").is_file());
+        assert_eq!(std::fs::read_to_string(dir.join(".gitignore")).unwrap(), "aqx.toml\n");
         assert_eq!(std::fs::read_to_string(dir.join("aqx.schema.json")).unwrap(), crate::config::schema());
     }
 
     #[test]
     fn rerunning_updates_what_aqx_owns_and_keeps_the_users_files() {
         let dir = fresh("rerun");
-        let no_global = dir.join("no-global.toml");
-        init(&dir, &no_global, || Ok(Some(Account { user: "Hero".into(), password: "x".into() }))).unwrap();
+        init(&dir, || Ok(Some(Account { user: "Hero".into(), password: "x".into() }))).unwrap();
         for name in ["aqx.d.ts", "aqx.schema.json"] {
             std::fs::write(dir.join(name), "old").unwrap();
         }
-        for name in ["farm.ts", "aqx.toml", "tsconfig.json"] {
+        for name in ["farm.ts", "tsconfig.json", ".gitignore", "aqx.toml"] {
             std::fs::write(dir.join(name), "mine").unwrap();
         }
-        init(&dir, &no_global, not_asked).unwrap();
+        init(&dir, not_asked).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("aqx.d.ts")).unwrap(), TYPES);
         assert_eq!(std::fs::read_to_string(dir.join("aqx.schema.json")).unwrap(), crate::config::schema());
-        for name in ["farm.ts", "aqx.toml", "tsconfig.json"] {
+        for name in ["farm.ts", "tsconfig.json", ".gitignore", "aqx.toml"] {
             assert_eq!(std::fs::read_to_string(dir.join(name)).unwrap(), "mine", "{name}");
         }
     }
 
     #[test]
-    fn a_global_config_is_never_overridden() {
-        let dir = fresh("global");
-        let global = dir.join("global.toml");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(&global, "").unwrap();
-        init(&dir, &global, not_asked).unwrap();
-        assert!(!dir.join("aqx.toml").exists());
-        assert!(dir.join("farm.ts").exists());
-    }
-
-    #[test]
     fn declining_writes_no_config() {
         let dir = fresh("declined");
-        init(&dir, &dir.join("no-global.toml"), || Ok(None)).unwrap();
+        init(&dir, || Ok(None)).unwrap();
+        assert!(dir.join("farm.ts").is_file());
         assert!(!dir.join("aqx.toml").exists());
         assert!(!dir.join("aqx.schema.json").exists());
     }

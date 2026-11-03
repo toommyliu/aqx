@@ -25,6 +25,7 @@ use crate::socket;
 
 const WIDE: u16 = 90;
 const NOTE_FOR: Duration = Duration::from_secs(4);
+const RECENT_KEPT: usize = 100;
 const ACCENT: Color = Color::Blue;
 const CARD_WIDTH: u16 = 44;
 const CARD_HEIGHT: u16 = 8;
@@ -83,6 +84,7 @@ pub struct Fleet {
     pub title: String,
     pub cells: Arc<Cells>,
     pub socket: PathBuf,
+    pub home: PathBuf,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -240,14 +242,14 @@ struct Prompt {
 }
 
 impl Prompt {
-    fn new() -> Self {
+    fn new(home: &Path) -> Self {
         let mut prompt = Prompt { input: TextInput::default(), draft: TextInput::default(), pick: None, matches: Vec::new() };
-        prompt.find_matches();
+        prompt.find_matches(home);
         prompt
     }
 
-    fn find_matches(&mut self) {
-        self.matches = scripts_matching(self.input.value());
+    fn find_matches(&mut self, home: &Path) {
+        self.matches = scripts_matching(self.input.value(), home);
     }
 
     fn recall(&mut self, recent: &[Recent], older: bool) {
@@ -380,6 +382,7 @@ struct App {
     remembered: HashMap<Slot, String>,
     ending: bool,
     recent: Vec<Recent>,
+    history: Option<PathBuf>,
     note: Option<(String, Instant)>,
     log: Log,
     log_of: Option<usize>,
@@ -400,7 +403,8 @@ pub fn run(fleet: &Fleet, redact: bool, done: impl Fn() -> bool) -> Result<(), S
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         restore(info);
     }));
-    let mut app = App { redact, ..App::default() };
+    let app = crate::config::user_state().map_or_else(App::default, |dir| App::remembering(dir.join("history"), &fleet.home));
+    let mut app = App { redact, ..app };
     let started = Instant::now();
     loop {
         app.frame = (started.elapsed().as_millis() / FRAME.as_millis()) as usize;
@@ -461,10 +465,9 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
     if snapshot(&shown, app.selected).and_then(|s| s.game.as_ref()).is_none() {
         app.list = None;
     }
-    for typed in shown.iter().filter_map(|s| s.snapshot.as_ref()?.script.clone()) {
-        let script = PathBuf::from(&typed);
+    for script in shown.iter().filter_map(|s| s.snapshot.as_ref()?.script.as_ref()).map(PathBuf::from) {
         if !app.recent.iter().any(|r| r.script == script) {
-            app.recent.insert(0, Recent { typed, script });
+            app.recent.insert(0, Recent { typed: shown_path(&fleet.home, &script), script });
         }
     }
     shown
@@ -555,6 +558,31 @@ impl Status {
 }
 
 impl App {
+    fn remembering(history: PathBuf, home: &Path) -> App {
+        let text = std::fs::read_to_string(&history).unwrap_or_default();
+        let mut recent: Vec<Recent> = Vec::new();
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            let (script, args) = split_script(line);
+            let script = expand_home(Path::new(script));
+            let typed = format!("{}{args}", shown_path(home, &script));
+            recent.retain(|r| r.typed != typed);
+            recent.push(Recent { typed, script });
+        }
+        recent.drain(..recent.len().saturating_sub(RECENT_KEPT));
+        App { recent, history: Some(history), ..App::default() }
+    }
+
+    fn save_recent(&self, typed: &str, script: &Path) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let Some(history) = &self.history else { return Ok(()) };
+        if let Some(dir) = history.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(history)?;
+        file.write_all(format!("{}{}\n", script.display(), split_script(typed).1).as_bytes())
+    }
+
     fn targets(&self) -> Vec<usize> {
         if self.marked.is_empty() { vec![self.selected] } else { self.marked.iter().copied().collect() }
     }
@@ -763,7 +791,7 @@ impl App {
                 }
             }
             if let Some(prompt) = &mut self.prompt {
-                prompt.find_matches();
+                prompt.find_matches(&fleet.home);
             }
             return false;
         }
@@ -886,7 +914,7 @@ impl App {
             KeyCode::Char('B') => self.rail_hidden = !self.rail_hidden,
             KeyCode::Char('[') => self.resize_list(|w| w.saturating_sub(LIST_STEP)),
             KeyCode::Char(']') => self.resize_list(|w| w + LIST_STEP),
-            KeyCode::Char('o') => self.prompt = Some(Prompt::new()),
+            KeyCode::Char('o') => self.prompt = Some(Prompt::new(&fleet.home)),
             KeyCode::Char('s') => self.act(fleet, Command::Stop, "stopping the script"),
             KeyCode::Char('r') => self.act(fleet, Command::Restart, "restarting the script"),
             KeyCode::Char('i') => self.act(fleet, Command::Login, "logging in"),
@@ -903,15 +931,16 @@ impl App {
         if input.is_empty() {
             return;
         }
-        let mut words = input.split_whitespace();
-        let path = match script_path(words.next().unwrap_or_default().as_ref()) {
+        let (word, rest) = split_script(&input);
+        let path = match script_path(&fleet.home.join(expand_home(Path::new(word)))) {
             Ok(path) => path,
             Err(e) => return self.say(e),
         };
-        let args = match typed_args(words) {
+        let args = match typed_args(rest.split_whitespace()) {
             Ok(args) => args,
             Err(e) => return self.say(e),
         };
+        let input = format!("{}{rest}", shown_path(&fleet.home, &path));
         let asked: Vec<Arg> = aqx_script::script_args(&path).into_iter().filter(|arg| !args.iter().any(|(given, _)| *given == arg.key)).collect();
         let targets = self.targets();
         if asked.is_empty() {
@@ -926,10 +955,14 @@ impl App {
     }
 
     fn run(&mut self, fleet: &Fleet, typed: String, script: &Path, each: Vec<(usize, Vec<(String, String)>)>) {
+        let saved = self.save_recent(&typed, script);
         self.recent.retain(|r| r.typed != typed);
         self.recent.push(Recent { typed, script: script.to_path_buf() });
         let commands = each.into_iter().map(|(i, args)| (i, Command::Run { script: script.to_path_buf(), args })).collect();
         self.act_on(fleet, commands, &format!("running {}", script.display()));
+        if let (Err(e), Some(history)) = (saved, &self.history) {
+            self.say(format!("couldn't save to {}: {e}", history.display()));
+        }
     }
 }
 
@@ -991,13 +1024,21 @@ fn typed_args<'a>(words: impl Iterator<Item = &'a str>) -> Result<Vec<(String, S
     Ok(args)
 }
 
-fn scripts_matching(input: &str) -> Vec<String> {
+fn shown_path(home: &Path, script: &Path) -> String {
+    script.strip_prefix(home).unwrap_or(script).display().to_string()
+}
+
+fn split_script(typed: &str) -> (&str, &str) {
+    typed.split_at(typed.find(char::is_whitespace).unwrap_or(typed.len()))
+}
+
+fn scripts_matching(input: &str, home: &Path) -> Vec<String> {
     let input = input.trim_start();
     if input.contains(char::is_whitespace) {
         return Vec::new();
     }
     let (dir, prefix) = input.split_at(input.rfind('/').map_or(0, |i| i + 1));
-    let Ok(entries) = std::fs::read_dir(expand_home(std::path::Path::new(if dir.is_empty() { "." } else { dir }))) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(home.join(expand_home(Path::new(dir)))) else { return Vec::new() };
     let mut matches: Vec<String> = entries
         .flatten()
         .filter_map(|entry| {
@@ -2020,7 +2061,7 @@ mod tests {
     fn fleet(accounts: &[&str]) -> (Fleet, Arc<Hub>) {
         let cells: Vec<Arc<AccountCell>> = accounts.iter().map(|name| Arc::new(AccountCell::mirror(name))).collect();
         let hub = Arc::new(Hub::new("aqx", cells.clone(), Print::Quiet));
-        (Fleet { title: "aqx".into(), cells: Arc::new(Cells::new(cells)), socket: PathBuf::new() }, hub)
+        (Fleet { title: "aqx".into(), cells: Arc::new(Cells::new(cells)), socket: PathBuf::new(), home: PathBuf::new() }, hub)
     }
 
     fn publish(hub: &Hub, cell: &AccountCell, world: &World) {
@@ -2270,7 +2311,7 @@ mod tests {
         let hub = Arc::new(Hub::new(&name, vec![cell.clone()], Print::Quiet));
         let (_, listener, _listening) = socket::bind(&name, false).unwrap();
         socket::serve(listener, hub.clone(), None).unwrap();
-        let fleet = Fleet { title: name.clone(), cells: Arc::new(Cells::new(vec![cell.clone()])), socket: socket::pick(Some(&name)).unwrap().1 };
+        let fleet = Fleet { title: name.clone(), cells: Arc::new(Cells::new(vec![cell.clone()])), socket: socket::pick(Some(&name)).unwrap().1, home: PathBuf::new() };
         publish(&hub, &cell, &farm_world());
         stock(&cell, 10);
         let mut app = App { list: Some(Section::Drops), ..App::default() };
@@ -2865,6 +2906,49 @@ mod tests {
     }
 
     #[test]
+    fn the_prompt_finds_scripts_from_the_config_folder_and_the_next_session_recalls_them() {
+        let dir = std::env::temp_dir().join(format!("aqx-tui-history-{}", std::process::id()));
+        let home = dir.join("cfg");
+        std::fs::create_dir_all(home.join("scripts")).unwrap();
+        for name in ["scripts/a.ts", "scripts/b.ts"] {
+            std::fs::write(home.join(name), "").unwrap();
+        }
+        let outside = dir.join("c.ts");
+        std::fs::write(&outside, "").unwrap();
+        let history = dir.join("state/history");
+        let (mut fleet, _hub) = fleet(&["main"]);
+        fleet.home = home.clone();
+        let typed = |app: &mut App, text: &str| text.chars().for_each(|c| press(&fleet, app, KeyCode::Char(c)));
+        let mut first = App::remembering(history.clone(), &home);
+        press(&fleet, &mut first, KeyCode::Char('o'));
+        typed(&mut first, "scripts/a");
+        press(&fleet, &mut first, KeyCode::Tab);
+        typed(&mut first, "rounds=3");
+        press(&fleet, &mut first, KeyCode::Enter);
+        for command in ["scripts/b.ts".to_string(), outside.display().to_string(), "scripts/a.ts rounds=3".to_string()] {
+            press(&fleet, &mut first, KeyCode::Char('o'));
+            typed(&mut first, &command);
+            press(&fleet, &mut first, KeyCode::Enter);
+        }
+        let walk = |home: &Path| {
+            let mut app = App::remembering(history.clone(), home);
+            press(&fleet, &mut app, KeyCode::Char('o'));
+            (0..3)
+                .map(|_| {
+                    press(&fleet, &mut app, KeyCode::Up);
+                    app.prompt.as_ref().unwrap().input.value().to_string()
+                })
+                .collect::<Vec<_>>()
+        };
+        let outside = outside.display().to_string();
+        assert_eq!(walk(&home), ["scripts/a.ts rounds=3", outside.as_str(), "scripts/b.ts"], "newest first, each command once");
+        assert_eq!(walk(&dir)[0], "cfg/scripts/a.ts rounds=3", "another config folder still finds the script");
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&history).unwrap().permissions().mode() & 0o777, 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn running_a_script_asks_each_account_for_the_args_it_was_not_given() {
         let dir = std::env::temp_dir().join(format!("aqx-tui-ask-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2879,7 +2963,7 @@ mod tests {
         let hub = Arc::new(Hub::new(&name, cells.clone(), Print::Quiet));
         let (_, listener, _listening) = socket::bind(&name, false).unwrap();
         socket::serve(listener, hub, None).unwrap();
-        let fleet = Fleet { title: name.clone(), cells: Arc::new(Cells::new(cells.clone())), socket: socket::pick(Some(&name)).unwrap().1 };
+        let fleet = Fleet { title: name.clone(), cells: Arc::new(Cells::new(cells.clone())), socket: socket::pick(Some(&name)).unwrap().1, home: PathBuf::new() };
         let mut app = App::default();
         let typed = |app: &mut App, text: &str| text.chars().for_each(|c| press(&fleet, app, KeyCode::Char(c)));
         let command = format!("{} rounds=3", script.display());
@@ -2990,7 +3074,7 @@ mod tests {
         let hub = Arc::new(Hub::new(&name, cells.clone(), Print::Quiet));
         let (_, listener, _listening) = socket::bind(&name, false).unwrap();
         socket::serve(listener, hub, None).unwrap();
-        let fleet = Fleet { title: name.clone(), cells: Arc::new(Cells::new(cells.clone())), socket: socket::pick(Some(&name)).unwrap().1 };
+        let fleet = Fleet { title: name.clone(), cells: Arc::new(Cells::new(cells.clone())), socket: socket::pick(Some(&name)).unwrap().1, home: PathBuf::new() };
         let mut app = App::default();
         let logouts = || cells.iter().filter(|c| matches!(c.take_command(), Some(Command::Logout))).count();
 
@@ -3121,7 +3205,7 @@ mod tests {
         assert_eq!(input(&app), format!("{root}farm.ts "));
         assert!(!screen(&fleet, &mut app, 100).contains("fight.js"));
 
-        app.prompt = Some(Prompt::new());
+        app.prompt = Some(Prompt::new(&fleet.home));
         typed(&mut app, &format!("{root}q"));
         press(&mut app, KeyCode::Tab);
         assert_eq!(input(&app), format!("{root}quests/"));
@@ -3138,7 +3222,7 @@ mod tests {
         let name = format!("aqx-tui-home-test-{}", std::process::id());
         std::fs::create_dir_all(home.join(&name)).unwrap();
         std::fs::write(home.join(&name).join("farm.ts"), "").unwrap();
-        let matches = scripts_matching(&format!("~/{name}/f"));
+        let matches = scripts_matching(&format!("~/{name}/f"), Path::new(""));
         std::fs::remove_dir_all(home.join(&name)).unwrap();
         assert_eq!(matches, [format!("~/{name}/farm.ts")]);
     }
