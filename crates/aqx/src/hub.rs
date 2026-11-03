@@ -165,6 +165,7 @@ pub struct Game {
     pub dead: bool,
     pub afk: bool,
     pub class: String,
+    pub class_rank: u32,
     pub level: u32,
     pub gold: i64,
     pub skills: Vec<SkillState>,
@@ -447,6 +448,7 @@ fn game(world: &World, touched: &HashMap<String, Instant>, now: Instant) -> Opti
         dead: me.vitals.state == State::Dead,
         afk: me.afk,
         class: me.class.clone(),
+        class_rank: me.class_rank(),
         level: me.level,
         gold: me.gold,
         skills: me

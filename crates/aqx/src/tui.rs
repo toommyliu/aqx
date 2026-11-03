@@ -1557,11 +1557,15 @@ fn summary(s: &Snapshot, g: &Game) -> Vec<Field> {
 }
 
 fn everything(s: &Snapshot, g: &Game, width: usize) -> Vec<Vec<Field>> {
-    let class = if g.class.is_empty() { "no class" } else { &g.class };
+    let class = match g.class.as_str() {
+        "" => vec![Span::raw("no class").dark_gray()],
+        name => vec![Span::raw(format!("{name} ")), Span::raw("rank ").dark_gray(), Span::raw(g.class_rank.to_string())],
+    };
     let mut you = vec![
         hp(g),
         vitals("MP", g.mp, g.max_mp, Color::Blue),
-        vec![Span::raw(format!("Lv {} {class}", g.level))],
+        labeled("Lv", vec![Span::raw(g.level.to_string())]),
+        class,
         vec![Span::raw(short(g.gold)), Span::raw(" gold").dark_gray()],
     ];
     if g.afk {
@@ -1916,6 +1920,7 @@ mod tests {
                 "uoBranch":[{"entID":1001,"uoName":"hero","strFrame":"Enter","strPad":"Spawn","intHP":2000,"intHPMax":4000,"intMP":100,"intMPMax":100,"intState":1},
                             {"entID":1002,"uoName":"ally","intLevel":40,"strFrame":"Enter","strPad":"Left","intHP":900,"intHPMax":1000,"intState":1}]}"#),
             json(r#"{"cmd":"initUserData","uid":1001,"data":{"intLevel":100,"intGold":12300000,"strClassName":"Barber"}}"#),
+            json(r#"{"cmd":"updateClass","uid":1001,"sClassName":"Barber","iCP":22500}"#),
             json(r#"{"cmd":"ct","a":[{"cmd":"aura+","tInf":"p:1001","auras":[{"nam":"Corruption","dur":20,"stk":2}]}]}"#),
         ] {
             reduce(&mut world, &Message::parse(&text).unwrap(), Instant::now());
@@ -2034,7 +2039,7 @@ mod tests {
         let shown = screen(&fleet, &mut app, 110);
         println!("{shown}");
         for expected in [
-            "MP ████████ 100/100  Lv 100 Barber  12.3M gold",
+            "MP ████████ 100/100  Lv 100  Barber rank 5  12.3M gold",
             "Auras Corruption x2",
             "Stats 1 kill  0 drops  0 deaths",
             "d less",
@@ -2042,6 +2047,10 @@ mod tests {
             assert!(shown.contains(expected), "missing {expected:?}");
         }
         assert!(!shown.contains("Here ally"), "players nearby leave the header for their own list: {shown}");
+        let rows = rows(&fleet, &mut app, 110);
+        let you = rows.iter().find(|r| r.iter().map(|c| c.symbol()).collect::<String>().contains("Barber")).unwrap();
+        let dim: String = you.iter().filter(|c| c.fg == Color::DarkGray).map(|c| c.symbol()).collect();
+        assert_eq!(dim, "HP ░░░░MP Lv rank  gold", "labels are dim so the values stand apart");
     }
 
     #[test]
