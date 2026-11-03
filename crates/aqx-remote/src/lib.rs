@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aqx_core::{ActError, Event, Halt, ItemRef, Monster, Need, Outcome, Phase, Quest, QuestStatus, ScriptError, Session, StopHandle, Target, World, views};
-use aqx_protocol::{ItemId, MonMapId, QuestId, ShopId, ShopItemId};
+use aqx_protocol::{ItemId, Message, MonMapId, QuestId, ShopId, ShopItemId};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -239,6 +239,13 @@ fn op(name: &str) -> Option<Op> {
         "quest_value" => I(|s, a| {
             let (slot,): (i32,) = args(a)?;
             Ok(json!(s.world.quest_value(slot)))
+        }),
+        "update_quest" => I(|s, a| {
+            let (value, slot): (u32, u32) = args(a)?;
+            let text = json!({ "t": "xt", "b": { "r": -1, "o": { "cmd": "updateQuest", "iValue": value, "iIndex": slot } } }).to_string();
+            let message = Message::parse(&text).map_err(|e| invalid(format!("{e:?}")))?;
+            aqx_core::reduce(&mut s.world, &message, Instant::now());
+            done()
         }),
         "achievement" => I(|s, a| {
             let (field, index): (String, u32) = args(a)?;

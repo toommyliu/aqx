@@ -913,3 +913,50 @@ fn jumping_in_place_still_sends_and_joining_the_current_map_does_nothing() {
     assert!(!sent.iter().any(|m| m.contains("%tfer%") || m.contains("%r2%")), "{sent:#?}");
     assert!(logged.contains(&"info: last map farm, counter handler False".to_string()), "{logged:#?}");
 }
+
+const UPDATE_QUEST: &str = r#"
+using Skua.Core.Interfaces;
+
+public class Unlock
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Quests.Load(14, 15);
+        bool before = bot.Quests.IsUnlocked(15);
+        bot.Quests.UpdateQuest(14);
+        bot.Log($"unlocked {before} then {bot.Quests.IsUnlocked(15)}, accepted {bot.Quests.EnsureAccept(15)}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn update_quest_moves_the_quest_slot_the_way_skuas_fake_packet_does() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-update-quest");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("Unlock.cs");
+    std::fs::write(&script, UPDATE_QUEST).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%getQuests%") {
+                wire.object(
+                    r#"{"cmd":"getQuests","quests":{
+                    "14":{"QuestID":14,"sName":"First","bOnce":true,"iSlot":5,"iValue":3,"bUpg":false,"iLvl":0,"turnin":[],"oItems":{},"oRewards":{},"reward":[]},
+                    "15":{"QuestID":15,"sName":"Second","bOnce":true,"iSlot":5,"iValue":4,"bUpg":false,"iLvl":0,"turnin":[],"oItems":{},"oRewards":{},"reward":[]}}}"#,
+                );
+            } else if msg.starts_with("%xt%zm%acceptQuest%5%15%") {
+                wire.object(r#"{"cmd":"acceptQuest","bSuccess":1,"QuestID":15,"msg":"success"}"#);
+            }
+        },
+        sink,
+    );
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: unlocked False then True, accepted True".to_string()), "{logged:#?}");
+}

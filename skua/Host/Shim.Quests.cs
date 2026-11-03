@@ -45,8 +45,8 @@ public sealed partial class Shim
         On("IScriptQuest.HasBeenCompleted(Quest)", args => HasBeenCompleted((Quest)args[0]!));
         On("IScriptQuest.IsDailyComplete(Int32)", args => EnsureLoad((int)args[0]!) is { } quest && IsDailyComplete(quest));
         On("IScriptQuest.IsDailyComplete(Quest)", args => IsDailyComplete((Quest)args[0]!));
-        On("IScriptQuest.UpdateQuest(Int32)", args => EnsureLoad((int)args[0]!) is not null);
-        On("IScriptQuest.UpdateQuest(Int32, Int32)", _ => null);
+        On("IScriptQuest.UpdateQuest(Int32)", args => EnsureLoad((int)args[0]!) is { } quest && UpdateQuest(quest.Value, quest.Slot));
+        On("IScriptQuest.UpdateQuest(Int32, Int32)", args => UpdateQuest((int)args[0]!, (int)args[1]!));
         On("IScriptQuest.get_RegisterCompleteInterval()", _ => registerInterval);
         On("IScriptQuest.set_RegisterCompleteInterval(Int32)", args => registerInterval = (int)args[0]!);
         On("IScriptQuest.get_Registered()", _ => Locked(registered, () => registered.Keys.ToList()));
@@ -118,6 +118,13 @@ public sealed partial class Shim
     }
 
     int TurnIns(Quest quest) => quest.Requirements.Select(r => r.Quantity > 0 ? Held(r.ID) / r.Quantity : int.MaxValue).DefaultIfEmpty(1).Min();
+
+    bool UpdateQuest(int value, int slot)
+    {
+        if (slot >= 0 && value >= 0)
+            Aqx.Call("update_quest", value, slot);
+        return true;
+    }
 
     int QuestValue(int slot) => Int(Aqx.Call("quest_value", slot));
 
