@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aqx_core::{ActError, Event, Halt, ItemRef, Need, Outcome, Phase, Quest, QuestStatus, ScriptError, Session, StopHandle, World, views};
+use aqx_core::{ActError, Event, Halt, ItemRef, Monster, Need, Outcome, Phase, Quest, QuestStatus, ScriptError, Session, StopHandle, Target, World, views};
 use aqx_protocol::{ItemId, MonMapId, QuestId, ShopId, ShopItemId};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -256,6 +256,11 @@ fn op(name: &str) -> Option<Op> {
         "respawn" => I(|s, a| {
             let (cell, pad): (Option<String>, Option<String>) = args(a)?;
             s.respawn_to = cell.zip(pad);
+            done()
+        }),
+        "aggro" => I(|s, a| {
+            let (on,): (bool,) = args(a)?;
+            s.set_aggro(on.then(|| Box::new(|_: &World, _: &Monster| true) as Target));
             done()
         }),
         "target" => I(|s, a| {

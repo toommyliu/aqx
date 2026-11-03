@@ -176,7 +176,13 @@ public sealed partial class Shim
             if (property.GetMethod is { } get)
                 On(Key(type, get), _ => settings.GetValueOrDefault(name, fallback));
             if (property.SetMethod is { } set)
-                On(Key(type, set), args => settings[name] = args[0]);
+                On(Key(type, set), args =>
+                {
+                    settings[name] = args[0];
+                    if (name == "IScriptOption.AggroMonsters")
+                        Aqx.Call("aggro", args[0]);
+                    return null;
+                });
         }
     }
 

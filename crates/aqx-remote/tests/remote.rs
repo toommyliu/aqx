@@ -190,3 +190,19 @@ fn abandoning_a_quest_drops_it_from_the_active_list_without_a_packet() {
     let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
     assert!(!sent.iter().any(|m| m.contains("%11%")), "{sent:#?}");
 }
+
+#[test]
+fn aggro_pulls_the_monsters_in_the_cell_until_it_is_turned_off() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    let result = remote(&mut fake, |host| {
+        host.call(1, "jump", json!(["r2", "Left"]));
+        host.call(2, "aggro", json!([true]));
+        thread::sleep(Duration::from_millis(300));
+        host.call(3, "aggro", json!([false]));
+        host.finish();
+    });
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}");
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+    let pulls: Vec<&String> = sent.iter().filter(|m| m.contains("%aggroMon%")).collect();
+    assert!(pulls.iter().any(|m| *m == "%xt%zm%aggroMon%5%2%"), "{sent:#?}");
+}
