@@ -1341,3 +1341,42 @@ fn an_aura_reports_the_time_it_has_left() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.contains(&"info: seal x2 with about 10 s left".to_string()), "{logged:#?}");
 }
+
+const JUMP_WAIT: &str = r#"
+//cs_include Scripts/CoreBots.cs
+using Skua.Core.Interfaces;
+
+public class JumpAway
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Core.SetOptions();
+        Bot.Wait.ForTrue(() => Bot.Map.Cells.Contains("Blank"), 50);
+        Bot.Map.Jump("r2", "Left");
+        Core.JumpWait();
+        Core.Logger($"cells {string.Join(",", Bot.Map.Cells)}, waited in {Bot.Player.Cell}");
+        Core.SetOptions(false);
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn jump_wait_leaves_the_monster_cell_for_one_the_map_file_names() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-jump-wait");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("JumpAway.cs");
+    std::fs::write(&script, JUMP_WAIT).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, |_, _| {}, sink);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.iter().any(|l| l.ends_with("cells Enter,r1,r2,Side1,Blank, waited in Side1")), "{logged:#?}");
+}

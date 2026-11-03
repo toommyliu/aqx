@@ -87,6 +87,8 @@ public sealed partial class Shim
 
     List<string> Cells()
     {
+        if (View("map")?["cells"] is JsonArray { Count: > 0 } loaded)
+            return loaded.Select(c => (string?)c ?? "").ToList();
         List<string> cells = ["Enter"];
         cells.AddRange(MapMonsters().Select(m => m.Cell));
         if ((string?)Me["cell"] is { Length: > 0 } mine)
