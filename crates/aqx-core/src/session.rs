@@ -170,6 +170,7 @@ pub struct Session {
     aggro: Option<Aggro>,
     alarm: Option<Instant>,
     packets: HashSet<String>,
+    all_packets: bool,
     pub world: World,
     pub phase: Phase,
 }
@@ -210,6 +211,7 @@ impl Session {
             aggro: None,
             alarm: None,
             packets: HashSet::new(),
+            all_packets: false,
             world: World::default(),
             phase: Phase::Connecting,
         }
@@ -390,6 +392,7 @@ impl Session {
             self.aggro = None;
             self.alarm = None;
             self.packets.clear();
+            self.all_packets = false;
         }
         self.script_events = hook.as_ref().map(|_| VecDeque::new());
         self.hook = hook;
@@ -467,6 +470,10 @@ impl Session {
         } else {
             self.packets.remove(cmd);
         }
+    }
+
+    pub fn listen_all(&mut self, on: bool) {
+        self.all_packets = on;
     }
 
     pub(crate) fn idle_until(&mut self, at: Instant) -> Result<(), Halt> {
@@ -652,13 +659,13 @@ impl Session {
             self.queue(event.clone());
             self.react(&event);
         }
-        if !self.packets.is_empty() && self.script_events.is_some() {
+        if (self.all_packets || !self.packets.is_empty()) && self.script_events.is_some() {
             let cmd = match &msg {
                 Message::Json(json) => json.cmd,
                 Message::Xt(xt) => xt.cmd,
                 Message::Xml(xml) => xml.action.unwrap_or_default(),
             };
-            if self.packets.contains(cmd) {
+            if self.all_packets || self.packets.contains(cmd) {
                 self.queue(Event::Packet { text: text.into() });
             }
         }
