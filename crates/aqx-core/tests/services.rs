@@ -272,3 +272,31 @@ fn a_player_who_enters_after_us_is_asked_for_their_level() {
     let level = fake.session.world.area.as_ref().and_then(|a| a.players.iter().find(|p| p.name == "newbie")).map(|p| p.level);
     assert_eq!(level, Some(42));
 }
+
+const TOWN: &str = r#"{"cmd":"moveToArea","areaId":6,"areaName":"town-2","strMapName":"town","mondef":[],"monmap":[],"monBranch":[],
+    "uoBranch":[{"entID":1001,"uoName":"hero","strFrame":"Enter","strPad":"Spawn","intHP":3000,"intHPMax":3000,"intMP":100,"intMPMax":100,"intState":1},
+                {"entID":1002,"uoName":"ally","strFrame":"Enter","strPad":"Spawn","intHP":900,"intHPMax":1000,"intState":1}]}"#;
+
+#[test]
+fn going_to_a_player_waits_out_combat_since_the_server_ignores_it_during_and_just_after_a_fight() {
+    let mut calm_since: Option<Instant> = None;
+    let mut fake = Fake::start(FARM, move |msg, wire| {
+        if msg.contains("%gar%") {
+            calm_since = None;
+            wire.object(r#"{"cmd":"ct","p":{"hero":{"intState":2}},"m":{"2":{"intHP":800,"intState":2}}}"#);
+        } else if msg.contains("%moveToCell%") {
+            calm_since = Some(Instant::now());
+            wire.object(r#"{"cmd":"uotls","unm":"hero","o":{"intState":1}}"#);
+        } else if msg.contains("%goto%ally%") && calm_since.is_some_and(|at| at.elapsed() >= Duration::from_millis(1200)) {
+            wire.send("<msg t='sys'><body action='joinOK' r='6'><uLs r='6'><u i='1001'><n><![CDATA[hero]]></n></u></uLs></body></msg>");
+            wire.object(TOWN);
+            wire.send("%xt%server%-1%You joined \"town-2\"%");
+        }
+    });
+    fake.session.jump("r2", "Left").unwrap();
+    fake.session.use_skill(0, None).unwrap();
+    pump_for(&mut fake, Duration::from_millis(200));
+    assert_eq!(fake.session.world.me.as_ref().unwrap().vitals.state, State::Combat);
+    fake.session.goto("ally").unwrap();
+    assert_eq!(fake.session.world.area.as_ref().map(|a| a.name.as_str()), Some("town-2"));
+}
