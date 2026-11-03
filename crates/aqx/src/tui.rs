@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -269,6 +269,8 @@ struct Recent {
     script: PathBuf,
 }
 
+type Slot = (PathBuf, String, Option<usize>);
+
 struct Ask {
     typed: String,
     script: PathBuf,
@@ -277,6 +279,7 @@ struct Ask {
     accounts: Vec<(usize, String)>,
     answers: Vec<String>,
     input: String,
+    recalled: bool,
 }
 
 impl Ask {
@@ -288,10 +291,28 @@ impl Ask {
         self.accounts.len() > 1 && !shared
     }
 
-    fn asking(&self, shared: bool) -> (&Arg, Option<&str>) {
+    fn asking(&self, shared: bool) -> (&Arg, Option<&(usize, String)>) {
         let n = self.answers.len();
-        let account = self.per_account(shared).then(|| self.accounts[n / self.asked.len()].1.as_str());
+        let account = self.per_account(shared).then(|| &self.accounts[n / self.asked.len()]);
         (&self.asked[n % self.asked.len()], account)
+    }
+
+    fn slot(&self, shared: bool) -> Slot {
+        let (arg, account) = self.asking(shared);
+        (self.script.clone(), arg.key.clone(), account.map(|&(i, _)| i))
+    }
+
+    fn recall(&mut self, remembered: &HashMap<Slot, String>, shared: bool) {
+        let (script, key, account) = self.slot(shared);
+        let value = account.and_then(|i| remembered.get(&(script.clone(), key.clone(), Some(i)))).or_else(|| remembered.get(&(script, key, None)));
+        self.input = value.cloned().unwrap_or_default();
+        self.recalled = !self.input.is_empty();
+    }
+
+    fn edit(&mut self) {
+        if std::mem::take(&mut self.recalled) {
+            self.input.clear();
+        }
     }
 
     fn answered(&self, round: &[String]) -> impl Iterator<Item = (String, String)> {
@@ -350,6 +371,7 @@ struct App {
     querying: bool,
     ask: Option<Ask>,
     share_args: bool,
+    remembered: HashMap<Slot, String>,
     ending: bool,
     recent: Vec<Recent>,
     note: Option<(String, Instant)>,
@@ -768,23 +790,31 @@ impl App {
         if let Some(ask) = &mut self.ask {
             match key.code {
                 KeyCode::Esc => self.ask = None,
-                KeyCode::Tab if ask.can_share() => self.share_args = !self.share_args,
+                KeyCode::Tab if ask.can_share() => {
+                    self.share_args = !self.share_args;
+                    if ask.recalled || ask.input.is_empty() {
+                        ask.recall(&self.remembered, self.share_args);
+                    }
+                }
                 KeyCode::Enter if !ask.input.trim().is_empty() || ask.asking(self.share_args).0.default.is_some() => {
                     let value = std::mem::take(&mut ask.input).trim().to_string();
+                    self.remembered.insert(ask.slot(self.share_args), value.clone());
                     ask.answers.push(value);
                     if ask.left(self.share_args) == 0 {
                         let ask = self.ask.take().expect("an ask is open");
-                        let mut typed = ask.typed.clone();
-                        if !ask.per_account(self.share_args) {
-                            typed.extend(ask.answered(&ask.answers).map(|(key, value)| format!(" {key}={value}")));
-                        }
-                        self.run(fleet, typed, &ask.script, ask.args(self.share_args));
+                        self.run(fleet, ask.typed.clone(), &ask.script, ask.args(self.share_args));
+                    } else {
+                        ask.recall(&self.remembered, self.share_args);
                     }
                 }
+                KeyCode::Backspace if ask.recalled => ask.edit(),
                 KeyCode::Backspace => {
                     ask.input.pop();
                 }
-                KeyCode::Char(c) => ask.input.push(c),
+                KeyCode::Char(c) => {
+                    ask.edit();
+                    ask.input.push(c);
+                }
                 _ => {}
             }
             return false;
@@ -890,7 +920,9 @@ impl App {
         }
         let cells = fleet.cells.all();
         let accounts = targets.into_iter().filter_map(|i| Some((i, self.mask.hide(&cells.get(i)?.name)))).collect();
-        self.ask = Some(Ask { typed: input, script: path, given: args, asked, accounts, answers: Vec::new(), input: String::new() });
+        let mut ask = Ask { typed: input, script: path, given: args, asked, accounts, answers: Vec::new(), input: String::new(), recalled: false };
+        ask.recall(&self.remembered, self.share_args);
+        self.ask = Some(ask);
     }
 
     fn run(&mut self, fleet: &Fleet, typed: String, script: &Path, each: Vec<(usize, Vec<(String, String)>)>) {
@@ -1115,7 +1147,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     if let Some(ask) = &app.ask {
         let script = ask.script.file_name().map_or_else(|| ask.script.display().to_string(), |name| name.to_string_lossy().into_owned());
         let (arg, account) = ask.asking(app.share_args);
-        let account = account.map(|a| format!(" for {a}")).unwrap_or_default();
+        let account = account.map(|(_, a)| format!(" for {a}")).unwrap_or_default();
         let label = match arg.default {
             None => format!(" {script} needs {}{account}: ", arg.key),
             Some(_) => format!(" {script} {}{account}: ", arg.key),
@@ -1126,7 +1158,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         }
         keys.push(("esc", "cancel"));
         let keys = hints(&keys);
-        let mut typed = vec![Span::raw(label).bold(), Span::raw(ask.input.clone()), Span::raw("█")];
+        let input = if ask.recalled { Span::raw(ask.input.clone()).reversed() } else { Span::raw(ask.input.clone()) };
+        let mut typed = vec![Span::raw(label).bold(), input, Span::raw("█")];
         if let Some(default) = arg.default.as_deref().filter(|_| ask.input.is_empty()) {
             typed.push(Span::raw(if default.is_empty() { "optional" } else { default }.to_string()).dark_gray());
         }
@@ -2863,9 +2896,19 @@ mod tests {
             press(&fleet, &mut app, KeyCode::Enter);
         }
         assert_eq!((ran(&cells[0]), ran(&cells[1])), ("rounds=3 target=Bob".into(), "rounds=3 target=Bob".into()));
-        assert_eq!(app.recent.last().map(|r| &r.typed), Some(&format!("{command} target=Bob")));
+        assert_eq!(app.recent.last().map(|r| &r.typed), Some(&command), "answers stay out of the history");
         run(&mut app);
-        assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target: █"), "the choice sticks");
+        assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target: Bob█"), "the choice and the last answer stick");
+        typed(&mut app, "Ann");
+        for _ in 0..3 {
+            press(&fleet, &mut app, KeyCode::Enter);
+        }
+        assert_eq!((ran(&cells[0]), ran(&cells[1])), ("rounds=3 target=Ann".into(), "rounds=3 target=Ann".into()), "typing replaces a recalled answer");
+        run(&mut app);
+        press(&fleet, &mut app, KeyCode::Backspace);
+        assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target: █"), "backspace clears a recalled answer");
+        press(&fleet, &mut app, KeyCode::Tab);
+        assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target for main: Bob Smith█"), "each account recalls its own answer");
         press(&fleet, &mut app, KeyCode::Esc);
 
         let spaced = "target=Bob Smith rounds=3 class=Dark Caster wait=5";
