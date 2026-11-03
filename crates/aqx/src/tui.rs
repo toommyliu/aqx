@@ -58,7 +58,7 @@ const ACCOUNT_KEYS: [(&str, &str); 13] = [
     ("ctrl+c", "end or detach"),
 ];
 
-const SCRIPT_KEYS: [(&str, &str); 15] = [
+const SCRIPT_KEYS: [(&str, &str); 16] = [
     ("", "Scripts"),
     ("o", "run a script"),
     ("s", "stop"),
@@ -68,6 +68,7 @@ const SCRIPT_KEYS: [(&str, &str); 15] = [
     ("g", "dashboard"),
     ("d", "more details"),
     ("b", "hide sidebar"),
+    ("B", "hide side panel"),
     ("[ ]", "resize sidebar"),
     ("l", "filter the log"),
     ("v", "next list"),
@@ -318,6 +319,7 @@ struct App {
     grid: bool,
     keys: bool,
     list_hidden: bool,
+    rail_hidden: bool,
     list_width: Option<u16>,
     list_area: Cell<Option<Rect>>,
     dragging: bool,
@@ -792,6 +794,7 @@ impl App {
             }
             KeyCode::Char('d') => self.details = !self.details,
             KeyCode::Char('b') => self.list_hidden = !self.list_hidden,
+            KeyCode::Char('B') => self.rail_hidden = !self.rail_hidden,
             KeyCode::Char('[') => self.resize_list(|w| w.saturating_sub(LIST_STEP)),
             KeyCode::Char(']') => self.resize_list(|w| w + LIST_STEP),
             KeyCode::Char('o') => self.prompt = Some(Prompt::new()),
@@ -1200,7 +1203,7 @@ fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
     let [top, divider, below] = Layout::vertical([Constraint::Length(head.len() as u16), Constraint::Length(1), Constraint::Min(0)]).areas(area);
     f.render_widget(Paragraph::new(head), top);
     let game = account.snapshot.as_ref().and_then(|s| s.game.as_ref());
-    let rail = game.filter(|_| area.width >= LOG_MIN + RAIL_WIDTH);
+    let rail = game.filter(|_| !app.rail_hidden && area.width >= LOG_MIN + RAIL_WIDTH);
     let [main, side] = Layout::horizontal([Constraint::Min(0), Constraint::Length(if rail.is_some() { RAIL_WIDTH } else { 0 })]).areas(below);
     let mut rule = vec![Span::raw("── ")];
     let tabs = game.filter(|_| rail.is_none());
@@ -2134,6 +2137,21 @@ mod tests {
         let rows = rows_of(&fleet, &mut app, 100, 24);
         let tab: String = rows[6].iter().filter(|c| c.fg == ACCENT).map(|c| c.symbol()).collect();
         assert_eq!(tab, "drops 8", "the open list's tab is highlighted");
+    }
+
+    #[test]
+    fn shift_b_hides_the_side_panel_and_moves_its_counts_to_the_divider() {
+        let (fleet, hub) = fleet(&["main"]);
+        let cell = &fleet.cells.all()[0];
+        publish(&hub, cell, &farm_world());
+        stock(cell, 38);
+        let mut app = App::default();
+        press(&fleet, &mut app, KeyCode::Char('B'));
+        let hidden = screen_of(&fleet, &mut app, 150, 30);
+        assert!(!hidden.contains('┬') && !hidden.contains("│ Players"), "{hidden}");
+        assert!(hidden.contains("── log · main ── players 1 · drops 8 · temp 2 · inventory 38/40"), "{hidden}");
+        press(&fleet, &mut app, KeyCode::Char('B'));
+        assert!(screen_of(&fleet, &mut app, 150, 30).contains("│ Players 1"));
     }
 
     #[test]
