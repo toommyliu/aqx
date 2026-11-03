@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use aqx_core::{Aura, Enhancement, Event, Item, Outcome, ScriptError, Sink};
 use aqx_protocol::{CharItemId, ItemId};
@@ -1782,4 +1783,53 @@ fn core_bots_finds_an_item_kept_in_the_house() {
     let logged = logged.lock().unwrap().clone();
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.iter().any(|l| l.ends_with("owns balloons True, house 1/95, in the bag False")), "{logged:#?}");
+}
+
+const TWO_MAP_ITEMS: &str = r#"
+//cs_include Scripts/CoreBots.cs
+using Skua.Core.Interfaces;
+
+public class TwoMapItems
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Core.GetMapItems(new[] { (55, 1), (56, 1) });
+        Core.Logger($"holding {Bot.TempInv.GetQuantity(900)} and {Bot.TempInv.GetQuantity(901)}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn map_items_wait_the_action_delay_between_pickups_like_skua() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-two-map-items");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("TwoMapItems.cs");
+    std::fs::write(&script, TWO_MAP_ITEMS).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.starts_with("%xt%zm%getMapItem%5%55%") {
+                wire.object(r#"{"cmd":"addItems","items":{"900":{"ItemID":900,"sName":"Mirror Unlocked","iQty":1,"iStk":1,"bTemp":1}}}"#);
+            } else if msg.starts_with("%xt%zm%getMapItem%5%56%") {
+                wire.object(r#"{"cmd":"addItems","items":{"901":{"ItemID":901,"sName":"Mirror Entered","iQty":1,"iStk":1,"bTemp":1}}}"#);
+            }
+        },
+        sink,
+    );
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let pickups: Vec<_> = fake.finish().into_iter().filter(|(_, m)| m.starts_with("%xt%zm%getMapItem%")).map(|(at, _)| at).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.iter().any(|l| l.ends_with("holding 1 and 1")), "{logged:#?}");
+    assert_eq!(pickups.len(), 2, "{pickups:?}");
+    let gap = pickups[1] - pickups[0];
+    assert!(gap >= Duration::from_millis(1800), "getMapItems 1000 ms sleep plus the 800 ms ActionDelay, got {gap:?}");
 }

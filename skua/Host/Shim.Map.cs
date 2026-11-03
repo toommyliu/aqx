@@ -39,7 +39,11 @@ public sealed partial class Shim
         });
         On("IScriptMap.JoinPacket(String, String, String)", args => Join((string)args[0]!, (string?)args[1], (string?)args[2]));
         On("IScriptMap.Jump(String, String, Boolean, Boolean)", args => Jump((string)args[0]!, (string)args[1]!));
-        On("IScriptMap.GetMapItem(Int32)", args => Act("send", $"%xt%zm%getMapItem%{Int(View("map")!["areaId"])}%{args[0]}%"));
+        On("IScriptMap.GetMapItem(Int32)", args =>
+        {
+            Sleep(SettingInt("ActionDelay"));
+            return Act("send", $"%xt%zm%getMapItem%{Int(View("map")!["areaId"])}%{args[0]}%");
+        });
         On("IScriptMap.Reload()", _ => null);
     }
 
