@@ -582,3 +582,27 @@ fn a_monster_in_combat_reads_as_state_2() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.contains(&"info: target Treeant in state 2".to_string()), "{logged:#?}");
 }
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn a_host_stopped_while_starting_exits_quietly() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-stopped-early");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("Hello.cs");
+    std::fs::write(&script, HELLO).unwrap();
+
+    let mut child = host(&script, &home).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut to_host = child.stdin.take().unwrap();
+    let mut from_host = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    from_host.read_line(&mut line).unwrap();
+    assert!(line.contains(r#""call":"listen""#), "{line}");
+    writeln!(to_host, r#"{{"stop":"Stopped"}}"#).unwrap();
+    drop(to_host);
+    let status = child.wait().unwrap();
+    let mut errors = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut errors).unwrap();
+    assert!(status.success() && !errors.contains("Unhandled exception"), "{status}\n{errors}");
+}
