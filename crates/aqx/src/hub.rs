@@ -205,11 +205,12 @@ pub struct Stack {
     pub qty: u32,
     pub max: u32,
     pub equipped: bool,
+    pub rank: Option<u32>,
 }
 
 impl Stack {
     fn of(item: &Item) -> Self {
-        Stack { name: item.name.clone(), qty: item.qty, max: item.max_stack, equipped: item.equipped }
+        Stack { name: item.name.clone(), qty: item.qty, max: item.max_stack, equipped: item.equipped, rank: item.class_rank() }
     }
 }
 
@@ -758,7 +759,7 @@ mod tests {
         let json = |o: &str| format!(r#"{{"t":"xt","b":{{"r":-1,"o":{o}}}}}"#);
         let messages = [
             r#"{"cmd":"loadInventoryBig","items":[{"ItemID":1,"CharItemID":11,"sName":"Bone Dust","iQty":3,"iStk":50},
-                {"ItemID":2,"CharItemID":12,"sName":"Rogue","iQty":1,"iStk":1,"bEquip":1,"sType":"Class"},
+                {"ItemID":2,"CharItemID":12,"sName":"Rogue","iQty":302500,"iStk":1,"bEquip":1,"sType":"Class"},
                 {"ItemID":3,"CharItemID":13,"sName":"Fabric","iQty":5,"iStk":99}],"factions":[]}"#,
             r#"{"cmd":"addItems","items":{"3":{"iQty":1,"iQtyNow":6,"CharItemID":13,"bBank":0}}}"#,
             r#"{"cmd":"dropItem","items":{"7":{"ItemID":7,"sName":"Old Map","iQty":1}}}"#,
@@ -774,7 +775,7 @@ mod tests {
         let names = |stacks: &[Stack]| stacks.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(&game.inventory), ["Fabric", "Bone Dust", "Rogue"], "items nothing touched keep the server's order");
         assert_eq!(names(&game.drops), ["Wolf Pelt", "Old Map"], "the newest drop comes first");
-        assert_eq!((game.inventory[0].qty, game.inventory[0].max, game.inventory[2].equipped), (6, 99, true));
+        assert_eq!((game.inventory[0].qty, game.inventory[0].max, game.inventory[2].equipped, game.inventory[2].rank), (6, 99, true, Some(10)));
         assert_eq!(game.bank, None, "the bank is unknown until it is opened");
         assert_eq!((game.inventory.len(), game.bag_used, game.misc_used, game.misc_slots), (3, 2, 0, 100), "a class takes no bag slot");
     }
