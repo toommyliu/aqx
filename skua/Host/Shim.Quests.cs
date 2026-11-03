@@ -134,7 +134,7 @@ public sealed partial class Shim
             ["iQty"] = (int?)item?["qty"] ?? 0,
             ["iStk"] = (int?)item?["maxStack"] ?? 1,
         };
-        static JObject ById(JsonNode? items) => items is JsonArray list ? new JObject(list.Select(i => new JProperty($"{(int?)i?["item"] ?? 0}", Item(i)))) : [];
+        static JObject ByPosition(JsonNode? items) => items is JsonArray list ? new JObject(list.Select((item, at) => new JProperty($"{at}", Item(item)))) : [];
         JArray turnIn = quest["requirements"] is JsonArray needs ? new(needs.Select(n => new JObject { ["ItemID"] = (int?)n?["item"] ?? 0, ["iQty"] = (int?)n?["qty"] ?? 0 })) : [];
         return new JObject
         {
@@ -155,10 +155,10 @@ public sealed partial class Shim
                 "completable" => "c",
                 _ => null,
             },
-            ["oItems"] = ById(quest["requirements"]),
+            ["oItems"] = ByPosition(quest["requirements"]),
             ["turnin"] = turnIn,
-            ["oReqd"] = ById(quest["held"]),
-            ["oRewards"] = new JObject { ["itemsS"] = ById(quest["rewards"]) },
+            ["oReqd"] = ByPosition(quest["held"]),
+            ["oRewards"] = new JObject { ["itemsS"] = ByPosition(quest["rewards"]) },
         }.ToObject<Quest>()!;
     }
 

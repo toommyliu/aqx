@@ -606,3 +606,46 @@ fn a_host_stopped_while_starting_exits_quietly() {
     child.stderr.take().unwrap().read_to_string(&mut errors).unwrap();
     assert!(status.success() && !errors.contains("Unhandled exception"), "{status}\n{errors}");
 }
+
+const QUEST_REPEATS: &str = r#"
+using Skua.Core.Interfaces;
+
+public class QuestRepeats
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        var quest = bot.Quests.EnsureLoad(12)!;
+        bot.Log($"{quest.Name} rewards {string.Join(", ", quest.Rewards.Select(r => r.Name))}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn a_quest_may_list_the_same_reward_twice() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-quest-repeats");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("QuestRepeats.cs");
+    std::fs::write(&script, QUEST_REPEATS).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%getQuests%") {
+                wire.object(
+                    r#"{"cmd":"getQuests","quests":{"12":{"QuestID":12,"sName":"Twice","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,
+                    "turnin":[],"oItems":{},"oRewards":{"itemsS":{"0":{"ItemID":1027,"sName":"Twilly Twig","iStk":1},"1":{"ItemID":1027,"sName":"Twilly Twig","iStk":1}}},
+                    "reward":[{"ItemID":1027,"iQty":1,"iRate":50,"iType":0},{"ItemID":1027,"iQty":2,"iRate":100,"iType":0}]}}}"#,
+                );
+            }
+        },
+        sink,
+    );
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.iter().any(|l| l.starts_with("info: Twice rewards Twilly Twig")), "{logged:#?}");
+}
