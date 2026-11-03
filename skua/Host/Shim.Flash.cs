@@ -53,6 +53,7 @@ public sealed partial class Shim
         "world.myAvatar.objData.iUpgDays" => JsonConvert.SerializeObject((bool?)Me["member"] == true ? 0 : -1),
         "world.myAvatar.objData.intLevel" => JsonConvert.SerializeObject(Int(Me["level"])),
         "world.myAvatar.objData.intGold" => JsonConvert.SerializeObject(Int(Me["gold"])),
+        "world.myAvatar.objData.intCoins" => JsonConvert.SerializeObject(Int(Me["coins"])),
         "world.myAvatar.objData.iBoostCP" => JsonConvert.SerializeObject(Int(Me["boosts"]?["class"])),
         "world.myAvatar.objData.iBoostXP" => JsonConvert.SerializeObject(Int(Me["boosts"]?["experience"])),
         "world.myAvatar.objData.iBoostG" => JsonConvert.SerializeObject(Int(Me["boosts"]?["gold"])),

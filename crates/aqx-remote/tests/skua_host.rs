@@ -469,6 +469,7 @@ public class ReadStats
             bot.Sleep(20);
         var s = bot.Player.Stats!;
         bot.Log($"{s.Strength} {s.AttackPower} {s.SpellPower} {s.CriticalChance} {s.CriticalMultiplier} {s.Haste}");
+        bot.Log($"coins {bot.Flash.GetGameObject<int>("world.myAvatar.objData.intCoins")}");
         bot.Log($"id {bot.Player.ID}, in r2: {string.Join(", ", bot.Map.CellPlayers!.Select(p => $"{p.Name} {p.EntID}"))}");
         var monsters = Newtonsoft.Json.Linq.JArray.Parse(bot.Flash.Call("availableMonsters")!);
         bot.Log($"monsters in r2: {string.Join(", ", monsters.Select(m => $"{m["strMonName"]} {m["MonMapID"]} {m["intHP"]}"))}");
@@ -490,6 +491,7 @@ fn a_script_reads_the_players_id_cell_and_combat_stats() {
         FARM,
         |msg, wire| {
             if msg.contains("%moveToCell%") {
+                wire.object(r#"{"cmd":"balance","intGold":10,"intCoins":50}"#);
                 wire.object(r#"{"cmd":"stu","sta":{"$STR":7,"$ap":14,"$sp":37,"$tcr":0.08,"$scm":1.66,"$tha":0.03}}"#);
             }
         },
@@ -500,6 +502,7 @@ fn a_script_reads_the_players_id_cell_and_combat_stats() {
     let logged = logged.lock().unwrap().clone();
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.contains(&"info: 7 14 37 0.08 1.66 0.03".to_string()), "{logged:#?}");
+    assert!(logged.contains(&"info: coins 50".to_string()), "{logged:#?}");
     assert!(logged.contains(&"info: id 1001, in r2: hero 1001".to_string()), "{logged:#?}");
     assert!(logged.iter().any(|l| l.starts_with("info: monsters in r2: Treeant 2 ")), "{logged:#?}");
 }
