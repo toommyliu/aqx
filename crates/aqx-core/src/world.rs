@@ -44,6 +44,7 @@ pub struct Shop {
     pub id: ShopId,
     pub name: String,
     pub items: Vec<ShopItem>,
+    pub info: Value,
 }
 
 #[derive(Clone)]
@@ -855,7 +856,7 @@ impl World {
             "loadShop" => {
                 #[derive(Deserialize)]
                 struct Loaded {
-                    shopinfo: ShopInfo,
+                    shopinfo: Value,
                 }
                 #[derive(Deserialize)]
                 struct ShopInfo {
@@ -879,7 +880,8 @@ impl World {
                     #[serde(flatten)]
                     item: ItemData,
                 }
-                let info = json.decode::<Loaded>()?.shopinfo;
+                let raw = json.decode::<Loaded>()?.shopinfo;
+                let info = ShopInfo::deserialize(&raw)?;
                 let items = each::<ShopItemData>(info.items, "shop item", events)
                     .into_iter()
                     .filter_map(|s| {
@@ -893,7 +895,7 @@ impl World {
                     })
                     .collect();
                 self.last_shop = Some(info.id);
-                self.shops.insert(info.id, Arc::new(Shop { id: info.id, name: info.name, items }));
+                self.shops.insert(info.id, Arc::new(Shop { id: info.id, name: info.name, items, info: raw }));
             }
             "buyItem" => {
                 #[derive(Deserialize)]
@@ -1252,6 +1254,10 @@ impl World {
         self.bank_count = items.iter().filter(|i| !i.ac).count() as u32;
         self.bank = Arc::new(items);
         self.bank_loaded = true;
+    }
+
+    pub fn loaded_shop(&self) -> Option<&Shop> {
+        self.last_shop.and_then(|id| self.shops.get(&id)).map(Arc::as_ref)
     }
 
     pub fn bank_full(&self) -> bool {
@@ -1792,6 +1798,7 @@ mod tests {
             ),
         );
         assert_eq!(world.shops[&ShopId(1348)].items.len(), 2);
+        assert_eq!(world.loaded_shop().map(|s| &s.info["items"][1]["sES"]), Some(&serde_json::json!("he")));
         assert_eq!(
             feed(&mut world, &json(r#"{"cmd":"buyItem","bitSuccess":1,"ItemID":102658,"CharItemID":77,"iQty":1,"bBank":0}"#)),
             [Event::ItemChanged { item: "Sword".into(), qty: 1, place: Place::Inventory }]
