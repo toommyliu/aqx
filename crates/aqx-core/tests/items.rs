@@ -156,3 +156,23 @@ fn loading_a_shop_waits_out_combat_since_the_server_ignores_it_during_and_just_a
     fake.session.load_shop(ShopId(1348)).unwrap();
     assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
 }
+
+#[test]
+fn a_house_item_moves_between_the_bank_and_the_house_and_sells_from_it() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%bankToInv%5%70%22%") {
+            wire.object(r#"{"cmd":"bankToInv","ItemID":"70"}"#);
+        } else if msg.contains("%sellItem%5%70%1%22%") {
+            wire.object(r#"{"cmd":"sellItem","CharItemID":22,"iQty":1,"intAmount":25,"bCoins":0}"#);
+        }
+    });
+    let balloons = Item { id: ItemId(70), char_item: Some(CharItemId(22)), name: "Blue Balloons".into(), kind: "Floor Item".into(), qty: 1, max_stack: 1, house: true, ..makai_stack() };
+    fake.session.world.me.as_mut().unwrap().house_slots = 5;
+    fake.session.world.set_bank(vec![balloons]);
+    let item = ItemRef::Name("Blue Balloons".into());
+
+    fake.session.withdraw(&item).unwrap();
+    assert_eq!((fake.session.world.house.len(), fake.session.world.count_of(&item)), (1, 1));
+    fake.session.sell(&item, 1).unwrap();
+    assert!(fake.session.world.house.is_empty());
+}

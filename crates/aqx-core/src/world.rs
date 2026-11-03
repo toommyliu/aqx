@@ -1475,6 +1475,10 @@ impl World {
         }
     }
 
+    pub fn carried(&self) -> impl Iterator<Item = &Item> {
+        self.inventory.iter().chain(&self.house)
+    }
+
     fn stash(&mut self, item: Item) -> (u32, Place) {
         let place = if item.pool() == Pool::House { Place::House } else { Place::Inventory };
         (add_item(self.held_in(place), item), place)
