@@ -114,7 +114,8 @@ declare module "aqx" {
     readonly equipped: boolean;
     readonly ac: boolean;
     readonly member: boolean;
-    readonly enhancement: { readonly id: number; readonly level: number } | null;
+    /** `pattern` is the server's `EnhPatternID`, the enhancement type, such as Lucky or Wizard. */
+    readonly enhancement: { readonly id: number; readonly level: number; readonly pattern: number } | null;
   }
 
   export interface Items {

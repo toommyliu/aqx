@@ -16,6 +16,7 @@ public static class Models
         new JObject
         {
             ["ItemID"] = (int?)item["id"] ?? 0,
+            ["CharItemID"] = (int?)item["charItem"] ?? 0,
             ["sName"] = (string?)item["name"],
             ["iQty"] = (int?)item["qty"] ?? 0,
             ["iStk"] = (int?)item["maxStack"] ?? 1,
@@ -30,6 +31,7 @@ public static class Models
             ["bUpg"] = (bool?)item["member"] ?? false,
             ["bTemp"] = temp,
             ["EnhLvl"] = (int?)item["enhancement"]?["level"] ?? 0,
+            ["EnhPatternID"] = (int?)item["enhancement"]?["pattern"] ?? 0,
         }.ToObject<T>()!;
 
     static readonly (string Skua, string Aqx)[] StatNames =

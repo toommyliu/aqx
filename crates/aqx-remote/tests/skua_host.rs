@@ -6,8 +6,8 @@ use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use aqx_core::{Event, Item, Outcome, ScriptError, Sink};
-use aqx_protocol::ItemId;
+use aqx_core::{Enhancement, Event, Item, Outcome, ScriptError, Sink};
+use aqx_protocol::{CharItemId, ItemId};
 use server::{FARM, Fake, Wire};
 
 const HELLO: &str = r#"
@@ -796,4 +796,85 @@ fn a_script_that_returns_raises_no_script_stopping() {
     let (result, logged, _) = run_stops("finish");
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(!logged.iter().any(|l| l.contains("stopping handler")), "{logged:#?}");
+}
+
+const CHOICE: &str = r#"
+//cs_include Scripts/CoreBots.cs
+using Skua.Core.Interfaces;
+
+public class ChooseReward
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Core.SetOptions();
+        var sword = Bot.Inventory.Items.First(i => i.ID == 7);
+        Core.Logger($"sword {sword.CharItemID} pattern {sword.EnhancementPatternID}");
+        Core.EnsureAccept(13);
+        Core.Logger($"completed {Core.EnsureComplete(13)}");
+        Core.SetOptions(false);
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn core_bots_picks_a_choice_reward_and_reads_an_items_char_id_and_pattern() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-choice");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("ChooseReward.cs");
+    std::fs::write(&script, CHOICE).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%getQuests%") {
+                wire.object(
+                    r#"{"cmd":"getQuests","quests":{"13":{"QuestID":13,"sName":"Pick One","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,
+                    "turnin":[],"oItems":{},"oRewards":{"itemsC":{"0":{"ItemID":1027,"sName":"Twilly Twig","iStk":1},"1":{"ItemID":1028,"sName":"Twilly Leaf","iStk":1}}},
+                    "reward":[{"ItemID":1027,"iQty":1,"iRate":100,"iType":2},{"ItemID":1028,"iQty":1,"iRate":100,"iType":2}]}}}"#,
+                );
+            } else if msg.starts_with("%xt%zm%acceptQuest%5%13%") {
+                wire.object(r#"{"cmd":"acceptQuest","bSuccess":1,"QuestID":13,"msg":"success"}"#);
+            } else if msg.starts_with("%xt%zm%tryQuestComplete%5%13%") {
+                wire.object(r#"{"cmd":"ccqr","bSuccess":1,"QuestID":13,"sName":"Pick One","rewardObj":{"intGold":0}}"#);
+                wire.object(r#"{"cmd":"addItems","items":{"1027":{"ItemID":1027,"sName":"Twilly Twig","iQty":1,"iStk":1,"CharItemID":10}}}"#);
+            }
+        },
+        sink,
+    );
+    fake.session.world.inventory.push(Item {
+        id: ItemId(7),
+        char_item: Some(CharItemId(77)),
+        name: "Sword".into(),
+        qty: 1,
+        max_stack: 1,
+        kind: "Sword".into(),
+        slot: "Weapon".into(),
+        equipped: false,
+        ac: false,
+        member: false,
+        house: false,
+        link: String::new(),
+        file: String::new(),
+        icon: String::new(),
+        meta: String::new(),
+        level: 1,
+        enhancement: Some(Enhancement { id: 3719, level: 22, pattern: 2 }),
+    });
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    if std::env::var_os("AQX_SKUA_LOG").is_some() {
+        eprintln!("{logged:#?}\n{sent:#?}");
+    }
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.iter().any(|l| l.ends_with("sword 77 pattern 2")), "{logged:#?}");
+    assert!(sent.iter().any(|m| m.starts_with("%xt%zm%tryQuestComplete%5%13%1027%")), "{sent:#?}");
+    assert!(logged.iter().any(|l| l.ends_with("completed True")), "{logged:#?}");
 }

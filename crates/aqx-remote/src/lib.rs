@@ -472,6 +472,6 @@ fn quest(world: &World, quest: &Quest) -> Value {
         "rep": quest.reputation.map_or(0, |(_, rep)| rep),
         "requirements": quest.turn_in.iter().map(need).collect::<Vec<_>>(),
         "held": quest.hold.iter().map(need).collect::<Vec<_>>(),
-        "rewards": quest.rewards.iter().map(|r| json!({ "item": r.item, "name": r.name, "qty": r.qty, "maxStack": r.max_stack, "chance": r.chance })).collect::<Vec<_>>(),
+        "rewards": quest.rewards.iter().map(|r| json!({ "item": r.item, "name": r.name, "qty": r.qty, "maxStack": r.max_stack, "chance": r.chance, "kind": views::reward_kind(r.kind) })).collect::<Vec<_>>(),
     })
 }

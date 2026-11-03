@@ -116,7 +116,7 @@ fn item(i: &Item) -> Value {
         "equipped": i.equipped,
         "ac": i.ac,
         "member": i.member,
-        "enhancement": i.enhancement.map(|e| json!({ "id": e.id, "level": e.level })),
+        "enhancement": i.enhancement.map(|e| json!({ "id": e.id, "level": e.level, "pattern": e.pattern })),
     })
 }
 
@@ -159,15 +159,7 @@ pub fn quest(world: &World, quest: &Quest) -> Value {
     let rewards: Vec<Value> = quest
         .rewards
         .iter()
-        .map(|r| {
-            let kind = match r.kind {
-                RewardKind::Fixed => "fixed",
-                RewardKind::Choice => "choice",
-                RewardKind::Roll => "roll",
-                RewardKind::Random => "random",
-            };
-            json!({ "item": r.item, "name": r.name, "qty": r.qty, "kind": kind })
-        })
+        .map(|r| json!({ "item": r.item, "name": r.name, "qty": r.qty, "kind": reward_kind(r.kind) }))
         .collect();
     json!({
         "id": quest.id,
@@ -176,6 +168,15 @@ pub fn quest(world: &World, quest: &Quest) -> Value {
         "requirements": quest.turn_in.iter().map(|n| json!({ "item": n.item, "name": n.name, "qty": n.qty })).collect::<Vec<_>>(),
         "rewards": rewards,
     })
+}
+
+pub fn reward_kind(kind: RewardKind) -> &'static str {
+    match kind {
+        RewardKind::Fixed => "fixed",
+        RewardKind::Choice => "choice",
+        RewardKind::Roll => "roll",
+        RewardKind::Random => "random",
+    }
 }
 
 pub fn shop(shop: &Shop) -> Value {

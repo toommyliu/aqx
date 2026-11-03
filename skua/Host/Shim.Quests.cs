@@ -159,6 +159,11 @@ public sealed partial class Shim
             ["turnin"] = turnIn,
             ["oReqd"] = ByPosition(quest["held"]),
             ["oRewards"] = new JObject { ["itemsS"] = ByPosition(quest["rewards"]) },
+            ["reward"] = quest["rewards"] is JsonArray rewards ? new JArray(rewards.Select(r => new JObject(Item(r))
+            {
+                ["iRate"] = (double?)r?["chance"] ?? 0,
+                ["iType"] = (string?)r?["kind"] switch { "roll" => 1, "choice" => 2, "random" => 3, _ => 0 },
+            })) : new JArray(),
         }.ToObject<Quest>()!;
     }
 
