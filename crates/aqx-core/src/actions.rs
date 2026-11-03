@@ -176,7 +176,7 @@ impl Session {
         let loaded = |s: &Session| missing.iter().all(|id| s.world.quests.contains_key(id));
         for _ in 0..LOAD_TRIES {
             let slowed = self.slowed;
-            self.send_paced(Out::LoadQuests { room, quests: &missing }, Kind::Free)?;
+            self.send_paced(Out::LoadQuests { room, quests: &missing }, Kind::Locked("getQuests"))?;
             self.wait_for(Some(Instant::now() + QUEST_TIMEOUT), "loading quests", |s| loaded(s) || s.slowed != slowed)?;
             if loaded(self) {
                 return Ok(());

@@ -33,6 +33,8 @@ const LOCKS: [(&str, u64); 22] = [
     ("dungeonRejoin", 5000),
 ];
 
+const SERVER_LIMITS: [(&str, u64); 1] = [("getQuests", 1000)];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     ClassSkill,
@@ -54,7 +56,7 @@ pub struct Pacer {
 pub fn kind_for(action: &str) -> Kind {
     match action {
         "gar" => Kind::ClassSkill,
-        _ => LOCKS.iter().find(|(name, _)| *name == action).map_or(Kind::Free, |(name, _)| Kind::Locked(name)),
+        _ => LOCKS.iter().chain(&SERVER_LIMITS).find(|(name, _)| *name == action).map_or(Kind::Free, |(name, _)| Kind::Locked(name)),
     }
 }
 
@@ -69,7 +71,7 @@ impl Pacer {
         let lock = match kind {
             Kind::ClassSkill => gap_since(self.last_class, GCD),
             Kind::Locked(name) => {
-                let ms = LOCKS.iter().find(|(n, _)| *n == name).map_or(0, |(_, ms)| *ms);
+                let ms = LOCKS.iter().chain(&SERVER_LIMITS).find(|(n, _)| *n == name).map_or(0, |(_, ms)| *ms);
                 gap_since(self.last.get(name).copied(), Duration::from_millis(ms))
             }
             Kind::AutoAttack | Kind::Free => now,
@@ -132,6 +134,15 @@ mod tests {
         pacer.sent(Kind::Locked("tfer"), t0);
         assert_eq!(pacer.ready_at(Kind::Locked("tfer"), t0 + ms(1000)), t0 + ms(3000));
         assert_eq!(pacer.ready_at(Kind::Locked("acceptQuest"), t0 + ms(1000)), t0 + ms(1000));
+    }
+
+    #[test]
+    fn quest_loads_wait_out_the_server_limit_even_when_sent_raw() {
+        let t0 = Instant::now();
+        let mut pacer = Pacer::new(t0);
+        let kind = kind_for("getQuests");
+        pacer.sent(kind, t0);
+        assert_eq!(pacer.ready_at(kind, t0 + ms(200)), t0 + ms(1000));
     }
 
     #[test]
