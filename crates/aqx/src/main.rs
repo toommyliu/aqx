@@ -260,7 +260,7 @@ fn open(wanted: &Wanted, redact: bool) -> Result<(), String> {
             }
         }
     };
-    attach(&session, redact)
+    attach(&session, path.parent().unwrap_or(Path::new("")), redact)
 }
 
 fn restart_wanted(info: &serde_json::Value) -> Result<bool, String> {
@@ -478,7 +478,7 @@ fn log_out_all(hub: &Hub) {
     }
 }
 
-fn attach(path: &Path, redact: bool) -> Result<(), String> {
+fn attach(path: &Path, home: &Path, redact: bool) -> Result<(), String> {
     let mut conn = Conn::open(path)?;
     conn.send(&json!({ "op": "subscribe" }))?;
     let hello = conn.recv().ok_or("the aqx process closed the connection")?;
@@ -496,7 +496,7 @@ fn attach(path: &Path, redact: bool) -> Result<(), String> {
             gone.store(true, Ordering::SeqCst);
         });
     }
-    let fleet = tui::Fleet { title: name, cells, socket: path.to_path_buf() };
+    let fleet = tui::Fleet { title: name, cells, socket: path.to_path_buf(), home: home.to_path_buf() };
     tui::run(&fleet, redact, || gone.load(Ordering::SeqCst))?;
     if gone.load(Ordering::SeqCst) {
         let all = fleet.cells.all();

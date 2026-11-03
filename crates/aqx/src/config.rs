@@ -233,6 +233,14 @@ pub fn user_config() -> PathBuf {
         .join("aqx/aqx.toml")
 }
 
+pub fn user_state() -> Option<PathBuf> {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .map(|dir| dir.join("aqx"))
+}
+
 fn warn_if_others_can_read(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = std::fs::metadata(path)
