@@ -69,6 +69,7 @@ declare module "aqx" {
     readonly hp: number;
     readonly maxHp: number;
     readonly alive: boolean;
+    readonly state: State;
     readonly auras: readonly Aura[];
   }
 

@@ -612,3 +612,23 @@ fn the_player_reads_its_entity_id_and_combat_stats() {
     );
     finished(result);
 }
+
+#[test]
+fn a_monster_shows_when_it_is_in_combat() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%moveToCell%") {
+            wire.object(r#"{"cmd":"ct","m":{"2":{"intHP":800,"intState":2}}}"#);
+        }
+    });
+    let result = run_script(
+        &mut fake,
+        "monster-state",
+        r#"
+        import { map, wait } from "aqx";
+        map.jump("r2", "Left");
+        const treeant = () => map.find("treeant")[0];
+        if (!wait.until(() => treeant().state === "combat", 2000)) throw new Error(`state: ${treeant().state}`);
+        "#,
+    );
+    finished(result);
+}
