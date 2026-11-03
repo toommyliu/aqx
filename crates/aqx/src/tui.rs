@@ -1509,7 +1509,11 @@ fn detail(account: &Shown, full: bool, frame: usize, width: usize) -> Vec<Line<'
     }
     if let Some(g) = &s.game {
         lines.push(Line::default());
-        lines.extend(flow(if full { everything(s, g, width) } else { vec![summary(s, g)] }, width));
+        if full {
+            lines.extend(flow(everything(s, g, width), width));
+        } else {
+            lines.push(fit(summary(s, g).join(&Span::raw("  ")), width));
+        }
     }
     lines
 }
@@ -1545,14 +1549,9 @@ fn progress(b: &Bar, width: usize) -> Line<'static> {
 }
 
 fn summary(s: &Snapshot, g: &Game) -> Vec<Field> {
-    let mut fields = vec![hp(g)];
-    if let Some(t) = &g.target {
-        fields.push(labeled("Target", vec![Span::raw(t.name.clone())]));
-    }
-    fields.push(amount(s.kills, "kill"));
-    if let Some(gold) = s.gold_gained {
-        fields.push(gained(gold));
-    }
+    let mut fields = vec![hp(g), amount(s.kills, "kill")];
+    fields.extend(s.gold_gained.map(gained));
+    fields.extend(g.target.as_ref().map(|t| labeled("Target", vec![Span::raw(t.name.clone())])));
     fields
 }
 
@@ -1571,12 +1570,15 @@ fn everything(s: &Snapshot, g: &Game, width: usize) -> Vec<Vec<Field>> {
     if g.afk {
         you.push(vec![Span::raw("away from keyboard").yellow()]);
     }
-    let target = g.target.iter().map(|t| {
-        let mut field = labeled("Target", vec![Span::raw(format!("{} ", t.name))]);
-        field.extend(meter(t.hp, t.max_hp, 8, Color::Red));
-        field.push(Span::raw(format!(" {}/{}", t.hp, t.max_hp)));
-        field
-    });
+    let target = match &g.target {
+        Some(t) => {
+            let mut field = labeled("Target", vec![Span::raw(format!("{} ", t.name))]);
+            field.extend(meter(t.hp, t.max_hp, 8, Color::Red));
+            field.push(Span::raw(format!(" {}/{}", t.hp, t.max_hp)));
+            field
+        }
+        None => vec![Span::raw("no target").dark_gray()],
+    };
     let mut combat = Vec::new();
     if !g.skills.is_empty() {
         combat.push(skills(g));
@@ -1587,7 +1589,7 @@ fn everything(s: &Snapshot, g: &Game, width: usize) -> Vec<Vec<Field>> {
     let mut stats = vec![labeled("Stats", amount(s.kills, "kill")), amount(s.drops, "drop")];
     stats.extend(s.gold_gained.map(gained));
     stats.push(amount(s.deaths, "death"));
-    vec![you, target.collect(), combat, stats]
+    vec![you, vec![target], combat, stats]
 }
 
 fn hp(g: &Game) -> Field {
@@ -1602,7 +1604,7 @@ fn hp(g: &Game) -> Field {
 fn vitals(label: &str, current: u32, max: u32, color: Color) -> Field {
     let mut field = vec![Span::raw(format!("{label} ")).dark_gray()];
     field.extend(meter(current, max, 8, color));
-    field.push(Span::raw(format!(" {current}/{max}")));
+    field.push(Span::raw(format!(" {current:>digits$}/{max}", digits = max.to_string().len())));
     field
 }
 
@@ -2051,6 +2053,39 @@ mod tests {
         let you = rows.iter().find(|r| r.iter().map(|c| c.symbol()).collect::<String>().contains("Barber")).unwrap();
         let dim: String = you.iter().filter(|c| c.fg == Color::DarkGray).map(|c| c.symbol()).collect();
         assert_eq!(dim, "HP ░░░░MP Lv rank  gold", "labels are dim so the values stand apart");
+    }
+
+    #[test]
+    fn the_header_keeps_its_shape_as_the_target_and_hp_change() {
+        let (fleet, hub) = fleet(&["main"]);
+        let cell = &fleet.cells.all()[0];
+        publish(&hub, cell, &farm_world());
+        let set = |target: Option<&str>, hp: u32| {
+            let mut board = cell.board();
+            let g = board.snapshot.as_mut().and_then(|s| s.game.as_mut()).expect("a published game");
+            g.target = target.map(|name| crate::hub::Target { name: name.into(), hp: 540, max_hp: 540 });
+            g.hp = hp;
+        };
+        let layout = |app: &mut App| {
+            let shown = screen(&fleet, app, 60);
+            let divider = shown.lines().position(|l| l.contains("── log")).unwrap_or_else(|| panic!("no divider:\n{shown}"));
+            let kills = row(&shown, " kill").find(" kill").unwrap();
+            (divider, kills, shown)
+        };
+        let mut app = App::default();
+        for details in [false, true] {
+            set(None, 2000);
+            let (divider, kills, before) = layout(&mut app);
+            assert_eq!(details, before.contains("no target"), "{before}");
+            for (target, hp) in [(Some("Ultra Chaos Vordred of the Void"), 2000), (None, 999)] {
+                set(target, hp);
+                let (moved, shifted, after) = layout(&mut app);
+                assert_eq!((moved, shifted), (divider, kills), "before:\n{before}\nafter:\n{after}");
+            }
+            set(Some("Ultra Chaos Vordred of the Void"), 2000);
+            assert!(layout(&mut app).2.contains("Target Ultra Chaos"));
+            press(&fleet, &mut app, KeyCode::Char('d'));
+        }
     }
 
     #[test]
