@@ -8,7 +8,7 @@ use crate::event::Event;
 use crate::pacer::{self, Kind};
 use crate::quests::{QuestStatus, RewardKind};
 use crate::session::{Goal, Halt, LoginError, Phase, Session};
-use crate::world::{Item, ItemRef, Monster, SkillTarget, State, World, items_from};
+use crate::world::{Item, ItemRef, Monster, Pool, SkillTarget, State, World, items_from};
 
 const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 const REST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -368,8 +368,8 @@ impl Session {
         let Some(found) = self.world.bank.iter().find(|i| item.matches(i)).cloned() else {
             return Err(ActError::NotFound(format!("{item} in the bank")));
         };
-        if self.bag_full() {
-            return Err(ActError::Rejected("the inventory is full".into()));
+        if self.world.full_for(&found) {
+            return Err(ActError::Rejected(format!("the {} is full", if found.pool() == Pool::Misc { "misc inventory" } else { "inventory" })));
         }
         let char_item = found.char_item.ok_or_else(|| ActError::NotFound(format!("a character item id for {item}")))?;
         let room = self.room()?;
@@ -395,10 +395,6 @@ impl Session {
         let room = self.room()?;
         self.send_expecting("depositing", Out::Deposit { room, item: found.id, char_item }, Kind::Free)?;
         self.refused_or("depositing", &format!("depositing {item}"), |s| s.world.bank.iter().any(|i| i.id == found.id))
-    }
-
-    fn bag_full(&self) -> bool {
-        self.world.me.as_ref().is_some_and(|m| m.bag_slots > 0 && self.world.inventory.len() as u32 >= m.bag_slots)
     }
 
     pub fn load_shop(&mut self, shop: ShopId) -> Result<(), ActError> {

@@ -35,6 +35,7 @@ fn makai_stack() -> Item {
         equipped: false,
         ac: false,
         member: false,
+        house: false,
         link: String::new(),
         meta: String::new(),
         enhancement: None,
@@ -73,6 +74,30 @@ fn buy_then_equip_and_move_items_through_the_bank() {
     assert_eq!(sent.iter().filter(|m| m.contains("%loadShop%")).count(), 1, "the shop was loaded once");
     assert!(!sent.iter().any(|m| m.contains("%buyItem%5%5%")), "the unaffordable crown was never requested");
     assert_eq!(sent.iter().filter(|m| m.contains("%buyItem%5%102658%")).count(), 1, "the owned sword was bought once");
+}
+
+#[test]
+fn withdrawing_checks_the_inventory_the_item_goes_to() {
+    let mut fake = Fake::start(FARM, shopkeeper);
+    let sword = Item { id: ItemId(102658), name: "Sword".into(), kind: "Sword".into(), qty: 1, max_stack: 1, ..makai_stack() };
+    let dust = |i: u32| Item { id: ItemId(2000 + i), name: format!("Dust {i}"), kind: "Resource".into(), ..makai_stack() };
+    fake.session.world.inventory = std::iter::once(sword).chain((0..5).map(dust)).collect();
+    fake.session.world.me.as_mut().unwrap().bag_slots = 1;
+    fake.session.world.misc_slots = 6;
+    let makai = ItemRef::Name("Defeated Makai".into());
+
+    fake.session.world.set_bank(vec![makai_stack()]);
+    fake.session.withdraw(&makai).unwrap();
+    assert_eq!(fake.session.world.count_of(&makai), 49, "a full bag leaves room for quest items");
+
+    fake.session.world.inventory.retain(|i| i.name != "Defeated Makai");
+    fake.session.world.set_bank(vec![makai_stack()]);
+    fake.session.world.misc_slots = 5;
+    let refused = fake.session.withdraw(&makai);
+    assert!(matches!(&refused, Err(ActError::Rejected(why)) if why == "the misc inventory is full"), "{refused:?}");
+
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+    assert_eq!(sent.iter().filter(|m| m.contains("%bankToInv%")).count(), 1);
 }
 
 const MERGE: &str = r#"{"cmd":"loadShop","shopinfo":{"ShopID":2000,"sName":"Merge Shop","items":[
