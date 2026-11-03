@@ -54,6 +54,7 @@ public sealed partial class Shim
         _ when path.StartsWith("world.lock.") => "{\"TS\":0,\"CD\":0}",
         _ when path.StartsWith("world.invTree.") => InventoryTree(path["world.invTree.".Length..]),
         _ when path == "world.shopinfo" || path.StartsWith("world.shopinfo.") => Walk(ShopInfo(), path["world.shopinfo".Length..])?.ToJsonString(),
+        "world.myAvatar.objData.strEmail" or "world.myAvatar.objData.dCreated" or "world.myAvatar.objData.strGender" => null,
         "ui.mcPopup.currentLabel" => "\"\"",
         "ui.monsterIcon.redX.visible" => "false",
         "world.myAvatar.objData.guild.Name" => "\"\"",
