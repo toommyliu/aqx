@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace Aqx.Skua;
 
@@ -31,7 +32,9 @@ public sealed partial class Shim
         ("callGameFunction", ["world.abandonQuest", int quest]) => JsonConvert.SerializeObject(Aqx.Call("abandon", quest)),
         ("callGameFunction", ["world.maximumQuestTurnIns", int quest]) => JsonConvert.SerializeObject(EnsureLoad(quest) is { } q ? TurnIns(q) : 0),
         ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool _, int times]) => JsonConvert.SerializeObject(Complete(quest, reward, times)),
-        ("callGameFunction", ["loaderInfo.applicationDomain.hasDefinition", "InvCat"]) => "false",
+        ("callGameFunction", ["loaderInfo.applicationDomain.hasDefinition", "InvCat"]) => "true",
+        ("callGameFunction", ["loaderInfo.applicationDomain.getDefinition", "InvCat"]) =>
+            new JObject { ["MISC_SLOTS"] = Int(View("slots")?["misc"]), ["MISC_TYPES"] = new JArray(MiscTypes) }.ToString(Formatting.None),
         ("callGameFunction", ["world.getQuestValue", int slot]) => JsonConvert.SerializeObject(QuestValue(slot)),
         ("callGameFunction", ["world.getAchievement", string field, int index]) => JsonConvert.SerializeObject((bool?)Aqx.Call("achievement", field, index) ?? false),
         ("callGameFunction", ["world.sendLoadShopRequest", int shop]) => JsonConvert.SerializeObject(LoadShop(shop)),
@@ -67,6 +70,8 @@ public sealed partial class Shim
         "world.myAvatar.objData.iBoostRep" => JsonConvert.SerializeObject(Int(Me["boosts"]?["reputation"])),
         "world.myAvatar.objData.strClassName" => JsonConvert.SerializeObject((string?)Me["class"] ?? ""),
         "world.strMapName" or "world.strMapFileName" => JsonConvert.SerializeObject(MapName),
+        "world.myAvatar.items" => Models.ItemArray(View("inventory")).ToString(Formatting.None),
+        "world.bankinfo.items" => Models.ItemArray(View("bank")).ToString(Formatting.None),
         _ => Missing($"Flash game object {path}"),
     };
 
@@ -86,6 +91,8 @@ public sealed partial class Shim
             _ => Missing($"Flash game object world.invTree.{path}"),
         };
     }
+
+    static readonly string[] MiscTypes = ["Item", "Note", "Quest Item", "Resource"];
 
     static readonly Dictionary<string, string> TreeFields = new() { ["sLink"] = "link", ["sFile"] = "file", ["sIcon"] = "icon", ["sES"] = "slot", ["sMeta"] = "meta" };
 

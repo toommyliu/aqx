@@ -1131,3 +1131,61 @@ fn a_pickup_the_server_ignores_does_not_hold_up_the_script() {
     assert!(logged.contains(&"info: pickup returned".to_string()), "{logged:#?}");
     assert!(sent.iter().any(|m| m.starts_with("%xt%zm%getDrop%5%87%")), "{sent:#?}");
 }
+
+const MISC_POOL: &str = r#"
+//cs_include Scripts/CoreBots.cs
+using Skua.Core.Interfaces;
+
+public class MiscPool
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        var dust = Bot.Inventory.Items.First(i => i.ID == 5);
+        var newResource = new Skua.Core.Models.Items.InventoryItem { ID = 6, Name = "Ash", CategoryString = "Resource" };
+        var newSword = new Skua.Core.Models.Items.InventoryItem { ID = 7, Name = "Blade", CategoryString = "Sword" };
+        bot.Log($"misc {Core.InventoryMiscUsedSlots}/{Core.InventoryMiscSlots}, room for more dust {Core.HasSpaceFor(dust)}, a new resource {Core.HasSpaceFor(newResource)}, a sword {Core.HasSpaceFor(newSword)}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn core_bots_sees_a_full_misc_pool_through_inv_cat() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-misc-pool");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("MiscPool.cs");
+    std::fs::write(&script, MISC_POOL).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, |_, _| {}, sink);
+    fake.session.world.misc_slots = 1;
+    fake.session.world.me.as_mut().unwrap().bag_slots = 10;
+    fake.session.world.inventory.push(Item {
+        id: ItemId(5),
+        char_item: Some(CharItemId(15)),
+        name: "Bone Dust".into(),
+        qty: 3,
+        max_stack: 50,
+        kind: "Resource".into(),
+        slot: "None".into(),
+        equipped: false,
+        ac: false,
+        member: false,
+        house: false,
+        link: String::new(),
+        file: String::new(),
+        icon: String::new(),
+        meta: String::new(),
+        level: 0,
+        enhancement: None,
+    });
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: misc 1/1, room for more dust True, a new resource False, a sword True".to_string()), "{logged:#?}");
+}

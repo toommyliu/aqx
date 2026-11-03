@@ -12,8 +12,12 @@ public static class Models
     public static List<T> Items<T>(JsonNode? items, bool temp = false) where T : ItemBase =>
         items is JsonArray list ? list.Select(i => Item<T>(i!, temp)).ToList() : [];
 
-    public static T Item<T>(JsonNode item, bool temp = false) where T : ItemBase =>
-        new JObject
+    public static T Item<T>(JsonNode item, bool temp = false) where T : ItemBase => ItemData(item, temp).ToObject<T>()!;
+
+    public static JArray ItemArray(JsonNode? items) => new(items is JsonArray list ? list.Select(i => ItemData(i!)) : []);
+
+    public static JObject ItemData(JsonNode item, bool temp = false) =>
+        new()
         {
             ["ItemID"] = (int?)item["id"] ?? 0,
             ["CharItemID"] = (int?)item["charItem"] ?? 0,
@@ -32,7 +36,7 @@ public static class Models
             ["bTemp"] = temp,
             ["EnhLvl"] = (int?)item["enhancement"]?["level"] ?? 0,
             ["EnhPatternID"] = (int?)item["enhancement"]?["pattern"] ?? 0,
-        }.ToObject<T>()!;
+        };
 
     static readonly (string Skua, string Aqx)[] StatNames =
     [
