@@ -1223,3 +1223,52 @@ fn rest_packets_and_aggro_all_monsters_send_in_the_background() {
     assert!(sent.iter().any(|m| m.starts_with("%xt%zm%restRequest%")), "{sent:#?}");
     assert!(sent.iter().filter(|m| m.starts_with("%xt%zm%aggroMon%5%1%2%")).count() >= 3, "{sent:#?}");
 }
+
+const FULL_CHECK: &str = r#"
+using Skua.Core.Interfaces;
+
+public class FullCheck
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Log($"can complete {bot.Quests.CanComplete(11)}, counting the bank {bot.Quests.CanCompleteFullCheck(11)}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn the_full_completion_check_counts_the_bank() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-full-check");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("FullCheck.cs");
+    std::fs::write(&script, FULL_CHECK).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, farm_quest_server, sink);
+    fake.session.world.set_bank(vec![Item {
+        id: ItemId(87),
+        char_item: Some(CharItemId(9)),
+        name: "Treeant Branch".into(),
+        qty: 1,
+        max_stack: 10,
+        kind: "Item".into(),
+        slot: "None".into(),
+        equipped: false,
+        ac: false,
+        member: false,
+        house: false,
+        link: String::new(),
+        file: String::new(),
+        icon: String::new(),
+        meta: String::new(),
+        level: 0,
+        enhancement: None,
+    }]);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: can complete False, counting the bank True".to_string()), "{logged:#?}");
+}

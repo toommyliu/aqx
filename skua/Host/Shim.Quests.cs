@@ -40,7 +40,7 @@ public sealed partial class Shim
             int id = (int)args[0]!;
             if (CanComplete(id))
                 return true;
-            return EnsureLoad(id) is { } quest && quest.Requirements.Concat(quest.AcceptRequirements).All(i => Held(i.ID) >= i.Quantity);
+            return EnsureLoad(id) is { } quest && quest.Requirements.Concat(quest.AcceptRequirements).All(i => HeldSomewhere(i.ID, i.Quantity));
         });
         On("IScriptQuest.IsInProgress(Int32)", args => InProgress((int)args[0]!));
         On("IScriptQuest.IsAvailable(Int32)", args => EnsureLoad((int)args[0]!) is { } quest && IsAvailable(quest));
@@ -145,6 +145,10 @@ public sealed partial class Shim
     int QuestValue(int slot) => Int(Aqx.Call("quest_value", slot));
 
     int SettingInt(string name) => settings.GetValueOrDefault($"IScriptOption.{name}") as int? ?? (int)SkuaDefaults[$"IScriptOption.{name}"];
+
+    bool HeldSomewhere(int id, int quantity) =>
+        new[] { InventoryItems().Cast<ItemBase>(), Models.Items<ItemBase>(View("temp")), Models.Items<ItemBase>(View("bank")) }
+            .Any(place => place.Where(i => i.ID == id).Sum(i => i.Quantity) >= quantity);
 
     int Held(int id) => InventoryItems().Concat(Models.Items<ItemBase>(View("temp"))).Where(i => i.ID == id).Sum(i => i.Quantity);
 
