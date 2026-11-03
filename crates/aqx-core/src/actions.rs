@@ -111,6 +111,7 @@ impl Session {
         if here(self) && (same_room || !map.contains('-')) {
             return Ok(());
         }
+        self.exit_combat()?;
         let user = self.world.me.as_ref().map(|m| m.user.clone()).unwrap_or_default();
         let before = self.joined;
         self.send_paced(Out::Join { user: &user, map }, Kind::Locked("tfer"))?;
@@ -401,6 +402,7 @@ impl Session {
             self.world.last_shop = Some(shop);
             return Ok(());
         }
+        self.exit_combat()?;
         let room = self.room()?;
         self.send_paced(Out::LoadShop { room, shop }, Kind::Locked("loadShop"))?;
         self.wait_for(Some(Instant::now() + REPLY_TIMEOUT), &format!("loading shop {shop}"), |s| s.world.shops.contains_key(&shop))

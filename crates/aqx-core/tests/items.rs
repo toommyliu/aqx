@@ -102,3 +102,25 @@ fn buying_picks_the_listing_and_reloading_a_cached_shop_makes_it_the_loaded_one(
     assert_eq!(sent.iter().filter(|m| m.contains("%loadShop%5%2000%")).count(), 1, "the cached shop was not requested again");
     assert!(sent.iter().any(|m| m.contains("%buyItem%5%102658%2000%2%1%")), "{sent:?}");
 }
+
+#[test]
+fn loading_a_shop_leaves_combat_first_since_the_server_ignores_it_mid_fight() {
+    let mut fighting = false;
+    let mut fake = Fake::start(FARM, move |msg, wire| {
+        if msg.contains("%gar%") {
+            fighting = true;
+            wire.object(r#"{"cmd":"ct","p":{"hero":{"intState":2}},"m":{"2":{"intHP":800,"intState":2}}}"#);
+        } else if msg.contains("%moveToCell%") {
+            fighting = false;
+            wire.object(r#"{"cmd":"uotls","unm":"hero","o":{"intState":1}}"#);
+        } else if msg.contains("%loadShop%5%1348%") && !fighting {
+            wire.object(SHOP);
+        }
+    });
+    fake.session.jump("r2", "Left").unwrap();
+    fake.session.use_skill(0, None).unwrap();
+    let _ = fake.session.pump_until(Some(std::time::Instant::now() + std::time::Duration::from_millis(200)), |_| None::<()>);
+    let started = std::time::Instant::now();
+    fake.session.load_shop(ShopId(1348)).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
+}
