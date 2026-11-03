@@ -125,6 +125,7 @@ name = "aqx-core"
 version = "0.1.0"
 dependencies = [
  "aqx-protocol",
+ "flate2",
  "mio",
  "serde",
  "serde_json",

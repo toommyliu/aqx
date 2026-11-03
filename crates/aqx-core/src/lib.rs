@@ -7,6 +7,7 @@ mod quests;
 mod record;
 mod run;
 mod session;
+mod swf;
 pub mod views;
 mod world;
 

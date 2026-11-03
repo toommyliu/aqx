@@ -3,6 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use aqx_protocol::de::flag;
 use serde::Deserialize;
 
+const MAP_FILE_LIMIT: u64 = 64 * 1024 * 1024;
+
 #[derive(Debug)]
 pub struct Account {
     pub token: String,
@@ -65,6 +67,17 @@ pub fn login(api: &str, user: &str, pass: &str) -> Result<Account, ApiError> {
 fn cache_buster() -> String {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
     format!("0.{nanos:09}")
+}
+
+pub fn map_file(api: &str, file: &str) -> Result<Vec<u8>, ApiError> {
+    let url = format!("{}/game/gamefiles/maps/{}", api.trim_end_matches('/'), file.trim_start_matches('/'));
+    ureq::get(&url)
+        .config()
+        .timeout_global(Some(Duration::from_secs(60)))
+        .build()
+        .call()
+        .and_then(|mut r| r.body_mut().with_config().limit(MAP_FILE_LIMIT).read_to_vec())
+        .map_err(|e| ApiError::Http(format!("map file request failed: {e}")))
 }
 
 pub fn servers(api: &str) -> Result<Vec<Server>, ApiError> {
