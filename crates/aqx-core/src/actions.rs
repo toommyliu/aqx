@@ -113,11 +113,14 @@ impl Session {
         if here(self) && (same_room || !map.contains('-')) {
             return Ok(());
         }
-        self.out_of_combat()?;
         let user = self.world.me.as_ref().map(|m| m.user.clone()).unwrap_or_default();
         let before = self.joined;
-        self.send_paced(Out::Join { user: &user, map }, Kind::Locked("tfer"))?;
-        self.wait_for(Some(Instant::now() + JOIN_TIMEOUT), &format!("joining {map}"), |s| here(s) && s.joined != before)
+        self.send_out_of_combat(
+            &format!("joining {map}"),
+            JOIN_TIMEOUT,
+            |s| s.send_paced(Out::Join { user: &user, map }, Kind::Locked("tfer")),
+            |s| here(s) && s.joined != before,
+        )
     }
 
     pub fn jump(&mut self, cell: &str, pad: &str) -> Result<(), ActError> {
@@ -404,10 +407,13 @@ impl Session {
             self.world.last_shop = Some(shop);
             return Ok(());
         }
-        self.out_of_combat()?;
         let room = self.room()?;
-        self.send_paced(Out::LoadShop { room, shop }, Kind::Locked("loadShop"))?;
-        self.wait_for(Some(Instant::now() + REPLY_TIMEOUT), &format!("loading shop {shop}"), |s| s.world.shops.contains_key(&shop))
+        self.send_out_of_combat(
+            &format!("loading shop {shop}"),
+            REPLY_TIMEOUT,
+            |s| s.send_paced(Out::LoadShop { room, shop }, Kind::Locked("loadShop")),
+            |s| s.world.shops.contains_key(&shop),
+        )
     }
 
     pub fn buy(&mut self, shop: ShopId, item: &ItemRef, listing: Option<ShopItemId>, qty: u32) -> Result<(), ActError> {
@@ -702,6 +708,36 @@ impl Session {
         Err(ActError::Rejected("the player keeps being pulled back into combat".into()))
     }
 
+    fn send_out_of_combat(
+        &mut self,
+        what: &str,
+        timeout: Duration,
+        mut send: impl FnMut(&mut Session) -> Result<(), Halt>,
+        arrived: impl Fn(&Session) -> bool,
+    ) -> Result<(), ActError> {
+        for _ in 0..CALM_TRIES {
+            self.out_of_combat()?;
+            let slowed = self.slowed;
+            send(self)?;
+            let answered = |s: &Session| {
+                if arrived(s) {
+                    Some(true)
+                } else if s.slowed != slowed || s.world.me.as_ref().is_some_and(|m| m.vitals.state == State::Combat) {
+                    Some(false)
+                } else {
+                    None
+                }
+            };
+            match self.pump_until(Some(Instant::now() + timeout), answered) {
+                Ok(true) => return Ok(()),
+                Ok(false) => continue,
+                Err(Halt::Timeout) => return Err(ActError::Timeout(what.into())),
+                Err(halt) => return Err(halt.into()),
+            }
+        }
+        Err(ActError::Rejected(format!("the player keeps being pulled back into combat while {what}")))
+    }
+
     pub fn walk(&mut self, x: i32, y: i32) -> Result<(), ActError> {
         self.ready(None)?;
         let room = self.room()?;
@@ -720,10 +756,13 @@ impl Session {
             area.players.iter().find(|p| p.name.eq_ignore_ascii_case(name)).map(|p| (p.cell.clone(), p.pad.clone()))
         };
         if spot(self).is_none() {
-            self.out_of_combat()?;
             let before = self.joined;
-            self.send_paced(Out::Goto { name }, Kind::Free)?;
-            self.wait_for(Some(Instant::now() + JOIN_TIMEOUT), &format!("going to {name}"), |s| s.joined.is_some() && s.joined != before)?;
+            self.send_out_of_combat(
+                &format!("going to {name}"),
+                JOIN_TIMEOUT,
+                |s| s.send_paced(Out::Goto { name }, Kind::Free),
+                |s| s.joined.is_some() && s.joined != before,
+            )?;
         }
         let Some((cell, pad)) = spot(self) else { return Err(ActError::NotFound(format!("{name} in this map"))) };
         if cell.is_empty() {
