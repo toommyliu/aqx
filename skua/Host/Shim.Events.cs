@@ -29,6 +29,7 @@ public sealed partial class Shim
         }
         Aqx.Event += Forward;
         Aqx.Call("listen", "addItems", true);
+        Aqx.Call("listen", "event", true);
     }
 
     object? Subscribe(string name, Func<Delegate?, Delegate?> change)
@@ -85,8 +86,16 @@ public sealed partial class Shim
                 Dropped(Models.Item<ItemBase>(data), false, 0);
                 break;
             case "packet" when ExtensionPacket((string?)data?["raw"] ?? "") is { } packet:
-                if ((string?)data?["cmd"] == "addItems")
-                    Added(packet["params"]!["dataObj"]!);
+                JToken body = packet["params"]!["dataObj"]!;
+                switch ((string?)data?["cmd"])
+                {
+                    case "addItems":
+                        Added(body);
+                        break;
+                    case "event" when body.SelectToken("args.zoneSet") is JValue { Type: JTokenType.String } zone:
+                        Raise("RunToArea", (string)zone!);
+                        break;
+                }
                 Raise(PacketEvent, packet);
                 break;
             case "counter":

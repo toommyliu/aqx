@@ -361,20 +361,23 @@ public class ReadPackets
             else
                 str ??= $"{data[0]} {data[1]} {data[2]} {data[3]}";
         }
+        string? zone = null;
         bot.Events.ExtensionPacketReceived += Read;
+        bot.Events.RunToArea += z => zone = z;
         bot.Map.Jump("r2", "Left");
-        for (int i = 0; i < 50 && (json is null || str is null); i++)
+        for (int i = 0; i < 50 && (json is null || str is null || zone is null); i++)
             bot.Sleep(20);
         bot.Events.ExtensionPacketReceived -= Read;
         bot.Log($"json: {json}");
         bot.Log($"str: {str}");
+        bot.Log($"zone: {zone}");
     }
 }
 "#;
 
 #[test]
 #[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
-fn a_script_reads_raw_packets_the_way_skua_hands_them_over() {
+fn a_script_reads_raw_packets_and_zone_changes_the_way_skua_hands_them_over() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-packets");
     let home = dir.join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -388,6 +391,7 @@ fn a_script_reads_raw_packets_the_way_skua_hands_them_over() {
             if msg.contains("%moveToCell%") {
                 wire.object(r#"{"cmd":"ct","anims":[{"msg":"Treeant prepares a counter attack!"}]}"#);
                 wire.send("%xt%uotls%-1%hero%afk:true%");
+                wire.object(r#"{"cmd":"event","args":{"zoneSet":"B"}}"#);
             }
         },
         sink,
@@ -398,6 +402,7 @@ fn a_script_reads_raw_packets_the_way_skua_hands_them_over() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.contains(&"info: json: ct Treeant prepares a counter attack!".to_string()), "{logged:#?}");
     assert!(logged.contains(&"info: str: uotls -1 hero afk:true".to_string()), "{logged:#?}");
+    assert!(logged.contains(&"info: zone: B".to_string()), "{logged:#?}");
 }
 
 const KILL_AND_HUNT: &str = r#"
