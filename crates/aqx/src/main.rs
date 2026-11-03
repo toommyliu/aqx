@@ -91,10 +91,10 @@ enum Cmd {
     View(ViewArgs),
     #[command(about = "Print the JSON Schema of aqx.toml, for editor completion and checks")]
     Schema,
-    #[command(about = "Write aqx.d.ts, tsconfig.json, a sample script and, in a terminal, an aqx.toml for one account. Rerun after upgrading aqx to update aqx.d.ts")]
+    #[command(about = "Write aqx.d.ts, tsconfig.json, a .gitignore, a sample script and, in a terminal, an aqx.toml for one account. Rerun after upgrading aqx to update aqx.d.ts")]
     Init {
-        #[arg(default_value = ".", help = "Directory to write into")]
-        dir: PathBuf,
+        #[arg(help = "Directory to write into [default: the folder of the config aqx would use, else $AQX_HOME or ~/aqx]")]
+        dir: Option<PathBuf>,
     },
     #[command(about = "Compile scripts and the files they import, without logging in or running them")]
     Check {
@@ -187,7 +187,10 @@ fn main() -> ExitCode {
             println!("{}", config::schema());
             Ok(())
         }
-        Some(Cmd::Init { dir }) => init::init(&dir, &config::user_config(), init::ask),
+        Some(Cmd::Init { dir }) => {
+            let dir = dir.unwrap_or_else(|| config::found().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(config::home));
+            init::init(&dir, init::ask)
+        }
         Some(Cmd::Check { scripts }) => check(&scripts),
     };
     match result {
