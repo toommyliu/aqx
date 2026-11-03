@@ -1313,7 +1313,7 @@ public class AuraTime
     public void ScriptMain(IScriptInterface bot)
     {
         var seal = bot.Self.GetAura("Righteous Seal");
-        bot.Log($"seal x{seal?.Value} with {(seal?.RemainingTime is >= 8 and <= 10 ? "about 10 s" : $"{seal?.RemainingTime} s")} left");
+        bot.Log($"seal x{seal?.Value} with {(seal?.RemainingTime is > 60 and <= 120 ? "minutes" : $"{seal?.RemainingTime} s")} left");
     }
 }
 "#;
@@ -1332,14 +1332,14 @@ fn an_aura_reports_the_time_it_has_left() {
     fake.session.world.me.as_mut().unwrap().auras.push(Aura {
         name: "Righteous Seal".into(),
         stacks: 2,
-        until: Some(std::time::Instant::now() + std::time::Duration::from_secs(12)),
+        until: Some(std::time::Instant::now() + std::time::Duration::from_secs(120)),
         persist: false,
     });
     let result = aqx_remote::run(&mut fake.session, host(&script, &home));
 
     let logged = logged.lock().unwrap().clone();
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
-    assert!(logged.contains(&"info: seal x2 with about 10 s left".to_string()), "{logged:#?}");
+    assert!(logged.contains(&"info: seal x2 with minutes left".to_string()), "{logged:#?}");
 }
 
 const JUMP_WAIT: &str = r#"
