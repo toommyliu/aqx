@@ -1,7 +1,7 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use aqx_protocol::{Aim, AreaId, ItemId, MonMapId, Out, QuestId, ShopId};
+use aqx_protocol::{Aim, AreaId, ItemId, MonMapId, Out, QuestId, ShopId, ShopItemId};
 
 use crate::api::{self, Server};
 use crate::event::Event;
@@ -400,6 +400,7 @@ impl Session {
     pub fn load_shop(&mut self, shop: ShopId) -> Result<(), ActError> {
         self.ready(None)?;
         if self.world.shops.contains_key(&shop) {
+            self.world.last_shop = Some(shop);
             return Ok(());
         }
         let room = self.room()?;
@@ -407,9 +408,10 @@ impl Session {
         self.wait_for(Some(Instant::now() + REPLY_TIMEOUT), &format!("loading shop {shop}"), |s| s.world.shops.contains_key(&shop))
     }
 
-    pub fn buy(&mut self, shop: ShopId, item: &ItemRef, qty: u32) -> Result<(), ActError> {
+    pub fn buy(&mut self, shop: ShopId, item: &ItemRef, listing: Option<ShopItemId>, qty: u32) -> Result<(), ActError> {
         self.load_shop(shop)?;
-        let Some(listed) = self.world.shops.get(&shop).and_then(|s| s.items.iter().find(|i| item.matches(&i.item))).cloned() else {
+        let listed = self.world.shops.get(&shop).and_then(|s| s.items.iter().find(|i| item.matches(&i.item) && listing.is_none_or(|id| i.id == id)));
+        let Some(listed) = listed.cloned() else {
             return Err(ActError::NotFound(format!("{item} in shop {shop}")));
         };
         let qty = qty.max(1);

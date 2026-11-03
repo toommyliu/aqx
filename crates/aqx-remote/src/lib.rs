@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aqx_core::{ActError, Event, Halt, ItemRef, Need, Outcome, Phase, Quest, QuestStatus, ScriptError, Session, StopHandle, World, views};
-use aqx_protocol::{ItemId, MonMapId, QuestId, ShopId};
+use aqx_protocol::{ItemId, MonMapId, QuestId, ShopId, ShopItemId};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -243,6 +243,7 @@ fn op(name: &str) -> Option<Op> {
             let (id,): (ShopId,) = args(a)?;
             Ok(s.world.shops.get(&id).map_or(Value::Null, |shop| views::shop(shop)))
         }),
+        "shopinfo" => I(|s, _| Ok(s.world.loaded_shop().map_or(Value::Null, |shop| shop.info.clone()))),
         "session" => I(|s, _| {
             let server = s.server();
             Ok(json!({ "phase": phase(&s.phase), "server": server.map_or(Value::Null, views::server), "host": server.map(|s| s.host.as_str()) }))
@@ -355,8 +356,8 @@ fn op(name: &str) -> Option<Op> {
             done()
         }),
         "buy" => B(|s, a| {
-            let (shop, item, qty): (ShopId, Item, u32) = args(a)?;
-            s.buy(shop, &item.into(), qty)?;
+            let (shop, item, listing, qty): (ShopId, Item, Option<ShopItemId>, u32) = args(a)?;
+            s.buy(shop, &item.into(), listing, qty)?;
             done()
         }),
         "sell" => B(|s, a| {

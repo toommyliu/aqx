@@ -270,7 +270,7 @@ fn complete(ctx: Ctx<'_>, id: u32, reward: Option<u32>, times: Option<u32>) -> R
 }
 
 fn buy(ctx: Ctx<'_>, shop: u32, item: Ref, qty: Option<u32>) -> Result<()> {
-    blocking(&ctx, "shop.buy", |s| s.buy(ShopId(shop), &item.0, qty.unwrap_or(1)))
+    blocking(&ctx, "shop.buy", |s| s.buy(ShopId(shop), &item.0, None, qty.unwrap_or(1)))
 }
 
 fn sell(ctx: Ctx<'_>, item: Ref, qty: Option<u32>) -> Result<()> {
