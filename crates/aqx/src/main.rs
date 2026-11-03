@@ -669,6 +669,42 @@ mod tests {
     use crate::fake::{FARM, Servers};
 
     #[test]
+    fn the_readme_lists_every_command_and_flag() {
+        use std::collections::BTreeSet;
+
+        use clap::CommandFactory;
+
+        fn walk(cmd: &clap::Command, path: &str, commands: &mut BTreeSet<String>, flags: &mut BTreeSet<(String, Option<String>)>) {
+            let named = cmd.get_arguments().filter_map(|a| Some((format!("--{}", a.get_long()?), a.get_short().map(|s| format!("-{s}")))));
+            flags.extend(named);
+            for sub in cmd.get_subcommands() {
+                let path = format!("{path} {}", sub.get_name());
+                walk(sub, &path, commands, flags);
+                commands.insert(path);
+            }
+        }
+
+        let readme = include_str!("../../../README.md");
+        let block = readme.split_once("## CLI\n\n```\n").and_then(|(_, rest)| rest.split_once("```")).expect("a CLI block").0;
+        let (mut commands, mut flags) = (BTreeSet::new(), BTreeSet::new());
+        walk(&Cli::command(), "aqx", &mut commands, &mut flags);
+
+        let listed = |command: &String| match command.strip_prefix("aqx ctl ") {
+            Some(action) => block.split(|c: char| !c.is_ascii_alphanumeric()).any(|word| word == action),
+            None => block.contains(&format!("{command} ")) || block.contains(&format!("{command}\n")),
+        };
+        let unlisted: Vec<&String> = commands.iter().filter(|c| !listed(c)).collect();
+        assert!(unlisted.is_empty(), "the README's CLI section leaves out {unlisted:?}");
+
+        let words: BTreeSet<&str> = block.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')).collect();
+        let undocumented: Vec<&String> =
+            flags.iter().filter(|(long, short)| !words.contains(long.as_str()) && short.as_ref().is_none_or(|s| !words.contains(s.as_str()))).map(|f| &f.0).collect();
+        assert!(undocumented.is_empty(), "the README's CLI section leaves out {undocumented:?}");
+        let unknown: Vec<&&str> = words.iter().filter(|w| w.starts_with("--") && !flags.iter().any(|(long, _)| long == *w)).collect();
+        assert!(unknown.is_empty(), "the README's CLI section lists {unknown:?}, which aqx doesn't take");
+    }
+
+    #[test]
     fn a_session_adds_accounts_appended_to_its_config() {
         let servers = Servers::start(FARM, |_, _| {});
         let dir = std::env::temp_dir().join(format!("aqx-main-tests-{}", std::process::id()));

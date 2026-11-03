@@ -4,6 +4,7 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
+rust-version = "1.89"
 publish = false
 
 [workspace.dependencies]
