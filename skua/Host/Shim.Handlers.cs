@@ -5,9 +5,12 @@ namespace Aqx.Skua;
 public sealed partial class Shim
 {
     const int TimerDelay = 20;
+    const int RestEvery = 1200;
+    const int AggroEvery = 250;
 
     readonly List<TimedHandler> timed = [];
     readonly Dictionary<string, long> lastRun = [];
+    readonly Dictionary<string, long> optionSent = [];
     Thread? timer;
     int nextHandler;
 
@@ -20,10 +23,8 @@ public sealed partial class Shim
         {
             TimedHandler handler = new((string?)args[2] ?? Interlocked.Increment(ref nextHandler).ToString(), (int)args[0]!, (Func<IScriptInterface, bool>)args[1]!);
             lock (timed)
-            {
                 timed.Add(handler);
-                timer ??= StartTimer();
-            }
+            EnsureTimer();
             return handler;
         });
         On("IScriptHandlers.Remove(String)", args => Remove(h => h.Name == (string?)args[0]));
@@ -48,6 +49,12 @@ public sealed partial class Shim
             return timed.RemoveAll(h => which(h));
     }
 
+    void EnsureTimer()
+    {
+        lock (timed)
+            timer ??= StartTimer();
+    }
+
     Thread StartTimer()
     {
         Thread thread = new(RunHandlers) { IsBackground = true, Name = "Skua handlers" };
@@ -60,9 +67,9 @@ public sealed partial class Shim
         while (!Aqx.Stopping.IsCancellationRequested)
         {
             Thread.Sleep(TimerDelay);
+            if ((Option("RestPackets") || Option("AggroAllMonsters")) && Playing)
+                KeepOptions();
             List<IHandler> due = Snapshot().Where(h => !lastRun.TryGetValue(h.Name, out long at) || Environment.TickCount64 - at >= h.Ticks * TimerDelay).ToList();
-            if (due.Count == 0 || !Playing)
-                continue;
             foreach (TimedHandler handler in due.Cast<TimedHandler>())
             {
                 lastRun[handler.Name] = Environment.TickCount64;
@@ -80,5 +87,21 @@ public sealed partial class Shim
                     Remove(h => ReferenceEquals(h, handler));
             }
         }
+    }
+
+    void KeepOptions()
+    {
+        if (Option("RestPackets") && State(Me) != 2 && Due("rest", RestEvery))
+            Act("send", "%xt%zm%restRequest%1%%");
+        if (Option("AggroAllMonsters") && Due("aggro", AggroEvery) && MapMonsters() is { Count: > 0 } monsters)
+            Act("send", $"%xt%zm%aggroMon%{Int(View("map")!["areaId"])}%{string.Join('%', monsters.Select(m => m.MapID))}%");
+    }
+
+    bool Due(string what, int every)
+    {
+        if (optionSent.TryGetValue(what, out long at) && Environment.TickCount64 - at < every)
+            return false;
+        optionSent[what] = Environment.TickCount64;
+        return true;
     }
 }

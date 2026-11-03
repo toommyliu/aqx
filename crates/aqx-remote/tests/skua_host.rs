@@ -1189,3 +1189,37 @@ fn core_bots_sees_a_full_misc_pool_through_inv_cat() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.contains(&"info: misc 1/1, room for more dust True, a new resource False, a sword True".to_string()), "{logged:#?}");
 }
+
+const BACKGROUND_OPTIONS: &str = r#"
+using Skua.Core.Interfaces;
+
+public class BackgroundOptions
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Options.RestPackets = true;
+        bot.Options.AggroAllMonsters = true;
+        bot.Sleep(1500);
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn rest_packets_and_aggro_all_monsters_send_in_the_background() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-background-options");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("BackgroundOptions.cs");
+    std::fs::write(&script, BACKGROUND_OPTIONS).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, |_, _| {}, sink);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(sent.iter().any(|m| m.starts_with("%xt%zm%restRequest%")), "{sent:#?}");
+    assert!(sent.iter().filter(|m| m.starts_with("%xt%zm%aggroMon%5%1%2%")).count() >= 3, "{sent:#?}");
+}

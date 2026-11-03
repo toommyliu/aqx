@@ -201,6 +201,8 @@ public sealed partial class Shim
                     settings[name] = args[0];
                     if (name == "IScriptOption.AggroMonsters")
                         Aqx.Call("aggro", args[0]);
+                    if (name is "IScriptOption.RestPackets" or "IScriptOption.AggroAllMonsters" && args[0] is true)
+                        EnsureTimer();
                     return null;
                 });
         }
