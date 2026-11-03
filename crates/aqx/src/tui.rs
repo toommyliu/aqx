@@ -946,8 +946,9 @@ fn spans_width(spans: &[Span]) -> usize {
 }
 
 fn log_lines(app: &App, height: usize, width: usize) -> Vec<Line<'static>> {
+    let tagged = app.filter == Filter::All;
     let lines: Vec<&LogLine> = app.log.iter().filter(|l| app.filter.shows(&l.source)).collect();
-    let sizes: Vec<usize> = lines.iter().map(|l| pieces(l, width).1.len()).collect();
+    let sizes: Vec<usize> = lines.iter().map(|l| pieces(l, width, tagged).1.len()).collect();
     let total: usize = sizes.iter().sum();
     app.max_scroll.set(total.saturating_sub(height));
     let end = total - app.scroll.min(app.max_scroll.get());
@@ -957,7 +958,7 @@ fn log_lines(app: &App, height: usize, width: usize) -> Vec<Line<'static>> {
     for (line, size) in lines.into_iter().zip(sizes) {
         let (first, last) = (at.max(start), (at + size).min(end));
         if first < last {
-            rows.extend(log_rows(line, width).into_iter().skip(first - at).take(last - first));
+            rows.extend(log_rows(line, width, tagged).into_iter().skip(first - at).take(last - first));
         }
         at += size;
         if at >= end {
@@ -967,32 +968,30 @@ fn log_lines(app: &App, height: usize, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
-fn pieces(l: &LogLine, width: usize) -> (String, Vec<&str>) {
-    let prefix = clock(l.t);
-    let room = width.saturating_sub(prefix.len() + 10).max(10);
+fn pieces(l: &LogLine, width: usize, tagged: bool) -> (Vec<Span<'static>>, Vec<&str>) {
+    let mut head = vec![Span::raw(clock(l.t)).dark_gray(), Span::raw("  ")];
+    if tagged {
+        let color = match l.source.as_str() {
+            "server" => Color::Yellow,
+            "script" => Color::Magenta,
+            _ => Color::Cyan,
+        };
+        head.extend([Span::styled(format!("{:<6}", l.source), Style::new().fg(color)), Span::raw("  ")]);
+    }
+    let room = width.saturating_sub(spans_width(&head)).max(10);
     let mut pieces: Vec<&str> = l.text.lines().flat_map(|line| wrap(line, room)).collect();
     if pieces.is_empty() {
         pieces.push("");
     }
-    (prefix, pieces)
+    (head, pieces)
 }
 
-fn log_rows(l: &LogLine, width: usize) -> Vec<Line<'static>> {
-    let color = match l.source.as_str() {
-        "server" => Color::Yellow,
-        "script" => Color::Magenta,
-        _ => Color::Cyan,
-    };
-    let (prefix, pieces) = pieces(l, width);
-    let indent = " ".repeat(prefix.len() + 10);
+fn log_rows(l: &LogLine, width: usize, tagged: bool) -> Vec<Line<'static>> {
+    let (mut head, pieces) = pieces(l, width, tagged);
+    let indent = " ".repeat(spans_width(&head));
     let mut pieces = pieces.into_iter();
-    let mut rows = vec![Line::from(vec![
-        Span::raw(prefix).dark_gray(),
-        Span::raw("  "),
-        Span::styled(format!("{:<6}", l.source), Style::new().fg(color)),
-        Span::raw("  "),
-        Span::raw(pieces.next().unwrap_or_default().to_string()),
-    ])];
+    head.push(Span::raw(pieces.next().unwrap_or_default().to_string()));
+    let mut rows = vec![Line::from(head)];
     rows.extend(pieces.map(|piece| Line::from(vec![Span::raw(indent.clone()), Span::raw(piece.to_string())])));
     rows
 }
@@ -1189,6 +1188,7 @@ mod tests {
         }
         let shown = screen(&fleet, &mut app, 110);
         assert!(shown.contains("── log · server") && shown.contains("Profanity filter On.") && !shown.contains("killed Mosquito"));
+        assert!(!shown.contains("server  Profanity"), "a filtered log leaves out the source column:\n{shown}");
     }
 
     #[test]
@@ -1343,7 +1343,7 @@ mod tests {
     fn a_long_running_session_keeps_every_character_of_a_wrapped_line() {
         let ten_hours = 36_000_000;
         let line = LogLine { seq: 0, t: ten_hours, source: "script".into(), text: format!("error: {}the end", "word ".repeat(30)) };
-        let rows: Vec<Line> = log_rows(&line, 60);
+        let rows: Vec<Line> = log_rows(&line, 60, true);
         let text: Vec<String> = rows.iter().map(Line::to_string).collect();
         assert!(text[0].starts_with("10:00:00.000  script  error: word"), "{text:#?}");
         assert!(text[1..].iter().all(|r| r.starts_with(&" ".repeat(22)) && !r.starts_with(&" ".repeat(23))), "{text:#?}");
@@ -1355,7 +1355,7 @@ mod tests {
     #[test]
     fn wide_characters_wrap_by_display_width() {
         let line = LogLine { seq: 0, t: 0, source: "server".into(), text: "漢".repeat(50) };
-        let rows = log_rows(&line, 60);
+        let rows = log_rows(&line, 60, true);
         assert!(rows.len() > 1 && rows.iter().all(|r| r.width() <= 60));
         assert_eq!(rows.iter().map(|r| r.to_string().matches('漢').count()).sum::<usize>(), 50);
     }
