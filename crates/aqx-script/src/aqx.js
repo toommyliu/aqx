@@ -135,6 +135,7 @@ export const player = live(
     "afk",
     "target",
     "gold",
+    "coins",
     "member",
     "class",
     "stats",

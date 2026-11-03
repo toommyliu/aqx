@@ -592,6 +592,7 @@ fn check_loads_every_import_without_running_the_script() {
 fn the_player_reads_its_entity_id_and_combat_stats() {
     let mut fake = Fake::start(FARM, |msg, wire| {
         if msg.contains("%moveToCell%") {
+            wire.object(r#"{"cmd":"balance","intGold":10,"intCoins":50}"#);
             wire.object(r#"{"cmd":"stu","sta":{"$STR":7,"$ap":14,"$sp":37,"$tcr":0.08,"$scm":1.66,"$tha":0.03}}"#);
         }
     });
@@ -603,6 +604,7 @@ fn the_player_reads_its_entity_id_and_combat_stats() {
         map.jump("r2", "Left");
         if (!wait.until(() => player.stats.critMultiplier > 0, 2000)) throw new Error("no stats arrived");
         if (player.id !== 1001) throw new Error(`id: ${player.id}`);
+        if (player.coins !== 50) throw new Error(`coins: ${player.coins}`);
         const { str, attackPower, spellPower, crit, critMultiplier } = player.stats;
         const seen = [str, attackPower, spellPower, crit, critMultiplier].join();
         if (seen !== "7,14,37,0.08,1.66") throw new Error(`stats: ${seen}`);
