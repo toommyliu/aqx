@@ -631,3 +631,17 @@ fn a_monster_shows_when_it_is_in_combat() {
     );
     finished(result);
 }
+
+#[test]
+fn the_inventory_reports_its_misc_pool_apart_from_the_bag() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    let result = run_script(
+        &mut fake,
+        "misc-pool",
+        r#"
+        import { inventory } from "aqx";
+        if (inventory.misc.slots !== 100 || inventory.misc.used !== 0) throw new Error(`misc ${inventory.misc.slots} ${inventory.misc.used}`);
+        "#,
+    );
+    finished(result);
+}

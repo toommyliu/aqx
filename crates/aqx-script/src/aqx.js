@@ -192,6 +192,14 @@ export const inventory = items(() => view("inventory"), {
   get used() {
     return view("slots").bagUsed;
   },
+  misc: {
+    get slots() {
+      return view("slots").misc;
+    },
+    get used() {
+      return view("slots").miscUsed;
+    },
+  },
   equip: (item) => native.equip(item),
   use: (item) => native.use_item(item),
 });

@@ -137,7 +137,14 @@ pub fn skills(world: &World) -> Value {
 
 pub fn slots(world: &World) -> Value {
     let (bag, bank) = world.me.as_ref().map_or((0, 0), |m| (m.bag_slots, m.bank_slots));
-    json!({ "bag": bag, "bagUsed": world.used(Pool::Bag), "bank": bank, "bankUsed": world.bank_count })
+    json!({
+        "bag": bag,
+        "bagUsed": world.used(Pool::Bag),
+        "misc": world.misc_slots,
+        "miscUsed": world.used(Pool::Misc),
+        "bank": bank,
+        "bankUsed": world.bank_count,
+    })
 }
 
 pub fn quest(world: &World, quest: &Quest) -> Value {

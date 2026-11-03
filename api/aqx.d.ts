@@ -344,6 +344,8 @@ declare module "aqx" {
     readonly temp: Items;
     readonly slots: number;
     readonly used: number;
+    /** Item, Note, Quest Item and Resource stacks, which fill their own pool instead of the bag. */
+    readonly misc: { readonly slots: number; readonly used: number };
     /** Withdraws from the bank first if needed. */
     equip(item: ItemRef): void;
     /** Uses a "ServerUse" item such as a boost. Returns once sent. */
