@@ -117,6 +117,8 @@ public sealed partial class Shim
             && (quest.RequiredFactionId <= 1 || rep >= quest.RequiredFactionRep);
     }
 
+    int TurnIns(Quest quest) => quest.Requirements.Select(r => r.Quantity > 0 ? Held(r.ID) / r.Quantity : int.MaxValue).DefaultIfEmpty(1).Min();
+
     int QuestValue(int slot) => Int(Aqx.Call("quest_value", slot));
 
     int SettingInt(string name) => settings.GetValueOrDefault($"IScriptOption.{name}") as int? ?? (int)SkuaDefaults[$"IScriptOption.{name}"];
@@ -196,7 +198,7 @@ public sealed partial class Shim
                 }
                 if (!CanComplete(id) || FindQuest(id) is not { } quest)
                     continue;
-                int times = quest.Once || !string.IsNullOrEmpty(quest.Field) ? 1 : Math.Max(1, quest.Requirements.Select(r => r.Quantity > 0 ? Held(r.ID) / r.Quantity : int.MaxValue).DefaultIfEmpty(1).Min());
+                int times = quest.Once || !string.IsNullOrEmpty(quest.Field) ? 1 : Math.Max(1, TurnIns(quest));
                 Complete(id, reward, times);
                 lastComplete[id] = Environment.TickCount64;
                 if (settings.GetValueOrDefault("IScriptLite.ReacceptQuest") is not true)
