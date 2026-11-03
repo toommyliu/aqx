@@ -1039,3 +1039,41 @@ fn resting_sends_once_and_waits_for_full_only_briefly() {
     assert!(logged.contains(&"info: rest returned, full rest gave up after 2 s".to_string()), "{logged:#?}");
     assert_eq!(sent.iter().filter(|m| m.starts_with("%xt%zm%restRequest%")).count(), 2, "{sent:#?}");
 }
+
+const LOAD: &str = r#"
+using System.Diagnostics;
+using Skua.Core.Interfaces;
+
+public class LoadQuests
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Stopwatch clock = Stopwatch.StartNew();
+        bot.Quests.Load(11, 404);
+        bot.Log($"load {(clock.ElapsedMilliseconds < 1000 ? "returned" : "blocked")}");
+        bot.Wait.ForTrue(() => bot.Quests.Tree.Exists(q => q.ID == 11), 20);
+        bot.Log($"tree has 11: {bot.Quests.Tree.Exists(q => q.ID == 11)}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn loading_quests_returns_without_waiting_for_ones_the_server_never_sends() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-load");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("LoadQuests.cs");
+    std::fs::write(&script, LOAD).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, farm_quest_server, sink);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: load returned".to_string()), "{logged:#?}");
+    assert!(logged.contains(&"info: tree has 11: True".to_string()), "{logged:#?}");
+    assert!(sent.iter().any(|m| m.starts_with("%xt%zm%getQuests%5%11%404%")), "{sent:#?}");
+}

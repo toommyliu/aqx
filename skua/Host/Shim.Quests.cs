@@ -7,6 +7,7 @@ namespace Aqx.Skua;
 
 public sealed partial class Shim
 {
+    const int QuestsPerLoad = 30;
     readonly Dictionary<int, int> registered = [];
     readonly Dictionary<int, long> lastAccept = [];
     readonly Dictionary<int, long> lastComplete = [];
@@ -18,7 +19,11 @@ public sealed partial class Shim
         On("IScriptQuest.get_Tree()", _ => QuestTree());
         On("IScriptQuest.get_Active()", _ => QuestTree().FindAll(q => q.Active));
         On("IScriptQuest.get_Completed()", _ => QuestTree().FindAll(q => q.Status == "c"));
-        On("IScriptQuest.Load(Int32[])", args => Act("load_quests", (int[])args[0]!));
+        On("IScriptQuest.Load(Int32[])", args =>
+        {
+            LoadQuests((int[])args[0]!);
+            return null;
+        });
         On("IScriptQuest.EnsureLoad(Int32)", args => EnsureLoad((int)args[0]!));
         On("IScriptQuest.TryGetQuest(Int32, Quest&)", args => (args[1] = FindQuest((int)args[0]!)) is not null);
         On("IScriptQuest.Accept(Int32)", args => Accept((int)args[0]!));
@@ -119,6 +124,16 @@ public sealed partial class Shim
     }
 
     int TurnIns(Quest quest) => quest.Requirements.Select(r => r.Quantity > 0 ? Held(r.ID) / r.Quantity : int.MaxValue).DefaultIfEmpty(1).Min();
+
+    void LoadQuests(int[] ids)
+    {
+        foreach (int[] chunk in ids.Chunk(QuestsPerLoad))
+        {
+            Act("send", $"%xt%zm%getQuests%{Int(View("map")!["areaId"])}%{string.Join('%', chunk)}%");
+            if (ids.Length > QuestsPerLoad)
+                Sleep(SettingInt("ActionDelay"));
+        }
+    }
 
     bool UpdateQuest(int value, int slot)
     {
