@@ -233,6 +233,10 @@ impl Item {
         }
     }
 
+    pub fn consumable(&self) -> bool {
+        self.kind == "Item" && !self.link.is_empty() && !self.link.eq_ignore_ascii_case("none")
+    }
+
     pub fn class_rank(&self) -> Option<u32> {
         (self.pool() == Pool::Class).then(|| rank_for(self.qty))
     }
@@ -1095,6 +1099,9 @@ impl World {
                 } else if let Some(me) = &mut self.me {
                     let o = equipped.o;
                     me.item_skill = Some(qty(o.id));
+                    for item in self.inventory.iter_mut().filter(|i| i.consumable()) {
+                        item.equipped = item.meta.parse() == Ok(qty(o.id));
+                    }
                     if let Some(slot) = me.skills.iter_mut().find(|s| s.slot == "i1") {
                         slot.cooldown = Duration::from_millis(o.cd.max(0) as u64);
                         slot.mana = o.mp as i32;
@@ -2058,10 +2065,19 @@ mod tests {
     }
 
     #[test]
-    fn equipping_a_consumable_sets_the_item_skill() {
+    fn equipping_a_consumable_sets_the_item_skill_and_marks_it_equipped() {
         let mut world = joined();
+        feed(
+            &mut world,
+            &json(
+                r#"{"cmd":"loadInventoryBig","factions":[],"items":[
+                {"ItemID":1,"CharItemID":11,"sName":"Health Potion","iQty":5,"sType":"Item","sLink":"potion","sMeta":"457"},
+                {"ItemID":2,"CharItemID":12,"sName":"Mana Potion","iQty":5,"sType":"Item","sLink":"potion","sMeta":"458","bEquip":1}]}"#,
+            ),
+        );
         feed(&mut world, &json(r#"{"cmd":"seia","o":{"id":457,"cd":60000,"tgt":"f"},"iRes":1}"#));
         assert_eq!(world.me.as_ref().unwrap().item_skill, Some(457));
+        assert_eq!(world.inventory.iter().map(|i| i.equipped).collect::<Vec<_>>(), [true, false]);
     }
 
     fn item(id: u32, name: &str, ac: bool) -> Value {
