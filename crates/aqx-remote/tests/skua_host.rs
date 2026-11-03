@@ -960,3 +960,44 @@ fn update_quest_moves_the_quest_slot_the_way_skuas_fake_packet_does() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.contains(&"info: unlocked False then True, accepted True".to_string()), "{logged:#?}");
 }
+
+const AVAILABLE: &str = r#"
+using Skua.Core.Interfaces;
+
+public class Available
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Log($"available {bot.Quests.IsAvailable(16)}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn a_quest_whose_held_item_is_missing_is_not_available() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-available");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("Available.cs");
+    std::fs::write(&script, AVAILABLE).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%getQuests%") {
+                wire.object(
+                    r#"{"cmd":"getQuests","quests":{"16":{"QuestID":16,"sName":"Badge Holders","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,
+                    "turnin":[],"oItems":{},"oRewards":{},"reward":[],"reqd":[{"ItemID":900,"iQty":1}],"oReqd":{"900":{"ItemID":900,"sName":"Badge","iStk":1}}}}}"#,
+                );
+            }
+        },
+        sink,
+    );
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: available False".to_string()), "{logged:#?}");
+}

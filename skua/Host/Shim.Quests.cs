@@ -114,7 +114,8 @@ public sealed partial class Shim
             && IsUnlocked(quest)
             && (!quest.Upgrade || ((bool?)me["member"] ?? false))
             && Int(me["level"]) >= quest.Level
-            && (quest.RequiredFactionId <= 1 || rep >= quest.RequiredFactionRep);
+            && (quest.RequiredFactionId <= 1 || rep >= quest.RequiredFactionRep)
+            && quest.AcceptRequirements.All(r => InventoryItems().Any(i => i.Name.Equals(r.Name, StringComparison.OrdinalIgnoreCase) && i.Quantity >= r.Quantity));
     }
 
     int TurnIns(Quest quest) => quest.Requirements.Select(r => r.Quantity > 0 ? Held(r.ID) / r.Quantity : int.MaxValue).DefaultIfEmpty(1).Min();
