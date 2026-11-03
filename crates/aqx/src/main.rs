@@ -439,6 +439,7 @@ fn start(name: &str, config: Option<&Path>, launches: Vec<Launch>, print: Print,
             Err(e) => eprintln!("aqx: not adding accounts from {}: {e}", config.display()),
         }
     }
+    hub.let_watchers_finish(Duration::from_secs(1));
     for cell in hub.cells.all() {
         cell.close();
     }

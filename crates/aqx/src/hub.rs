@@ -639,8 +639,19 @@ impl Hub {
         *ending
     }
 
+    pub fn ended(&self) -> bool {
+        *self.ending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn watched(&self) -> bool {
         self.watchers.load(Ordering::Relaxed) > 0
+    }
+
+    pub fn let_watchers_finish(&self, within: Duration) {
+        let deadline = Instant::now() + within;
+        while self.watched() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     pub fn watch(self: &Arc<Self>) -> Watching {

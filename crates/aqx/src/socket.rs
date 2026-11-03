@@ -156,6 +156,7 @@ fn subscribe(hub: &Arc<Hub>, out: &mut UnixStream) {
     let mut shown: Vec<Option<Snapshot>> = vec![None; hello.len()];
     let mut next: Vec<u64> = vec![0; hello.len()];
     loop {
+        let ended = hub.ended();
         let cells = hub.cells.all();
         for cell in &cells[shown.len()..] {
             if !send(out, &json!({ "type": "account", "account": cell.name })) {
@@ -183,6 +184,9 @@ fn subscribe(hub: &Arc<Hub>, out: &mut UnixStream) {
                 shown[i] = snapshot;
             }
         }
+        if ended {
+            return;
+        }
         thread::sleep(TICK);
     }
 }
@@ -195,6 +199,7 @@ fn logs(hub: &Arc<Hub>, account: Option<&str>, follow: bool, out: &mut UnixStrea
     }
     let mut next = vec![0u64; cells.len()];
     loop {
+        let ended = hub.ended();
         let mut lines: Vec<(&str, LogLine)> = Vec::new();
         for (i, cell) in cells.iter().enumerate() {
             let board = cell.board();
@@ -210,7 +215,7 @@ fn logs(hub: &Arc<Hub>, account: Option<&str>, follow: bool, out: &mut UnixStrea
                 return;
             }
         }
-        if !follow {
+        if !follow || ended {
             send(out, &json!({ "type": "end" }));
             return;
         }
@@ -503,6 +508,33 @@ mod tests {
         hub.cells.add(Arc::new(AccountCell::local("alt", control.stop_handle())));
         let added = std::iter::from_fn(|| conn.recv()).find(|m| m["type"] == "account").expect("no account message within 5s");
         assert_eq!(added["account"], "alt");
+    }
+
+    #[test]
+    fn a_subscriber_hears_the_last_lines_before_the_session_ends() {
+        let control = Control::new().unwrap();
+        let cell = Arc::new(AccountCell::local("main", control.stop_handle()));
+        let name = format!("test-ends-{}", std::process::id());
+        let hub = Arc::new(Hub::new(&name, vec![cell.clone()], Print::Quiet));
+        cell.board().online = true;
+        let (_, listener, _listening) = bind(&name, false).unwrap();
+        serve(listener, hub.clone(), None).unwrap();
+        let mut conn = Conn::open(&pick(Some(&name)).unwrap().1).unwrap();
+        conn.writer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        conn.send(&json!({ "op": "subscribe" })).unwrap();
+        conn.recv().unwrap();
+        while !hub.watched() {
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        hub.say(&cell, "aqx", "logged out");
+        cell.board().online = false;
+        assert!(hub.end_if_idle());
+        let started = std::time::Instant::now();
+        hub.let_watchers_finish(Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(1), "the subscriber hangs on after the session ends");
+        let heard: Vec<Value> = std::iter::from_fn(|| conn.recv()).collect();
+        assert!(heard.iter().any(|m| m["line"]["text"] == "logged out"), "{heard:?}");
     }
 
     #[test]
