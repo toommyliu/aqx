@@ -104,17 +104,21 @@ fn buying_picks_the_listing_and_reloading_a_cached_shop_makes_it_the_loaded_one(
 }
 
 #[test]
-fn loading_a_shop_leaves_combat_first_since_the_server_ignores_it_mid_fight() {
-    let mut fighting = false;
+fn loading_a_shop_waits_out_combat_since_the_server_ignores_it_during_and_just_after_a_fight() {
+    let mut calm_since: Option<std::time::Instant> = None;
     let mut fake = Fake::start(FARM, move |msg, wire| {
         if msg.contains("%gar%") {
-            fighting = true;
+            calm_since = None;
             wire.object(r#"{"cmd":"ct","p":{"hero":{"intState":2}},"m":{"2":{"intHP":800,"intState":2}}}"#);
         } else if msg.contains("%moveToCell%") {
-            fighting = false;
+            calm_since = Some(std::time::Instant::now());
             wire.object(r#"{"cmd":"uotls","unm":"hero","o":{"intState":1}}"#);
-        } else if msg.contains("%loadShop%5%1348%") && !fighting {
-            wire.object(SHOP);
+        } else if msg.contains("%loadShop%5%1348%") {
+            match calm_since {
+                Some(at) if at.elapsed() >= std::time::Duration::from_millis(1200) => wire.object(SHOP),
+                Some(_) => wire.send("%xt%warning%-1%You cannot do that too soon after combat.%"),
+                None => {}
+            }
         }
     });
     fake.session.jump("r2", "Left").unwrap();

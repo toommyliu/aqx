@@ -21,6 +21,8 @@ const JUMP_SETTLE: Duration = Duration::from_millis(500);
 const SERVER_MARGIN: Duration = Duration::from_millis(200);
 const HOLD_RECHECK: Duration = Duration::from_millis(200);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+const AFTER_COMBAT: Duration = Duration::from_millis(1500);
+const CALM_TRIES: usize = 5;
 const MANA_TIMEOUT: Duration = Duration::from_secs(30);
 const COLLECT_WAIT: Duration = Duration::from_secs(2);
 const COLLECT_TRIES: u32 = 3;
@@ -122,7 +124,7 @@ impl Session {
         if here(self) && (same_room || !map.contains('-')) {
             return Ok(());
         }
-        self.exit_combat()?;
+        self.out_of_combat()?;
         let user = self.world.me.as_ref().map(|m| m.user.clone()).unwrap_or_default();
         let before = self.joined;
         self.send_paced(Out::Join { user: &user, map }, Kind::Locked("tfer"))?;
@@ -413,7 +415,7 @@ impl Session {
             self.world.last_shop = Some(shop);
             return Ok(());
         }
-        self.exit_combat()?;
+        self.out_of_combat()?;
         let room = self.room()?;
         self.send_paced(Out::LoadShop { room, shop }, Kind::Locked("loadShop"))?;
         self.wait_for(Some(Instant::now() + REPLY_TIMEOUT), &format!("loading shop {shop}"), |s| s.world.shops.contains_key(&shop))
@@ -743,6 +745,20 @@ impl Session {
         let (room, cell, pad) = (area.id, me.cell.clone(), me.pad.clone());
         self.send_paced(Out::MoveToCell { room, cell: &cell, pad: &pad }, Kind::Free)?;
         self.wait_for(Some(Instant::now() + EXIT_TIMEOUT), "leaving combat", |s| !in_combat(s))
+    }
+
+    fn out_of_combat(&mut self) -> Result<(), ActError> {
+        let in_combat = |s: &Session| s.world.me.as_ref().is_some_and(|m| m.vitals.state == State::Combat).then_some(());
+        for _ in 0..CALM_TRIES {
+            self.exit_combat()?;
+            let Some(calm) = self.world.me.as_ref().and_then(|m| m.left_combat).map(|left| left + AFTER_COMBAT) else { return Ok(()) };
+            match self.pump_until(Some(calm), in_combat) {
+                Err(Halt::Timeout) => return Ok(()),
+                Ok(()) => continue,
+                Err(halt) => return Err(halt.into()),
+            }
+        }
+        Err(ActError::Rejected("the player keeps being pulled back into combat".into()))
     }
 
     pub fn walk(&mut self, x: i32, y: i32) -> Result<(), ActError> {
