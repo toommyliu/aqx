@@ -9,7 +9,7 @@ use aqx_core::{Event, Phase, State, StopHandle, World};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::output::{self, clock};
+use crate::output::{self, time_of_day};
 
 pub const LOG_LINES: usize = 1000;
 const WINDOW: Duration = Duration::from_secs(600);
@@ -658,9 +658,9 @@ impl Hub {
     fn plain(&self, cell: &AccountCell, line: &LogLine) {
         let mut out = std::io::stdout().lock();
         let _ = if self.cells.all().len() > 1 {
-            writeln!(out, "{}  {:<10}  {:<6}  {}", clock(line.t), cell.name, line.source, line.text)
+            writeln!(out, "{}  {:<10}  {:<6}  {}", time_of_day(line.t), cell.name, line.source, line.text)
         } else {
-            writeln!(out, "{}  {:<6}  {}", clock(line.t), line.source, line.text)
+            writeln!(out, "{}  {:<6}  {}", time_of_day(line.t), line.source, line.text)
         };
     }
 
