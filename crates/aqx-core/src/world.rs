@@ -25,6 +25,7 @@ pub struct World {
     pub me: Option<Me>,
     pub area: Option<Area>,
     pub inventory: Vec<Item>,
+    pub house: Vec<Item>,
     pub temp: Vec<Item>,
     pub factions: Vec<Faction>,
     pub drops: Vec<Item>,
@@ -81,6 +82,7 @@ pub struct Me {
     pub coins: i64,
     pub bag_slots: u32,
     pub bank_slots: u32,
+    pub house_slots: u32,
     pub item_skill: Option<u32>,
     pub quest_slots: Vec<String>,
     pub achievements: HashMap<String, i64>,
@@ -759,6 +761,8 @@ impl World {
                     #[serde(default)]
                     items: Vec<Value>,
                     #[serde(default)]
+                    hitems: Vec<Value>,
+                    #[serde(default)]
                     factions: Vec<Value>,
                     #[serde(rename = "bankCount", default, deserialize_with = "int")]
                     bank_count: i64,
@@ -779,6 +783,7 @@ impl World {
                 }
                 let inventory: Inventory = json.decode()?;
                 self.inventory = items_from(inventory.items, "inventory item", events);
+                self.house = items_from(inventory.hitems, "house item", events);
                 if !self.bank_loaded {
                     self.bank_count = qty(inventory.bank_count);
                 }
@@ -805,20 +810,26 @@ impl World {
                         continue;
                     }
                     let temp = data.temp || data.char_item.is_none();
-                    let (list, place) = if temp { (&mut self.temp, Place::Temp) } else { (&mut self.inventory, Place::Inventory) };
-                    let gained = data.qty;
-                    let item = match list.iter_mut().find(|i| i.id == id) {
-                        Some(item) => {
-                            item.qty = qty(data.qty_now.unwrap_or(item.qty as i64 + gained));
-                            item.clone()
+                    let places: &[Place] = if temp { &[Place::Temp] } else { &[Place::House, Place::Inventory] };
+                    let (total, place, name) = match self.find_held(places, |i| i.id == id) {
+                        Some((place, at)) => {
+                            let item = &mut self.held_in(place)[at];
+                            item.qty = qty(data.qty_now.unwrap_or(item.qty as i64 + data.qty));
+                            (item.qty, place, item.name.clone())
+                        }
+                        None if temp => {
+                            let item = data.into_item(id);
+                            let name = item.name.clone();
+                            (add_item(&mut self.temp, item), Place::Temp, name)
                         }
                         None => {
                             let item = data.into_item(id);
-                            list.push(item.clone());
-                            item
+                            let name = item.name.clone();
+                            let (total, place) = self.stash(item);
+                            (total, place, name)
                         }
                     };
-                    events.push(Event::ItemChanged { item: item.name, qty: item.qty, place });
+                    events.push(Event::ItemChanged { item: name, qty: total, place });
                 }
             }
             "dropItem" => {
@@ -1066,7 +1077,7 @@ impl World {
                         item.char_item = bought.char_item;
                         let name = item.name.clone();
                         let (total, place) =
-                            if bought.bank { (self.add_to_bank(item, None), Place::Bank) } else { (add_item(&mut self.inventory, item), Place::Inventory) };
+                            if bought.bank { (self.add_to_bank(item, None), Place::Bank) } else { self.stash(item) };
                         events.push(Event::ItemChanged { item: name, qty: total, place });
                     }
                     (true, None) => {}
@@ -1099,14 +1110,44 @@ impl World {
                             self.bank_count = self.bank_count.saturating_sub(1);
                         }
                         let name = item.name.clone();
-                        let total = add_item(&mut self.inventory, item);
-                        events.push(Event::ItemChanged { item: name, qty: total, place: Place::Inventory });
+                        let (total, place) = self.stash(item);
+                        events.push(Event::ItemChanged { item: name, qty: total, place });
                     }
-                } else if let Some(at) = self.inventory.iter().position(|i| i.id == moved.id) {
-                    let item = self.inventory.remove(at);
+                } else if let Some((place, at)) = self.find_held(&[Place::Inventory, Place::House], |i| i.id == moved.id) {
+                    let item = self.held_in(place).remove(at);
                     let name = item.name.clone();
                     let total = self.add_to_bank(item, None);
                     events.push(Event::ItemChanged { item: name, qty: total, place: Place::Bank });
+                }
+            }
+            "enhanceItemShop" => {
+                #[derive(Deserialize)]
+                struct Enhanced {
+                    #[serde(rename = "bSuccess", default, deserialize_with = "flag")]
+                    ok: bool,
+                    #[serde(rename = "ItemIDs", default)]
+                    items: Vec<Value>,
+                    #[serde(rename = "EnhID", default, deserialize_with = "int")]
+                    id: i64,
+                    #[serde(rename = "EnhLvl", default, deserialize_with = "int")]
+                    level: i64,
+                    #[serde(rename = "EnhPID", default, deserialize_with = "int")]
+                    pattern: i64,
+                    #[serde(rename = "iCost", default, deserialize_with = "int")]
+                    cost: i64,
+                }
+                let enhanced: Enhanced = json.decode()?;
+                if !enhanced.ok {
+                    events.push(Event::Refused { action: "enhancing".into(), reason: "the server refused it".into() });
+                    return Ok(());
+                }
+                let ids: Vec<u64> = enhanced.items.iter().filter_map(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok())).collect();
+                let enhancement = Enhancement { id: qty(enhanced.id), level: qty(enhanced.level), pattern: qty(enhanced.pattern) };
+                for item in self.inventory.iter_mut().filter(|i| ids.contains(&u64::from(i.id.0))) {
+                    item.enhancement = Some(enhancement);
+                }
+                if let Some(me) = &mut self.me {
+                    me.gold -= enhanced.cost;
                 }
             }
             "seia" => {
@@ -1166,12 +1207,13 @@ impl World {
                         me.gold += sold.amount;
                     }
                 }
-                if let Some(at) = self.inventory.iter().position(|i| i.char_item == Some(sold.char_item)) {
-                    let item = &mut self.inventory[at];
+                if let Some((place, at)) = self.find_held(&[Place::Inventory, Place::House], |i| i.char_item == Some(sold.char_item)) {
+                    let list = self.held_in(place);
+                    let item = &mut list[at];
                     item.qty = item.qty.saturating_sub(qty(sold.qty));
-                    events.push(Event::ItemChanged { item: item.name.clone(), qty: item.qty, place: Place::Inventory });
+                    events.push(Event::ItemChanged { item: item.name.clone(), qty: item.qty, place });
                     if item.qty == 0 {
-                        let gone = self.inventory.remove(at);
+                        let gone = list.remove(at);
                         self.forget_consumable(&gone);
                     }
                 }
@@ -1364,6 +1406,7 @@ impl World {
                     ("intCoins", Some(n)) => me.coins = n,
                     ("iBagSlots", Some(n)) => me.bag_slots = qty(n),
                     ("iBankSlots", Some(n)) => me.bank_slots = qty(n),
+                    ("iHouseSlots", Some(n)) => me.house_slots = qty(n),
                     ("intAQ", Some(n)) => me.aq_linked = n > 0,
                     ("intActivationFlag", Some(n)) => me.email_verified = n == EMAIL_VERIFIED,
                     (key, Some(secs)) => {
@@ -1426,18 +1469,41 @@ impl World {
     }
 
     pub fn used(&self, pool: Pool) -> u32 {
-        self.inventory.iter().filter(|i| i.pool() == pool).count() as u32
+        match pool {
+            Pool::House => self.house.len() as u32,
+            _ => self.inventory.iter().filter(|i| i.pool() == pool).count() as u32,
+        }
+    }
+
+    fn stash(&mut self, item: Item) -> (u32, Place) {
+        let place = if item.pool() == Pool::House { Place::House } else { Place::Inventory };
+        (add_item(self.held_in(place), item), place)
+    }
+
+    fn held_in(&mut self, place: Place) -> &mut Vec<Item> {
+        match place {
+            Place::House => &mut self.house,
+            Place::Temp => &mut self.temp,
+            Place::Inventory => &mut self.inventory,
+            Place::Bank => Arc::make_mut(&mut self.bank),
+        }
+    }
+
+    fn find_held(&mut self, places: &[Place], hit: impl Fn(&Item) -> bool) -> Option<(Place, usize)> {
+        places.iter().find_map(|&place| self.held_in(place).iter().position(&hit).map(|at| (place, at)))
     }
 
     pub fn full_for(&self, item: &Item) -> bool {
         if item.pool() == Pool::Class {
             return false;
         }
-        let owned = self.inventory.iter().find(|i| i.id == item.id);
+        let held = if item.pool() == Pool::House { &self.house } else { &self.inventory };
+        let owned = held.iter().find(|i| i.id == item.id);
         if owned.is_some_and(|i| i.qty < i.max_stack) {
             return false;
         }
         match item.pool() {
+            Pool::House => self.me.as_ref().is_some_and(|m| m.house_slots > 0 && self.used(Pool::House) >= m.house_slots),
             Pool::Misc => owned.is_none() && self.misc_slots > 0 && self.used(Pool::Misc) >= self.misc_slots,
             _ => self.me.as_ref().is_some_and(|m| m.bag_slots > 0 && self.used(Pool::Bag) >= m.bag_slots),
         }
@@ -1603,6 +1669,7 @@ impl Me {
             coins: 0,
             bag_slots: 0,
             bank_slots: 0,
+            house_slots: 0,
             item_skill: None,
             quest_slots: Vec::new(),
             achievements: HashMap::new(),
@@ -1855,9 +1922,9 @@ mod tests {
                 {"ItemID":5,"CharItemID":15,"sName":"Bone Dust","iQty":3,"iStk":50,"sType":"Resource"},
                 {"ItemID":6,"CharItemID":16,"sName":"Defeated Makai","iQty":50,"iStk":50,"sType":"Quest Item"},
                 {"ItemID":7,"CharItemID":17,"sName":"Voucher","iQty":1,"iStk":1,"sType":"Item"},
-                {"ItemID":8,"CharItemID":18,"sName":"Letter","iQty":1,"iStk":1,"sType":"Note"},
-                {"ItemID":9,"CharItemID":19,"sName":"Chair","iQty":1,"iStk":1,"sType":"Floor Item"},
-                {"ItemID":10,"CharItemID":20,"sName":"Tent","iQty":1,"iStk":1,"sType":"Misc","bHouse":1}]}"#,
+                {"ItemID":8,"CharItemID":18,"sName":"Letter","iQty":1,"iStk":1,"sType":"Note"}],"hitems":[
+                {"ItemID":9,"CharItemID":19,"sName":"Chair","iQty":1,"iStk":1,"sType":"Floor Item","bHouse":true},
+                {"ItemID":10,"CharItemID":20,"sName":"Tent","iQty":1,"iStk":1,"sType":"House","bHouse":true}]}"#,
             ),
         );
         let used = |pool| world.used(pool);
@@ -2155,6 +2222,58 @@ mod tests {
         assert_eq!(feed(&mut world, "%xt%uotls%-1%hero%afk:true%"), [Event::Afk { afk: true }]);
         assert_eq!(feed(&mut world, "%xt%uotls%-1%hero%afk:true%"), []);
         assert_eq!(feed(&mut world, "%xt%uotls%-1%hero%afk:false%"), [Event::Afk { afk: false }]);
+    }
+
+    #[test]
+    fn house_items_live_apart_from_the_inventory_and_move_with_purchases_and_the_bank() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"initUserData","uid":1001,"data":{"iBagSlots":10,"iHouseSlots":2}}"#));
+        feed(
+            &mut world,
+            &json(
+                r#"{"cmd":"loadInventoryBig","factions":[],"items":[{"ItemID":1,"CharItemID":11,"sName":"Sword","iQty":1,"iStk":1,"sType":"Sword"}],
+                "hitems":[{"ItemID":24,"CharItemID":21,"sName":"Crystal House","iQty":1,"iStk":1,"sType":"House","bHouse":true,"bEquip":true}]}"#,
+            ),
+        );
+        assert_eq!((world.inventory.len(), world.house.len(), world.used(Pool::House)), (1, 1, 1));
+        feed(
+            &mut world,
+            &json(
+                r#"{"cmd":"loadShop","shopinfo":{"ShopID":42,"sName":"Furniture","items":[
+                {"ItemID":70,"ShopItemID":71,"sName":"Blue Balloons","iCost":100,"bCoins":false,"iStk":1,"iQty":1,"sType":"Floor Item","sES":"hi","bHouse":true}]}}"#,
+            ),
+        );
+        assert_eq!(
+            feed(&mut world, &json(r#"{"cmd":"buyItem","bitSuccess":1,"CharItemID":22,"iQty":1,"ItemID":70,"bBank":0}"#)),
+            [Event::ItemChanged { item: "Blue Balloons".into(), qty: 1, place: Place::House }]
+        );
+        let balloons = world.house.iter().find(|i| i.id == ItemId(70)).unwrap().clone();
+        assert!(world.full_for(&Item { id: ItemId(99), ..balloons.clone() }), "the house pool holds 2");
+        assert!(!world.full_for(&Item { id: ItemId(98), kind: "Sword".into(), house: false, ..balloons }), "a bag item doesn't count house slots");
+
+        feed(&mut world, &json(r#"{"cmd":"bankFromInv","ItemID":70,"bSuccess":1}"#));
+        assert!(world.house.iter().all(|i| i.id != ItemId(70)) && world.bank.iter().any(|i| i.id == ItemId(70)));
+        assert_eq!(
+            feed(&mut world, &json(r#"{"cmd":"bankToInv","ItemID":"70"}"#)),
+            [Event::ItemChanged { item: "Blue Balloons".into(), qty: 1, place: Place::House }]
+        );
+        assert!(world.inventory.iter().all(|i| i.id != ItemId(70)));
+    }
+
+    #[test]
+    fn an_enhancement_from_a_shop_updates_the_item_and_costs_gold() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"initUserData","uid":1001,"data":{"intGold":50000}}"#));
+        feed(
+            &mut world,
+            &json(r#"{"cmd":"loadInventoryBig","factions":[],"items":[{"ItemID":540,"CharItemID":41,"sName":"Healer","iQty":302500,"iStk":1,"sType":"Class","sES":"ar","EnhID":1,"EnhLvl":10,"EnhPatternID":2}]}"#),
+        );
+        feed(
+            &mut world,
+            &json(r#"{"cmd":"enhanceItemShop","ItemIDs":[540],"EnhID":664,"EnhPID":7,"EnhLvl":100,"EnhRty":5,"EnhDPS":100,"EnhRng":10,"EnhName":"Healer Armor Enhancement","iCost":10060,"bSuccess":1}"#),
+        );
+        assert_eq!(world.inventory[0].enhancement, Some(Enhancement { id: 664, level: 100, pattern: 7 }));
+        assert_eq!(world.me.as_ref().unwrap().gold, 50000 - 10060);
     }
 
     fn item(id: u32, name: &str, ac: bool) -> Value {

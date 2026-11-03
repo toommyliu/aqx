@@ -68,6 +68,7 @@ fn view<'js>(ctx: Ctx<'js>, what: String) -> Result<Value<'js>> {
         "map" => Some(views::map(world)),
         "inventory" => Some(views::items(&world.inventory)),
         "temp" => Some(views::items(&world.temp)),
+        "house" => Some(views::items(&world.house)),
         "drops" => Some(views::items(&world.drops)),
         "skills" => Some(views::skills(world)),
         "slots" => Some(views::slots(world)),
