@@ -882,13 +882,10 @@ impl App {
             Ok(path) => path,
             Err(e) => return self.say(e),
         };
-        let mut args = Vec::new();
-        for word in words {
-            match word.trim_start_matches("--arg=").split_once('=') {
-                Some((key, value)) if !key.is_empty() => args.push((key.to_string(), value.to_string())),
-                _ => return self.say(format!("{word} isn't KEY=VALUE")),
-            }
-        }
+        let args = match typed_args(words) {
+            Ok(args) => args,
+            Err(e) => return self.say(e),
+        };
         let asked: Vec<Arg> = aqx_script::script_args(&path).into_iter().filter(|arg| !args.iter().any(|(given, _)| *given == arg.key)).collect();
         let targets = self.targets();
         if asked.is_empty() {
@@ -949,6 +946,21 @@ fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
     if app.ending {
         draw_ending(f, body, shown.len());
     }
+}
+
+fn typed_args<'a>(words: impl Iterator<Item = &'a str>) -> Result<Vec<(String, String)>, String> {
+    let mut args: Vec<(String, String)> = Vec::new();
+    for word in words {
+        match (word.trim_start_matches("--arg=").split_once('='), args.last_mut()) {
+            (Some((key, value)), _) if !key.is_empty() => args.push((key.to_string(), value.to_string())),
+            (_, Some((_, value))) => {
+                value.push(' ');
+                value.push_str(word);
+            }
+            (_, None) => return Err(format!("{word} isn't KEY=VALUE")),
+        }
+    }
+    Ok(args)
 }
 
 fn scripts_matching(input: &str) -> Vec<String> {
@@ -2858,6 +2870,13 @@ mod tests {
         assert_eq!(app.recent.last().map(|r| &r.typed), Some(&format!("{command} target=Bob")));
         run(&mut app);
         assert!(screen(&fleet, &mut app, 120).contains(" follow.ts needs target: █"), "the choice sticks");
+        press(&fleet, &mut app, KeyCode::Esc);
+
+        let spaced = "target=Bob Smith rounds=3 class=Dark Caster wait=5";
+        press(&fleet, &mut app, KeyCode::Char('o'));
+        typed(&mut app, &format!("{} {spaced}", script.display()));
+        press(&fleet, &mut app, KeyCode::Enter);
+        assert_eq!((ran(&cells[0]), ran(&cells[1])), (spaced.into(), spaced.into()), "a value runs to the next KEY=");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

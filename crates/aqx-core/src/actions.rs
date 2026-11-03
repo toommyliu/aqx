@@ -8,7 +8,7 @@ use crate::event::Event;
 use crate::pacer::{self, Kind};
 use crate::quests::{QuestStatus, RewardKind};
 use crate::session::{Goal, Halt, LoginError, Phase, Session};
-use crate::world::{Item, ItemRef, Monster, Pool, SkillTarget, State, World, items_from};
+use crate::world::{ItemRef, Monster, Pool, SkillTarget, State, World, items_from};
 
 const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 const REST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -498,7 +498,7 @@ impl Session {
             return Err(ActError::NotFound(format!("{item} in the inventory")));
         };
         let room = self.room()?;
-        if consumable(&found) {
+        if found.consumable() {
             let skill: u32 = found.meta.parse().map_err(|_| ActError::Rejected(format!("{} has no skill to equip", found.name)))?;
             if self.world.me.as_ref().is_some_and(|m| m.item_skill == Some(skill)) {
                 return Ok(());
@@ -924,10 +924,6 @@ impl Session {
         }
         cells.into_iter().max_by_key(|(_, alive, total)| (*alive, *total)).map(|(c, _, _)| c.to_string())
     }
-}
-
-fn consumable(item: &Item) -> bool {
-    item.kind == "Item" && !item.link.is_empty() && !item.link.eq_ignore_ascii_case("none")
 }
 
 fn unless_met(result: Result<(), ActError>) -> Result<(), ActError> {

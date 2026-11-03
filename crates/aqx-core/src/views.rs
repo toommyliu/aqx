@@ -10,6 +10,7 @@ pub fn player(world: &World) -> Value {
     json!({
         "id": me.eid,
         "name": me.user,
+        "charId": me.char_id,
         "level": me.level,
         "hp": me.vitals.hp,
         "maxHp": me.vitals.max_hp,
@@ -25,6 +26,8 @@ pub fn player(world: &World) -> Value {
         "gold": me.gold,
         "coins": me.coins,
         "member": me.member,
+        "aqLinked": me.aq_linked,
+        "emailVerified": me.email_verified,
         "class": me.class,
         "classRank": me.class_rank(),
         "boosts": {
@@ -103,6 +106,12 @@ fn item(i: &Item) -> Value {
         "qty": i.qty,
         "maxStack": i.max_stack,
         "type": i.kind,
+        "slot": i.slot,
+        "level": i.level,
+        "link": i.link,
+        "file": i.file,
+        "icon": i.icon,
+        "meta": i.meta,
         "equipped": i.equipped,
         "ac": i.ac,
         "member": i.member,
@@ -192,6 +201,7 @@ pub fn event_name(event: &Event) -> Option<&'static str> {
         Event::AuraChanged { .. } => "aura",
         Event::Countering { .. } => "counter",
         Event::Packet { .. } => "packet",
+        Event::Afk { .. } => "afk",
         _ => return None,
     })
 }
@@ -230,6 +240,7 @@ pub fn event(world: &World, event: &Event) -> Value {
             json!({ "name": name, "stacks": stacks, "change": if *added { "added" } else { "removed" }, "monster": monster })
         }
         Event::Countering { id, active } => json!({ "monster": id, "active": active }),
+        Event::Afk { afk } => json!({ "afk": afk }),
         Event::Packet { text } => packet(text),
         _ => Value::Null,
     }
