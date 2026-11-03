@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
 use aqx_core::{Event, Phase, State, StopHandle, World};
@@ -502,9 +502,26 @@ impl AccountCell {
     }
 }
 
+#[derive(Default)]
+pub struct Cells(RwLock<Vec<Arc<AccountCell>>>);
+
+impl Cells {
+    pub fn new(cells: Vec<Arc<AccountCell>>) -> Self {
+        Cells(RwLock::new(cells))
+    }
+
+    pub fn all(&self) -> Vec<Arc<AccountCell>> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn add(&self, cell: Arc<AccountCell>) {
+        self.0.write().unwrap_or_else(|e| e.into_inner()).push(cell);
+    }
+}
+
 pub struct Hub {
     pub name: String,
-    pub cells: Vec<Arc<AccountCell>>,
+    pub cells: Cells,
     watchers: AtomicUsize,
     ending: Mutex<bool>,
     print: Print,
@@ -512,7 +529,7 @@ pub struct Hub {
 
 impl Hub {
     pub fn new(name: &str, cells: Vec<Arc<AccountCell>>, print: Print) -> Self {
-        Hub { name: name.into(), cells, watchers: AtomicUsize::new(0), ending: Mutex::new(false), print }
+        Hub { name: name.into(), cells: Cells::new(cells), watchers: AtomicUsize::new(0), ending: Mutex::new(false), print }
     }
 
     pub fn send(&self, account: &str, command: Command) -> Result<bool, String> {
@@ -520,13 +537,13 @@ impl Hub {
         if *ending {
             return Err(format!("{} is ending", self.name));
         }
-        let cell = self.cells.iter().find(|c| c.name == account).ok_or_else(|| format!("no account named {account} in {}", self.name))?;
+        let cell = self.cells.all().into_iter().find(|c| c.name == account).ok_or_else(|| format!("no account named {account} in {}", self.name))?;
         cell.send(command)
     }
 
     pub fn end_if_idle(&self) -> bool {
         let mut ending = self.ending.lock().unwrap_or_else(|e| e.into_inner());
-        *ending |= self.cells.iter().all(|c| c.offline());
+        *ending |= self.cells.all().iter().all(|c| c.offline());
         *ending
     }
 
@@ -600,7 +617,7 @@ impl Hub {
 
     fn plain(&self, cell: &AccountCell, line: &LogLine) {
         let mut out = std::io::stdout().lock();
-        let _ = if self.cells.len() > 1 {
+        let _ = if self.cells.all().len() > 1 {
             writeln!(out, "{}  {:<10}  {:<6}  {}", clock(line.t), cell.name, line.source, line.text)
         } else {
             writeln!(out, "{}  {:<6}  {}", clock(line.t), line.source, line.text)

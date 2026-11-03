@@ -135,27 +135,36 @@ fn serve_client(hub: &Arc<Hub>, config: Option<&Path>, conn: UnixStream) {
 }
 
 fn snapshots(hub: &Arc<Hub>) -> Vec<Snapshot> {
-    let fresh = hub.cells.iter().all(|c| c.board().snapshot.is_some()) && hub.watched();
+    let fresh = hub.cells.all().iter().all(|c| c.board().snapshot.is_some()) && hub.watched();
     if !fresh {
         let _watching = hub.watch();
         thread::sleep(FRESH);
     }
-    hub.cells.iter().map(|c| c.board().snapshot.clone().unwrap_or_else(|| Snapshot { account: c.name.clone(), phase: "STARTING".into(), ..Snapshot::default() })).collect()
+    hub.cells.all().iter().map(|c| c.board().snapshot.clone().unwrap_or_else(|| Snapshot { account: c.name.clone(), phase: "STARTING".into(), ..Snapshot::default() })).collect()
 }
 
-fn names(hub: &Hub) -> Vec<&str> {
-    hub.cells.iter().map(|c| c.name.as_str()).collect()
+fn names(hub: &Hub) -> Vec<String> {
+    hub.cells.all().iter().map(|c| c.name.clone()).collect()
 }
 
 fn subscribe(hub: &Arc<Hub>, out: &mut UnixStream) {
     let _watching = hub.watch();
-    if !send(out, &json!({ "type": "hello", "protocol": PROTOCOL, "name": hub.name, "accounts": names(hub) })) {
+    let hello = names(hub);
+    if !send(out, &json!({ "type": "hello", "protocol": PROTOCOL, "name": hub.name, "accounts": hello })) {
         return;
     }
-    let mut shown: Vec<Option<Snapshot>> = vec![None; hub.cells.len()];
-    let mut next: Vec<u64> = vec![0; hub.cells.len()];
+    let mut shown: Vec<Option<Snapshot>> = vec![None; hello.len()];
+    let mut next: Vec<u64> = vec![0; hello.len()];
     loop {
-        for (i, cell) in hub.cells.iter().enumerate() {
+        let cells = hub.cells.all();
+        for cell in &cells[shown.len()..] {
+            if !send(out, &json!({ "type": "account", "account": cell.name })) {
+                return;
+            }
+        }
+        shown.resize(cells.len(), None);
+        next.resize(cells.len(), 0);
+        for (i, cell) in cells.iter().enumerate() {
             let (snapshot, lines) = {
                 let board = cell.board();
                 let lines: Vec<LogLine> = board.log.iter().filter(|l| l.seq >= next[i]).cloned().collect();
@@ -179,7 +188,7 @@ fn subscribe(hub: &Arc<Hub>, out: &mut UnixStream) {
 }
 
 fn logs(hub: &Arc<Hub>, account: Option<&str>, follow: bool, out: &mut UnixStream) {
-    let cells: Vec<_> = hub.cells.iter().filter(|c| account.is_none_or(|name| c.name == name)).collect();
+    let cells: Vec<_> = hub.cells.all().into_iter().filter(|c| account.is_none_or(|name| c.name == name)).collect();
     if cells.is_empty() {
         send(out, &json!({ "type": "error", "message": format!("no account named {} in {}", account.unwrap_or_default(), hub.name) }));
         return;
@@ -466,6 +475,23 @@ mod tests {
              snapshot.progress.eta_secs snapshot.progress.label snapshot.progress.total snapshot.run \
              snapshot.script snapshot.server snapshot.stalled snapshot.status snapshot.up_secs snapshot.user";
         assert_eq!((PROTOCOL, shape.join(" ").as_str()), (3, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
+    }
+
+    #[test]
+    fn a_subscriber_hears_about_accounts_added_after_it_subscribed() {
+        let control = Control::new().unwrap();
+        let name = format!("test-added-{}", std::process::id());
+        let hub = Arc::new(Hub::new(&name, vec![Arc::new(AccountCell::local("main", control.stop_handle()))], Print::Quiet));
+        let (_, listener, _listening) = bind(&name, false).unwrap();
+        serve(listener, hub.clone(), None).unwrap();
+        let mut conn = Conn::open(&pick(Some(&name)).unwrap().1).unwrap();
+        conn.writer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        conn.send(&json!({ "op": "subscribe" })).unwrap();
+        assert_eq!(conn.recv().unwrap()["accounts"], json!(["main"]));
+
+        hub.cells.add(Arc::new(AccountCell::local("alt", control.stop_handle())));
+        let added = std::iter::from_fn(|| conn.recv()).find(|m| m["type"] == "account").expect("no account message within 5s");
+        assert_eq!(added["account"], "alt");
     }
 
     #[test]

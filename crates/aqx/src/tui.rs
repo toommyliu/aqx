@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
 use crate::account::{expand_home, script_path};
-use crate::hub::{Bar, AccountCell, Command, Game, LOG_LINES, LogLine, Snapshot};
+use crate::hub::{Bar, Cells, Command, Game, LOG_LINES, LogLine, Snapshot};
 use crate::output::{clock, span};
 use crate::socket;
 
@@ -59,7 +59,7 @@ const SCRIPT_KEYS: [(&str, &str); 12] = [
 
 pub struct Fleet {
     pub title: String,
-    pub cells: Vec<Arc<AccountCell>>,
+    pub cells: Arc<Cells>,
     pub socket: PathBuf,
 }
 
@@ -190,6 +190,7 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
     }
     fleet
         .cells
+        .all()
         .iter()
         .enumerate()
         .map(|(i, cell)| {
@@ -254,9 +255,10 @@ impl App {
     }
 
     fn act_on(&mut self, accounts: Vec<usize>, fleet: &Fleet, command: Command, done: &str) {
+        let cells = fleet.cells.all();
         let (mut sent, mut same, mut said) = (Vec::new(), Vec::new(), Vec::new());
         for i in accounts {
-            let Some(cell) = fleet.cells.get(i) else { continue };
+            let Some(cell) = cells.get(i) else { continue };
             match socket::ctl(&fleet.socket, &cell.name, &command) {
                 Ok(true) => sent.push(cell.name.as_str()),
                 Ok(false) => same.push(cell.name.as_str()),
@@ -288,7 +290,7 @@ impl App {
             match key.code {
                 KeyCode::Enter => {
                     self.ending = false;
-                    self.act_on((0..fleet.cells.len()).collect(), fleet, Command::Logout, "logging out; the session ends once every account is offline");
+                    self.act_on((0..shown.len()).collect(), fleet, Command::Logout, "logging out; the session ends once every account is offline");
                 }
                 KeyCode::Char('q') => return true,
                 KeyCode::Esc => self.ending = false,
@@ -329,7 +331,7 @@ impl App {
             }
             return false;
         }
-        let accounts = fleet.cells.len();
+        let accounts = shown.len();
         let last = accounts.saturating_sub(1);
         let line = accounts < 2 || key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
@@ -1090,6 +1092,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::hub::AccountCell;
     use crate::hub::{Board, Hub, Player, Print, SkillState};
 
     fn rows(fleet: &Fleet, app: &mut App, width: u16) -> Vec<Vec<ratatui::buffer::Cell>> {
@@ -1131,7 +1134,7 @@ mod tests {
     fn fleet(accounts: &[&str]) -> (Fleet, Arc<Hub>) {
         let cells: Vec<Arc<AccountCell>> = accounts.iter().map(|name| Arc::new(AccountCell::mirror(name))).collect();
         let hub = Arc::new(Hub::new("aqx", cells.clone(), Print::Quiet));
-        (Fleet { title: "aqx".into(), cells, socket: PathBuf::new() }, hub)
+        (Fleet { title: "aqx".into(), cells: Arc::new(Cells::new(cells)), socket: PathBuf::new() }, hub)
     }
 
     fn publish(hub: &Hub, cell: &AccountCell, world: &World) {
@@ -1161,7 +1164,7 @@ mod tests {
     #[test]
     fn the_selected_account_shows_its_task_a_summary_and_its_log() {
         let (fleet, hub) = fleet(&["main"]);
-        publish(&hub, &fleet.cells[0], &farm_world());
+        publish(&hub, &fleet.cells.all()[0], &farm_world());
         let mut app = App::default();
         let shown = screen(&fleet, &mut app, 110);
         println!("{shown}");
@@ -1191,7 +1194,7 @@ mod tests {
     #[test]
     fn d_shows_every_detail() {
         let (fleet, hub) = fleet(&["main"]);
-        publish(&hub, &fleet.cells[0], &farm_world());
+        publish(&hub, &fleet.cells.all()[0], &farm_world());
         let mut app = App::default();
         press(&fleet, &mut app, KeyCode::Char('d'));
         let shown = screen(&fleet, &mut app, 110);
@@ -1210,7 +1213,7 @@ mod tests {
     #[test]
     fn the_list_shows_each_account_and_who_keys_act_on() {
         let (fleet, hub) = fleet(&["main", "healer"]);
-        publish(&hub, &fleet.cells[0], &farm_world());
+        publish(&hub, &fleet.cells.all()[0], &farm_world());
         let mut app = App::default();
         let shown = screen(&fleet, &mut app, 120);
         println!("{shown}");
@@ -1230,9 +1233,9 @@ mod tests {
     #[test]
     fn g_shows_every_account_as_a_card_and_arrows_move_across_the_grid() {
         let (fleet, hub) = fleet(&["main", "healer", "spare", "alt"]);
-        publish(&hub, &fleet.cells[0], &farm_world());
+        publish(&hub, &fleet.cells.all()[0], &farm_world());
         let detail = "this account logged in somewhere else";
-        show(&fleet.cells[2], Snapshot { phase: "OFFLINE".into(), detail: detail.into(), ..Snapshot::default() });
+        show(&fleet.cells.all()[2], Snapshot { phase: "OFFLINE".into(), detail: detail.into(), ..Snapshot::default() });
         let mut app = App::default();
         press(&fleet, &mut app, KeyCode::Char('g'));
         let shown = screen(&fleet, &mut app, 140);
@@ -1277,7 +1280,7 @@ mod tests {
     #[test]
     fn a_narrow_terminal_hides_the_list_and_tab_switches_accounts() {
         let (fleet, hub) = fleet(&["main", "healer"]);
-        publish(&hub, &fleet.cells[0], &farm_world());
+        publish(&hub, &fleet.cells.all()[0], &farm_world());
         let mut app = App::default();
         let shown = screen(&fleet, &mut app, 80);
         assert!(row(&shown, "main 1/2").contains("tab next"), "{shown}");
@@ -1290,7 +1293,7 @@ mod tests {
     fn an_offline_account_shows_why_and_offers_to_log_in() {
         let (fleet, _hub) = fleet(&["spare"]);
         let detail = "this account logged in somewhere else";
-        show(&fleet.cells[0], Snapshot { account: "spare".into(), phase: "OFFLINE".into(), detail: detail.into(), ..Snapshot::default() });
+        show(&fleet.cells.all()[0], Snapshot { account: "spare".into(), phase: "OFFLINE".into(), detail: detail.into(), ..Snapshot::default() });
         let shown = screen(&fleet, &mut App::default(), 100);
         assert!(row(&shown, "spare").contains("OFFLINE"));
         assert!(shown.contains(detail) && shown.contains("i log in"), "{shown}");
@@ -1301,7 +1304,7 @@ mod tests {
         let (fleet, _hub) = fleet(&["main"]);
         let players = (0..11).map(|i| Player { name: format!("player{i}"), level: 40 + i }).collect();
         let game = Game { cell_players: players, ..Game::default() };
-        show(&fleet.cells[0], Snapshot { phase: "READY".into(), game: Some(game), ..Snapshot::default() });
+        show(&fleet.cells.all()[0], Snapshot { phase: "READY".into(), game: Some(game), ..Snapshot::default() });
         let mut app = App { details: true, ..App::default() };
         let shown = screen(&fleet, &mut app, 60);
         let here = row(&shown, "Here").trim_end();
@@ -1315,7 +1318,7 @@ mod tests {
     fn scrolling_past_the_oldest_line_keeps_the_log_on_screen() {
         let (fleet, hub) = fleet(&["main"]);
         for i in 0..5 {
-            hub.say(&fleet.cells[0], "aqx", format!("line {i}"));
+            hub.say(&fleet.cells.all()[0], "aqx", format!("line {i}"));
         }
         let mut app = App { scroll: 500, ..App::default() };
         let shown = screen(&fleet, &mut app, 100);
@@ -1326,7 +1329,7 @@ mod tests {
     fn long_log_lines_wrap_under_the_message() {
         let (fleet, hub) = fleet(&["main"]);
         let long = format!("error: {}the end", "word ".repeat(30));
-        hub.say(&fleet.cells[0], "script", format!("{long}\n    at main (farm.ts:2:5)"));
+        hub.say(&fleet.cells.all()[0], "script", format!("{long}\n    at main (farm.ts:2:5)"));
         let shown = screen(&fleet, &mut App::default(), 80);
         println!("{shown}");
         let rows: Vec<&str> = shown.lines().filter(|l| l.contains("word") || l.contains("at main")).collect();
@@ -1385,7 +1388,7 @@ mod tests {
     fn the_state_stays_on_screen_when_the_location_is_long() {
         let (fleet, _hub) = fleet(&["main"]);
         let game = Game { area: "battleon-123456789012345678901234567890".into(), cell: "Enter".into(), pad: "Spawn".into(), ..Game::default() };
-        show(&fleet.cells[0], Snapshot { phase: "READY".into(), server: "Twilight".into(), up_secs: 3720, game: Some(game), ..Snapshot::default() });
+        show(&fleet.cells.all()[0], Snapshot { phase: "READY".into(), server: "Twilight".into(), up_secs: 3720, game: Some(game), ..Snapshot::default() });
         let shown = screen(&fleet, &mut App::default(), 60);
         assert!(row(&shown, "main").contains("…  READY  up 1h02m"), "{shown}");
     }
@@ -1394,7 +1397,7 @@ mod tests {
     fn arrows_scroll_the_log_when_there_is_nothing_to_pick() {
         let (one, hub) = fleet(&["main"]);
         for i in 0..50 {
-            hub.say(&one.cells[0], "aqx", format!("line {i}"));
+            hub.say(&one.cells.all()[0], "aqx", format!("line {i}"));
         }
         let mut app = App::default();
         screen(&one, &mut app, 100);
@@ -1413,7 +1416,7 @@ mod tests {
     fn the_wheel_scrolls_the_log_and_never_changes_the_account() {
         let (two, hub) = fleet(&["main", "healer"]);
         for i in 0..50 {
-            hub.say(&two.cells[0], "aqx", format!("line {i}"));
+            hub.say(&two.cells.all()[0], "aqx", format!("line {i}"));
         }
         let mut app = App::default();
         let bottom = screen(&two, &mut app, 100);
@@ -1476,7 +1479,7 @@ mod tests {
         let hub = Arc::new(Hub::new(&name, cells.clone(), Print::Quiet));
         let (_, listener, _listening) = socket::bind(&name, false).unwrap();
         socket::serve(listener, hub, None).unwrap();
-        let fleet = Fleet { title: name.clone(), cells: cells.clone(), socket: socket::pick(Some(&name)).unwrap().1 };
+        let fleet = Fleet { title: name.clone(), cells: Arc::new(Cells::new(cells.clone())), socket: socket::pick(Some(&name)).unwrap().1 };
         let mut app = App::default();
         let logouts = || cells.iter().filter(|c| matches!(c.take_command(), Some(Command::Logout))).count();
 
@@ -1519,10 +1522,10 @@ mod tests {
     fn the_log_copies_only_new_lines_and_keeps_a_ring() {
         let (fleet, hub) = fleet(&["main"]);
         let mut app = App::default();
-        hub.say(&fleet.cells[0], "aqx", "first");
+        hub.say(&fleet.cells.all()[0], "aqx", "first");
         gather(&fleet, &mut app);
         for i in 0..LOG_LINES {
-            hub.say(&fleet.cells[0], "aqx", format!("line {i}"));
+            hub.say(&fleet.cells.all()[0], "aqx", format!("line {i}"));
         }
         gather(&fleet, &mut app);
         assert_eq!(app.log.len(), LOG_LINES);
@@ -1542,7 +1545,7 @@ mod tests {
     #[test]
     fn the_header_names_the_user_only_when_it_differs_from_the_account() {
         let (fleet, hub) = fleet(&["hero"]);
-        publish(&hub, &fleet.cells[0], &farm_world());
+        publish(&hub, &fleet.cells.all()[0], &farm_world());
         let shown = screen(&fleet, &mut App::default(), 110);
         assert!(shown.contains(" hero · Twilly · farm-1"), "{shown}");
     }
@@ -1616,7 +1619,7 @@ mod tests {
         let (fleet, _hub) = fleet(&["main"]);
         let skill = |name: &str, ready_pct| SkillState { name: name.into(), ready_pct };
         let game = Game { skills: vec![skill("Slash", 100), skill("Blur", 50), skill("Rend", 0)], ..Game::default() };
-        show(&fleet.cells[0], Snapshot { phase: "READY".into(), game: Some(game), ..Snapshot::default() });
+        show(&fleet.cells.all()[0], Snapshot { phase: "READY".into(), game: Some(game), ..Snapshot::default() });
         let mut app = App { details: true, ..App::default() };
         let rows = rows(&fleet, &mut app, 60);
         let row = rows.iter().find(|r| r.iter().map(|c| c.symbol()).collect::<String>().contains("Skills")).unwrap();
