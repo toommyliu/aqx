@@ -120,6 +120,7 @@ public sealed partial class Shim
             && (!quest.Upgrade || ((bool?)me["member"] ?? false))
             && Int(me["level"]) >= quest.Level
             && (quest.RequiredFactionId <= 1 || rep >= quest.RequiredFactionRep)
+            && (quest.RequiredClassID <= 0 || ClassPoints(quest.RequiredClassID) >= quest.RequiredClassPoints)
             && quest.AcceptRequirements.All(r => InventoryItems().Any(i => i.Name.Equals(r.Name, StringComparison.OrdinalIgnoreCase) && i.Quantity >= r.Quantity));
     }
 
@@ -146,6 +147,8 @@ public sealed partial class Shim
 
     int SettingInt(string name) => settings.GetValueOrDefault($"IScriptOption.{name}") as int? ?? (int)SkuaDefaults[$"IScriptOption.{name}"];
 
+    int ClassPoints(int classId) => InventoryItems().Find(i => i.ID == classId)?.Quantity ?? 0;
+
     bool HeldSomewhere(int id, int quantity) =>
         new[] { InventoryItems().Cast<ItemBase>(), Models.Items<ItemBase>(View("temp")), Models.Items<ItemBase>(View("bank")) }
             .Any(place => place.Where(i => i.ID == id).Sum(i => i.Quantity) >= quantity);
@@ -160,6 +163,7 @@ public sealed partial class Shim
             ["sName"] = (string?)item?["name"],
             ["iQty"] = (int?)item?["qty"] ?? 0,
             ["iStk"] = (int?)item?["maxStack"] ?? 1,
+            ["bTemp"] = (bool?)item?["temp"] ?? false,
         };
         static JObject ByPosition(JsonNode? items) => items is JsonArray list ? new JObject(list.Select((item, at) => new JProperty($"{at}", Item(item)))) : [];
         JArray turnIn = quest["requirements"] is JsonArray needs ? new(needs.Select(n => new JObject { ["ItemID"] = (int?)n?["item"] ?? 0, ["iQty"] = (int?)n?["qty"] ?? 0 })) : [];
@@ -176,6 +180,10 @@ public sealed partial class Shim
             ["iLvl"] = (int?)quest["level"] ?? 0,
             ["FactionID"] = (int?)quest["faction"] ?? 0,
             ["iReqRep"] = (int?)quest["rep"] ?? 0,
+            ["iClass"] = (int?)quest["classId"] ?? 0,
+            ["iReqCP"] = (int?)quest["classPoints"] ?? 0,
+            ["iGold"] = (int?)quest["gold"] ?? 0,
+            ["iExp"] = (int?)quest["experience"] ?? 0,
             ["status"] = (string?)quest["status"] switch
             {
                 "active" => "p",

@@ -35,6 +35,7 @@ public sealed partial class Shim
         ("callGameFunction", ["loaderInfo.applicationDomain.hasDefinition", "InvCat"]) => "true",
         ("callGameFunction", ["loaderInfo.applicationDomain.getDefinition", "InvCat"]) =>
             new JObject { ["MISC_SLOTS"] = Int(View("slots")?["misc"]), ["MISC_TYPES"] = new JArray(MiscTypes) }.ToString(Formatting.None),
+        ("callGameFunction", ["world.myAvatar.getCPByID", int classId]) => JsonConvert.SerializeObject(ClassPoints(classId)),
         ("callGameFunction", ["world.getQuestValue", int slot]) => JsonConvert.SerializeObject(QuestValue(slot)),
         ("callGameFunction", ["world.getAchievement", string field, int index]) => JsonConvert.SerializeObject((bool?)Aqx.Call("achievement", field, index) ?? false),
         ("callGameFunction", ["world.sendLoadShopRequest", int shop]) => JsonConvert.SerializeObject(LoadShop(shop)),

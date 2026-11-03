@@ -462,7 +462,7 @@ fn phase(phase: &Phase) -> &'static str {
 }
 
 fn quest(world: &World, quest: &Quest) -> Value {
-    let need = |n: &Need| json!({ "item": n.item, "name": n.name, "qty": n.qty, "maxStack": n.max_stack });
+    let need = |n: &Need| json!({ "item": n.item, "name": n.name, "qty": n.qty, "maxStack": n.max_stack, "temp": n.temp });
     let status = match world.quest_status(quest.id) {
         Some(QuestStatus::Locked) => "locked",
         Some(QuestStatus::Available) | None => "available",
@@ -483,6 +483,10 @@ fn quest(world: &World, quest: &Quest) -> Value {
         "level": quest.level,
         "faction": quest.reputation.map_or(0, |(faction, _)| faction.0),
         "rep": quest.reputation.map_or(0, |(_, rep)| rep),
+        "classId": quest.class.map_or(0, |(class, _)| class.0),
+        "classPoints": quest.class.map_or(0, |(_, points)| points),
+        "gold": quest.gold,
+        "experience": quest.experience,
         "requirements": quest.turn_in.iter().map(need).collect::<Vec<_>>(),
         "held": quest.hold.iter().map(need).collect::<Vec<_>>(),
         "rewards": quest.rewards.iter().map(|r| json!({ "item": r.item, "name": r.name, "qty": r.qty, "maxStack": r.max_stack, "chance": r.chance, "kind": views::reward_kind(r.kind) })).collect::<Vec<_>>(),

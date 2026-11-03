@@ -1833,3 +1833,75 @@ fn map_items_wait_the_action_delay_between_pickups_like_skua() {
     let gap = pickups[1] - pickups[0];
     assert!(gap >= Duration::from_millis(1800), "getMapItems 1000 ms sleep plus the 800 ms ActionDelay, got {gap:?}");
 }
+
+const CLASS_QUEST: &str = r#"
+using System.Linq;
+using Skua.Core.Interfaces;
+
+public class ClassQuest
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Quests.Load(17, 18);
+        var hard = bot.Quests.EnsureLoad(17)!;
+        bot.Log($"rank 3 quest available {bot.Quests.IsAvailable(17)}, rank 2 quest available {bot.Quests.IsAvailable(18)}");
+        bot.Log($"needs class {hard.RequiredClassID} at {hard.RequiredClassPoints}, pays {hard.Gold} gold {hard.XP} xp, spark is temp {hard.Requirements.First().Temp}");
+        bot.Log($"accepted the locked one {bot.Quests.EnsureAccept(17)}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn a_class_quest_is_unavailable_until_the_class_has_the_points() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-class-quest");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("ClassQuest.cs");
+    std::fs::write(&script, CLASS_QUEST).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(
+        FARM,
+        |msg, wire| {
+            if msg.contains("%getQuests%") {
+                wire.object(
+                    r#"{"cmd":"getQuests","quests":{
+                    "17":{"QuestID":17,"sName":"Rank Three","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,"iClass":15652,"iReqCP":3600,"iGold":500,"iExp":1200,
+                          "turnin":[{"ItemID":900,"iQty":2}],"oItems":{"900":{"ItemID":900,"sName":"Spark","iStk":5,"bTemp":1}},"oRewards":{},"reward":[]},
+                    "18":{"QuestID":18,"sName":"Rank Two","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,"iClass":15652,"iReqCP":900,
+                          "turnin":[],"oItems":{},"oRewards":{},"reward":[]}}}"#,
+                );
+            }
+        },
+        sink,
+    );
+    fake.session.world.inventory.push(Item {
+        id: ItemId(15652),
+        char_item: Some(CharItemId(78)),
+        name: "Rogue".into(),
+        qty: 900,
+        max_stack: 1,
+        kind: "Class".into(),
+        slot: "ar".into(),
+        equipped: true,
+        ac: false,
+        member: false,
+        house: false,
+        link: String::new(),
+        file: String::new(),
+        icon: String::new(),
+        meta: String::new(),
+        level: 0,
+        enhancement: None,
+    });
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: rank 3 quest available False, rank 2 quest available True".to_string()), "{logged:#?}");
+    assert!(logged.contains(&"info: needs class 15652 at 3600, pays 500 gold 1200 xp, spark is temp True".to_string()), "{logged:#?}");
+    assert!(logged.contains(&"info: accepted the locked one False".to_string()), "{logged:#?}");
+    assert!(!sent.iter().any(|m| m.contains("%acceptQuest%5%17%")), "{sent:#?}");
+}
