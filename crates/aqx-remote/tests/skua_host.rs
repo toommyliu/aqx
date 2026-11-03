@@ -1641,3 +1641,48 @@ fn core_story_picks_up_a_map_item_for_a_quest() {
     assert!(sent.iter().any(|m| m.starts_with("%xt%zm%getMapItem%5%55%")), "{sent:#?}");
     assert!(logged.iter().any(|l| l.ends_with("quest 12 done True")), "{logged:#?}");
 }
+
+const REGISTERED: &str = r#"
+//cs_include Scripts/CoreBots.cs
+using Skua.Core.Interfaces;
+
+public class Registered
+{
+    public IScriptInterface Bot => IScriptInterface.Instance;
+    public CoreBots Core => CoreBots.Instance;
+
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Core.SetOptions();
+        Core.RegisterQuests(11);
+        Core.HuntMonster("farm", "Treeant", "Treeant Branch", 1, isTemp: false);
+        Bot.Wait.ForTrue(() => Bot.Inventory.Contains("Twilly Twig"), 100);
+        Core.CancelRegisteredQuests();
+        Core.Logger($"holding {Bot.Inventory.GetQuantity("Twilly Twig")} Twilly Twig");
+        Core.SetOptions(false);
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn core_bots_turns_in_registered_quests_while_it_hunts() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-registered");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("Registered.cs");
+    std::fs::write(&script, REGISTERED).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, farm_quest_server, sink);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    if std::env::var_os("AQX_SKUA_LOG").is_some() {
+        eprintln!("{logged:#?}\n{sent:#?}");
+    }
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(sent.iter().any(|m| m.starts_with("%xt%zm%tryQuestComplete%5%11%")), "{sent:#?}");
+    assert!(logged.iter().any(|l| l.ends_with("holding 1 Twilly Twig")), "{logged:#?}");
+}
