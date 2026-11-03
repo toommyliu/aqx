@@ -252,6 +252,7 @@ impl Item {
 pub struct Enhancement {
     pub id: u32,
     pub level: u32,
+    pub pattern: u32,
 }
 
 #[derive(Clone)]
@@ -420,6 +421,8 @@ struct ItemData {
     enhancement: i64,
     #[serde(rename = "EnhLvl", default, deserialize_with = "int")]
     enhancement_level: i64,
+    #[serde(rename = "EnhPatternID", default, deserialize_with = "int")]
+    enhancement_pattern: i64,
 }
 
 impl ItemData {
@@ -446,7 +449,11 @@ impl ItemData {
             icon: self.icon,
             meta: self.meta,
             level: qty(self.level),
-            enhancement: (self.enhancement > 0).then(|| Enhancement { id: qty(self.enhancement), level: qty(self.enhancement_level) }),
+            enhancement: (self.enhancement > 0).then(|| Enhancement {
+                id: qty(self.enhancement),
+                level: qty(self.enhancement_level),
+                pattern: qty(self.enhancement_pattern),
+            }),
         }
     }
 }
@@ -1850,13 +1857,13 @@ mod tests {
             &mut world,
             &json(
                 r#"{"cmd":"loadInventoryBig","items":[{"ItemID":1528,"CharItemID":77,"sName":"Defeated Makai","iQty":3,"iStk":50,"sType":"Quest Item","sES":"None"},
-                {"ItemID":15652,"CharItemID":78,"sName":"Rogue","iQty":1,"iStk":1,"sType":"Class","sES":"ar","EnhID":3719,"EnhLvl":22}],
+                {"ItemID":15652,"CharItemID":78,"sName":"Rogue","iQty":1,"iStk":1,"sType":"Class","sES":"ar","EnhID":3719,"EnhLvl":22,"EnhPatternID":2}],
                 "factions":[{"CharFactionID":"9","FactionID":"46","sName":"Aegis","iRep":"44100"}]}"#,
             ),
         );
         assert_eq!(world.factions[0].rank(), 6);
         let enhancements: Vec<_> = world.inventory.iter().map(|i| i.enhancement).collect();
-        assert_eq!(enhancements, [None, Some(Enhancement { id: 3719, level: 22 })]);
+        assert_eq!(enhancements, [None, Some(Enhancement { id: 3719, level: 22, pattern: 2 })]);
         assert_eq!(
             feed(&mut world, &json(r#"{"cmd":"addItems","items":{"87":{"ItemID":87,"sName":"Treeant Branch","bTemp":true,"iQty":1}}}"#)),
             [Event::ItemChanged { item: "Treeant Branch".into(), qty: 1, place: Place::Temp }]
