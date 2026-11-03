@@ -136,6 +136,12 @@ struct Aggro {
     next: Instant,
 }
 
+enum MapCells {
+    Loading,
+    Loaded(Vec<String>),
+    Unreadable,
+}
+
 pub struct Session {
     control: Control,
     events: Events,
@@ -151,6 +157,7 @@ pub struct Session {
     server: Option<Server>,
     ready_at: Option<Instant>,
     pub(crate) refusals: HashMap<String, String>,
+    map_cells: HashMap<String, MapCells>,
     inventory_requested: bool,
     pacer: Pacer,
     counter: u32,
@@ -192,6 +199,7 @@ impl Session {
             server: None,
             ready_at: None,
             refusals: HashMap::new(),
+            map_cells: HashMap::new(),
             inventory_requested: false,
             pacer: Pacer::new(Instant::now()),
             counter: 0,
@@ -702,6 +710,7 @@ impl Session {
             Event::Joined { .. } => {
                 self.on_joined();
                 self.joined = self.world.area.as_ref().map(|a| a.id);
+                self.load_cells();
             }
             Event::PlayerEntered { eid } => {
                 if let Some(room) = self.world.area.as_ref().map(|a| a.id) {
@@ -767,6 +776,40 @@ impl Session {
         if !aggressive.is_empty() {
             let room = area.id;
             self.send(Out::Aggro { room, monsters: &aggressive });
+        }
+    }
+
+    fn load_cells(&mut self) {
+        let Some(file) = self.world.area.as_ref().map(|a| a.file.clone()).filter(|f| !f.is_empty()) else { return };
+        match self.map_cells.get(&file) {
+            Some(MapCells::Loaded(cells)) => {
+                let cells = cells.clone();
+                self.cells_loaded(&file, cells);
+            }
+            Some(MapCells::Loading | MapCells::Unreadable) => {}
+            None => {
+                self.map_cells.insert(file.clone(), MapCells::Loading);
+                let (api, handle) = (self.api().to_string(), self.stop_handle());
+                std::thread::spawn(move || {
+                    let cells = api::map_file(&api, &file).map_err(|e| e.to_string()).and_then(|swf| crate::swf::frame_labels(&swf));
+                    handle.post(move |s| match cells {
+                        Ok(cells) => {
+                            s.map_cells.insert(file.clone(), MapCells::Loaded(cells.clone()));
+                            s.cells_loaded(&file, cells);
+                        }
+                        Err(e) => {
+                            s.map_cells.insert(file.clone(), MapCells::Unreadable);
+                            (s.sink)(&Event::Unreadable { what: format!("the cells of {file}: {e}") });
+                        }
+                    });
+                });
+            }
+        }
+    }
+
+    fn cells_loaded(&mut self, file: &str, cells: Vec<String>) {
+        if let Some(area) = self.world.area.as_mut().filter(|a| a.file == file) {
+            area.cells = cells;
         }
     }
 

@@ -6,6 +6,7 @@ mod pacer;
 mod quests;
 mod record;
 mod session;
+mod swf;
 mod world;
 
 pub use actions::{ActError, Fight, Predicate, Step};

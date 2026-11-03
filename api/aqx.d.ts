@@ -293,6 +293,8 @@ declare module "aqx" {
     readonly room: number;
     /** The server's id for this map instance, which raw packets carry as their room. */
     readonly areaId: number;
+    /** The cells in the map file, in its order. Empty until the file loads, and for a file aqx can't read. */
+    readonly cells: readonly string[];
     readonly monsters: readonly Monster[];
     readonly players: readonly OtherPlayer[];
     find(target: Target): Monster[];

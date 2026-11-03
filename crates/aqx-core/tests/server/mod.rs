@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use aqx_core::{Control, Credentials, Session, Sink};
 
-pub const FARM: &str = r#"{"cmd":"moveToArea","areaId":5,"areaName":"farm-1","strMapName":"farm",
+pub const FARM: &str = r#"{"cmd":"moveToArea","areaId":5,"areaName":"farm-1","strMapName":"farm","strMapFileName":"farm/farm.swf",
     "mondef":[{"MonID":10,"strMonName":"Mosquito"},{"MonID":12,"strMonName":"Treeant"}],
     "monmap":[{"MonMapID":1,"MonID":10,"strFrame":"r1"},{"MonMapID":2,"MonID":12,"strFrame":"r2"}],
     "monBranch":[{"MonMapID":1,"intHP":540,"intHPMax":540,"intState":1},{"MonMapID":2,"intHP":900,"intHPMax":900,"intState":1}],
@@ -154,12 +154,27 @@ fn serve_api(listener: TcpListener, game: u16, logins: Arc<AtomicUsize>, done: A
         }
         let body = if head.starts_with("post /game/api/login/now") {
             logins.fetch_add(1, Ordering::SeqCst);
-            format!(r#"{{"login":{{"bSuccess":1,"sToken":"t","iUpg":0}},"servers":{servers}}}"#)
+            format!(r#"{{"login":{{"bSuccess":1,"sToken":"t","iUpg":0}},"servers":{servers}}}"#).into_bytes()
+        } else if head.starts_with("get /game/gamefiles/maps/farm/farm.swf") {
+            map_swf(&["Enter", "r1", "r2", "Blank"])
         } else {
-            servers.clone()
+            servers.clone().into_bytes()
         };
-        let _ = write!(sock, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+        let _ = write!(sock, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());
+        let _ = sock.write_all(&body);
     }
+}
+
+fn map_swf(cells: &[&str]) -> Vec<u8> {
+    let mut tags = Vec::new();
+    for cell in cells {
+        let label = [cell.as_bytes(), &[0]].concat();
+        tags.extend_from_slice(&((43u16 << 6) | label.len() as u16).to_le_bytes());
+        tags.extend_from_slice(&label);
+        tags.extend_from_slice(&(1u16 << 6).to_le_bytes());
+    }
+    let body = [vec![0, 0, 24, 1, 0], tags, vec![0, 0]].concat();
+    [b"FWS".as_slice(), &[10], &((body.len() + 8) as u32).to_le_bytes(), &body].concat()
 }
 
 fn serve_game(listener: TcpListener, area: &'static str, mut extra: impl FnMut(&str, &mut Wire), seen: Sender<(Instant, String)>, done: Arc<AtomicBool>) {

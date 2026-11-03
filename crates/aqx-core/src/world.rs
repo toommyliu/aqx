@@ -145,6 +145,8 @@ pub struct Area {
     pub id: AreaId,
     pub name: String,
     pub map: String,
+    pub file: String,
+    pub cells: Vec<String>,
     pub monsters: Vec<Monster>,
     pub players: Vec<Player>,
     announced: bool,
@@ -577,7 +579,7 @@ impl World {
             Some("joinOK") => {
                 let Some(id) = xml.room() else { return };
                 let players = xml.users().filter(|(eid, _)| Some(*eid) != me).map(|(eid, name)| Player::new(eid, name)).collect();
-                self.area = Some(Area { id, name: String::new(), map: String::new(), monsters: Vec::new(), players, announced: false });
+                self.area = Some(Area { id, name: String::new(), map: String::new(), file: String::new(), cells: Vec::new(), monsters: Vec::new(), players, announced: false });
             }
             Some("uER") => {
                 if let Some(area) = &mut self.area {
@@ -1310,7 +1312,7 @@ impl World {
             Some(area) if area.id == m.id => area.players,
             _ => Vec::new(),
         };
-        self.area = Some(Area { id: m.id, name: m.name, map: m.map, monsters, players, announced: false });
+        self.area = Some(Area { id: m.id, name: m.name, map: m.map, file: m.file, cells: Vec::new(), monsters, players, announced: false });
         for avatar in each::<Avatar>(m.avatars, "player", events) {
             let me = self.me.as_mut().filter(|me| me.eid == avatar.eid);
             if let Some(me) = me {
@@ -1659,6 +1661,8 @@ struct MoveToArea {
     name: String,
     #[serde(rename = "strMapName")]
     map: String,
+    #[serde(rename = "strMapFileName", default)]
+    file: String,
     #[serde(rename = "mondef", default)]
     defs: Vec<Value>,
     #[serde(rename = "monmap", default)]

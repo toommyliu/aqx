@@ -333,3 +333,11 @@ fn a_goto_dropped_by_a_monster_pulling_the_player_back_into_combat_is_sent_again
     assert!(started.elapsed() < Duration::from_secs(8), "{:?}", started.elapsed());
     assert_eq!(fake.session.world.area.as_ref().map(|a| a.name.as_str()), Some("town-2"));
 }
+
+#[test]
+fn the_map_file_gives_the_cells() {
+    let mut fake = Fake::start(FARM, |_, _| {});
+    let cells = |s: &aqx_core::Session| s.world.area.as_ref().map(|a| a.cells.clone()).filter(|c| !c.is_empty());
+    let first = fake.session.pump_until(Some(Instant::now() + Duration::from_secs(5)), cells);
+    assert_eq!(first.unwrap(), ["Enter", "r1", "r2", "Blank"]);
+}

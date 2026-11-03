@@ -50,12 +50,13 @@ pub fn player(world: &World) -> Value {
 }
 
 pub fn map(world: &World) -> Value {
-    let Some(area) = &world.area else { return json!({ "name": "", "room": 0, "areaId": 0, "monsters": [], "players": [] }) };
+    let Some(area) = &world.area else { return json!({ "name": "", "room": 0, "areaId": 0, "cells": [], "monsters": [], "players": [] }) };
     let room = area.name.rsplit_once('-').and_then(|(_, room)| room.parse::<u32>().ok()).unwrap_or(0);
     json!({
         "name": area.map,
         "room": room,
         "areaId": area.id,
+        "cells": area.cells,
         "monsters": area.monsters.iter().map(monster).collect::<Vec<_>>(),
         "players": area.players.iter().map(other).collect::<Vec<_>>(),
     })
