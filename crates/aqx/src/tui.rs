@@ -192,14 +192,16 @@ impl Section {
     fn title(self, g: &Game) -> Field {
         let mut title = vec![Span::raw(format!("{} ", self.label().to_lowercase()))];
         title.extend(self.count(g));
-        if self != Section::Players {
-            title.push(Span::raw(" · last changed first"));
+        match self {
+            Section::Players => {}
+            Section::Inventory => title.push(Span::raw(" · equipped first, then last changed")),
+            _ => title.push(Span::raw(" · last changed first")),
         }
         title
     }
 
     fn entries(self, g: &Game) -> Vec<(String, Field)> {
-        let stacks = |stacks: &[Stack]| stacks.iter().map(|s| (s.name.clone(), held(s))).collect();
+        let stacks = |stacks: &[Stack]| stacks.iter().map(stacked).collect();
         match self {
             Section::Players => g.cell_players.iter().map(|p| (p.name.clone(), vec![Span::raw(p.level.to_string())])).collect(),
             Section::Drops => g.drops.iter().map(|d| (d.name.clone(), vec![Span::raw(d.qty.to_string())])).collect(),
@@ -207,6 +209,14 @@ impl Section {
             Section::Inventory => stacks(&g.inventory),
             Section::Bank => g.bank.as_deref().map(stacks).unwrap_or_default(),
         }
+    }
+
+    fn listing(self, g: &Game) -> Vec<(String, Field)> {
+        if self != Section::Inventory {
+            return self.entries(g);
+        }
+        let (worn, carried): (Vec<&Stack>, Vec<&Stack>) = g.inventory.iter().partition(|s| s.equipped);
+        worn.into_iter().chain(carried).map(stacked).collect()
     }
 
     fn nothing(self, g: &Game) -> &'static str {
@@ -1357,6 +1367,10 @@ fn fill(used: u32, slots: u32) -> Option<(Color, &'static str)> {
     }
 }
 
+fn stacked(s: &Stack) -> (String, Field) {
+    (s.name.clone(), held(s))
+}
+
 fn held(s: &Stack) -> Field {
     match () {
         _ if s.equipped => vec![Span::raw("equipped").dark_gray()],
@@ -1377,7 +1391,7 @@ fn entry(indent: usize, name: String, value: Field, width: usize) -> Field {
 }
 
 fn draw_section(f: &mut Frame, area: Rect, g: &Game, section: Section, app: &App) {
-    let entries = section.entries(g);
+    let entries = section.listing(g);
     if entries.is_empty() {
         app.list_max.set(0);
         return f.render_widget(Paragraph::new(Line::raw(format!("  {}", section.nothing(g))).dark_gray()), area);
@@ -1976,6 +1990,8 @@ mod tests {
         ] {
             assert!(row(&shown, rail).contains(log), "missing {rail:?} beside {log:?}:\n{shown}");
         }
+        let after = |has: &str| shown.lines().skip_while(|l| !l.contains(has)).nth(1).unwrap().to_string();
+        assert!(after("│ Inventory").contains("│   Fishing Bait"), "the rail keeps what changed last on top:\n{shown}");
         let headings: Vec<String> = rail(&shown).into_iter().map(|(heading, _, _)| heading).collect();
         assert_eq!(headings.iter().map(|h| h.split(' ').next().unwrap()).collect::<Vec<_>>(), ["Players", "Drops", "Temp", "Inventory", "Bank"]);
 
@@ -2045,7 +2061,9 @@ mod tests {
         }
         let inventory = screen_of(&fleet, &mut app, 150, 30);
         println!("{inventory}");
-        assert!(inventory.contains("── inventory 38/40 · misc 40/100 · last changed first ─"), "{inventory}");
+        assert!(inventory.contains("── inventory 38/40 · misc 40/100 · equipped first, then last changed ─"), "{inventory}");
+        let first = inventory.lines().skip_while(|l| !l.contains("── inventory")).nth(1).unwrap();
+        assert!(first.starts_with("   Master Ranger") && first.contains("equipped"), "equipped items lead the full list: {inventory}");
         assert_eq!(inventory.matches("Spare Part").count(), 34, "a 40-slot inventory fits without scrolling: {inventory}");
         assert!(row(&inventory, "Fishing Bait").contains("533/999") && row(&inventory, "Paint").contains("99/99 ✓"));
         assert!(!rail(&inventory).iter().any(|(heading, shown, _)| heading.starts_with("Inventory") && *shown > 0), "the open list shrinks to its heading in the rail: {inventory}");
