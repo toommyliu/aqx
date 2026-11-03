@@ -348,6 +348,11 @@ fn op(name: &str) -> Option<Op> {
             s.complete(id, reward, times)?;
             done()
         }),
+        "request_pickup" => I(|s, a| {
+            let (name,): (String,) = args(a)?;
+            s.request_pickup(&name);
+            done()
+        }),
         "pickup" => B(|s, a| {
             let (name,): (String,) = args(a)?;
             s.pickup(&name)?;

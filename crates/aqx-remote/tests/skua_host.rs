@@ -1077,3 +1077,57 @@ fn loading_quests_returns_without_waiting_for_ones_the_server_never_sends() {
     assert!(logged.contains(&"info: tree has 11: True".to_string()), "{logged:#?}");
     assert!(sent.iter().any(|m| m.starts_with("%xt%zm%getQuests%5%11%404%")), "{sent:#?}");
 }
+
+const PICKUP: &str = r#"
+using System.Diagnostics;
+using Skua.Core.Interfaces;
+
+public class Pickup
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        Stopwatch clock = Stopwatch.StartNew();
+        bot.Drops.Pickup("Treeant Branch");
+        bot.Log($"pickup {(clock.ElapsedMilliseconds < 1000 ? "returned" : "blocked")}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn a_pickup_the_server_ignores_does_not_hold_up_the_script() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-pickup");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("Pickup.cs");
+    std::fs::write(&script, PICKUP).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, |_, _| {}, sink);
+    fake.session.world.drops.push(Item {
+        id: ItemId(87),
+        char_item: None,
+        name: "Treeant Branch".into(),
+        qty: 1,
+        max_stack: 10,
+        kind: "Item".into(),
+        slot: "None".into(),
+        equipped: false,
+        ac: false,
+        member: false,
+        house: false,
+        link: String::new(),
+        file: String::new(),
+        icon: String::new(),
+        meta: String::new(),
+        level: 0,
+        enhancement: None,
+    });
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let sent: Vec<String> = fake.finish().into_iter().map(|(_, m)| m).collect();
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: pickup returned".to_string()), "{logged:#?}");
+    assert!(sent.iter().any(|m| m.starts_with("%xt%zm%getDrop%5%87%")), "{sent:#?}");
+}

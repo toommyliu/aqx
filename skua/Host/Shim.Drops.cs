@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using Skua.Core.Models.Items;
+using Skua.Core.Interfaces;
 
 namespace Aqx.Skua;
 
@@ -43,9 +44,13 @@ public sealed partial class Shim
         });
         On("IScriptDrop.Pickup(String)", args => PickupDrop((string)args[0]!));
         On("IScriptDrop.Pickup(Int32)", args => PickupDrop((int)args[0]!));
-        On("IScriptDrop.Pickup(String[])", args => ((string[])args[0]!).All(PickupDrop));
-        On("IScriptDrop.Pickup(Int32[])", args => ((int[])args[0]!).All(PickupDrop));
-        On("IScriptDrop.PickupAll(Boolean)", _ => CurrentDrops().All(d => PickupDrop(d.Name)));
+        On("IScriptDrop.Pickup(String[])", args => PickupEach((string[])args[0]!, name => PickupDrop(name), name => IScriptInterface.Instance.Wait.ForPickup(name)));
+        On("IScriptDrop.Pickup(Int32[])", args => PickupEach((int[])args[0]!, id => PickupDrop(id), id => IScriptInterface.Instance.Wait.ForPickup(id)));
+        On("IScriptDrop.PickupAll(Boolean)", args =>
+        {
+            CurrentDrops().ForEach(d => PickupDrop(d.Name));
+            return (bool)args[0]! || IScriptInterface.Instance.Wait.ForPickup("*");
+        });
         On("IScriptDrop.RejectAll(Boolean)", _ => null);
         On("IScriptDrop.RejectExcept(String[])", _ => null);
         On("IScriptDrop.RejectExcept(Int32[])", _ => null);
@@ -68,9 +73,19 @@ public sealed partial class Shim
 
     List<ItemBase> CurrentDrops() => Models.Items<ItemBase>(View("drops"));
 
-    bool PickupDrop(string name) => !CurrentDrops().Exists(d => d.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) || Act("pickup", name);
+    object? PickupDrop(string name) => Aqx.Call("request_pickup", name);
 
-    bool PickupDrop(int id) => CurrentDrops().Find(d => d.ID == id) is not { } drop || Act("pickup", drop.Name);
+    object? PickupDrop(int id) => CurrentDrops().Find(d => d.ID == id) is { } drop ? PickupDrop(drop.Name) : null;
+
+    static object? PickupEach<T>(T[] drops, Action<T> pickup, Func<T, bool> wait)
+    {
+        foreach (T drop in drops)
+        {
+            pickup(drop);
+            wait(drop);
+        }
+        return null;
+    }
 
     object? StartGrabber()
     {
