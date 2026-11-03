@@ -1139,17 +1139,18 @@ fn draw_keys(f: &mut Frame, area: Rect) {
         }
         vec![Span::raw(format!("{key:<11}")).bold(), Span::raw(format!("{word:<w$}", w = width - 11))]
     };
+    let (left, right) = (32, 27);
     let rows = ACCOUNT_KEYS.len().max(SCRIPT_KEYS.len());
     let mut lines: Vec<Line> = (0..rows)
         .map(|i| {
-            let mut spans = ACCOUNT_KEYS.get(i).map_or_else(|| vec![Span::raw(" ".repeat(30))], |&k| cell(k, 30));
-            spans.extend(SCRIPT_KEYS.get(i).map(|&k| cell(k, 27)).unwrap_or_default());
+            let mut spans = ACCOUNT_KEYS.get(i).map_or_else(|| vec![Span::raw(" ".repeat(left))], |&k| cell(k, left));
+            spans.extend(SCRIPT_KEYS.get(i).map(|&k| cell(k, right)).unwrap_or_default());
             Line::from(spans)
         })
         .collect();
     lines.push(Line::default());
     lines.push(Line::raw("Keys act on the marked accounts, or the selected one.").dark_gray());
-    let rect = centered(area, 61, lines.len() as u16 + 2);
+    let rect = centered(area, (left + right) as u16 + 4, lines.len() as u16 + 2);
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(lines).block(Block::bordered().title(" keys ").padding(Padding::horizontal(1))), rect);
 }
