@@ -14,6 +14,7 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 const REST_TIMEOUT: Duration = Duration::from_secs(30);
 const PICKUP_TIMEOUT: Duration = Duration::from_secs(5);
 const QUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const LOAD_TRIES: usize = 5;
 const BANK_TIMEOUT: Duration = Duration::from_secs(30);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const JUMP_SETTLE: Duration = Duration::from_millis(500);
@@ -172,8 +173,16 @@ impl Session {
             return Ok(());
         }
         let room = self.room()?;
-        self.send_paced(Out::LoadQuests { room, quests: &missing }, Kind::Free)?;
-        self.wait_for(Some(Instant::now() + QUEST_TIMEOUT), "loading quests", |s| missing.iter().all(|id| s.world.quests.contains_key(id)))
+        let loaded = |s: &Session| missing.iter().all(|id| s.world.quests.contains_key(id));
+        for _ in 0..LOAD_TRIES {
+            let slowed = self.slowed;
+            self.send_paced(Out::LoadQuests { room, quests: &missing }, Kind::Free)?;
+            self.wait_for(Some(Instant::now() + QUEST_TIMEOUT), "loading quests", |s| loaded(s) || s.slowed != slowed)?;
+            if loaded(self) {
+                return Ok(());
+            }
+        }
+        Err(ActError::Rejected("the server kept saying to slow down while loading quests".into()))
     }
 
     pub fn accept(&mut self, id: QuestId) -> Result<(), ActError> {
