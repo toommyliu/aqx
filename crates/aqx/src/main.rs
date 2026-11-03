@@ -440,6 +440,7 @@ fn start(name: &str, config: Option<&Path>, launches: Vec<Launch>, print: Print,
             Err(e) => eprintln!("aqx: not adding accounts from {}: {e}", config.display()),
         }
     }
+    hub.let_watchers_finish(Duration::from_secs(1));
     for cell in hub.cells.all() {
         cell.close();
     }
@@ -498,17 +499,31 @@ fn attach(path: &Path, redact: bool) -> Result<(), String> {
     }
     let fleet = tui::Fleet { title: name, cells, socket: path.to_path_buf() };
     tui::run(&fleet, redact, || gone.load(Ordering::SeqCst))?;
-    let all = fleet.cells.all();
-    if gone.load(Ordering::SeqCst)
-        && let [only] = &all[..]
-    {
+    if gone.load(Ordering::SeqCst) {
+        let all = fleet.cells.all();
         let mask = if redact { tui::mask(&all) } else { mask::Mask::default() };
-        let board = only.board();
-        for line in board.log.iter().skip(board.log.len().saturating_sub(10)) {
-            println!("{}  {:<6}  {}", output::time_of_day(line.t), line.source, mask.hide(&line.text));
+        println!("the aqx session ended");
+        for line in last_words(&all, &mask) {
+            println!("{line}");
         }
     }
     Ok(())
+}
+
+fn last_words(cells: &[Arc<AccountCell>], mask: &mask::Mask) -> Vec<String> {
+    let tail = if cells.len() == 1 { 10 } else { 3 };
+    let names: Vec<String> = cells.iter().map(|cell| mask.hide(&cell.name)).collect();
+    let width = names.iter().map(|name| name.chars().count()).max().unwrap_or(0);
+    let mut out = Vec::new();
+    for (cell, name) in cells.iter().zip(&names) {
+        let who = if cells.len() == 1 { String::new() } else { format!("{name:<width$}  ") };
+        let board = cell.board();
+        let lines: Vec<&hub::LogLine> = board.log.iter().filter(|line| !line.is_game()).collect();
+        for line in &lines[lines.len().saturating_sub(tail)..] {
+            out.push(format!("{}  {who}{:<6}  {}", output::time_of_day(line.t), line.source, mask.hide(&line.text)));
+        }
+    }
+    out
 }
 
 fn mirror(cells: &Cells, message: &serde_json::Value) {
@@ -687,5 +702,21 @@ mod tests {
         let outcomes = session.join().unwrap().unwrap();
         assert!(outcomes.iter().all(|(_, r)| r.is_ok()), "{outcomes:?}");
         servers.stop();
+    }
+
+    #[test]
+    fn an_ended_session_prints_why_each_account_stopped() {
+        let line = |seq: u64, source: &str, text: &str| hub::LogLine { seq, t: 0, source: source.into(), text: text.into() };
+        let cells: Vec<Arc<AccountCell>> = ["main", "alt"].iter().map(|name| Arc::new(AccountCell::mirror(name))).collect();
+        for (seq, source, text) in [(1, "aqx", "logging in as main"), (2, "script", "farming"), (3, "aqx", "the script stopped: done"), (4, "game", "killed Frogzard"), (5, "aqx", "logged out")] {
+            cells[0].board().log.push(line(seq, source, text));
+        }
+        cells[1].board().log.push(line(1, "aqx", "stopped: login failed"));
+        let words = last_words(&cells, &mask::Mask::default());
+        let expected = ["farming", "the script stopped: done", "logged out", "stopped: login failed"];
+        assert!(words.len() == expected.len() && words.iter().zip(expected).all(|(w, e)| w.ends_with(&format!("  {e}"))), "the last 3 non-game lines of each: {words:?}");
+        assert!(words[0].contains("main  ") && words[3].contains("alt   "), "names line up: {words:?}");
+        let one = last_words(&cells[1..], &mask::Mask::default());
+        assert!(!one[0].contains("alt") && one[0].ends_with("stopped: login failed"), "one account needs no name: {one:?}");
     }
 }
