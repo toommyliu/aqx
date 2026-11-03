@@ -25,6 +25,8 @@ public sealed partial class Shim
         ("setGameObject" or "setGameObjectKey", _) => null,
         ("callGameFunction0", ["world.toggleMonsters"]) => null,
         ("callGameFunction", ["loaderInfo.applicationDomain.hasDefinition", "InvCat"]) => "false",
+        ("callGameFunction", ["world.getQuestValue", int slot]) => JsonConvert.SerializeObject(QuestValue(slot)),
+        ("callGameFunction", ["world.getAchievement", string field, int index]) => JsonConvert.SerializeObject((bool?)Aqx.Call("achievement", field, index) ?? false),
         ("callGameFunction", ["world.sendLoadShopRequest", int shop]) => JsonConvert.SerializeObject(Act("load_shop", shop)),
         ("callGameFunction", ["world.sendBuyItemRequestWithQuantity", IDictionary<string, object?> item]) =>
             JsonConvert.SerializeObject(Buy(Convert.ToInt32(item["ItemID"]), Convert.ToInt32(item["ShopItemID"]), Convert.ToInt32(item["iQty"]))),

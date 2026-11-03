@@ -14,7 +14,12 @@ public sealed partial class Shim
         On("IScriptStatus.get_ShouldExit()", _ => ShouldExit);
         On("IScriptManager.get_ShouldExit()", _ => ShouldExit);
         On("IScriptManager.get_LoadedScript()", _ => Script);
+        On("IScriptStatus.get_CompiledScript()", _ => CompiledScript());
     }
+
+    string CompiledScript() =>
+        string.Join(Environment.NewLine, File.ReadAllLines(Script).Where(line =>
+            !(line.TrimStart().StartsWith("//cs_") && line.Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).Length == 2))).Trim();
 
     static ScriptWait MakeWait()
     {
