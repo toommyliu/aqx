@@ -22,6 +22,7 @@ public static class Serve
         if (File.Exists(skills) && !File.Exists(ClientFileSources.SkuaAdvancedSkillsFile))
             File.Copy(skills, ClientFileSources.SkuaAdvancedSkillsFile);
         Shim shim = new(aqx, new ScriptConfig(overrides), Path.GetFullPath(script));
+        shim.Start();
         (string Outcome, string? Detail) end = ("finished", null);
         Thread thread = new(() => end = Execute((Built)compiled, shim)) { Name = Shim.ScriptThread };
         thread.Start();

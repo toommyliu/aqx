@@ -3,6 +3,7 @@ using Skua.Core.Models;
 
 const string Usage = """
     usage: aqx-skua check [--scripts DIR] [PATH...]
+           aqx-skua gaps [--scripts DIR]
            aqx-skua serve [--scripts DIR] SCRIPT [--arg KEY=VALUE]...
     """;
 
@@ -25,6 +26,8 @@ switch (args.FirstOrDefault(), paths)
         return Report.Check(Compiler(root), [Compiler(root).Root]);
     case ("check", _):
         return Report.Check(Compiler(root), paths);
+    case ("gaps", []):
+        return Report.Gaps(Compiler(root));
     case ("serve", [string script]):
         return Serve.Run(Compiler(root ?? ScriptsAbove(script)), script, overrides);
     default:

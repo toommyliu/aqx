@@ -27,6 +27,10 @@ public sealed partial class Shim
             On(Key(typeof(IScriptEvent), e.AddMethod!), args => Subscribe(name, d => Delegate.Combine(d, (Delegate)args[0]!)));
             On(Key(typeof(IScriptEvent), e.RemoveMethod!), args => Subscribe(name, d => Delegate.Remove(d, (Delegate)args[0]!)));
         }
+    }
+
+    public void Start()
+    {
         Aqx.Event += Forward;
         Aqx.Call("listen", "addItems", true);
         Aqx.Call("listen", "event", true);
