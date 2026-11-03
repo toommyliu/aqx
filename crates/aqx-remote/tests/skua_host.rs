@@ -1272,3 +1272,35 @@ fn the_full_completion_check_counts_the_bank() {
     assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
     assert!(logged.contains(&"info: can complete False, counting the bank True".to_string()), "{logged:#?}");
 }
+
+const RELOGIN: &str = r#"
+using Skua.Core.Interfaces;
+
+public class Relog
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Log($"relogged {bot.Servers.EnsureRelogin("fak")}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "needs the .NET host: build skua/Host and point AQX_SKUA at it"]
+fn relogging_by_name_matches_part_of_a_server_name() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("skua-relogin");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let script = dir.join("Relog.cs");
+    std::fs::write(&script, RELOGIN).unwrap();
+
+    let (sink, logged) = logging();
+    let mut fake = Fake::start_with(FARM, |_, _| {}, sink);
+    let result = aqx_remote::run(&mut fake.session, host(&script, &home));
+    let logins = fake.logins.load(std::sync::atomic::Ordering::SeqCst);
+
+    let logged = logged.lock().unwrap().clone();
+    assert!(matches!(result, Ok(Outcome::Finished)), "{result:?}\n{logged:#?}");
+    assert!(logged.contains(&"info: relogged True".to_string()), "{logged:#?}");
+    assert_eq!(logins, 2, "{logged:#?}");
+}
