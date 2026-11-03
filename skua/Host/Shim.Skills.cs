@@ -16,7 +16,7 @@ public sealed partial class Shim
     {
         On("IScriptInterface.get_Skills()", _ => skills ??= MakeSkills());
         On("IScriptPlayer.get_Skills()", _ => null);
-        On("IScriptPlayer.get_CurrentClassRank()", _ => 0);
+        On("IScriptPlayer.get_CurrentClassRank()", _ => Int(Me["classRank"]));
         foreach (string owner in new[] { "IScriptSelfAuras", "IScriptTargetAuras" })
         {
             Func<List<Aura>> auras = owner == "IScriptSelfAuras" ? () => Auras(Me["auras"]) : () => Auras(Me["target"]?["auras"]);

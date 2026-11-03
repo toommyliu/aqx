@@ -254,6 +254,8 @@ declare module "aqx" {
     readonly member: boolean;
     /** Name of the equipped class, `""` before the server sends it. */
     readonly class: string;
+    /** Rank of the equipped class, 1-10, from its class points. */
+    readonly classRank: number;
     readonly stats: Stats;
     readonly auras: readonly Aura[];
     readonly factions: readonly Faction[];

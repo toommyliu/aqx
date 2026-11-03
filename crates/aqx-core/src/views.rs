@@ -24,6 +24,7 @@ pub fn player(world: &World) -> Value {
         "gold": me.gold,
         "member": me.member,
         "class": me.class,
+        "classRank": me.class_rank(),
         "stats": {
             "str": stat("$STR"),
             "int": stat("$INT"),
