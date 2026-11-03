@@ -115,6 +115,7 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+ "tui-input",
  "unicode-width",
 ]
 
@@ -2798,6 +2799,17 @@ checksum = "0d15f4f5898bcfc5d8a8e45ed30b2f108d710c1a2e5489dbf80e078f707181bc"
 dependencies = [
  "serde",
  "stable_deref_trait",
+]
+
+[[package]]
+name = "tui-input"
+version = "0.15.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4fa0cb7933d19f91eb3109781bf7297d5e4cba57e857d97a29b9465d3383f56"
+dependencies = [
+ "ratatui",
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]
