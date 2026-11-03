@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::hub::{Command, Hub, LogLine, Snapshot};
 
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 5;
 const BUILD: &str = env!("AQX_BUILD");
 const TICK: Duration = Duration::from_millis(250);
 const FRESH: Duration = Duration::from_millis(300);
@@ -442,13 +442,16 @@ mod tests {
 
     #[test]
     fn the_wire_format_matches_its_protocol_number() {
-        use crate::hub::{Aura, Bar, Game, Offer, Player, SkillState, Snapshot, Target};
+        use crate::hub::{Aura, Bar, Game, Player, SkillState, Snapshot, Stack, Target};
         let game = Game {
             skills: vec![SkillState::default()],
             auras: vec![Aura::default()],
             target: Some(Target::default()),
             cell_players: vec![Player::default()],
-            drops: vec![Offer::default()],
+            drops: vec![Stack::default()],
+            temp: vec![Stack::default()],
+            inventory: vec![Stack::default()],
+            bank: Some(vec![Stack::default()]),
             ..Game::default()
         };
         let snapshot = Snapshot {
@@ -462,19 +465,26 @@ mod tests {
         let mut shape = Vec::new();
         keys(&json!({ "snapshot": snapshot, "log": line }), "", &mut shape);
         shape.sort();
-        let pinned = "log log.seq log.source log.t log.text snapshot snapshot.account snapshot.args snapshot.deaths snapshot.detail \
-             snapshot.drops snapshot.game snapshot.game.afk snapshot.game.area snapshot.game.auras \
-             snapshot.game.auras.name snapshot.game.auras.stacks snapshot.game.cell snapshot.game.cell_players \
-             snapshot.game.cell_players.level snapshot.game.cell_players.name snapshot.game.class \
-             snapshot.game.dead snapshot.game.drops snapshot.game.drops.name snapshot.game.drops.qty \
-             snapshot.game.gold snapshot.game.hp snapshot.game.level snapshot.game.max_hp snapshot.game.max_mp \
-             snapshot.game.mp snapshot.game.pad snapshot.game.skills snapshot.game.skills.name \
-             snapshot.game.skills.ready_pct snapshot.game.target snapshot.game.target.hp \
-             snapshot.game.target.max_hp snapshot.game.target.name snapshot.gold_gained snapshot.kills \
-             snapshot.paused snapshot.phase snapshot.progress snapshot.progress.current \
-             snapshot.progress.eta_secs snapshot.progress.label snapshot.progress.total snapshot.run \
-             snapshot.script snapshot.server snapshot.stalled snapshot.status snapshot.up_secs snapshot.user";
-        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (3, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
+        let pinned = "log log.seq log.source log.t log.text snapshot snapshot.account snapshot.args snapshot.deaths \
+             snapshot.detail snapshot.drops snapshot.game snapshot.game.afk snapshot.game.area \
+             snapshot.game.auras snapshot.game.auras.name snapshot.game.auras.stacks snapshot.game.bag_slots \
+             snapshot.game.bag_used snapshot.game.bank snapshot.game.bank.equipped snapshot.game.bank.max \
+             snapshot.game.bank.name snapshot.game.bank.qty snapshot.game.bank_slots snapshot.game.bank_used \
+             snapshot.game.cell snapshot.game.cell_players snapshot.game.cell_players.level \
+             snapshot.game.cell_players.name snapshot.game.class snapshot.game.dead snapshot.game.drops \
+             snapshot.game.drops.equipped snapshot.game.drops.max snapshot.game.drops.name \
+             snapshot.game.drops.qty snapshot.game.gold snapshot.game.hp snapshot.game.inventory \
+             snapshot.game.inventory.equipped snapshot.game.inventory.max snapshot.game.inventory.name \
+             snapshot.game.inventory.qty snapshot.game.level snapshot.game.max_hp snapshot.game.max_mp \
+             snapshot.game.misc_slots snapshot.game.misc_used snapshot.game.mp snapshot.game.pad \
+             snapshot.game.skills snapshot.game.skills.name snapshot.game.skills.ready_pct snapshot.game.target \
+             snapshot.game.target.hp snapshot.game.target.max_hp snapshot.game.target.name snapshot.game.temp \
+             snapshot.game.temp.equipped snapshot.game.temp.max snapshot.game.temp.name snapshot.game.temp.qty \
+             snapshot.gold_gained snapshot.kills snapshot.paused snapshot.phase snapshot.progress \
+             snapshot.progress.current snapshot.progress.eta_secs snapshot.progress.label snapshot.progress.total \
+             snapshot.run snapshot.script snapshot.server snapshot.stalled snapshot.status snapshot.up_secs \
+             snapshot.user";
+        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (5, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
     }
 
     #[test]

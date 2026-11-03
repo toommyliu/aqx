@@ -1,6 +1,6 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::{Aura, Boost, Event, Item, Monster, Place, Player, Quest, QuestStatus, RewardKind, Server, Shop, SkillTarget, State, World};
+use crate::{Aura, Boost, Event, Item, Monster, Place, Player, Pool, Quest, QuestStatus, RewardKind, Server, Shop, SkillTarget, State, World};
 use aqx_protocol::Message;
 use serde_json::{Value, json};
 
@@ -135,7 +135,7 @@ pub fn skills(world: &World) -> Value {
 
 pub fn slots(world: &World) -> Value {
     let (bag, bank) = world.me.as_ref().map_or((0, 0), |m| (m.bag_slots, m.bank_slots));
-    json!({ "bag": bag, "bagUsed": world.inventory.len(), "bank": bank, "bankUsed": world.bank_count })
+    json!({ "bag": bag, "bagUsed": world.used(Pool::Bag), "bank": bank, "bankUsed": world.bank_count })
 }
 
 pub fn quest(world: &World, quest: &Quest) -> Value {

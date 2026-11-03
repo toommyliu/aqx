@@ -16,7 +16,7 @@ use unicode_width::UnicodeWidthChar;
 use aqx_script::Arg;
 
 use crate::account::{expand_home, script_path};
-use crate::hub::{AccountCell, Bar, Cells, Command, Game, Log, LogLine, Snapshot};
+use crate::hub::{AccountCell, Bar, Cells, Command, Game, Log, LogLine, Snapshot, Stack};
 use crate::mask::Mask;
 use crate::output::{span, time_of_day};
 use crate::socket;
@@ -27,6 +27,11 @@ const ACCENT: Color = Color::Blue;
 const CARD_WIDTH: u16 = 44;
 const CARD_HEIGHT: u16 = 8;
 const WHEEL_LINES: usize = 3;
+const PAGE_LINES: usize = 10;
+const RAIL_WIDTH: u16 = 34;
+const LOG_MIN: u16 = 76;
+const COLUMN_MIN: usize = 20;
+const COLUMN_MAX: usize = 40;
 const LIST_MIN: u16 = 10;
 const ABOUT_WIDTH: usize = 14;
 const LIST_STEP: u16 = 4;
@@ -45,7 +50,7 @@ const ACCOUNT_KEYS: [(&str, &str); 13] = [
     ("/", "filter by name"),
     ("space", "mark"),
     ("a", "mark all / none"),
-    ("esc", "clear marks"),
+    ("esc", "close list, unmark"),
     ("i", "log in"),
     ("x", "log out"),
     ("q", "detach"),
@@ -53,7 +58,7 @@ const ACCOUNT_KEYS: [(&str, &str); 13] = [
     ("ctrl+c", "end or detach"),
 ];
 
-const SCRIPT_KEYS: [(&str, &str); 14] = [
+const SCRIPT_KEYS: [(&str, &str); 15] = [
     ("", "Scripts"),
     ("o", "run a script"),
     ("s", "stop"),
@@ -65,6 +70,7 @@ const SCRIPT_KEYS: [(&str, &str); 14] = [
     ("b", "hide sidebar"),
     ("[ ]", "resize sidebar"),
     ("l", "filter the log"),
+    ("v", "next list"),
     ("⇧↑ ⇧↓", "scroll a line"),
     ("PgUp PgDn", "scroll a page"),
     ("End", "newest lines"),
@@ -122,6 +128,98 @@ impl Filter {
             Filter::Aqx => "aqx",
             Filter::Server => "server",
             Filter::Game => "game",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Section {
+    Players,
+    Drops,
+    Temp,
+    Inventory,
+    Bank,
+}
+
+impl Section {
+    const ALL: [Section; 5] = [Section::Players, Section::Drops, Section::Temp, Section::Inventory, Section::Bank];
+
+    fn after(open: Option<Section>) -> Option<Section> {
+        match open {
+            None => Some(Section::Players),
+            Some(Section::Players) => Some(Section::Drops),
+            Some(Section::Drops) => Some(Section::Temp),
+            Some(Section::Temp) => Some(Section::Inventory),
+            Some(Section::Inventory) => Some(Section::Bank),
+            Some(Section::Bank) => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Section::Players => "Players",
+            Section::Drops => "Drops",
+            Section::Temp => "Temp",
+            Section::Inventory => "Inventory",
+            Section::Bank => "Bank",
+        }
+    }
+
+    fn rail_rows(self) -> usize {
+        match self {
+            Section::Players | Section::Temp | Section::Inventory => 4,
+            Section::Drops => 6,
+            Section::Bank => 0,
+        }
+    }
+
+    fn len(self, g: &Game) -> usize {
+        match self {
+            Section::Players => g.cell_players.len(),
+            Section::Drops => g.drops.len(),
+            Section::Temp => g.temp.len(),
+            Section::Inventory => g.inventory.len(),
+            Section::Bank => g.bank.as_ref().map_or(0, Vec::len),
+        }
+    }
+
+    fn count(self, g: &Game) -> Field {
+        match self {
+            Section::Inventory if g.misc_slots > 0 => vec![tally(g.bag_used, g.bag_slots), Span::raw(" · misc "), tally(g.misc_used, g.misc_slots)],
+            Section::Inventory => vec![tally(g.bag_used, g.bag_slots)],
+            Section::Bank => vec![tally(g.bank_used, g.bank_slots)],
+            _ => vec![Span::raw(self.len(g).to_string())],
+        }
+    }
+
+    fn title(self, g: &Game) -> Field {
+        let mut title = vec![Span::raw(format!("{} ", self.label().to_lowercase()))];
+        title.extend(self.count(g));
+        if self != Section::Players {
+            title.push(Span::raw(" · last changed first"));
+        }
+        title
+    }
+
+    fn entries(self, g: &Game) -> Vec<(String, Field)> {
+        let stacks = |stacks: &[Stack]| stacks.iter().map(|s| (s.name.clone(), held(s))).collect();
+        match self {
+            Section::Players => g.cell_players.iter().map(|p| (p.name.clone(), vec![Span::raw(p.level.to_string())])).collect(),
+            Section::Drops => g.drops.iter().map(|d| (d.name.clone(), vec![Span::raw(d.qty.to_string())])).collect(),
+            Section::Temp => stacks(&g.temp),
+            Section::Inventory => stacks(&g.inventory),
+            Section::Bank => g.bank.as_deref().map(stacks).unwrap_or_default(),
+        }
+    }
+
+    fn nothing(self, g: &Game) -> &'static str {
+        match self {
+            Section::Players => "Nobody else is in this cell.",
+            Section::Drops => "No drops are waiting.",
+            Section::Temp => "No temporary items.",
+            Section::Inventory => "The inventory is empty.",
+            Section::Bank if g.bank.is_none() => "aqx lists the bank once a script opens it.",
+            Section::Bank => "The bank is empty.",
         }
     }
 }
@@ -232,6 +330,10 @@ struct App {
     scroll: usize,
     max_scroll: Cell<usize>,
     log_width: Cell<usize>,
+    list: Option<Section>,
+    list_at: usize,
+    list_max: Cell<usize>,
+    rail: Cell<Option<(Rect, [usize; 5])>>,
     unseen_from: Option<u64>,
     jump_area: Cell<Option<Rect>>,
     list_top: Cell<usize>,
@@ -322,6 +424,9 @@ fn gather(fleet: &Fleet, app: &mut App) -> Vec<Shown> {
             Shown { name: app.mask.hide(&cell.name), snapshot: board.snapshot.as_ref().and_then(|s| app.mask.hide_in(s)) }
         })
         .collect();
+    if snapshot(&shown, app.selected).and_then(|s| s.game.as_ref()).is_none() {
+        app.list = None;
+    }
     for typed in shown.iter().filter_map(|s| s.snapshot.as_ref()?.script.clone()) {
         let script = PathBuf::from(&typed);
         if !app.recent.iter().any(|r| r.script == script) {
@@ -453,6 +558,26 @@ impl App {
         if i != self.selected {
             self.selected = i;
             self.scroll = 0;
+            self.list_at = 0;
+        }
+    }
+
+    fn open(&mut self, list: Option<Section>) {
+        self.list = list;
+        self.list_at = 0;
+    }
+
+    fn up(&mut self, lines: usize) {
+        match self.list {
+            Some(_) => self.list_at = self.list_at.min(self.list_max.get()).saturating_sub(lines),
+            None => self.scroll = self.scroll.saturating_add(lines).min(self.max_scroll.get()),
+        }
+    }
+
+    fn down(&mut self, lines: usize) {
+        match self.list {
+            Some(_) => self.list_at = self.list_at.saturating_add(lines).min(self.list_max.get()),
+            None => self.scroll = self.scroll.saturating_sub(lines),
         }
     }
 
@@ -462,16 +587,21 @@ impl App {
             MouseEventKind::Drag(MouseButton::Left) if self.dragging => self.list_width = Some(mouse.column + 1),
             MouseEventKind::Up(_) => self.dragging = false,
             _ if self.grid => {}
-            MouseEventKind::ScrollUp => self.scroll = (self.scroll + WHEEL_LINES).min(self.max_scroll.get()),
-            MouseEventKind::ScrollDown => self.scroll = self.scroll.saturating_sub(WHEEL_LINES),
+            MouseEventKind::ScrollUp => self.up(WHEEL_LINES),
+            MouseEventKind::ScrollDown => self.down(WHEEL_LINES),
             _ => {}
         }
     }
 
     fn click(&mut self, column: u16, row: u16, shown: &[Shown]) {
-        if self.jump_area.get().is_some_and(|pill| pill.contains(Position::new(column, row))) {
+        let at = Position::new(column, row);
+        if self.jump_area.get().is_some_and(|pill| pill.contains(at)) {
             self.scroll = 0;
             return;
+        }
+        if let Some((rail, starts)) = self.rail.get().filter(|(rail, _)| rail.contains(at)) {
+            let section = Section::ALL[starts.iter().rposition(|&start| start <= usize::from(row - rail.y)).unwrap_or(0)];
+            return self.open(if self.list == Some(section) { None } else { Some(section) });
         }
         let list = self.list_area.get();
         self.dragging = list.is_some_and(|l| column + 1 == l.right() || column == l.right());
@@ -631,14 +761,14 @@ impl App {
             KeyCode::Char('Q') => self.ending = true,
             KeyCode::Char('?') => self.keys = true,
             KeyCode::Char('g') => self.grid = !self.grid,
-            KeyCode::Char('d' | 'l') | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End if self.grid => {}
+            KeyCode::Char('d' | 'l' | 'v') | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End if self.grid => {}
             KeyCode::Enter if self.grid => self.grid = false,
             KeyCode::Left if self.grid => self.step(shown, -1, false),
             KeyCode::Right if self.grid => self.step(shown, 1, false),
             KeyCode::Up if self.grid => self.step(shown, -cols, false),
             KeyCode::Down if self.grid => self.step(shown, cols, false),
-            KeyCode::Up if line => self.scroll = (self.scroll + 1).min(self.max_scroll.get()),
-            KeyCode::Down if line => self.scroll = self.scroll.saturating_sub(1),
+            KeyCode::Up if line => self.up(1),
+            KeyCode::Down if line => self.down(1),
             KeyCode::Up => self.step(shown, -1, false),
             KeyCode::Down => self.step(shown, 1, false),
             KeyCode::Tab => self.step(shown, 1, true),
@@ -653,11 +783,13 @@ impl App {
             KeyCode::Char('a') if visible.iter().all(|i| self.marked.contains(i)) => self.marked.retain(|i| !visible.contains(i)),
             KeyCode::Char('a') => self.marked.extend(visible),
             KeyCode::Char('/') => self.querying = true,
+            KeyCode::Esc | KeyCode::Char('l') if self.list.is_some() => self.open(None),
             KeyCode::Esc => self.marked.clear(),
-            KeyCode::PageUp => self.scroll = (self.scroll + 10).min(self.max_scroll.get()),
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::Home => self.scroll = self.max_scroll.get(),
-            KeyCode::End => self.scroll = 0,
+            KeyCode::PageUp => self.up(PAGE_LINES),
+            KeyCode::PageDown => self.down(PAGE_LINES),
+            KeyCode::Home => self.up(usize::MAX),
+            KeyCode::End => self.down(usize::MAX),
+            KeyCode::Char('v') => self.open(Section::after(self.list)),
             KeyCode::Char('l') => {
                 self.filter = self.filter.next();
                 self.scroll = 0;
@@ -731,6 +863,7 @@ fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
     let list = !app.grid && !app.list_hidden && body.width >= WIDE && shown.len() > 1;
     app.list_area.set(None);
     app.jump_area.set(None);
+    app.rail.set(None);
     draw_header(f, header, fleet, app, shown, list || app.grid);
     if app.grid {
         draw_grid(f, body, app, shown);
@@ -738,7 +871,7 @@ fn draw(f: &mut Frame, fleet: &Fleet, app: &App, shown: &[Shown]) {
         let pane = if list {
             let fitted = (4 + name_width(shown) + 1 + ABOUT_WIDTH + 1) as u16;
             let width = app.list_width.unwrap_or(fitted).clamp(LIST_MIN, body.width - PANE_MIN);
-            let [left, _, pane] = Layout::horizontal([Constraint::Length(width), Constraint::Length(1), Constraint::Min(0)]).areas(body);
+            let [left, _, pane, _] = Layout::horizontal([Constraint::Length(width), Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)]).areas(body);
             app.list_area.set(Some(left));
             draw_list(f, left, app, shown);
             pane
@@ -934,20 +1067,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     {
         return f.render_widget(Paragraph::new(format!(" {note}")).yellow(), area);
     }
-    let details = if app.details { "less" } else { "details" };
-    let offline = app.all(shown, is_offline);
-    let mut keys: Vec<(&str, &str)> = if offline {
-        vec![("i", "log in"), ("o", "log in and run")]
-    } else {
-        let pause = if app.all(shown, |s| s.paused) { "resume" } else { "pause" };
-        vec![("o", "run"), ("s", "stop"), ("r", "restart"), ("p", pause), ("x", "log out")]
-    };
-    keys.push(("space", "mark"));
-    match (app.grid, offline) {
-        (true, _) => keys.push(("enter", "open")),
-        (false, true) => keys.push(("d", details)),
-        (false, false) => keys.extend([("d", details), ("l", "filter")]),
-    }
+    let keys = if app.list.is_some() && !app.grid { list_keys(app) } else { account_keys(app, shown) };
     let mut line = vec![Span::raw(" → ").fg(ACCENT), Span::raw(who).bold(), Span::raw("   ")];
     let used = spans_width(&line);
     if used + spans_width(&hints(&keys)) <= width {
@@ -962,6 +1082,32 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         line.extend(hints(&[("?", "more")]));
     }
     f.render_widget(Paragraph::new(Line::from(line)), area);
+}
+
+fn list_keys(app: &App) -> Vec<(&'static str, &'static str)> {
+    let mut keys = vec![("v", "next list"), ("esc", "back to log")];
+    if app.list_max.get() > 0 {
+        keys.push(("PgUp PgDn", "scroll"));
+    }
+    keys
+}
+
+fn account_keys(app: &App, shown: &[Shown]) -> Vec<(&'static str, &'static str)> {
+    let details = if app.details { "less" } else { "details" };
+    let offline = app.all(shown, is_offline);
+    let mut keys = if offline {
+        vec![("i", "log in"), ("o", "log in and run")]
+    } else {
+        let pause = if app.all(shown, |s| s.paused) { "resume" } else { "pause" };
+        vec![("o", "run"), ("s", "stop"), ("r", "restart"), ("p", pause), ("x", "log out")]
+    };
+    keys.push(("space", "mark"));
+    match (app.grid, offline) {
+        (true, _) => keys.push(("enter", "open")),
+        (false, true) => keys.push(("d", details)),
+        (false, false) => keys.extend([("d", details), ("l", "filter"), ("v", "lists")]),
+    }
+    keys
 }
 
 fn draw_grid(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
@@ -1028,7 +1174,10 @@ fn card(account: &Shown, width: usize) -> Vec<Line<'static>> {
     if online {
         lines.extend(s.progress.first().map(|b| progress(b, width)));
         if let Some(g) = &s.game {
-            lines.extend(flow(summary(s, g), width));
+            let mut fields = summary(s, g);
+            let pools = [("inventory", g.bag_used, g.bag_slots), ("misc", g.misc_used, g.misc_slots)];
+            fields.extend(pools.into_iter().filter_map(|(pool, used, slots)| fill(used, slots).map(|(color, word)| vec![Span::raw(format!("{pool} {used}/{slots} {word}")).fg(color)])));
+            lines.extend(flow(vec![fields], width));
         }
     }
     lines
@@ -1051,23 +1200,204 @@ fn task(s: &Snapshot) -> Field {
 }
 
 fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
-    let width = area.width as usize;
-    let mut lines = detail(account, app.details, app.frame, width);
-    let pill_row = usize::from(app.scroll > 0);
-    let log = log_lines(app, (area.height as usize).saturating_sub(lines.len() + 1 + pill_row), width);
-    let mut rule = format!("── log · {}", app.filter.label());
-    let scrolled = app.scroll.min(app.max_scroll.get());
-    if scrolled > 0 {
-        rule.push_str(&format!(" · ↑{scrolled}"));
+    let head = detail(account, app.details, app.frame, usize::from(area.width));
+    let [top, divider, below] = Layout::vertical([Constraint::Length(head.len() as u16), Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    f.render_widget(Paragraph::new(head), top);
+    let game = account.snapshot.as_ref().and_then(|s| s.game.as_ref());
+    let rail = game.filter(|_| area.width >= LOG_MIN + RAIL_WIDTH);
+    let [main, side] = Layout::horizontal([Constraint::Min(0), Constraint::Length(if rail.is_some() { RAIL_WIDTH } else { 0 })]).areas(below);
+    let mut rule = vec![Span::raw("── ")];
+    let tabs = game.filter(|_| rail.is_none());
+    match app.list.zip(game) {
+        Some((section, g)) => {
+            draw_section(f, main, g, section, app);
+            match tabs {
+                Some(g) => rule.extend(counts(g, app.list)),
+                None => rule.extend(section.title(g)),
+            }
+            let (at, max) = (app.list_at.min(app.list_max.get()), app.list_max.get());
+            if at > 0 {
+                rule.push(Span::raw(format!(" · ↑{at}")));
+            }
+            if at < max {
+                rule.push(Span::raw(format!(" · ↓{}", max - at)));
+            }
+        }
+        None => {
+            rule.push(Span::raw(format!("log · {}", app.filter.label())));
+            let scrolled = draw_log(f, main, app);
+            if scrolled > 0 {
+                rule.push(Span::raw(format!(" · ↑{scrolled}")));
+            }
+            if let Some(g) = tabs {
+                rule.push(Span::raw(" ── "));
+                rule.extend(counts(g, None));
+            }
+        }
     }
-    let fill = width.saturating_sub(rule.chars().count() + 1);
-    lines.push(Line::raw(format!("{rule} {}", "─".repeat(fill))).dark_gray());
+    rule.push(Span::raw(" "));
+    let width = usize::from(main.width);
+    rule.push(Span::raw("─".repeat(width.saturating_sub(spans_width(&rule)))));
+    let mut rule = clip(rule, width);
+    if let Some(g) = rail {
+        rule.push(Span::raw(format!("┬{}", "─".repeat(usize::from(RAIL_WIDTH) - 1))));
+        draw_rail(f, side, g, app);
+    }
+    f.render_widget(Paragraph::new(Line::from(rule)).dark_gray(), divider);
+}
+
+fn draw_log(f: &mut Frame, area: Rect, app: &App) -> usize {
+    let pill_row = usize::from(app.scroll > 0);
+    let log = log_lines(app, usize::from(area.height).saturating_sub(pill_row), usize::from(area.width));
+    let scrolled = app.scroll.min(app.max_scroll.get());
     let has_log = !log.is_empty();
-    lines.extend(log);
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(Paragraph::new(log), area);
     if scrolled > 0 && has_log {
         draw_jump(f, area, app);
     }
+    scrolled
+}
+
+fn counts(g: &Game, open: Option<Section>) -> Field {
+    let mut spans = Vec::new();
+    for section in Section::ALL {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" · "));
+        }
+        let mut tab = vec![Span::raw(format!("{} ", section.label().to_lowercase()))];
+        tab.extend(section.count(g));
+        if open == Some(section) {
+            tab = tab.into_iter().map(|span| span.fg(ACCENT).bold()).collect();
+        }
+        spans.extend(tab);
+    }
+    spans
+}
+
+fn draw_rail(f: &mut Frame, area: Rect, g: &Game, app: &App) {
+    let width = usize::from(area.width.saturating_sub(1));
+    let sizes = Section::ALL.map(|s| if s == Section::Bank || app.list == Some(s) { 0 } else { s.len(g) });
+    let (gaps, rows) = rail_rows(sizes, usize::from(area.height));
+    let mut lines = Vec::new();
+    let mut starts = [0; 5];
+    for (i, section) in Section::ALL.into_iter().enumerate() {
+        if gaps && i > 0 {
+            lines.push(Line::default());
+        }
+        starts[i] = lines.len();
+        lines.push(fit(heading(g, section, app.list == Some(section)), width));
+        let entries = if sizes[i] == 0 { Vec::new() } else { section.entries(g) };
+        let cut = entries.len() > rows[i] && rows[i] >= 2;
+        let fits = if cut { rows[i] - 1 } else { entries.len().min(rows[i]) };
+        let more = entries.len() - fits;
+        lines.extend(entries.into_iter().take(fits).map(|(name, value)| Line::from(entry(3, name, value, width))));
+        if cut {
+            lines.push(Line::raw(format!("   +{more}")).dark_gray());
+        }
+    }
+    app.rail.set(Some((Rect { height: area.height.min(lines.len() as u16), ..area }, starts)));
+    let rule = Block::new().borders(Borders::LEFT).border_style(Style::new().dark_gray());
+    f.render_widget(Paragraph::new(lines).block(rule), area);
+}
+
+fn rail_rows(sizes: [usize; 5], height: usize) -> (bool, [usize; 5]) {
+    let gaps = Section::ALL.len() - 1;
+    let mut left = height.saturating_sub(Section::ALL.len());
+    let mut rows = [0; 5];
+    for (i, section) in Section::ALL.into_iter().enumerate() {
+        rows[i] = sizes[i].min(section.rail_rows()).min(left);
+        left -= rows[i];
+    }
+    let spaced = left >= gaps;
+    if spaced {
+        left -= gaps;
+    }
+    for i in [Section::Inventory, Section::Players, Section::Drops, Section::Temp].map(|s| s as usize) {
+        let more = (sizes[i] - rows[i]).min(left);
+        rows[i] += more;
+        left -= more;
+    }
+    (spaced, rows)
+}
+
+fn heading(g: &Game, section: Section, open: bool) -> Field {
+    let mut spans = vec![Span::raw(if open { "▌" } else { " " }).fg(ACCENT)];
+    let empty = match section {
+        Section::Players | Section::Drops | Section::Temp => "none",
+        Section::Inventory | Section::Bank => "",
+    };
+    if section.len(g) == 0 && !empty.is_empty() {
+        spans.push(Span::raw(format!("{} {empty}", section.label())).dark_gray());
+        return spans;
+    }
+    spans.extend([Span::raw(section.label()).bold(), Span::raw(" ")]);
+    spans.extend(section.count(g));
+    if section == Section::Bank && g.bank.is_none() {
+        spans.push(Span::raw("  not opened").dark_gray());
+    }
+    spans
+}
+
+fn tally(used: u32, slots: u32) -> Span<'static> {
+    if slots == 0 {
+        return Span::raw(used.to_string());
+    }
+    let text = Span::raw(format!("{used}/{slots}"));
+    match fill(used, slots) {
+        Some((color, _)) => text.fg(color),
+        None => text,
+    }
+}
+
+fn fill(used: u32, slots: u32) -> Option<(Color, &'static str)> {
+    match () {
+        _ if slots == 0 => None,
+        _ if used >= slots => Some((Color::Red, "full")),
+        _ if used * 10 >= slots * 9 => Some((Color::Yellow, "nearly full")),
+        _ => None,
+    }
+}
+
+fn held(s: &Stack) -> Field {
+    match () {
+        _ if s.equipped => vec![Span::raw("equipped").dark_gray()],
+        _ if s.max > 1 && s.qty >= s.max => vec![Span::raw(format!("{}/{} ✓", s.qty, s.max)).green()],
+        _ if s.max > 1 => vec![Span::raw(format!("{}/{}", s.qty, s.max))],
+        _ if s.qty > 1 => vec![Span::raw(s.qty.to_string())],
+        _ => Vec::new(),
+    }
+}
+
+fn entry(indent: usize, name: String, value: Field, width: usize) -> Field {
+    let value_width = spans_width(&value);
+    let mut spans = vec![Span::raw(" ".repeat(indent))];
+    spans.extend(clip(vec![Span::raw(name)], width.saturating_sub(indent + value_width + 1)));
+    spans.push(Span::raw(" ".repeat(width.saturating_sub(spans_width(&spans) + value_width))));
+    spans.extend(value);
+    clip(spans, width)
+}
+
+fn draw_section(f: &mut Frame, area: Rect, g: &Game, section: Section, app: &App) {
+    let entries = section.entries(g);
+    if entries.is_empty() {
+        app.list_max.set(0);
+        return f.render_widget(Paragraph::new(Line::raw(format!("  {}", section.nothing(g))).dark_gray()), area);
+    }
+    let width = usize::from(area.width);
+    let widest = entries.iter().map(|(name, value)| Span::raw(name.as_str()).width() + spans_width(value)).max().unwrap_or(0);
+    let cols = (width / (widest + 4).clamp(COLUMN_MIN, COLUMN_MAX)).max(1);
+    let column = width / cols;
+    let rows = entries.len().div_ceil(cols);
+    let height = usize::from(area.height);
+    app.list_max.set(rows.saturating_sub(height));
+    let at = app.list_at.min(app.list_max.get());
+    let lines: Vec<Line> = (at..rows.min(at + height))
+        .map(|row| {
+            let cells = (0..cols).filter_map(|col| entries.get(col * rows + row));
+            Line::from(cells.flat_map(|(name, value)| entry(2, name.clone(), value.clone(), column.saturating_sub(2)).into_iter().chain([Span::raw("  ")])).collect::<Field>())
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_jump(f: &mut Frame, area: Rect, app: &App) {
@@ -1095,7 +1425,7 @@ fn detail(account: &Shown, full: bool, frame: usize, width: usize) -> Vec<Line<'
     }
     if let Some(g) = &s.game {
         lines.push(Line::default());
-        lines.extend(flow(if full { everything(s, g, width) } else { summary(s, g) }, width));
+        lines.extend(flow(if full { everything(s, g, width) } else { vec![summary(s, g)] }, width));
     }
     lines
 }
@@ -1130,7 +1460,7 @@ fn progress(b: &Bar, width: usize) -> Line<'static> {
     fit(spans, width)
 }
 
-fn summary(s: &Snapshot, g: &Game) -> Vec<Vec<Field>> {
+fn summary(s: &Snapshot, g: &Game) -> Vec<Field> {
     let mut fields = vec![hp(g)];
     if let Some(t) = &g.target {
         fields.push(labeled("Target", vec![Span::raw(t.name.clone())]));
@@ -1139,7 +1469,7 @@ fn summary(s: &Snapshot, g: &Game) -> Vec<Vec<Field>> {
     if let Some(gold) = s.gold_gained {
         fields.push(gained(gold));
     }
-    vec![fields]
+    fields
 }
 
 fn everything(s: &Snapshot, g: &Game, width: usize) -> Vec<Vec<Field>> {
@@ -1166,17 +1496,10 @@ fn everything(s: &Snapshot, g: &Game, width: usize) -> Vec<Vec<Field>> {
     if !g.auras.is_empty() {
         combat.push(listed("Auras", g.auras.iter().map(|a| (a.name.clone(), (a.stacks > 1).then(|| format!("x{}", a.stacks)))), width));
     }
-    let mut around = Vec::new();
-    if !g.cell_players.is_empty() {
-        around.push(listed("Here", g.cell_players.iter().map(|p| (p.name.clone(), Some(p.level.to_string()))), width));
-    }
-    if !g.drops.is_empty() {
-        around.push(listed("Offered", g.drops.iter().map(|d| (d.name.clone(), Some(format!("x{}", d.qty)))), width));
-    }
     let mut stats = vec![labeled("Stats", amount(s.kills, "kill")), amount(s.drops, "drop")];
     stats.extend(s.gold_gained.map(gained));
     stats.push(amount(s.deaths, "death"));
-    vec![you, target.collect(), combat, around, stats]
+    vec![you, target.collect(), combat, stats]
 }
 
 fn hp(g: &Game) -> Field {
@@ -1469,17 +1792,25 @@ mod tests {
 
     use super::*;
     use crate::hub::AccountCell;
-    use crate::hub::{Board, Hub, LOG_LINES, Player, Print, SkillState};
+    use crate::hub::{Board, Hub, LOG_LINES, Player, Print, SkillState, Stack};
 
-    fn rows(fleet: &Fleet, app: &mut App, width: u16) -> Vec<Vec<ratatui::buffer::Cell>> {
+    fn rows_of(fleet: &Fleet, app: &mut App, width: u16, height: u16) -> Vec<Vec<ratatui::buffer::Cell>> {
         let shown = gather(fleet, app);
-        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|f| draw(f, fleet, app, &shown)).unwrap();
         terminal.backend().buffer().content.chunks(width as usize).map(<[_]>::to_vec).collect()
     }
 
+    fn screen_of(fleet: &Fleet, app: &mut App, width: u16, height: u16) -> String {
+        rows_of(fleet, app, width, height).iter().map(|row| row.iter().map(|c| c.symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+    }
+
+    fn rows(fleet: &Fleet, app: &mut App, width: u16) -> Vec<Vec<ratatui::buffer::Cell>> {
+        rows_of(fleet, app, width, 24)
+    }
+
     fn screen(fleet: &Fleet, app: &mut App, width: u16) -> String {
-        rows(fleet, app, width).iter().map(|row| row.iter().map(|c| c.symbol()).collect::<String>()).collect::<Vec<_>>().join("\n")
+        screen_of(fleet, app, width, 24)
     }
 
     fn press(fleet: &Fleet, app: &mut App, code: KeyCode) {
@@ -1505,6 +1836,31 @@ mod tests {
             reduce(&mut world, &Message::parse(&text).unwrap(), Instant::now());
         }
         world
+    }
+
+    fn stock(cell: &AccountCell, items: usize) {
+        let stack = |name: String, qty, max, equipped| Stack { name, qty, max, equipped };
+        let named = [("Fishing Bait", 533, 999, false), ("Master Ranger", 1, 1, true), ("Treasure Chest", 6, 99, false), ("Paint", 99, 99, false)];
+        let mut board = cell.board();
+        let g = board.snapshot.as_mut().and_then(|s| s.game.as_mut()).expect("a published game");
+        g.drops = (0..8).map(|i| stack(format!("Spider Drop {i}"), i + 1, 99, false)).collect();
+        g.temp = vec![stack("Spider Silk".into(), 4, 10, false), stack("Slime Sample".into(), 10, 10, false)];
+        g.inventory = (0..items).map(|i| named.get(i).map_or_else(|| stack(format!("Spare Part {i:02}"), 1, 1, false), |&(n, q, m, e)| stack(n.into(), q, m, e))).collect();
+        (g.bag_used, g.bag_slots, g.misc_used, g.misc_slots, g.bank_used, g.bank_slots) = (items as u32, 40, 40, 100, 120, 200);
+    }
+
+    fn rail(screen: &str) -> Vec<(String, usize, usize)> {
+        let mut sections: Vec<(String, usize, usize)> = Vec::new();
+        for line in screen.lines().skip_while(|l| !l.contains('┬')).skip(1) {
+            let Some((_, text)) = line.rsplit_once('│') else { continue };
+            match (text.trim(), sections.last_mut()) {
+                ("", _) => {}
+                (more, Some(last)) if more.starts_with('+') => last.2 = more[1..].parse().unwrap(),
+                (_, Some(last)) if text.starts_with("   ") => last.1 += 1,
+                (heading, _) => sections.push((heading.trim_start_matches('▌').to_string(), 0, 0)),
+            }
+        }
+        sections
     }
 
     fn fleet(accounts: &[&str]) -> (Fleet, Arc<Hub>) {
@@ -1590,11 +1946,213 @@ mod tests {
         for expected in [
             "MP ████████ 100/100  Lv 100 Barber  12.3M gold",
             "Auras Corruption x2",
-            "Here ally 40",
             "Stats 1 kill  0 drops  0 deaths",
             "d less",
         ] {
             assert!(shown.contains(expected), "missing {expected:?}");
+        }
+        assert!(!shown.contains("Here ally"), "players nearby leave the header for their own list: {shown}");
+    }
+
+    #[test]
+    fn a_wide_pane_lists_what_is_nearby_and_held_beside_the_log() {
+        let (fleet, hub) = fleet(&["main"]);
+        let cell = &fleet.cells.all()[0];
+        publish(&hub, cell, &farm_world());
+        stock(cell, 38);
+        let mut app = App::default();
+        let shown = screen_of(&fleet, &mut app, 150, 30);
+        println!("{shown}");
+        assert!(row(&shown, "── log · main").contains('┬'), "{shown}");
+        for (log, rail) in [
+            ("script  Astral Ephemerite", "│ Players 1"),
+            ("", "│   ally                        40"),
+            ("", "│ Drops 8"),
+            ("", "│   Spider Silk               4/10"),
+            ("", "│   Slime Sample           10/10 ✓"),
+            ("", "│ Inventory 38/40 · misc 40/100 "),
+            ("", "│   Fishing Bait           533/999"),
+            ("", "│   Master Ranger         equipped"),
+            ("", "│ Bank 120/200  not opened"),
+        ] {
+            assert!(row(&shown, rail).contains(log), "missing {rail:?} beside {log:?}:\n{shown}");
+        }
+        let headings: Vec<String> = rail(&shown).into_iter().map(|(heading, _, _)| heading).collect();
+        assert_eq!(headings.iter().map(|h| h.split(' ').next().unwrap()).collect::<Vec<_>>(), ["Players", "Drops", "Temp", "Inventory", "Bank"]);
+
+        let colored = |app: &mut App, has: &str, color: Color| -> String {
+            let rows = rows_of(&fleet, app, 150, 30);
+            let heading = rows.iter().find(|r| r.iter().map(|c| c.symbol()).collect::<String>().contains(has)).unwrap_or_else(|| panic!("no {has:?}"));
+            heading.iter().filter(|c| c.fg == color).map(|c| c.symbol()).collect()
+        };
+        assert_eq!(colored(&mut app, "Inventory 38/40", Color::Yellow), "38/40", "a nearly full inventory turns yellow");
+
+        let mut board = cell.board();
+        let g = board.snapshot.as_mut().unwrap().game.as_mut().unwrap();
+        (g.bag_used, g.misc_used) = (25, 100);
+        drop(board);
+        assert_eq!(colored(&mut app, "Inventory 25/40 · misc 100/100", Color::Red), "100/100", "the counts come from each pool, and a full one turns red");
+    }
+
+    #[test]
+    fn the_pane_keeps_a_column_clear_of_the_right_edge() {
+        let (fleet, hub) = fleet(&["main", "healer"]);
+        let cell = &fleet.cells.all()[0];
+        publish(&hub, cell, &farm_world());
+        stock(cell, 38);
+        let shown = screen_of(&fleet, &mut App::default(), 160, 30);
+        assert!(row(&shown, "Fishing Bait").ends_with("533/999 "), "{shown}");
+        assert!(shown.lines().all(|l| l.ends_with(' ')), "{shown}");
+    }
+
+    #[test]
+    fn a_short_rail_keeps_every_heading_and_counts_what_it_cuts() {
+        let (fleet, hub) = fleet(&["main"]);
+        let cell = &fleet.cells.all()[0];
+        publish(&hub, cell, &farm_world());
+        stock(cell, 38);
+        cell.board().snapshot.as_mut().unwrap().game.as_mut().unwrap().cell_players = (0..11).map(|i| Player { name: format!("player{i}"), level: 40 }).collect();
+        let mut app = App::default();
+        let expected = [("Players", 11), ("Drops", 8), ("Temp", 2), ("Inventory", 38), ("Bank", 0)];
+        for height in [40, 30, 20, 15, 13] {
+            let shown = screen_of(&fleet, &mut app, 150, height);
+            let sections = rail(&shown);
+            let found: Vec<(&str, usize)> = sections.iter().map(|(heading, shown, more)| (heading.split(' ').next().unwrap(), shown + more)).collect();
+            let wanted: Vec<(&str, usize)> = expected.iter().map(|&(name, n)| (name, if sections.iter().any(|s| s.0.starts_with(name) && s.1 + s.2 > 0) { n } else { 0 })).collect();
+            assert_eq!(found, wanted, "at {height} rows every heading shows and each list's rows add up to its count:\n{shown}");
+        }
+        let short = screen_of(&fleet, &mut app, 150, 13);
+        assert!(!short.lines().skip_while(|l| !l.contains('┬')).any(|l| l.ends_with("│ ") || l.trim_end().ends_with('│')), "a short rail drops the blank lines first:\n{short}");
+    }
+
+    #[test]
+    fn v_opens_each_list_in_place_of_the_log_and_esc_goes_back() {
+        let (fleet, hub) = fleet(&["main"]);
+        let cell = &fleet.cells.all()[0];
+        publish(&hub, cell, &farm_world());
+        stock(cell, 38);
+        let mut app = App { marked: BTreeSet::from([0]), ..App::default() };
+        let press_v = |app: &mut App| press(&fleet, app, KeyCode::Char('v'));
+
+        press_v(&mut app);
+        let players = screen_of(&fleet, &mut app, 150, 30);
+        assert!(players.contains("── players 1 ─"), "{players}");
+        assert!(row(&players, "  ally ").contains("40  ") && row(&players, "  ally ").contains("│▌Players 1"), "{players}");
+        assert!(!players.contains("Profanity filter"), "the list takes the log's place: {players}");
+        assert!(players.contains("v next list  esc back to log"), "{players}");
+
+        for _ in 0..3 {
+            press_v(&mut app);
+        }
+        let inventory = screen_of(&fleet, &mut app, 150, 30);
+        println!("{inventory}");
+        assert!(inventory.contains("── inventory 38/40 · misc 40/100 · last changed first ─"), "{inventory}");
+        assert_eq!(inventory.matches("Spare Part").count(), 34, "a 40-slot inventory fits without scrolling: {inventory}");
+        assert!(row(&inventory, "Fishing Bait").contains("533/999") && row(&inventory, "Paint").contains("99/99 ✓"));
+        assert!(!rail(&inventory).iter().any(|(heading, shown, _)| heading.starts_with("Inventory") && *shown > 0), "the open list shrinks to its heading in the rail: {inventory}");
+
+        press_v(&mut app);
+        assert!(screen_of(&fleet, &mut app, 150, 30).contains("aqx lists the bank once a script opens it."));
+        press_v(&mut app);
+        assert!(screen_of(&fleet, &mut app, 150, 30).contains("── log · main"), "v after the bank returns to the log");
+
+        press_v(&mut app);
+        press(&fleet, &mut app, KeyCode::Esc);
+        assert!(app.list.is_none() && app.marked.len() == 1, "esc closes the list first");
+        press(&fleet, &mut app, KeyCode::Esc);
+        assert!(app.marked.is_empty(), "then clears the marks");
+        press_v(&mut app);
+        press(&fleet, &mut app, KeyCode::Char('l'));
+        assert!(app.list.is_none() && app.filter == Filter::Main, "l goes back to the log without changing its filter");
+    }
+
+    #[test]
+    fn a_long_list_scrolls_with_the_log_keys() {
+        let (fleet, hub) = fleet(&["main"]);
+        let cell = &fleet.cells.all()[0];
+        publish(&hub, cell, &farm_world());
+        stock(cell, 10);
+        cell.board().snapshot.as_mut().unwrap().game.as_mut().unwrap().bank =
+            Some((0..300).map(|i| Stack { name: format!("Banked {i:03}"), qty: 1, max: 1, equipped: false }).collect());
+        let mut app = App { list: Some(Section::Bank), ..App::default() };
+        let top = screen_of(&fleet, &mut app, 150, 30);
+        println!("{top}");
+        let below: usize = row(&top, "── bank 120/200").split('↓').nth(1).and_then(|n| n.split(' ').next()?.parse().ok()).unwrap_or_else(|| panic!("no ↓ count: {top}"));
+        assert!(top.contains("Banked 000") && !top.contains("Banked 299") && below > 0, "{top}");
+        assert!(top.contains("PgUp PgDn scroll"), "{top}");
+        press(&fleet, &mut app, KeyCode::PageDown);
+        assert!(screen_of(&fleet, &mut app, 150, 30).contains(&format!("· ↑10 · ↓{} ", below - 10)));
+        press(&fleet, &mut app, KeyCode::End);
+        let end = screen_of(&fleet, &mut app, 150, 30);
+        assert!(end.contains("Banked 299") && !end.contains("Banked 000") && end.contains(&format!("· ↑{below} ─")), "{end}");
+        app.mouse(pointer(MouseEventKind::ScrollUp, 50, 15), &[]);
+        assert_eq!(app.list_at, below - WHEEL_LINES);
+        press(&fleet, &mut app, KeyCode::Home);
+        assert!(screen_of(&fleet, &mut app, 150, 30).contains("Banked 000"));
+        assert_eq!(app.scroll, 0, "the log keeps its own place");
+    }
+
+    #[test]
+    fn clicking_a_section_in_the_rail_opens_its_list() {
+        let (fleet, hub) = fleet(&["main"]);
+        let cell = &fleet.cells.all()[0];
+        publish(&hub, cell, &farm_world());
+        stock(cell, 4);
+        let mut app = App::default();
+        let shown = screen_of(&fleet, &mut app, 150, 34);
+        let at = |shown: &str, has: &str| shown.lines().position(|l| l.contains(has)).unwrap_or_else(|| panic!("no {has:?}:\n{shown}")) as u16;
+        let (x, heading, item) = (130, at(&shown, "│ Drops 8"), at(&shown, "Spider Drop 4"));
+        let click = |app: &mut App, y| {
+            screen_of(&fleet, app, 150, 34);
+            app.mouse(pointer(MouseEventKind::Down(MouseButton::Left), x, y), &[]);
+            screen_of(&fleet, app, 150, 34)
+        };
+        assert!(click(&mut app, item).contains("── drops 8 · last changed first"), "clicking a row opens its section");
+        assert!(click(&mut app, heading).contains("── log · main"), "clicking the open section's heading closes it");
+        assert!(click(&mut app, heading).contains("── drops 8 · last changed first"));
+        click(&mut app, heading);
+        assert!(shown.lines().nth(32).unwrap().trim_end().ends_with('│'), "{shown}");
+        click(&mut app, 32);
+        assert!(app.list.is_none(), "the empty space under the rail opens nothing");
+        app.grid = true;
+        screen_of(&fleet, &mut app, 150, 34);
+        app.mouse(pointer(MouseEventKind::Down(MouseButton::Left), x, heading), &[]);
+        assert!(app.list.is_none(), "the dashboard has no rail to click");
+    }
+
+    #[test]
+    fn a_narrow_pane_puts_the_counts_on_the_divider() {
+        let (fleet, hub) = fleet(&["main"]);
+        let cell = &fleet.cells.all()[0];
+        publish(&hub, cell, &farm_world());
+        stock(cell, 38);
+        let mut app = App::default();
+        let shown = screen_of(&fleet, &mut app, 100, 24);
+        assert!(row(&shown, "── log · main ── players 1 · drops 8 · temp 2 · inventory 38/40 · misc 40/100 · bank 120/200 ─").ends_with("─ "), "{shown}");
+        assert!(!shown.contains('┬'), "{shown}");
+        press(&fleet, &mut app, KeyCode::Char('v'));
+        press(&fleet, &mut app, KeyCode::Char('v'));
+        let drops = screen_of(&fleet, &mut app, 100, 24);
+        assert!(row(&drops, "── players 1 · drops 8 · temp 2").ends_with("─ ") && drops.contains("Spider Drop 7"), "the counts double as tabs: {drops}");
+        assert!(!drops.contains("log ·"), "{drops}");
+        let rows = rows_of(&fleet, &mut app, 100, 24);
+        let tab: String = rows[6].iter().filter(|c| c.fg == ACCENT).map(|c| c.symbol()).collect();
+        assert_eq!(tab, "drops 8", "the open list's tab is highlighted");
+    }
+
+    #[test]
+    fn a_card_warns_when_the_inventory_is_nearly_full() {
+        let (fleet, hub) = fleet(&["main", "healer"]);
+        let cell = &fleet.cells.all()[0];
+        let mut app = App { grid: true, ..App::default() };
+        for (items, warning) in [(30, None), (36, Some("inventory 36/40 nearly full")), (40, Some("inventory 40/40 full"))] {
+            publish(&hub, cell, &farm_world());
+            stock(cell, items);
+            let shown = screen_of(&fleet, &mut app, 120, 24);
+            match warning {
+                Some(warning) => assert!(shown.contains(warning), "{shown}"),
+                None => assert!(!shown.contains("inventory 3"), "{shown}"),
+            }
         }
     }
 
@@ -1815,21 +2373,6 @@ mod tests {
         let shown = screen(&fleet, &mut App::default(), 100);
         assert!(row(&shown, "spare").contains("✗ offline"));
         assert!(shown.contains(detail) && shown.contains("i log in"), "{shown}");
-    }
-
-    #[test]
-    fn a_crowded_cell_fits_one_line_and_counts_the_rest() {
-        let (fleet, _hub) = fleet(&["main"]);
-        let players = (0..11).map(|i| Player { name: format!("player{i}"), level: 40 + i }).collect();
-        let game = Game { cell_players: players, ..Game::default() };
-        show(&fleet.cells.all()[0], Snapshot { phase: "READY".into(), game: Some(game), ..Snapshot::default() });
-        let mut app = App { details: true, ..App::default() };
-        let shown = screen(&fleet, &mut app, 60);
-        let here = row(&shown, "Here").trim_end();
-        let named = here.matches("player").count();
-        let rest: usize = here.rsplit('+').next().and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("no count: {here}"));
-        assert_eq!(named + rest, 11, "{here}");
-        assert!(here.chars().count() <= 60);
     }
 
     #[test]

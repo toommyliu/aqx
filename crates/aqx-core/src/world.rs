@@ -14,6 +14,7 @@ use crate::quests::{Quest, QuestData, set_quest_value};
 const HASTE_CAP: f64 = 0.5;
 const RANK_POINTS: [u32; 9] = [900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500];
 const GOLD_CAP: i64 = 100_000_000;
+const DEFAULT_MISC_SLOTS: i64 = 100;
 const COUNTER_AURA: &str = "Counter Attack";
 const COUNTER_WARNING: &str = "prepares a counter attack";
 const COUNTER_WINDOW: Duration = Duration::from_secs(10);
@@ -31,6 +32,7 @@ pub struct World {
     pub bank: Arc<Vec<Item>>,
     pub bank_loaded: bool,
     pub bank_count: u32,
+    pub misc_slots: u32,
     pub shops: HashMap<ShopId, Arc<Shop>>,
     pub(crate) last_shop: Option<ShopId>,
     pub(crate) buying: Option<ShopId>,
@@ -204,9 +206,32 @@ pub struct Item {
     pub equipped: bool,
     pub ac: bool,
     pub member: bool,
+    pub house: bool,
     pub link: String,
     pub meta: String,
     pub enhancement: Option<Enhancement>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pool {
+    Bag,
+    Misc,
+    Class,
+    House,
+}
+
+impl Item {
+    pub fn pool(&self) -> Pool {
+        let numeric_meta = !self.meta.trim().is_empty() && self.meta.trim().bytes().all(|b| b.is_ascii_digit());
+        match self.kind.as_str() {
+            "Class" => Pool::Class,
+            _ if self.house => Pool::House,
+            "House" | "Wall Item" | "Floor Item" | "Guild" => Pool::House,
+            "Item" if numeric_meta => Pool::Bag,
+            "Item" | "Note" | "Quest Item" | "Resource" => Pool::Misc,
+            _ => Pool::Bag,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -373,6 +398,8 @@ struct ItemData {
     ac: bool,
     #[serde(rename = "bUpg", default, deserialize_with = "flag")]
     member: bool,
+    #[serde(rename = "bHouse", default, deserialize_with = "flag")]
+    house: bool,
     #[serde(rename = "bTemp", default, deserialize_with = "flag")]
     temp: bool,
     #[serde(rename = "bBank", default, deserialize_with = "flag")]
@@ -405,6 +432,7 @@ impl ItemData {
             equipped: self.equipped,
             ac: self.ac,
             member: self.member,
+            house: self.house,
             link: self.link,
             meta: self.meta,
             enhancement: (self.enhancement > 0).then(|| Enhancement { id: qty(self.enhancement), level: qty(self.enhancement_level) }),
@@ -702,6 +730,11 @@ impl World {
                     factions: Vec<Value>,
                     #[serde(rename = "bankCount", default, deserialize_with = "int")]
                     bank_count: i64,
+                    #[serde(rename = "iMiscSlots", default = "default_misc_slots", deserialize_with = "int")]
+                    misc_slots: i64,
+                }
+                fn default_misc_slots() -> i64 {
+                    DEFAULT_MISC_SLOTS
                 }
                 #[derive(Deserialize)]
                 struct FactionData {
@@ -717,6 +750,7 @@ impl World {
                 if !self.bank_loaded {
                     self.bank_count = qty(inventory.bank_count);
                 }
+                self.misc_slots = qty(inventory.misc_slots);
                 self.factions = each::<FactionData>(inventory.factions, "faction", events)
                     .into_iter()
                     .map(|f| Faction { id: f.id, name: f.name, rep: qty(f.rep) })
@@ -1354,6 +1388,24 @@ impl World {
         self.last_shop.and_then(|id| self.shops.get(&id)).map(Arc::as_ref)
     }
 
+    pub fn used(&self, pool: Pool) -> u32 {
+        self.inventory.iter().filter(|i| i.pool() == pool).count() as u32
+    }
+
+    pub fn full_for(&self, item: &Item) -> bool {
+        if item.pool() == Pool::Class {
+            return false;
+        }
+        let owned = self.inventory.iter().find(|i| i.id == item.id);
+        if owned.is_some_and(|i| i.qty < i.max_stack) {
+            return false;
+        }
+        match item.pool() {
+            Pool::Misc => owned.is_none() && self.misc_slots > 0 && self.used(Pool::Misc) >= self.misc_slots,
+            _ => self.me.as_ref().is_some_and(|m| m.bag_slots > 0 && self.used(Pool::Bag) >= m.bag_slots),
+        }
+    }
+
     pub fn bank_full(&self) -> bool {
         self.me.as_ref().is_some_and(|m| m.bank_slots > 0 && self.bank_count >= m.bank_slots)
     }
@@ -1745,6 +1797,40 @@ mod tests {
         assert_eq!(me.boost_left(Boost::Experience, now), Duration::ZERO);
         reduce(&mut world, &Message::parse(&json(r#"{"cmd":"cpboost","op":"-"}"#)).unwrap(), now);
         assert_eq!(world.me.as_ref().unwrap().boost_left(Boost::Class, now), Duration::ZERO);
+    }
+
+    #[test]
+    fn only_bag_items_count_against_the_bag_slots() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"initUserData","uid":1001,"data":{"intLevel":10,"iBagSlots":3}}"#));
+        feed(
+            &mut world,
+            &json(
+                r#"{"cmd":"loadInventoryBig","factions":[],"iMiscSlots":"4","items":[
+                {"ItemID":1,"CharItemID":11,"sName":"Sword","iQty":1,"iStk":1,"sType":"Sword"},
+                {"ItemID":2,"CharItemID":12,"sName":"Health Potion","iQty":5,"iStk":10,"sType":"Item","sMeta":"457"},
+                {"ItemID":3,"CharItemID":13,"sName":"Junk","iQty":1,"iStk":1,"sType":"Misc"},
+                {"ItemID":4,"CharItemID":14,"sName":"Rogue","iQty":1,"iStk":1,"sType":"Class"},
+                {"ItemID":5,"CharItemID":15,"sName":"Bone Dust","iQty":3,"iStk":50,"sType":"Resource"},
+                {"ItemID":6,"CharItemID":16,"sName":"Defeated Makai","iQty":50,"iStk":50,"sType":"Quest Item"},
+                {"ItemID":7,"CharItemID":17,"sName":"Voucher","iQty":1,"iStk":1,"sType":"Item"},
+                {"ItemID":8,"CharItemID":18,"sName":"Letter","iQty":1,"iStk":1,"sType":"Note"},
+                {"ItemID":9,"CharItemID":19,"sName":"Chair","iQty":1,"iStk":1,"sType":"Floor Item"},
+                {"ItemID":10,"CharItemID":20,"sName":"Tent","iQty":1,"iStk":1,"sType":"Misc","bHouse":1}]}"#,
+            ),
+        );
+        let used = |pool| world.used(pool);
+        assert_eq!([Pool::Bag, Pool::Misc, Pool::Class, Pool::House].map(used), [3, 4, 1, 2]);
+        assert_eq!(world.misc_slots, 4);
+
+        let owned = |name: &str| world.inventory.iter().find(|i| i.name == name).unwrap().clone();
+        let new = |kind: &str| Item { id: ItemId(99), kind: kind.into(), ..owned("Sword") };
+        assert!(world.full_for(&new("Axe")) && world.full_for(&new("Resource")), "both pools are at their limit");
+        assert!(!world.full_for(&owned("Health Potion")) && !world.full_for(&owned("Bone Dust")), "a stack with room takes more");
+        assert!(!world.full_for(&new("Class")), "classes have no limit");
+
+        feed(&mut world, &json(r#"{"cmd":"loadInventoryBig","factions":[],"items":[]}"#));
+        assert_eq!(world.misc_slots, 100, "the client allows 100 misc items when the server names no limit");
     }
 
     #[test]

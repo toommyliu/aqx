@@ -331,6 +331,7 @@ fn skua_boosts_use_a_boost_item_until_the_boost_is_running() {
         equipped: false,
         ac: false,
         member: false,
+        house: false,
         link: String::new(),
         meta: String::new(),
         enhancement: None,

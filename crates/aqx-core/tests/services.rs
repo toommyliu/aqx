@@ -118,6 +118,7 @@ fn potion() -> Item {
         equipped: true,
         ac: false,
         member: false,
+        house: false,
         link: "potion".into(),
         meta: "457".into(),
         enhancement: None,
