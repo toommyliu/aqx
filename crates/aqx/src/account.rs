@@ -286,7 +286,7 @@ impl Driver {
 
     fn skua(&self, script: &Script) -> std::process::Command {
         let mut host = std::process::Command::new(&self.spec.skua);
-        host.arg("serve").arg(&script.path);
+        host.env("AQX_SKUA_DATA", crate::config::home().join("skua")).arg("serve").arg(&script.path);
         for (key, value) in &script.args {
             host.arg("--arg").arg(format!("{key}={value}"));
         }
@@ -565,7 +565,7 @@ mod tests {
             &host,
             r#"#!/bin/sh
 [ "$1" = serve ] || exit 1
-echo "{\"id\":1,\"call\":\"log\",\"args\":[\"info\",\"hello from $(basename "$2") with $4\"]}"
+echo "{\"id\":1,\"call\":\"log\",\"args\":[\"info\",\"hello from $(basename "$2") with $4 in $AQX_SKUA_DATA\"]}"
 read reply
 echo '{"done":{"outcome":"finished"}}'
 "#,
@@ -578,7 +578,8 @@ echo '{"done":{"outcome":"finished"}}'
             s.skua = host;
             s.script = Some(Script { path, args: vec![("batch".into(), "5".into())] });
         });
-        wait_for(&account.cell, "ran the skua script", |b| b.log.iter().any(|l| l.text == "hello from farm.cs with batch=5"));
+        let said = format!("hello from farm.cs with batch=5 in {}", crate::config::home().join("skua").display());
+        wait_for(&account.cell, "ran the skua script", |b| b.log.iter().any(|l| l.text == said));
         assert!(account.finish().is_ok());
         servers.stop();
     }
