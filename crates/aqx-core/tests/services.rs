@@ -3,7 +3,7 @@ mod server;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use aqx_core::{ActError, Disconnect, Fight, Halt, Item, ItemRef, Monster, Phase, State, World};
+use aqx_core::{ActError, Disconnect, Fight, Halt, Item, ItemRef, Monster, Phase, Spot, State, World};
 use aqx_protocol::ItemId;
 use server::{FARM, Fake};
 
@@ -332,6 +332,41 @@ fn a_goto_dropped_by_a_monster_pulling_the_player_back_into_combat_is_sent_again
     fake.session.goto("ally").unwrap();
     assert!(started.elapsed() < Duration::from_secs(8), "{:?}", started.elapsed());
     assert_eq!(fake.session.world.area.as_ref().map(|a| a.name.as_str()), Some("town-2"));
+}
+
+#[test]
+fn a_goto_the_server_refuses_fails_at_once_with_its_reason() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%goto%ally%") {
+            wire.send("%xt%warning%-1%Cannot goto to player in a Locked zone.%");
+        }
+    });
+    let started = Instant::now();
+    let refused = fake.session.goto("ally");
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    assert!(matches!(&refused, Err(ActError::Rejected(reason)) if reason == "Cannot goto to player in a Locked zone."), "{refused:?}");
+}
+
+#[test]
+fn going_to_one_of_our_accounts_joins_its_room_and_cell_without_a_goto() {
+    let mut fake = Fake::start(FARM, |msg, wire| {
+        if msg.contains("%tfer%hero%town-2%") {
+            wire.send("<msg t='sys'><body action='joinOK' r='6'><uLs r='6'><u i='1001'><n><![CDATA[hero]]></n></u></uLs></body></msg>");
+            wire.object(TOWN);
+            wire.send("%xt%server%-1%You joined \"town-2\"%");
+        }
+    });
+    fake.session.locate_with(|name| {
+        name.eq_ignore_ascii_case("ally").then(|| Spot { player: "Ally".into(), area: "town-2".into(), cell: "r3".into(), pad: "Left".into() })
+    });
+    fake.session.goto("ally").unwrap();
+    let me = fake.session.world.me.clone().unwrap();
+    assert_eq!(fake.session.world.area.as_ref().map(|a| a.name.as_str()), Some("town-2"));
+    assert_eq!((me.cell.as_str(), me.pad.as_str()), ("r3", "Left"));
+    let sent = sent(fake);
+    let sent = messages(&sent);
+    assert!(!sent.iter().any(|m| m.contains("%goto%")), "{sent:?}");
+    assert!(sent.contains(&"%xt%zm%moveToCell%6%r3%Left%"), "{sent:?}");
 }
 
 #[test]

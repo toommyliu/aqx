@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
-use aqx_core::{Event, Faction, Item, Phase, Pool, State, StopHandle, World};
+use aqx_core::{Event, Faction, Item, Phase, Pool, Spot, State, StopHandle, World};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -272,6 +272,7 @@ pub struct Board {
     pub online: bool,
     pub leaving: bool,
     pub server: String,
+    pub spot: Option<Spot>,
     pub ready_since: Option<Instant>,
     pub last_progress: Instant,
     bars: Vec<Rate>,
@@ -299,6 +300,7 @@ impl Default for Board {
             online: false,
             leaving: false,
             server: String::new(),
+            spot: None,
             ready_since: None,
             last_progress: Instant::now(),
             bars: Vec::new(),
@@ -612,6 +614,7 @@ impl AccountCell {
         let mut board = self.board();
         board.online = self.inbox().commands.iter().any(|c| matches!(c, Command::Login | Command::Run { .. }));
         board.leaving = false;
+        board.spot = None;
         board.stalled = false;
         board.paused = false;
         if board.run == Run::Running {

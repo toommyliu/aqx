@@ -60,6 +60,14 @@ pub struct ShopItem {
     pub reputation: Option<(FactionId, u32)>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Spot {
+    pub player: String,
+    pub area: String,
+    pub cell: String,
+    pub pad: String,
+}
+
 #[derive(Clone)]
 pub struct Me {
     pub eid: EntityId,
@@ -656,7 +664,14 @@ impl World {
                     _ => events.push(Event::ServerText { text: text.into() }),
                 }
             }
-            "warning" => events.push(Event::Warning { text: xt.arg(0).unwrap_or_default().into() }),
+            "warning" => {
+                let text = xt.arg(0).unwrap_or_default();
+                if text.starts_with("Cannot goto") {
+                    events.push(Event::Refused { action: "goto".into(), reason: text.into() });
+                } else {
+                    events.push(Event::Warning { text: text.into() });
+                }
+            }
             "notify" | "logoutWarning" => events.push(Event::ServerText { text: xt.arg(0).unwrap_or_default().into() }),
             "multiLoginWarning" => events.push(Event::LoggedInElsewhere),
             "zm" if matches!(xt.room, "tryQuestComplete" | "acceptQuest") => {
@@ -1502,6 +1517,11 @@ impl World {
         }
     }
 
+    pub fn spot(&self) -> Option<Spot> {
+        let (me, area) = (self.me.as_ref()?, self.area.as_ref()?);
+        Some(Spot { player: me.user.clone(), area: area.name.clone(), cell: me.cell.clone(), pad: me.pad.clone() })
+    }
+
     pub fn carried(&self) -> impl Iterator<Item = &Item> {
         self.inventory.iter().chain(&self.house)
     }
@@ -2075,6 +2095,15 @@ mod tests {
         let mut world = joined();
         assert_eq!(feed(&mut world, "%xt%multiLoginWarning%-1%"), [Event::LoggedInElsewhere]);
         assert_eq!(feed(&mut world, "%xt%notify%-1%Server restarting soon%"), [Event::ServerText { text: "Server restarting soon".into() }]);
+    }
+
+    #[test]
+    fn a_goto_into_a_locked_zone_is_a_refusal() {
+        let mut world = joined();
+        assert_eq!(
+            feed(&mut world, "%xt%warning%-1%Cannot goto to player in a Locked zone.%"),
+            [Event::Refused { action: "goto".into(), reason: "Cannot goto to player in a Locked zone.".into() }]
+        );
     }
 
     #[test]

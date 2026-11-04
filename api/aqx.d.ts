@@ -313,7 +313,12 @@ declare module "aqx" {
     jump(cell: string, pad?: string): void;
     /** Walks to a point in the current cell. Returns once sent; the server doesn't acknowledge it. */
     walk(x: number, y: number): void;
-    /** Goes to another player's map and cell. Throws `timeout` when the server doesn't move the player there, as when the other player is offline. */
+    /**
+     * Goes to another player's map and cell. An account in this aqx process on
+     * the same server is reached by joining its room, which also works in maps
+     * that refuse `/goto`. Throws `rejected` when the server refuses the goto, and
+     * `timeout` when it doesn't move the player there, as when the other player is offline.
+     */
     goto(player: string): void;
     /** Picks up a map item until the inventories hold `qty` of `item`. Throws `rejected` after 3 tries that give nothing. */
     collect(mapItem: number, item: ItemRef, qty?: number): void;

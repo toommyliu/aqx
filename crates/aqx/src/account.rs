@@ -3,7 +3,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aqx_core::{Control, Credentials, Disconnect, Event, Halt, LoginError, Phase, Recorder, Session, Sink, State, World};
+use aqx_core::{Control, Credentials, Disconnect, Event, Halt, LoginError, Phase, Recorder, Session, Sink, Spot, State, World};
 use aqx_script::{Outcome, ScriptError};
 
 use crate::config::{OnStall, Restart};
@@ -94,6 +94,7 @@ pub fn run(spec: Spec, recorder: Option<Recorder>, control: Control, cell: Arc<A
     };
     let mut session = Session::new(control, spec.creds.clone(), &spec.version, recorder, sink);
     session.watch(WATCH_EVERY, watcher(&spec, &cell, &hub));
+    session.locate_with(locator(&cell, &hub));
     let mut driver = Driver { spec, cell, hub, wanted: None, last: None, ever_ready: false };
     driver.publish(&session, String::new());
     let mut result = Ok(());
@@ -119,6 +120,17 @@ pub fn run(spec: Spec, recorder: Option<Recorder>, control: Control, cell: Arc<A
     result
 }
 
+fn locator(cell: &Arc<AccountCell>, hub: &Arc<Hub>) -> impl Fn(&str) -> Option<Spot> + 'static {
+    let (cell, hub) = (cell.clone(), hub.clone());
+    move |name| {
+        let server = cell.board().server.clone();
+        hub.cells.all().into_iter().filter(|other| !Arc::ptr_eq(other, &cell)).find_map(|other| {
+            let board = other.board();
+            board.spot.clone().filter(|spot| board.server == server && spot.player.eq_ignore_ascii_case(name))
+        })
+    }
+}
+
 fn watcher(spec: &Spec, cell: &Arc<AccountCell>, hub: &Arc<Hub>) -> impl FnMut(&Phase, &World) + 'static {
     let (cell, hub, user) = (cell.clone(), hub.clone(), spec.creds.user.clone());
     let (stall_after, on_stall) = (spec.stall_after, spec.on_stall);
@@ -126,6 +138,7 @@ fn watcher(spec: &Spec, cell: &Arc<AccountCell>, hub: &Arc<Hub>) -> impl FnMut(&
     move |phase, world| {
         let now = Instant::now();
         let mut board = cell.board();
+        board.spot = if *phase == Phase::Ready { world.spot() } else { None };
         if *phase == Phase::Ready {
             board.sample_gold(world);
         }

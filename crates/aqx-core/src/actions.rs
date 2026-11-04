@@ -762,24 +762,38 @@ impl Session {
 
     pub fn goto(&mut self, name: &str) -> Result<(), ActError> {
         self.ready(None)?;
+        let (cell, pad) = match self.locate.as_ref().and_then(|locate| locate(name)) {
+            Some(spot) => {
+                self.join(&spot.area)?;
+                (spot.cell, spot.pad)
+            }
+            None => self.goto_by_server(name)?,
+        };
+        if cell.is_empty() {
+            return Ok(());
+        }
+        self.jump(&cell, if pad.is_empty() { "Left" } else { &pad })
+    }
+
+    fn goto_by_server(&mut self, name: &str) -> Result<(String, String), ActError> {
         let spot = |s: &Session| {
             let area = s.world.area.as_ref()?;
             area.players.iter().find(|p| p.name.eq_ignore_ascii_case(name)).map(|p| (p.cell.clone(), p.pad.clone()))
         };
         if spot(self).is_none() {
             let before = self.joined;
+            self.refusals.remove("goto");
             self.send_out_of_combat(
                 &format!("going to {name}"),
                 JOIN_TIMEOUT,
                 |s| s.send_paced(Out::Goto { name }, Kind::Free),
-                |s| s.joined.is_some() && s.joined != before,
+                |s| (s.joined.is_some() && s.joined != before) || s.refusals.contains_key("goto"),
             )?;
+            if let Some(reason) = self.refusals.remove("goto") {
+                return Err(ActError::Rejected(reason));
+            }
         }
-        let Some((cell, pad)) = spot(self) else { return Err(ActError::NotFound(format!("{name} in this map"))) };
-        if cell.is_empty() {
-            return Ok(());
-        }
-        self.jump(&cell, if pad.is_empty() { "Left" } else { &pad })
+        spot(self).ok_or_else(|| ActError::NotFound(format!("{name} in this map")))
     }
 
     pub fn collect(&mut self, map_item: u32, item: &ItemRef, qty: u32) -> Result<(), ActError> {
