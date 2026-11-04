@@ -41,7 +41,7 @@ aqx sends every `.cs` file to the Skua host. Run it the same way as a `.ts` scri
 aqx run skua/vendor/Scripts/Farm/BuyScrolls.cs
 ```
 
-A script loads `CoreBots.cs` and its other includes from the nearest folder above it that holds `CoreBots.cs`. `skua/vendor/Scripts` is a copy of Skua's script repo, so its scripts work as they are. A script outside such a folder uses Skua's scripts folder, `~/.config/Skua/Scripts`.
+A script loads `CoreBots.cs` and its other includes from the nearest folder above it that holds `CoreBots.cs`. `skua/vendor/Scripts` is a copy of Skua's script repo, so its scripts work as they are. A script outside such a folder uses `skua/Scripts` in the aqx folder, `~/aqx/skua/Scripts` by default. aqx keeps the rest of Skua's data there too, such as each script's saved options.
 
 To set a script option, pass `--arg Name=value`. For an option in a group, pass `--arg Group:Name=value`. aqx loads the Skua options file of the script first, and `--arg` overrides it.
 
