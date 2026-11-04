@@ -18,7 +18,7 @@ use unicode_width::UnicodeWidthChar;
 use aqx_script::Arg;
 
 use crate::account::{expand_home, script_path};
-use crate::hub::{AccountCell, Bar, Cells, Command, Game, Log, LogLine, Snapshot, Stack};
+use crate::hub::{AccountCell, Bar, Cells, Command, Game, Log, LogLine, QuestProgress, Snapshot, Stack};
 use crate::mask::Mask;
 use crate::output::{span, time_of_day};
 use crate::socket;
@@ -141,19 +141,21 @@ impl Filter {
 enum Section {
     Players,
     Drops,
+    Quests,
     Temp,
     Inventory,
     Bank,
 }
 
 impl Section {
-    const ALL: [Section; 5] = [Section::Players, Section::Drops, Section::Temp, Section::Inventory, Section::Bank];
+    const ALL: [Section; 6] = [Section::Players, Section::Drops, Section::Quests, Section::Temp, Section::Inventory, Section::Bank];
 
     fn after(open: Option<Section>) -> Option<Section> {
         match open {
             None => Some(Section::Players),
             Some(Section::Players) => Some(Section::Drops),
-            Some(Section::Drops) => Some(Section::Temp),
+            Some(Section::Drops) => Some(Section::Quests),
+            Some(Section::Quests) => Some(Section::Temp),
             Some(Section::Temp) => Some(Section::Inventory),
             Some(Section::Inventory) => Some(Section::Bank),
             Some(Section::Bank) => None,
@@ -164,6 +166,7 @@ impl Section {
         match self {
             Section::Players => "Players",
             Section::Drops => "Drops",
+            Section::Quests => "Quests",
             Section::Temp => "Temp",
             Section::Inventory => "Inventory",
             Section::Bank => "Bank",
@@ -172,7 +175,7 @@ impl Section {
 
     fn rail_rows(self) -> usize {
         match self {
-            Section::Players | Section::Temp | Section::Inventory => 4,
+            Section::Players | Section::Quests | Section::Temp | Section::Inventory => 4,
             Section::Drops => 6,
             Section::Bank => 0,
         }
@@ -182,6 +185,7 @@ impl Section {
         match self {
             Section::Players => g.cell_players.len(),
             Section::Drops => g.drops.len(),
+            Section::Quests => g.quests.len(),
             Section::Temp => g.temp.len(),
             Section::Inventory => g.inventory.len(),
             Section::Bank => g.bank.as_ref().map_or(0, Vec::len),
@@ -202,6 +206,7 @@ impl Section {
         title.extend(self.count(g));
         match self {
             Section::Players => {}
+            Section::Quests => title.push(Span::raw(" · in the order accepted")),
             Section::Inventory => title.push(Span::raw(" · equipped first, then last changed")),
             _ => title.push(Span::raw(" · last changed first")),
         }
@@ -213,6 +218,7 @@ impl Section {
         match self {
             Section::Players => g.cell_players.iter().map(|p| (p.name.clone(), vec![Span::raw(p.level.to_string())])).collect(),
             Section::Drops => g.drops.iter().map(|d| (d.name.clone(), vec![Span::raw(d.qty.to_string())])).collect(),
+            Section::Quests => g.quests.iter().map(|q| (q.name.clone(), turn_in(q))).collect(),
             Section::Temp => stacks(&g.temp),
             Section::Inventory => {
                 let (worn, carried): (Vec<&Stack>, Vec<&Stack>) = g.inventory.iter().partition(|s| s.equipped);
@@ -226,6 +232,7 @@ impl Section {
         match self {
             Section::Players => "Nobody else is in this cell.",
             Section::Drops => "No drops are waiting.",
+            Section::Quests => "No quests are accepted.",
             Section::Temp => "No temporary items.",
             Section::Inventory => "The inventory is empty.",
             Section::Bank if g.bank.is_none() => "aqx lists the bank once a script opens it.",
@@ -368,7 +375,7 @@ struct App {
     cursor: usize,
     picked: BTreeSet<String>,
     list_max: Cell<usize>,
-    rail: Cell<Option<(Rect, [usize; 5])>>,
+    rail: Cell<Option<(Rect, [usize; Section::ALL.len()])>>,
     unseen_from: Option<u64>,
     jump_area: Cell<Option<Rect>>,
     list_top: Cell<usize>,
@@ -1442,7 +1449,7 @@ fn draw_rail(f: &mut Frame, area: Rect, g: &Game, app: &App) {
     let sizes = Section::ALL.map(|s| if s == Section::Bank || app.list == Some(s) { 0 } else { s.len(g) });
     let (gaps, rows) = rail_rows(sizes, usize::from(area.height));
     let mut lines = Vec::new();
-    let mut starts = [0; 5];
+    let mut starts = [0; Section::ALL.len()];
     for (i, section) in Section::ALL.into_iter().enumerate() {
         if gaps && i > 0 {
             lines.push(Line::default());
@@ -1450,7 +1457,7 @@ fn draw_rail(f: &mut Frame, area: Rect, g: &Game, app: &App) {
         starts[i] = lines.len();
         lines.push(fit(heading(g, section, app.list == Some(section)), width));
         let entries = if sizes[i] == 0 { Vec::new() } else { section.entries(g) };
-        let cut = entries.len() > rows[i] && rows[i] >= 2;
+        let cut = entries.len() > rows[i] && rows[i] >= 1;
         let fits = if cut { rows[i] - 1 } else { entries.len().min(rows[i]) };
         let more = entries.len() - fits;
         lines.extend(entries.into_iter().take(fits).map(|(name, value)| Line::from(entry(3, name, value, width))));
@@ -1463,10 +1470,10 @@ fn draw_rail(f: &mut Frame, area: Rect, g: &Game, app: &App) {
     f.render_widget(Paragraph::new(lines).block(rule), area);
 }
 
-fn rail_rows(sizes: [usize; 5], height: usize) -> (bool, [usize; 5]) {
+fn rail_rows(sizes: [usize; Section::ALL.len()], height: usize) -> (bool, [usize; Section::ALL.len()]) {
     let gaps = Section::ALL.len() - 1;
     let mut left = height.saturating_sub(Section::ALL.len());
-    let mut rows = [0; 5];
+    let mut rows = [0; Section::ALL.len()];
     for (i, section) in Section::ALL.into_iter().enumerate() {
         rows[i] = sizes[i].min(section.rail_rows()).min(left);
         left -= rows[i];
@@ -1475,7 +1482,7 @@ fn rail_rows(sizes: [usize; 5], height: usize) -> (bool, [usize; 5]) {
     if spaced {
         left -= gaps;
     }
-    for i in [Section::Inventory, Section::Players, Section::Drops, Section::Temp].map(|s| s as usize) {
+    for i in [Section::Inventory, Section::Quests, Section::Players, Section::Drops, Section::Temp].map(|s| s as usize) {
         let more = (sizes[i] - rows[i]).min(left);
         rows[i] += more;
         left -= more;
@@ -1486,7 +1493,7 @@ fn rail_rows(sizes: [usize; 5], height: usize) -> (bool, [usize; 5]) {
 fn heading(g: &Game, section: Section, open: bool) -> Field {
     let mut spans = vec![Span::raw(if open { "▌" } else { " " }).fg(ACCENT)];
     let empty = match section {
-        Section::Players | Section::Drops | Section::Temp => "none",
+        Section::Players | Section::Drops | Section::Quests | Section::Temp => "none",
         Section::Inventory | Section::Bank => "",
     };
     if section.len(g) == 0 && !empty.is_empty() {
@@ -1518,6 +1525,14 @@ fn fill(used: u32, slots: u32) -> Option<(Color, &'static str)> {
         _ if used >= slots => Some((Color::Red, "full")),
         _ if used * 10 >= slots * 9 => Some((Color::Yellow, "nearly full")),
         _ => None,
+    }
+}
+
+fn turn_in(q: &QuestProgress) -> Field {
+    match () {
+        _ if q.need == 0 => vec![Span::raw("ready").green()],
+        _ if q.have >= q.need => vec![Span::raw(format!("{}/{} ✓", q.have, q.need)).green()],
+        _ => vec![Span::raw(format!("{}/{}", q.have, q.need))],
     }
 }
 
@@ -1980,7 +1995,7 @@ mod tests {
 
     use super::*;
     use crate::hub::AccountCell;
-    use crate::hub::{Board, Hub, LOG_LINES, Player, Print, SkillState, Stack};
+    use crate::hub::{Board, Hub, LOG_LINES, Player, Print, QuestProgress, SkillState, Stack};
 
     fn rows_of(fleet: &Fleet, app: &mut App, width: u16, height: u16) -> Vec<Vec<ratatui::buffer::Cell>> {
         let shown = gather(fleet, app);
@@ -2039,6 +2054,9 @@ mod tests {
         let mut board = cell.board();
         let g = board.snapshot.as_mut().and_then(|s| s.game.as_mut()).expect("a published game");
         g.drops = (0..8).map(|i| stack(&format!("Spider Drop {i}"), i + 1, 99)).collect();
+        g.quests = [("Spider Hunt", 4, 10), ("Slime Time", 10, 10), ("Free Gift", 0, 0)]
+            .map(|(name, have, need)| QuestProgress { name: name.into(), have, need })
+            .into();
         g.temp = vec![stack("Spider Silk", 4, 10), stack("Slime Sample", 10, 10)];
         g.inventory = (0..items).map(|i| named.get(i).cloned().unwrap_or_else(|| stack(&format!("Spare Part {i:02}"), 1, 1))).collect();
         (g.bag_used, g.bag_slots, g.misc_used, g.misc_slots, g.bank_used, g.bank_slots) = (items as u32, 40, 40, 100, 120, 200);
@@ -2200,6 +2218,10 @@ mod tests {
             ("script  Astral Ephemerite", "│ Players 1"),
             ("", "│   ally                        40"),
             ("", "│ Drops 8"),
+            ("", "│ Quests 3"),
+            ("", "│   Spider Hunt               4/10"),
+            ("", "│   Slime Time             10/10 ✓"),
+            ("", "│   Free Gift                ready"),
             ("", "│   Spider Silk               4/10"),
             ("", "│   Slime Sample           10/10 ✓"),
             ("", "│ Inventory 38/40 · misc 40/100 "),
@@ -2212,7 +2234,7 @@ mod tests {
         let after = |has: &str| shown.lines().skip_while(|l| !l.contains(has)).nth(1).unwrap().to_string();
         assert!(after("│ Inventory").contains("│   Master Ranger"), "equipped gear leads the inventory:\n{shown}");
         let headings: Vec<String> = rail(&shown).into_iter().map(|(heading, _, _)| heading).collect();
-        assert_eq!(headings.iter().map(|h| h.split(' ').next().unwrap()).collect::<Vec<_>>(), ["Players", "Drops", "Temp", "Inventory", "Bank"]);
+        assert_eq!(headings.iter().map(|h| h.split(' ').next().unwrap()).collect::<Vec<_>>(), ["Players", "Drops", "Quests", "Temp", "Inventory", "Bank"]);
 
         let colored = |app: &mut App, has: &str, color: Color| -> String {
             let rows = rows_of(&fleet, app, 150, 30);
@@ -2247,15 +2269,15 @@ mod tests {
         stock(cell, 38);
         cell.board().snapshot.as_mut().unwrap().game.as_mut().unwrap().cell_players = (0..11).map(|i| Player { name: format!("player{i}"), level: 40 }).collect();
         let mut app = App::default();
-        let expected = [("Players", 11), ("Drops", 8), ("Temp", 2), ("Inventory", 38), ("Bank", 0)];
-        for height in [40, 30, 20, 15, 13] {
+        let expected = [("Players", 11), ("Drops", 8), ("Quests", 3), ("Temp", 2), ("Inventory", 38), ("Bank", 0)];
+        for height in [40, 30, 20, 15, 14] {
             let shown = screen_of(&fleet, &mut app, 150, height);
             let sections = rail(&shown);
             let found: Vec<(&str, usize)> = sections.iter().map(|(heading, shown, more)| (heading.split(' ').next().unwrap(), shown + more)).collect();
             let wanted: Vec<(&str, usize)> = expected.iter().map(|&(name, n)| (name, if sections.iter().any(|s| s.0.starts_with(name) && s.1 + s.2 > 0) { n } else { 0 })).collect();
             assert_eq!(found, wanted, "at {height} rows every heading shows and each list's rows add up to its count:\n{shown}");
         }
-        let short = screen_of(&fleet, &mut app, 150, 13);
+        let short = screen_of(&fleet, &mut app, 150, 14);
         assert!(!short.lines().skip_while(|l| !l.contains('┬')).any(|l| l.ends_with("│ ") || l.trim_end().ends_with('│')), "a short rail drops the blank lines first:\n{short}");
     }
 
@@ -2275,7 +2297,13 @@ mod tests {
         assert!(!players.contains("Profanity filter"), "the list takes the log's place: {players}");
         assert!(players.contains("v next list  esc back to log"), "{players}");
 
-        for _ in 0..3 {
+        press_v(&mut app);
+        press_v(&mut app);
+        let quests = screen_of(&fleet, &mut app, 150, 30);
+        assert!(quests.contains("── quests 3 · in the order accepted ─"), "{quests}");
+        assert!(row(&quests, "Spider Hunt").contains("4/10") && row(&quests, "Free Gift").contains("ready"), "{quests}");
+
+        for _ in 0..2 {
             press_v(&mut app);
         }
         let inventory = screen_of(&fleet, &mut app, 150, 30);
@@ -2374,23 +2402,23 @@ mod tests {
         publish(&hub, cell, &farm_world());
         stock(cell, 4);
         let mut app = App::default();
-        let shown = screen_of(&fleet, &mut app, 150, 34);
+        let shown = screen_of(&fleet, &mut app, 150, 40);
         let at = |shown: &str, has: &str| shown.lines().position(|l| l.contains(has)).unwrap_or_else(|| panic!("no {has:?}:\n{shown}")) as u16;
         let (x, heading, item) = (130, at(&shown, "│ Drops 8"), at(&shown, "Spider Drop 4"));
         let click = |app: &mut App, y| {
-            screen_of(&fleet, app, 150, 34);
+            screen_of(&fleet, app, 150, 40);
             app.mouse(pointer(MouseEventKind::Down(MouseButton::Left), x, y), &[]);
-            screen_of(&fleet, app, 150, 34)
+            screen_of(&fleet, app, 150, 40)
         };
         assert!(click(&mut app, item).contains("── drops 8 · last changed first"), "clicking a row opens its section");
         assert!(click(&mut app, heading).contains("── log · main"), "clicking the open section's heading closes it");
         assert!(click(&mut app, heading).contains("── drops 8 · last changed first"));
         click(&mut app, heading);
-        assert!(shown.lines().nth(32).unwrap().trim_end().ends_with('│'), "{shown}");
-        click(&mut app, 32);
+        assert!(shown.lines().nth(37).unwrap().trim_end().ends_with('│'), "{shown}");
+        click(&mut app, 37);
         assert!(app.list.is_none(), "the empty space under the rail opens nothing");
         app.grid = true;
-        screen_of(&fleet, &mut app, 150, 34);
+        screen_of(&fleet, &mut app, 150, 40);
         app.mouse(pointer(MouseEventKind::Down(MouseButton::Left), x, heading), &[]);
         assert!(app.list.is_none(), "the dashboard has no rail to click");
     }
@@ -2402,15 +2430,15 @@ mod tests {
         publish(&hub, cell, &farm_world());
         stock(cell, 38);
         let mut app = App::default();
-        let shown = screen_of(&fleet, &mut app, 100, 24);
-        assert!(row(&shown, "── log · main ── players 1 · drops 8 · temp 2 · inventory 38/40 · misc 40/100 · bank 120/200 ─").ends_with("─ "), "{shown}");
+        let shown = screen_of(&fleet, &mut app, 108, 24);
+        assert!(row(&shown, "── log · main ── players 1 · drops 8 · quests 3 · temp 2 · inventory 38/40 · misc 40/100 · bank 120/200 ─").ends_with("─ "), "{shown}");
         assert!(!shown.contains('┬'), "{shown}");
         press(&fleet, &mut app, KeyCode::Char('v'));
         press(&fleet, &mut app, KeyCode::Char('v'));
-        let drops = screen_of(&fleet, &mut app, 100, 24);
-        assert!(row(&drops, "── players 1 · drops 8 · temp 2").ends_with("─ ") && drops.contains("Spider Drop 7"), "the counts double as tabs: {drops}");
+        let drops = screen_of(&fleet, &mut app, 108, 24);
+        assert!(row(&drops, "── players 1 · drops 8 · quests 3 · temp 2").ends_with("─ ") && drops.contains("Spider Drop 7"), "the counts double as tabs: {drops}");
         assert!(!drops.contains("log ·"), "{drops}");
-        let rows = rows_of(&fleet, &mut app, 100, 24);
+        let rows = rows_of(&fleet, &mut app, 108, 24);
         let tab: String = rows[6].iter().filter(|c| c.fg == ACCENT).map(|c| c.symbol()).collect();
         assert_eq!(tab, "drops 8", "the open list's tab is highlighted");
     }
@@ -2425,7 +2453,7 @@ mod tests {
         press(&fleet, &mut app, KeyCode::Char('B'));
         let hidden = screen_of(&fleet, &mut app, 150, 30);
         assert!(!hidden.contains('┬') && !hidden.contains("│ Players"), "{hidden}");
-        assert!(hidden.contains("── log · main ── players 1 · drops 8 · temp 2 · inventory 38/40"), "{hidden}");
+        assert!(hidden.contains("── log · main ── players 1 · drops 8 · quests 3 · temp 2 · inventory 38/40"), "{hidden}");
         press(&fleet, &mut app, KeyCode::Char('B'));
         assert!(screen_of(&fleet, &mut app, 150, 30).contains("│ Players 1"));
     }
