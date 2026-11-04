@@ -12,8 +12,8 @@ while (true) {
     try {
       map.goto(args.target);
     } catch (e) {
-      if (!(e instanceof AqxError) || e.code !== "timeout") throw e;
-      script.status(`can't reach ${args.target}, retrying`);
+      if (!(e instanceof AqxError) || (e.code !== "timeout" && e.code !== "rejected")) throw e;
+      script.status(`can't reach ${args.target} (${e.message}), retrying`);
       wait.ms(5000);
       continue;
     }

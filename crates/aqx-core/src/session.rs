@@ -14,7 +14,7 @@ use crate::control::{Control, StopHandle};
 use crate::event::Event;
 use crate::pacer::{Kind, Pacer};
 use crate::record::Recorder;
-use crate::world::{self, Monster, State, World};
+use crate::world::{self, Monster, Spot, State, World};
 
 pub const CLIENT_VERSION: &str = "5.31";
 
@@ -123,6 +123,7 @@ pub type Sink = Rc<dyn Fn(&Event)>;
 type WatchFn = Box<dyn FnMut(&Phase, &World)>;
 pub type Goal = Box<dyn Fn(&World) -> bool>;
 pub type Hook = Box<dyn FnMut(&mut Session)>;
+pub type Locate = Box<dyn Fn(&str) -> Option<Spot>>;
 pub type Target = Box<dyn Fn(&World, &Monster) -> bool>;
 
 struct Watcher {
@@ -165,6 +166,7 @@ pub struct Session {
     respawn_sent: bool,
     watcher: Option<Watcher>,
     hook: Option<Hook>,
+    pub(crate) locate: Option<Locate>,
     pub(crate) goal: Option<Goal>,
     script_events: Option<VecDeque<Event>>,
     events_queued: u64,
@@ -208,6 +210,7 @@ impl Session {
             respawn_sent: false,
             watcher: None,
             hook: None,
+            locate: None,
             goal: None,
             script_events: None,
             events_queued: 0,
@@ -346,6 +349,10 @@ impl Session {
 
     pub fn version(&self) -> &str {
         &self.version
+    }
+
+    pub fn locate_with(&mut self, locate: impl Fn(&str) -> Option<Spot> + 'static) {
+        self.locate = Some(Box::new(locate));
     }
 
     pub fn watch(&mut self, every: Duration, f: impl FnMut(&Phase, &World) + 'static) {
