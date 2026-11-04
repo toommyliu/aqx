@@ -530,6 +530,7 @@ pub struct AccountCell {
 struct Inbox {
     commands: VecDeque<Command>,
     closed: bool,
+    commanded: bool,
 }
 
 impl AccountCell {
@@ -553,6 +554,7 @@ impl AccountCell {
         let Some(stop) = &self.stop else { return Err(format!("{} runs in another process", self.name)) };
         let mut board = self.board();
         let mut inbox = self.inbox();
+        inbox.commanded |= matches!(command, Command::Login | Command::Run { .. } | Command::Logout);
         match &command {
             Command::Login if board.online => {
                 let leaving = board.leaving || inbox.commands.iter().any(|c| matches!(c, Command::Logout));
@@ -621,6 +623,10 @@ impl AccountCell {
         !self.board().online && self.inbox().commands.is_empty()
     }
 
+    pub fn commanded(&self) -> bool {
+        self.inbox().commanded
+    }
+
     pub fn close(&self) {
         let mut inbox = self.inbox();
         inbox.closed = true;
@@ -674,7 +680,8 @@ impl Hub {
 
     pub fn end_if_idle(&self) -> bool {
         let mut ending = self.ending.lock().unwrap_or_else(|e| e.into_inner());
-        *ending |= self.cells.all().iter().all(|c| c.offline());
+        let cells = self.cells.all();
+        *ending |= cells.iter().all(|c| c.offline()) && cells.iter().any(|c| c.commanded());
         *ending
     }
 

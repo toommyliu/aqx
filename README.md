@@ -20,7 +20,7 @@ The terminal UI needs a terminal that shows UTF-8 and the 16 standard colors, wi
 
 ```
 aqx [ACCOUNT...] [-c FILE] [--script FILE [--arg KEY=VALUE]...] [--redact]
-    Open the TUI. Without accounts, a new session logs in every account.
+    Open the TUI. Without accounts, a new session logs in every account with autologin on.
     --script runs that script instead of each account's own; --arg feeds script.args().
     --redact shows accounts as account 1, account 2, ... and the home directory as ~.
 

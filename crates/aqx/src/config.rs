@@ -12,6 +12,7 @@ const ROOM: &str = "Room number scripts read as `settings.room`.";
 const STALL_AFTER: &str = "How long a running script can go without progress before the account counts as stalled, like \"90s\", \"5m\" or \"1h\". Defaults to 5m.";
 const ON_STALL: &str = "What happens when the account stalls. Defaults to warn.";
 const RESTART: &str = "Whether to rerun the script when it throws. Defaults to never.";
+const AUTOLOGIN: &str = "Whether aqx logs the account in when a session starts without naming accounts. Defaults to true.";
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +42,8 @@ pub struct Settings {
     pub on_stall: Option<OnStall>,
     #[schemars(description = RESTART)]
     pub restart: Option<Restart>,
+    #[schemars(description = AUTOLOGIN)]
+    pub autologin: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema, Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -92,6 +95,8 @@ pub struct AccountConfig {
     on_stall: Option<OnStall>,
     #[schemars(description = RESTART)]
     restart: Option<Restart>,
+    #[schemars(description = AUTOLOGIN)]
+    autologin: Option<bool>,
 }
 
 fn duration_schema(_: &mut SchemaGenerator) -> Schema {
@@ -155,6 +160,7 @@ impl AccountConfig {
             stall_after: self.stall_after.or(defaults.stall_after),
             on_stall: self.on_stall.or(defaults.on_stall),
             restart: self.restart.or(defaults.restart),
+            autologin: self.autologin.or(defaults.autologin),
         }
     }
 
@@ -262,6 +268,7 @@ mod tests {
         stall_after = "90s"
         on_stall = "relogin"
         restart = "on-error"
+        autologin = false
 
         [[account]]
         user = "Hero"
@@ -276,6 +283,7 @@ mod tests {
         server = "Yorumi"
         stall_after = "20m"
         on_stall = "warn"
+        autologin = true
     "#;
 
     fn pairs(script: &Script) -> Vec<(&str, &str)> {
@@ -307,6 +315,7 @@ mod tests {
         assert_eq!(healer.server.as_deref(), Some("Yorumi"));
         assert_eq!((healer.stall_after, healer.on_stall), (Some(Duration::from_secs(1200)), Some(OnStall::Warn)));
         assert_eq!((healer.room, healer.restart, healer.api.as_deref()), (Some(12345), Some(Restart::OnError), Some("http://127.0.0.1:8787")));
+        assert_eq!((hero.autologin, healer.autologin), (Some(false), Some(true)));
     }
 
     #[test]
