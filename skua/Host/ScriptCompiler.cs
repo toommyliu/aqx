@@ -10,10 +10,7 @@ namespace Aqx.Skua;
 
 public abstract record Outcome(string Path);
 
-public sealed record Built(string Path, string Name, byte[] Image, IReadOnlyList<Built> Closure) : Outcome(Path)
-{
-    public MetadataReference Reference { get; } = MetadataReference.CreateFromImage(Image);
-}
+public sealed record Built(string Path, string Name, string Key, byte[] Image, IReadOnlyList<Built> Closure) : Outcome(Path);
 
 public sealed record Failed(string Path, string Cause, IReadOnlyList<string> Errors) : Outcome(Path);
 
@@ -21,24 +18,15 @@ public sealed record Source(string Path, string Text, IReadOnlyList<string> Incl
 
 public sealed partial class ScriptCompiler(string root)
 {
-    static readonly string[] Namespaces =
-    [
-        "System", "System.Collections", "System.Collections.Concurrent", "System.Collections.Generic", "System.Diagnostics",
-        "System.Drawing", "System.Dynamic", "System.Globalization", "System.IO", "System.Linq", "System.Net", "System.Net.Http",
-        "System.Reflection", "System.Runtime.CompilerServices", "System.Text", "System.Text.RegularExpressions", "System.Threading",
-        "System.Threading.Tasks", "System.Timers", "System.Windows.Forms", "Skua.Core", "Skua.Core.Interfaces", "Skua.Core.Models",
-        "Skua.Core.Models.Items", "Skua.Core.Models.Monsters", "Skua.Core.Models.Players", "Skua.Core.Models.Quests",
-        "Skua.Core.Models.Servers", "Skua.Core.Models.Shops", "Skua.Core.Models.Skills", "Skua.Core.Models.Auras",
-        "Skua.Core.Models.Factions", "Skua.Core.Options", "Skua.Core.Utils", "CommunityToolkit.Mvvm.DependencyInjection",
-        "Newtonsoft.Json", "Newtonsoft.Json.Linq",
-    ];
+    static readonly string Cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.InternetCache), "aqx", "skua");
 
-    static readonly CSharpCompilationOptions Options = new(OutputKind.DynamicallyLinkedLibrary, optimizationLevel: OptimizationLevel.Release, deterministic: true);
+    static readonly TimeSpan CacheExpiry = TimeSpan.FromDays(7);
 
-    static readonly SyntaxTree GlobalUsings = CSharpSyntaxTree.ParseText(string.Concat(Namespaces.Select(n => $"global using {n};\n")), path: "<usings>");
+    static readonly string[] TrustedAssemblies = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator);
 
-    static readonly MetadataReference[] Framework =
-        ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES")!).Split(Path.PathSeparator).Select(p => MetadataReference.CreateFromFile(p)).ToArray();
+    static readonly string HostBuild = string.Join("\n", TrustedAssemblies.Order().Select(p => new FileInfo(p)).Select(f => $"{f.FullName} {f.Length} {f.LastWriteTimeUtc.Ticks}"));
+
+    readonly ConcurrentDictionary<string, MetadataReference> references = new();
 
     readonly Dictionary<string, string[]> listings = new();
 
@@ -46,6 +34,7 @@ public sealed partial class ScriptCompiler(string root)
 
     public IReadOnlyList<Outcome> Build(IReadOnlyList<string> scripts)
     {
+        Prune();
         List<string?> found = scripts.Select(Canonical).ToList();
         Dictionary<string, Outcome> outcomes = Compile(Discover(found.OfType<string>()));
         return scripts.Zip(found, (script, path) => path is null ? new Failed(script, script, [$"{script}: file not found"]) : outcomes[path]).ToList();
@@ -144,17 +133,57 @@ public sealed partial class ScriptCompiler(string root)
 
         List<Built> closure = includes.Cast<Built>().SelectMany(b => b.Closure.Append(b)).DistinctBy(b => b.Path).ToList();
         string name = AssemblyName(source.Path);
+        string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join("\n", [HostBuild, name, .. includes.Cast<Built>().Select(b => b.Key), source.Text]))));
+        string cached = Path.Combine(Cache, $"{key}.dll");
+        if (File.Exists(cached))
+        {
+            File.SetLastWriteTimeUtc(cached, DateTime.UtcNow);
+            return new Built(source.Path, name, key, File.ReadAllBytes(cached), closure);
+        }
+
+        Outcome outcome = Emit(source, name, key, closure);
+        if (outcome is Built built)
+            Store(cached, built.Image);
+        return outcome;
+    }
+
+    Outcome Emit(Source source, string name, string key, List<Built> closure)
+    {
         SyntaxTree tree = CSharpSyntaxTree.ParseText(SourceText.From(source.Text, Encoding.UTF8), path: Relative(source.Path));
-        CSharpCompilation compilation = CSharpCompilation.Create(name, [GlobalUsings, tree], [.. Framework, .. closure.Select(b => b.Reference)], Options);
+        IEnumerable<MetadataReference> includes = closure.Select(b => references.GetOrAdd(b.Path, _ => MetadataReference.CreateFromImage(b.Image)));
+        CSharpCompilation compilation = CSharpCompilation.Create(name, [Roslyn.GlobalUsings, tree], [.. Roslyn.Framework, .. includes], Roslyn.Options);
 
         using MemoryStream image = new();
         var result = compilation.Emit(image);
         if (result.Success)
-            return new Built(source.Path, name, image.ToArray(), closure);
+            return new Built(source.Path, name, key, image.ToArray(), closure);
 
         List<string> errors = result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error).Select(d => d.ToString()).ToList();
         errors.AddRange(source.Missing.Select(m => $"{Relative(source.Path)}: include not found: {m}"));
         return new Failed(source.Path, source.Path, errors);
+    }
+
+    static void Store(string path, byte[] image)
+    {
+        string temp = $"{path}.{Environment.ProcessId}.tmp";
+        try
+        {
+            Directory.CreateDirectory(Cache);
+            File.WriteAllBytes(temp, image);
+            File.Move(temp, path, overwrite: true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    static void Prune()
+    {
+        if (!Directory.Exists(Cache))
+            return;
+        foreach (FileInfo file in new DirectoryInfo(Cache).EnumerateFiles())
+            if (DateTime.UtcNow - file.LastWriteTimeUtc > CacheExpiry)
+                file.Delete();
     }
 
     static string AssemblyName(string path)
@@ -165,4 +194,26 @@ public sealed partial class ScriptCompiler(string root)
 
     [GeneratedRegex("[^A-Za-z0-9_]")]
     private static partial Regex Unsafe();
+
+    static class Roslyn
+    {
+        static readonly string[] Namespaces =
+        [
+            "System", "System.Collections", "System.Collections.Concurrent", "System.Collections.Generic", "System.Diagnostics",
+            "System.Drawing", "System.Dynamic", "System.Globalization", "System.IO", "System.Linq", "System.Net", "System.Net.Http",
+            "System.Reflection", "System.Runtime.CompilerServices", "System.Text", "System.Text.RegularExpressions", "System.Threading",
+            "System.Threading.Tasks", "System.Timers", "System.Windows.Forms", "Skua.Core", "Skua.Core.Interfaces", "Skua.Core.Models",
+            "Skua.Core.Models.Items", "Skua.Core.Models.Monsters", "Skua.Core.Models.Players", "Skua.Core.Models.Quests",
+            "Skua.Core.Models.Servers", "Skua.Core.Models.Shops", "Skua.Core.Models.Skills", "Skua.Core.Models.Auras",
+            "Skua.Core.Models.Factions", "Skua.Core.Options", "Skua.Core.Utils", "CommunityToolkit.Mvvm.DependencyInjection",
+            "Newtonsoft.Json", "Newtonsoft.Json.Linq",
+        ];
+
+        public static readonly CSharpCompilationOptions Options = new(OutputKind.DynamicallyLinkedLibrary, optimizationLevel: OptimizationLevel.Release, deterministic: true);
+
+        public static readonly SyntaxTree GlobalUsings = CSharpSyntaxTree.ParseText(string.Concat(Namespaces.Select(n => $"global using {n};\n")), path: "<usings>");
+
+        public static readonly MetadataReference[] Framework =
+            TrustedAssemblies.Select(p => MetadataReference.CreateFromFile(p)).ToArray();
+    }
 }
