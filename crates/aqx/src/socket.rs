@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::hub::{Command, Hub, LogLine, Snapshot};
 
-pub const PROTOCOL: u32 = 9;
+pub const PROTOCOL: u32 = 10;
 const BUILD: &str = env!("AQX_BUILD");
 const TICK: Duration = Duration::from_millis(250);
 const FRESH: Duration = Duration::from_millis(300);
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn the_wire_format_matches_its_protocol_number() {
-        use crate::hub::{Aura, Bar, Game, Player, QuestProgress, SkillState, Snapshot, Stack, Target};
+        use crate::hub::{Aura, Bar, Game, Player, QuestProgress, SkillState, Snapshot, Stack, Standing, Target};
         let game = Game {
             skills: vec![SkillState::default()],
             auras: vec![Aura::default()],
@@ -455,6 +455,7 @@ mod tests {
             cell_players: vec![Player::default()],
             drops: vec![Stack::default()],
             quests: vec![QuestProgress::default()],
+            factions: vec![Standing::default()],
             temp: vec![Stack::default()],
             inventory: vec![Stack::default()],
             bank: Some(vec![Stack::default()]),
@@ -479,7 +480,9 @@ mod tests {
              snapshot.game.bank_used snapshot.game.cell snapshot.game.cell_players \
              snapshot.game.cell_players.level snapshot.game.cell_players.name snapshot.game.class \
              snapshot.game.class_rank snapshot.game.dead snapshot.game.drops snapshot.game.drops.equipped \
-             snapshot.game.drops.max snapshot.game.drops.name snapshot.game.drops.qty snapshot.game.drops.rank snapshot.game.gold \
+             snapshot.game.drops.max snapshot.game.drops.name snapshot.game.drops.qty snapshot.game.drops.rank snapshot.game.factions \
+             snapshot.game.factions.gained snapshot.game.factions.name snapshot.game.factions.next \
+             snapshot.game.factions.rank snapshot.game.factions.rep snapshot.game.gold \
              snapshot.game.hp snapshot.game.inventory snapshot.game.inventory.equipped \
              snapshot.game.inventory.max snapshot.game.inventory.name snapshot.game.inventory.qty \
              snapshot.game.inventory.rank snapshot.game.level snapshot.game.max_hp snapshot.game.max_mp \
@@ -492,7 +495,7 @@ mod tests {
              snapshot.progress snapshot.progress.current snapshot.progress.eta_secs snapshot.progress.label \
              snapshot.progress.total snapshot.run snapshot.script snapshot.server snapshot.stalled \
              snapshot.status snapshot.up_secs snapshot.user";
-        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (9, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
+        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (10, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
     }
 
     #[test]
