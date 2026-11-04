@@ -1906,15 +1906,6 @@ mod tests {
     }
 
     #[test]
-    fn faction_rank_progress_counts_from_the_start_of_the_rank() {
-        let at = |rep| Faction { id: FactionId(1), name: String::new(), rep };
-        let progress = |f: Faction| (f.rank(), f.rep_in_rank(), f.rep_for_next_rank());
-        assert_eq!(progress(at(0)), (1, 0, 900));
-        assert_eq!(progress(at(1000)), (2, 100, 2700));
-        assert_eq!(progress(at(310000)), (10, 7500, 0));
-    }
-
-    #[test]
     fn reputation_grows_from_rewards_and_new_factions_join_the_list() {
         let mut world = joined();
         feed(&mut world, &json(r#"{"cmd":"loadInventoryBig","items":[],"factions":[{"FactionID":"46","sName":"Aegis","iRep":"44100"}]}"#));
@@ -1988,6 +1979,15 @@ mod tests {
 
         feed(&mut world, &json(r#"{"cmd":"loadInventoryBig","factions":[],"items":[]}"#));
         assert_eq!(world.misc_slots, 100, "the client allows 100 misc items when the server names no limit");
+    }
+
+    #[test]
+    fn faction_rank_progress_counts_from_the_start_of_the_rank() {
+        let at = |rep| Faction { id: FactionId(1), name: String::new(), rep };
+        let progress = |f: Faction| (f.rank(), f.rep_in_rank(), f.rep_for_next_rank());
+        assert_eq!(progress(at(0)), (1, 0, 900));
+        assert_eq!(progress(at(1000)), (2, 100, 2700));
+        assert_eq!(progress(at(310000)), (10, 7500, 0));
     }
 
     #[test]
