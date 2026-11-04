@@ -87,5 +87,5 @@ aqx logs in, runs `farm.ts`, and prints one line for each thing the account does
 
 - [How scripts run](scripts.md) covers what to know before you write your own script.
 - The [`aqx.toml` reference](config.md) lists every setting, such as the server and what to do when a script stalls.
-- `aqx --help` lists every command. Run `aqx` with no command to open the terminal UI with every account logged in.
+- `aqx --help` lists every command. Run `aqx` with no command to open the terminal UI and log in every account.
 - To upgrade aqx, run the `cargo install` command again. Then run `aqx init` to get the new `aqx.d.ts`.

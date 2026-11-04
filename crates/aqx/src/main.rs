@@ -123,7 +123,7 @@ enum Ctl {
 
 #[derive(Args)]
 struct Wanted {
-    #[arg(value_name = "ACCOUNT", help = "Accounts to log in, by name or user. Without any, a new session logs in every account")]
+    #[arg(value_name = "ACCOUNT", help = "Accounts to log in, by name or user. Without any, a new session logs in every account with autologin on")]
     accounts: Vec<String>,
     #[arg(short, long, value_name = "FILE", help = "Config file")]
     config: Option<PathBuf>,
@@ -357,7 +357,10 @@ fn serve(wanted: &Wanted, json: bool, quiet: bool) -> Result<(), String> {
     if let Some(session) = socket::session_for(&path)? {
         return Err(format!("aqx is already running for {}; its socket is {}", path.display(), session.display()));
     }
-    let accounts = named(&config, &wanted.accounts)?;
+    let accounts = match &wanted.accounts[..] {
+        [] => config.accounts.iter().filter(|a| a.settings(&config.defaults).autologin.unwrap_or(true)).map(|a| a.name().to_string()).collect(),
+        names => named(&config, names)?,
+    };
     let command = command(wanted)?;
     let launches = launches(&config, &path)?;
     let name = path.file_stem().map_or("aqx".into(), |s| s.to_string_lossy().into_owned());
@@ -366,7 +369,7 @@ fn serve(wanted: &Wanted, json: bool, quiet: bool) -> Result<(), String> {
         (_, true) => Print::Quiet,
         _ => Print::Plain,
     };
-    let first = |account: &str| (accounts.is_empty() || accounts.iter().any(|a| a == account)).then(|| command.clone());
+    let first = |account: &str| accounts.iter().any(|a| a == account).then(|| command.clone());
     let results = start(&name, Some(&path), launches, print, &first)?;
     let failed: Vec<String> = results.into_iter().filter_map(|(account, r)| r.err().map(|e| format!("{account}: {e}"))).collect();
     if failed.is_empty() { Ok(()) } else { Err(failed.join("\n")) }

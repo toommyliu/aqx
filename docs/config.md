@@ -46,6 +46,7 @@ These settings go in `[defaults]`, in an `[[account]]`, or in both. A value in a
 | `stall_after` | How long a script can go without progress before aqx marks the account stalled. A number with `ms`, `s`, `m`, or `h`, such as `"90s"`. A number without a unit is seconds. | `"5m"` |
 | `on_stall` | What aqx does when the account stalls: `warn` logs a warning, `restart` runs the script again, and `relogin` logs out, logs back in, and runs the script again | `warn` |
 | `restart` | `on-error` runs the script again after a delay when the script throws. `never` leaves the account idle. | `never` |
+| `autologin` | `false` keeps the account offline when aqx starts a session without account names. Log it in later from the terminal UI or with `aqx ctl NAME login`. Naming the account, as in `aqx NAME`, still logs it in. | `true` |
 
 ## Account settings
 

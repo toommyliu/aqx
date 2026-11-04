@@ -395,6 +395,8 @@ mod tests {
     fn an_ending_session_refuses_commands() {
         let control = Control::new().unwrap();
         let hub = Hub::new("ending", vec![Arc::new(AccountCell::local("main", control.stop_handle()))], Print::Quiet);
+        assert!(!hub.end_if_idle(), "a session waits for its first login");
+        assert_eq!(hub.send("main", Command::Logout), Ok(false));
         assert!(hub.end_if_idle());
         assert_eq!(hub.send("main", Command::Login), Err("ending is ending".to_string()));
     }
@@ -521,7 +523,8 @@ mod tests {
         let cell = Arc::new(AccountCell::local("main", control.stop_handle()));
         let name = format!("test-ends-{}", std::process::id());
         let hub = Arc::new(Hub::new(&name, vec![cell.clone()], Print::Quiet));
-        cell.board().online = true;
+        cell.send(Command::Login).unwrap();
+        cell.take_command();
         let (_, listener, _listening) = bind(&name, false).unwrap();
         serve(listener, hub.clone(), None).unwrap();
         let mut conn = Conn::open(&pick(Some(&name)).unwrap().1).unwrap();
