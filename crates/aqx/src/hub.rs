@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
-use aqx_core::{Event, Item, Phase, Pool, State, StopHandle, World};
+use aqx_core::{Event, Faction, Item, Phase, Pool, State, StopHandle, World};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -174,6 +174,7 @@ pub struct Game {
     pub cell_players: Vec<Player>,
     pub drops: Vec<Stack>,
     pub quests: Vec<QuestProgress>,
+    pub factions: Vec<Standing>,
     pub temp: Vec<Stack>,
     pub inventory: Vec<Stack>,
     pub bag_used: u32,
@@ -209,6 +210,15 @@ pub struct QuestProgress {
     pub name: String,
     pub have: u32,
     pub need: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Standing {
+    pub name: String,
+    pub rank: u32,
+    pub rep: u32,
+    pub next: u32,
+    pub gained: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -271,6 +281,7 @@ pub struct Board {
     gold_from: Option<i64>,
     gold_now: i64,
     touched: HashMap<String, Instant>,
+    gained: HashMap<String, Instant>,
 }
 
 impl Default for Board {
@@ -297,6 +308,7 @@ impl Default for Board {
             gold_from: None,
             gold_now: 0,
             touched: HashMap::new(),
+            gained: HashMap::new(),
         }
     }
 }
@@ -337,6 +349,9 @@ impl Board {
             Event::ItemChanged { item, .. } => {
                 self.touched.insert(item.clone(), now);
                 self.progressed(now);
+            }
+            Event::RepGained { faction, .. } => {
+                self.gained.insert(faction.clone(), now);
             }
             Event::QuestCompleted { .. } | Event::Joined { .. } => self.progressed(now),
             Event::Status { text } => self.status.clone_from(text),
@@ -415,7 +430,7 @@ impl Board {
             drops: self.drops,
             deaths: self.deaths,
             gold_gained: self.gold_from.map(|from| self.gold_now - from),
-            game: if self.online { game(world, &self.touched, now) } else { None },
+            game: if self.online { game(world, &self.touched, &self.gained, now) } else { None },
         }
     }
 }
@@ -433,13 +448,15 @@ fn describe_phase(phase: &Phase, now: Instant) -> (String, String) {
     }
 }
 
-fn game(world: &World, touched: &HashMap<String, Instant>, now: Instant) -> Option<Game> {
+fn game(world: &World, touched: &HashMap<String, Instant>, gained: &HashMap<String, Instant>, now: Instant) -> Option<Game> {
     let me = world.me.as_ref()?;
     let latest_first = |items: &[Item]| -> Vec<Stack> {
         let mut items: Vec<&Item> = items.iter().collect();
         items.sort_by_key(|i| Reverse(touched.get(&i.name)));
         items.into_iter().map(Stack::of).collect()
     };
+    let mut factions: Vec<&Faction> = world.factions.iter().collect();
+    factions.sort_by_key(|f| (Reverse(gained.get(&f.name)), &f.name));
     let area = world.area.as_ref();
     let target = world
         .target
@@ -484,6 +501,10 @@ fn game(world: &World, touched: &HashMap<String, Instant>, now: Instant) -> Opti
                 have: q.turn_in.iter().map(|n| world.count(n.item).min(n.qty)).sum(),
                 need: q.turn_in.iter().map(|n| n.qty).sum(),
             })
+            .collect(),
+        factions: factions
+            .into_iter()
+            .map(|f| Standing { name: f.name.clone(), rank: f.rank(), rep: f.rep_in_rank(), next: f.rep_for_next_rank(), gained: gained.contains_key(&f.name) })
             .collect(),
         temp: latest_first(&world.temp),
         inventory: latest_first(&world.inventory),
@@ -818,6 +839,29 @@ mod tests {
         assert_eq!(game.bank, None, "the bank is unknown until it is opened");
         assert_eq!((game.inventory.len(), game.bag_used, game.misc_used, game.misc_slots), (3, 2, 0, 100), "a class takes no bag slot");
     }
+    #[test]
+    fn factions_list_what_gained_rep_first_then_by_name() {
+        let start = Instant::now();
+        let mut board = Board { online: true, ..Board::default() };
+        let mut world = world(Some(0));
+        let json = |o: &str| format!(r#"{{"t":"xt","b":{{"r":-1,"o":{o}}}}}"#);
+        let messages = [
+            r#"{"cmd":"loadInventoryBig","items":[],"factions":[{"FactionID":2,"sName":"Chaos","iRep":302500},
+                {"FactionID":3,"sName":"Brightoak","iRep":1000},{"FactionID":4,"sName":"Aegis","iRep":0}]}"#,
+            r#"{"cmd":"addGoldExp","iRep":250,"FactionID":3,"typ":"q"}"#,
+            r#"{"cmd":"addGoldExp","iRep":250,"FactionID":2,"typ":"q"}"#,
+        ];
+        for (i, message) in messages.iter().enumerate() {
+            let now = start + Duration::from_secs(i as u64);
+            for event in aqx_core::reduce(&mut world, &Message::parse(&json(message)).unwrap(), now) {
+                board.note(&event, now);
+            }
+        }
+        let game = board.snapshot("main", "hero", &Phase::Ready, &world, start).game.unwrap();
+        let shown: Vec<(&str, u32, u32, u32, bool)> = game.factions.iter().map(|f| (f.name.as_str(), f.rank, f.rep, f.next, f.gained)).collect();
+        assert_eq!(shown, [("Chaos", 10, 0, 0, true), ("Brightoak", 2, 350, 2700, true), ("Aegis", 1, 0, 900, false)]);
+    }
+
     #[test]
     fn accepted_quests_count_what_is_held_toward_each_turn_in() {
         let mut world = world(Some(0));
