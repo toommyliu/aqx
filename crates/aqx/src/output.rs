@@ -38,6 +38,7 @@ pub fn describe(event: &Event) -> Option<(&'static str, String)> {
             };
             ("game", format!("{item}: {qty} in the {place}"))
         }
+        Event::RepGained { faction, rep } => ("game", format!("{faction}: +{rep} reputation")),
         Event::Chat { channel, sender, text } => ("server", format!("[{channel}] {sender}: {text}")),
         Event::Progress { label, current, total } => ("script", format!("{label} {current}/{total}")),
         Event::Status { text } => ("script", text.clone()),

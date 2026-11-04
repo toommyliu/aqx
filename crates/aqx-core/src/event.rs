@@ -31,6 +31,7 @@ pub enum Event {
     Killed { id: MonMapId, monster: String },
     DropOffered { id: ItemId, item: String, qty: u32 },
     ItemChanged { item: String, qty: u32, place: Place },
+    RepGained { faction: String, rep: u32 },
     Chat { channel: String, sender: String, text: String },
     Progress { label: String, current: u32, total: u32 },
     Status { text: String },

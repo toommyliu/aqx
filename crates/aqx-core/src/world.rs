@@ -13,6 +13,7 @@ use crate::quests::{Quest, QuestData, set_quest_value};
 
 const HASTE_CAP: f64 = 0.5;
 const RANK_POINTS: [u32; 9] = [900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500];
+const MAX_REP: u32 = RANK_POINTS[RANK_POINTS.len() - 1];
 const GOLD_CAP: i64 = 100_000_000;
 const DEFAULT_MISC_SLOTS: i64 = 100;
 const EMAIL_VERIFIED: i64 = 5;
@@ -482,6 +483,22 @@ struct AuraAdd {
 }
 
 #[derive(Deserialize)]
+struct FactionData {
+    #[serde(rename = "FactionID")]
+    id: FactionId,
+    #[serde(rename = "sName", default, deserialize_with = "text")]
+    name: String,
+    #[serde(rename = "iRep", default, deserialize_with = "int")]
+    rep: i64,
+}
+
+impl FactionData {
+    fn into_faction(self) -> Faction {
+        Faction { id: self.id, name: self.name, rep: qty(self.rep) }
+    }
+}
+
+#[derive(Deserialize)]
 struct AuraName {
     nam: String,
 }
@@ -760,15 +777,6 @@ impl World {
                 fn default_misc_slots() -> i64 {
                     DEFAULT_MISC_SLOTS
                 }
-                #[derive(Deserialize)]
-                struct FactionData {
-                    #[serde(rename = "FactionID")]
-                    id: FactionId,
-                    #[serde(rename = "sName", default, deserialize_with = "text")]
-                    name: String,
-                    #[serde(rename = "iRep", default, deserialize_with = "int")]
-                    rep: i64,
-                }
                 let inventory: Inventory = json.decode()?;
                 self.inventory = items_from(inventory.items, "inventory item", events);
                 self.house = items_from(inventory.hitems, "house item", events);
@@ -776,10 +784,7 @@ impl World {
                     self.bank_count = qty(inventory.bank_count);
                 }
                 self.misc_slots = qty(inventory.misc_slots);
-                self.factions = each::<FactionData>(inventory.factions, "faction", events)
-                    .into_iter()
-                    .map(|f| Faction { id: f.id, name: f.name, rep: qty(f.rep) })
-                    .collect();
+                self.factions = each::<FactionData>(inventory.factions, "faction", events).into_iter().map(FactionData::into_faction).collect();
                 events.push(Event::InventoryLoaded { items: self.inventory.len() });
             }
             "addItems" => {
@@ -897,6 +902,10 @@ impl World {
                     gold: i64,
                     #[serde(rename = "iCP", default, deserialize_with = "int")]
                     class_points: i64,
+                    #[serde(rename = "iRep", default, deserialize_with = "int")]
+                    rep: i64,
+                    #[serde(rename = "FactionID", default, deserialize_with = "int")]
+                    faction: i64,
                     #[serde(default)]
                     typ: String,
                     id: Option<MonMapId>,
@@ -905,6 +914,13 @@ impl World {
                 if let Some(me) = &mut self.me {
                     me.gold += reward.gold;
                     me.class_points = me.class_points.saturating_add(qty(reward.class_points));
+                }
+                let gained = qty(reward.rep);
+                if let Some(faction) = self.factions.iter_mut().find(|f| i64::from(f.id.0) == reward.faction)
+                    && gained > 0
+                {
+                    faction.rep = faction.rep.saturating_add(gained).min(MAX_REP);
+                    events.push(Event::RepGained { faction: faction.name.clone(), rep: gained });
                 }
                 if let ("m", Some(id)) = (reward.typ.as_str(), reward.id) {
                     let monster = self.monster(id).map_or_else(|| format!("monster {id}"), |m| m.name.clone());
@@ -1271,6 +1287,17 @@ impl World {
                 let stats = json.decode::<Stats>()?.sta;
                 if let Some(me) = &mut self.me {
                     me.stats.extend(stats.into_iter().filter_map(|(k, v)| Some((k, v.as_f64()?))));
+                }
+            }
+            "addFaction" => {
+                #[derive(Deserialize)]
+                struct Added {
+                    faction: FactionData,
+                }
+                let faction = json.decode::<Added>()?.faction.into_faction();
+                match self.factions.iter_mut().find(|f| f.id == faction.id) {
+                    Some(known) => *known = faction,
+                    None => self.factions.push(faction),
                 }
             }
             "updateClass" => {
@@ -1864,6 +1891,23 @@ mod tests {
         );
         assert_eq!(feed(&mut world, &json(r#"{"cmd":"mtls","id":1,"o":{"intHP":540,"intState":1}}"#)), []);
         assert_eq!(world.area.as_ref().unwrap().monsters[0].vitals.state, State::Idle);
+    }
+
+    #[test]
+    fn reputation_grows_from_rewards_and_new_factions_join_the_list() {
+        let mut world = joined();
+        feed(&mut world, &json(r#"{"cmd":"loadInventoryBig","items":[],"factions":[{"FactionID":"46","sName":"Aegis","iRep":"44100"}]}"#));
+        assert_eq!(
+            feed(&mut world, &json(r#"{"cmd":"addGoldExp","intGold":10,"intExp":5,"iRep":500,"FactionID":46,"typ":"q"}"#)),
+            [Event::RepGained { faction: "Aegis".into(), rep: 500 }]
+        );
+        assert_eq!(feed(&mut world, &json(r#"{"cmd":"addGoldExp","intGold":10,"iRep":500,"FactionID":12,"typ":"q"}"#)), [], "rep for a faction not yet joined");
+        feed(&mut world, &json(r#"{"cmd":"addFaction","faction":{"CharFactionID":"10","FactionID":"12","sName":"Chaos","iRep":"0"}}"#));
+        feed(&mut world, &json(r#"{"cmd":"addGoldExp","iRep":302000,"FactionID":12,"typ":"q"}"#));
+        feed(&mut world, &json(r#"{"cmd":"addGoldExp","iRep":1000,"FactionID":12,"typ":"q"}"#));
+        let standing: Vec<(&str, u32)> = world.factions.iter().map(|f| (f.name.as_str(), f.rep)).collect();
+        assert_eq!(standing, [("Aegis", 44600), ("Chaos", 302500)], "rep stops at rank 10");
+        assert_eq!(feed(&mut world, &json(r#"{"cmd":"addGoldExp","intGold":10,"FactionID":"","typ":"m","id":1}"#)).len(), 1, "an odd faction field still counts the kill");
     }
 
     #[test]
