@@ -173,6 +173,7 @@ pub struct Game {
     pub target: Option<Target>,
     pub cell_players: Vec<Player>,
     pub drops: Vec<Stack>,
+    pub quests: Vec<QuestProgress>,
     pub temp: Vec<Stack>,
     pub inventory: Vec<Stack>,
     pub bag_used: u32,
@@ -201,6 +202,13 @@ pub struct Target {
 pub struct Player {
     pub name: String,
     pub level: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct QuestProgress {
+    pub name: String,
+    pub have: u32,
+    pub need: u32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -467,6 +475,16 @@ fn game(world: &World, touched: &HashMap<String, Instant>, now: Instant) -> Opti
             .map(|p| Player { name: p.name.clone(), level: p.level })
             .collect(),
         drops: latest_first(&world.drops),
+        quests: world
+            .active
+            .iter()
+            .filter_map(|id| world.quests.get(id))
+            .map(|q| QuestProgress {
+                name: q.name.clone(),
+                have: q.turn_in.iter().map(|n| world.count(n.item).min(n.qty)).sum(),
+                need: q.turn_in.iter().map(|n| n.qty).sum(),
+            })
+            .collect(),
         temp: latest_first(&world.temp),
         inventory: latest_first(&world.inventory),
         bag_used: world.used(Pool::Bag),
@@ -799,5 +817,26 @@ mod tests {
         assert_eq!((game.inventory[0].qty, game.inventory[0].max, game.inventory[2].equipped, game.inventory[2].rank), (6, 99, true, Some(10)));
         assert_eq!(game.bank, None, "the bank is unknown until it is opened");
         assert_eq!((game.inventory.len(), game.bag_used, game.misc_used, game.misc_slots), (3, 2, 0, 100), "a class takes no bag slot");
+    }
+    #[test]
+    fn accepted_quests_count_what_is_held_toward_each_turn_in() {
+        let mut world = world(Some(0));
+        let json = |o: &str| format!(r#"{{"t":"xt","b":{{"r":-1,"o":{o}}}}}"#);
+        for message in [
+            r#"{"cmd":"getQuests","quests":{
+                "11":{"QuestID":11,"sName":"Twilly's New Staff","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,"turnin":[{"ItemID":87,"iQty":1}]},
+                "12":{"QuestID":12,"sName":"Spare Parts","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,"turnin":[{"ItemID":3,"iQty":4},{"ItemID":4,"iQty":10}]},
+                "13":{"QuestID":13,"sName":"Never Taken","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,"turnin":[]}}}"#,
+            r#"{"cmd":"loadInventoryBig","items":[{"ItemID":3,"CharItemID":13,"sName":"Fabric","iQty":6,"iStk":99},
+                {"ItemID":4,"CharItemID":14,"sName":"Bolt","iQty":7,"iStk":99}],"factions":[]}"#,
+            r#"{"cmd":"acceptQuest","bSuccess":1,"QuestID":12,"msg":"success"}"#,
+            r#"{"cmd":"acceptQuest","bSuccess":1,"QuestID":11,"msg":"success"}"#,
+        ] {
+            aqx_core::reduce(&mut world, &Message::parse(&json(message)).unwrap(), Instant::now());
+        }
+        let board = Board { online: true, ..Board::default() };
+        let game = board.snapshot("main", "hero", &Phase::Ready, &world, Instant::now()).game.unwrap();
+        let shown: Vec<(&str, u32, u32)> = game.quests.iter().map(|q| (q.name.as_str(), q.have, q.need)).collect();
+        assert_eq!(shown, [("Spare Parts", 11, 14), ("Twilly's New Staff", 0, 1)], "in the order accepted, extra copies count no further");
     }
 }

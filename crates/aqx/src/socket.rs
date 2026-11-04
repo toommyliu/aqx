@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use crate::hub::{Command, Hub, LogLine, Snapshot};
 
-pub const PROTOCOL: u32 = 8;
+pub const PROTOCOL: u32 = 9;
 const BUILD: &str = env!("AQX_BUILD");
 const TICK: Duration = Duration::from_millis(250);
 const FRESH: Duration = Duration::from_millis(300);
@@ -447,13 +447,14 @@ mod tests {
 
     #[test]
     fn the_wire_format_matches_its_protocol_number() {
-        use crate::hub::{Aura, Bar, Game, Player, SkillState, Snapshot, Stack, Target};
+        use crate::hub::{Aura, Bar, Game, Player, QuestProgress, SkillState, Snapshot, Stack, Target};
         let game = Game {
             skills: vec![SkillState::default()],
             auras: vec![Aura::default()],
             target: Some(Target::default()),
             cell_players: vec![Player::default()],
             drops: vec![Stack::default()],
+            quests: vec![QuestProgress::default()],
             temp: vec![Stack::default()],
             inventory: vec![Stack::default()],
             bank: Some(vec![Stack::default()]),
@@ -483,6 +484,7 @@ mod tests {
              snapshot.game.inventory.max snapshot.game.inventory.name snapshot.game.inventory.qty \
              snapshot.game.inventory.rank snapshot.game.level snapshot.game.max_hp snapshot.game.max_mp \
              snapshot.game.misc_slots snapshot.game.misc_used snapshot.game.mp snapshot.game.pad \
+             snapshot.game.quests snapshot.game.quests.have snapshot.game.quests.name snapshot.game.quests.need \
              snapshot.game.skills snapshot.game.skills.name snapshot.game.skills.ready_pct snapshot.game.target \
              snapshot.game.target.hp snapshot.game.target.max_hp snapshot.game.target.name snapshot.game.temp \
              snapshot.game.temp.equipped snapshot.game.temp.max snapshot.game.temp.name snapshot.game.temp.qty \
@@ -490,7 +492,7 @@ mod tests {
              snapshot.progress snapshot.progress.current snapshot.progress.eta_secs snapshot.progress.label \
              snapshot.progress.total snapshot.run snapshot.script snapshot.server snapshot.stalled \
              snapshot.status snapshot.up_secs snapshot.user";
-        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (8, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
+        assert_eq!((PROTOCOL, shape.join(" ").as_str()), (9, pinned), "the wire format changed: bump PROTOCOL, then update this shape");
     }
 
     #[test]
