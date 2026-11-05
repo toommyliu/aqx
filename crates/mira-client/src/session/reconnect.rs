@@ -1,0 +1,62 @@
+use std::sync::Arc;
+use std::thread;
+
+use super::{CounterHold, Disconnect, Phase, Respawn, Session};
+use crate::api::{self, ApiError};
+
+impl Session {
+    pub(super) fn forget_session(&mut self) {
+        self.counter_hold = CounterHold::Off;
+        self.aggro = None;
+        self.respawn = Respawn::Spawn;
+        self.died_in = None;
+        self.anti_afk = false;
+        self.afk_cleared = None;
+        self.requested_spot = None;
+        self.shop_maps.clear();
+        self.procs = Arc::default();
+    }
+
+    pub(super) fn relogin(&mut self) {
+        let Some(password) = self.options.reconnect.as_ref().map(|p| p.password.clone()) else {
+            return;
+        };
+        let (base, device) = (self.account.api.clone(), self.account.device.clone());
+        let username = self.account.username.clone();
+        let (results, waker) = (self.relogin_out.clone(), Arc::clone(&self.waker));
+        thread::spawn(move || {
+            let _ = results.send(api::login_at(&base, &device, &username, &password));
+            let _ = waker.wake();
+        });
+    }
+
+    pub(super) fn take_relogin_results(&mut self) {
+        while let Ok(result) = self.relogin_results.try_recv() {
+            if !matches!(self.phase, Phase::Reconnecting { .. }) || self.reconnect_at.is_some() {
+                continue;
+            }
+            let account = match result {
+                Ok(account) => account,
+                Err(ApiError::Rejected(why)) => {
+                    self.close(Disconnect::Rejected(why));
+                    continue;
+                }
+                Err(e) => {
+                    self.close(Disconnect::ConnectionLost(e.to_string()));
+                    continue;
+                }
+            };
+            let server = match account.pick_server(&self.server.name) {
+                Ok(server) => server.clone(),
+                Err(e) => {
+                    self.close(Disconnect::ConnectionLost(e.to_string()));
+                    continue;
+                }
+            };
+            self.token = account.token.clone();
+            self.account = account;
+            let version = self.version.clone();
+            self.current = Some(self.start_login(server, version, 1));
+        }
+    }
+}
