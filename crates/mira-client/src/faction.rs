@@ -1,9 +1,7 @@
 use mira_protocol::{FactionId, flex};
 use serde::{Deserialize, Serialize};
 
-const RANK_THRESHOLDS: [u32; 9] = [
-    900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500,
-];
+use crate::rank::rank;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Faction {
@@ -16,10 +14,7 @@ pub struct Faction {
 impl Faction {
     fn set_rep(&mut self, rep: u32) {
         self.rep = rep;
-        self.rank = 1 + RANK_THRESHOLDS
-            .iter()
-            .filter(|&&floor| rep >= floor)
-            .count() as u32;
+        self.rank = rank(rep);
     }
 }
 

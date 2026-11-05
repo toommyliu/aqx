@@ -317,10 +317,17 @@ fn describe_inventory(world: &World) -> String {
     let mut text = String::new();
     for item in world.inventory.iter() {
         let equipped = if item.equipped { ", equipped" } else { "" };
-        text.push_str(&format!(
-            "  {} x{}/{} ({}{equipped})\n",
-            item.name, item.qty, item.max_stack, item.kind
-        ));
+        let line = match item.class_rank() {
+            Some(rank) => format!(
+                "  {} (class, rank {rank}, {} CP{equipped})\n",
+                item.name, item.qty
+            ),
+            None => format!(
+                "  {} x{}/{} ({}{equipped})\n",
+                item.name, item.qty, item.max_stack, item.kind
+            ),
+        };
+        text.push_str(&line);
     }
     for item in &world.temp {
         text.push_str(&format!(
@@ -336,10 +343,12 @@ fn describe_inventory(world: &World) -> String {
 
 fn describe_me(me: &Me) -> String {
     let mut text = format!(
-        "level {} ({}/{} xp), {} gold, {} AC, {}/{} HP, {}/{} MP, {}, haste {}\n",
+        "level {} ({}/{} xp), class rank {} ({} CP), {} gold, {} AC, {}/{} HP, {}/{} MP, {}, haste {}\n",
         me.level,
         me.exp,
         me.exp_to_level,
+        me.class_rank(),
+        me.class_points,
         me.gold,
         me.coins,
         me.hp,

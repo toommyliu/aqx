@@ -11,6 +11,17 @@ pub struct Aura {
     pub category: Option<String>,
     pub persist: bool,
     pub caster: Option<Caster>,
+    pub effects: Vec<StatEffect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatEffect {
+    #[serde(rename(deserialize = "sta"), default)]
+    pub stat: String,
+    #[serde(rename(deserialize = "typ"), default)]
+    pub op: String,
+    #[serde(rename(deserialize = "val"), default, deserialize_with = "flex::float")]
+    pub value: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -77,12 +88,8 @@ impl Auras {
         }
     }
 
-    pub(crate) fn replace_passives(&mut self, skills: Vec<PassiveSkill>) {
-        self.passive = skills
-            .into_iter()
-            .flat_map(|skill| skill.auras.into_iter().flatten())
-            .map(|data| data.into_aura(None))
-            .collect();
+    pub(crate) fn clear_passives(&mut self) {
+        self.passive.clear();
     }
 
     pub(crate) fn clear(&mut self) {
@@ -132,12 +139,6 @@ pub(crate) struct AuraChange {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct PassiveSkill {
-    #[serde(default)]
-    auras: Option<Vec<AuraData>>,
-}
-
-#[derive(Deserialize)]
 struct AuraData {
     #[serde(rename = "nam", default)]
     name: String,
@@ -153,6 +154,8 @@ struct AuraData {
     is_new: bool,
     #[serde(default, deserialize_with = "flex::bool")]
     persist: bool,
+    #[serde(rename = "e", default)]
+    effects: Vec<StatEffect>,
 }
 
 impl AuraData {
@@ -165,6 +168,7 @@ impl AuraData {
             category: self.category,
             persist: self.persist,
             caster,
+            effects: self.effects,
         }
     }
 }

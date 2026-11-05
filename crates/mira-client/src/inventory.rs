@@ -5,6 +5,8 @@ use mira_protocol::{CharItemId, EntityId, ItemId, flex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::rank::rank;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     #[serde(rename(deserialize = "ItemID"))]
@@ -35,6 +37,12 @@ pub struct Item {
     pub coins: bool,
     #[serde(rename(deserialize = "bUpg"), default, deserialize_with = "flex::bool")]
     pub member: bool,
+}
+
+impl Item {
+    pub fn class_rank(&self) -> Option<u32> {
+        (self.kind == "Class").then(|| rank(self.qty))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
