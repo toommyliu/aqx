@@ -108,6 +108,7 @@ pub struct Options {
 pub struct World {
     pub phase: Phase,
     pub room: Option<Room>,
+    pub me: Option<Me>,
 }
 
 type Slot = Arc<Mutex<Arc<World>>>;
@@ -231,6 +232,7 @@ pub fn spawn(
     let world = Arc::new(Mutex::new(Arc::new(World {
         phase: phase.clone(),
         room: None,
+        me: None,
     })));
     let session = Session {
         username: account.username.clone(),
@@ -293,10 +295,11 @@ pub struct Monster {
     pub aggressive: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CombatState {
     Dead,
+    #[default]
     Idle,
     InCombat,
 }
@@ -315,11 +318,84 @@ impl<'de> Deserialize<'de> for CombatState {
 }
 
 impl Monster {
-    fn apply(&mut self, patch: &MonsterPatch) {
+    fn apply(&mut self, patch: &Vitals) {
         self.hp = patch.hp.unwrap_or(self.hp);
         self.max_hp = patch.max_hp.unwrap_or(self.max_hp);
         self.state = patch.state.unwrap_or(self.state);
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Me {
+    pub level: u32,
+    pub gold: u64,
+    pub hp: u32,
+    pub max_hp: u32,
+    pub mp: u32,
+    pub max_mp: u32,
+    pub state: CombatState,
+    pub haste: f64,
+    pub skills: Vec<Skill>,
+}
+
+impl Me {
+    fn apply(&mut self, patch: &Vitals) {
+        self.hp = patch.hp.unwrap_or(self.hp);
+        self.max_hp = patch.max_hp.unwrap_or(self.max_hp);
+        self.mp = patch.mp.unwrap_or(self.mp);
+        self.max_mp = patch.max_mp.unwrap_or(self.max_mp);
+        self.state = patch.state.unwrap_or(self.state);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Skill {
+    #[serde(rename(deserialize = "ref"))]
+    pub slot: String,
+    #[serde(rename(deserialize = "nam"))]
+    pub name: String,
+    #[serde(rename(deserialize = "cd"), default, deserialize_with = "flex::int")]
+    pub cooldown_ms: u32,
+    #[serde(rename(deserialize = "mp"), default, deserialize_with = "flex::int")]
+    pub mana: i32,
+    #[serde(rename(deserialize = "tgt"))]
+    pub target: SkillTarget,
+    #[serde(
+        rename(deserialize = "tgtMax"),
+        default = "one",
+        deserialize_with = "max_targets"
+    )]
+    pub max_targets: u32,
+    #[serde(
+        rename(deserialize = "isOK"),
+        default = "yes",
+        deserialize_with = "flex::bool"
+    )]
+    pub unlocked: bool,
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn max_targets<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    #[derive(Deserialize)]
+    struct Count(#[serde(deserialize_with = "flex::int")] u32);
+    Ok(Option::<Count>::deserialize(d)?.map_or(1, |count| count.0))
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SkillTarget {
+    #[serde(rename(serialize = "hostile", deserialize = "h"))]
+    Hostile,
+    #[serde(rename(serialize = "friendly", deserialize = "f"))]
+    Friendly,
+    #[serde(rename(serialize = "self", deserialize = "s"))]
+    Myself,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -330,12 +406,6 @@ pub struct Player {
     pub cell: Option<String>,
     #[serde(skip)]
     fetched: bool,
-}
-
-#[derive(Clone, Copy)]
-struct Character {
-    level: u32,
-    gold: u64,
 }
 
 struct Session {
@@ -362,7 +432,7 @@ struct Session {
     joins: u64,
     transferred_at: Option<Instant>,
     refusal: Option<String>,
-    character: Option<Character>,
+    character: Option<Me>,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
 }
@@ -543,6 +613,7 @@ impl Session {
         *self.world.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(World {
             phase: self.phase.clone(),
             room: self.room.clone(),
+            me: self.character.clone(),
         });
         for event in self.outgoing.drain(..) {
             let _ = self.events.send(event);
@@ -855,6 +926,7 @@ impl Session {
         match xt.field(5).and_then(|eid| eid.parse().ok()) {
             Some(eid) if accepted => {
                 self.me = Some(EntityId(eid));
+                self.character = Some(Me::default());
                 self.send(&packet::first_join());
                 self.send(&packet::clear_ignore_list());
                 self.set_phase(Phase::Loading {
@@ -878,6 +950,12 @@ impl Session {
             "moveToArea" => {
                 let area: MoveToArea = serde_json::from_value(json.data).map_err(unreadable)?;
                 let me = self.me;
+                if let (Some(mine), Some(character)) = (
+                    area.players.iter().find(|p| Some(p.eid) == me),
+                    &mut self.character,
+                ) {
+                    character.apply(&mine.vitals);
+                }
                 let (cell, pad) = SPAWN;
                 self.arriving = Some(Room {
                     area: area.area,
@@ -910,10 +988,10 @@ impl Session {
                 };
                 if user.uid == me {
                     let room = room.area;
-                    self.character = Some(Character {
-                        level: user.data.level,
-                        gold: user.data.gold,
-                    });
+                    if let Some(character) = &mut self.character {
+                        character.level = user.data.level;
+                        character.gold = user.data.gold;
+                    }
                     self.send(&packet::retrieve_inventory(room, me));
                     self.set_phase(Phase::Loading {
                         step: Load::Inventory,
@@ -930,6 +1008,25 @@ impl Session {
                 for (id, patch) in &tick.monsters {
                     self.patch_monster(*id, patch);
                 }
+                for (name, patch) in &tick.players {
+                    self.patch_player(name, patch);
+                }
+            }
+            "uotls" => {
+                let update: PlayerUpdate = serde_json::from_value(json.data).map_err(unreadable)?;
+                self.patch_player(&update.name, &update.o);
+            }
+            "stu" => {
+                let stats: Stats = serde_json::from_value(json.data).map_err(unreadable)?;
+                if let (Some(haste), Some(character)) = (stats.sta.haste, &mut self.character) {
+                    character.haste = haste;
+                }
+            }
+            "sAct" => {
+                let skills: SkillList = serde_json::from_value(json.data).map_err(unreadable)?;
+                if let Some(character) = &mut self.character {
+                    character.skills = skills.actions.active;
+                }
             }
             "loadInventoryBig"
                 if self.phase
@@ -939,13 +1036,14 @@ impl Session {
             {
                 let inventory: LoadInventory =
                     serde_json::from_value(json.data).map_err(unreadable)?;
-                let Some(character) = self.character else {
+                let Some(character) = &self.character else {
                     return Ok(());
                 };
+                let (level, gold) = (character.level, character.gold);
                 self.set_phase(Phase::Ready);
                 self.emit(Event::Ready {
-                    level: character.level,
-                    gold: character.gold,
+                    level,
+                    gold,
                     items: inventory.items.len(),
                 });
             }
@@ -1025,7 +1123,15 @@ impl Session {
         self.emit(Event::PlayerLeft { name });
     }
 
-    fn patch_monster(&mut self, id: MonMapId, patch: &MonsterPatch) {
+    fn patch_player(&mut self, name: &str, patch: &Vitals) {
+        if let Some(character) = &mut self.character
+            && name.eq_ignore_ascii_case(&self.username)
+        {
+            character.apply(patch);
+        }
+    }
+
+    fn patch_monster(&mut self, id: MonMapId, patch: &Vitals) {
         let room = self.arriving.as_mut().or(self.room.as_mut());
         if let Some(monster) = room.and_then(|room| room.monsters.iter_mut().find(|m| m.id == id)) {
             monster.apply(patch);
@@ -1170,11 +1276,15 @@ struct MonsterBranch {
 }
 
 #[derive(Deserialize)]
-struct MonsterPatch {
+struct Vitals {
     #[serde(rename = "intHP", default, deserialize_with = "flex::opt_int")]
     hp: Option<u32>,
     #[serde(rename = "intHPMax", default, deserialize_with = "flex::opt_int")]
     max_hp: Option<u32>,
+    #[serde(rename = "intMP", default, deserialize_with = "flex::opt_int")]
+    mp: Option<u32>,
+    #[serde(rename = "intMPMax", default, deserialize_with = "flex::opt_int")]
+    max_mp: Option<u32>,
     #[serde(rename = "intState", default)]
     state: Option<CombatState>,
 }
@@ -1182,13 +1292,45 @@ struct MonsterPatch {
 #[derive(Deserialize)]
 struct MonsterUpdate {
     id: MonMapId,
-    o: MonsterPatch,
+    o: Vitals,
+}
+
+#[derive(Deserialize)]
+struct PlayerUpdate {
+    #[serde(rename = "unm")]
+    name: String,
+    o: Vitals,
 }
 
 #[derive(Deserialize)]
 struct Tick {
     #[serde(rename = "m", default)]
-    monsters: HashMap<MonMapId, MonsterPatch>,
+    monsters: HashMap<MonMapId, Vitals>,
+    #[serde(rename = "p", default)]
+    players: HashMap<String, Vitals>,
+}
+
+#[derive(Deserialize)]
+struct Stats {
+    #[serde(default)]
+    sta: StatValues,
+}
+
+#[derive(Deserialize, Default)]
+struct StatValues {
+    #[serde(rename = "$tha")]
+    haste: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct SkillList {
+    actions: Actions,
+}
+
+#[derive(Deserialize)]
+struct Actions {
+    #[serde(default)]
+    active: Vec<Skill>,
 }
 
 fn room_monsters(
@@ -1223,6 +1365,8 @@ struct AreaPlayer {
     name: String,
     #[serde(rename = "strFrame", default)]
     cell: String,
+    #[serde(flatten)]
+    vitals: Vitals,
 }
 
 #[derive(Deserialize)]
