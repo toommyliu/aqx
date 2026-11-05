@@ -1,14 +1,13 @@
 use std::io::BufRead;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use mira_client::{
-    ActionError, DeviceId, Direction, Disconnect, Event, Load, NoticeKind, Options, Phase, Room,
-    Server, Session, api,
+    ActionError, DeviceId, Direction, Disconnect, Event, Handle, Load, NoticeKind, Options, Phase,
+    Room, Server, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
@@ -122,65 +121,53 @@ fn login(
         client_version,
         trace_packets: packets,
     };
-    let mut session = Session::new(&account, options, move |event| {
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string(event).expect("events serialize")
-            );
-        } else if let Some(line) = describe(event) {
-            println!("{}{line}", stamp(started));
-        }
-    })?;
+    let (session, events) = mira_client::spawn(&account, server, options)?;
 
-    let control = session.control();
+    let interrupt = session.clone();
     let interrupted = AtomicBool::new(false);
     ctrlc::set_handler(move || {
         if interrupted.swap(true, Ordering::SeqCst) {
             std::process::exit(130);
         }
-        control.logout();
+        interrupt.logout();
     })?;
 
-    let why = match session.login(&server) {
-        Ok(()) => serve_stdin(&mut session, json),
-        Err(_) => match session.phase() {
-            Phase::Closed { reason } => reason.clone(),
-            _ => unreachable!("a failed login always closes the session"),
-        },
-    };
-    Ok(if why == Disconnect::LoggedOut {
+    thread::spawn(move || serve_stdin(&session, json));
+
+    let mut closed = None;
+    for event in events {
+        if let Event::Phase(Phase::Closed { reason }) = &event {
+            closed = Some(reason.clone());
+        }
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string(&event).expect("events serialize")
+            );
+        } else if let Some(line) = describe(&event) {
+            println!("{}{line}", stamp(started));
+        }
+    }
+    Ok(if closed == Some(Disconnect::LoggedOut) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
     })
 }
 
-fn serve_stdin(session: &mut Session, json: bool) -> Disconnect {
-    let (send, lines) = mpsc::channel();
-    let control = session.control();
-    thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            let Ok(line) = line else { break };
-            if send.send(line).is_err() {
-                break;
-            }
-            control.wake();
-        }
-    });
-    loop {
-        let line = match session.run_until(|| lines.try_recv().ok()) {
-            Ok(line) => line,
-            Err(why) => return why,
-        };
+fn serve_stdin(session: &Handle, json: bool) {
+    if session.ready().wait().is_err() {
+        return;
+    }
+    for line in std::io::stdin().lock().lines() {
+        let Ok(line) = line else { break };
         if line.trim() == "logout" {
-            session.control().logout();
-            return session.run();
+            return session.logout();
         }
         match run_command(session, &line, json) {
             Ok(()) => {}
             Err(CommandError::Usage(e)) => eprintln!("mira: {e}"),
-            Err(CommandError::Action(ActionError::Closed(why))) => return why,
+            Err(CommandError::Action(ActionError::Closed(_))) => return,
             Err(CommandError::Action(e)) => eprintln!("mira: {e}"),
         }
     }
@@ -197,14 +184,14 @@ impl From<ActionError> for CommandError {
     }
 }
 
-fn run_command(session: &mut Session, line: &str, json: bool) -> Result<(), CommandError> {
+fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandError> {
     let words: Vec<&str> = line.split_whitespace().collect();
     match words.as_slice() {
         [] => {}
-        ["join", map] => session.join(map)?,
-        ["cell", cell] => session.move_to_cell(cell, DEFAULT_PAD)?,
-        ["cell", cell, pad] => session.move_to_cell(cell, pad)?,
-        ["who"] => match session.room() {
+        ["join", map] => session.join(map).wait()?,
+        ["cell", cell] => session.move_to_cell(cell, DEFAULT_PAD).wait()?,
+        ["cell", cell, pad] => session.move_to_cell(cell, pad).wait()?,
+        ["who"] => match &session.snapshot().room {
             Some(room) if json => {
                 println!("{}", serde_json::to_string(room).expect("rooms serialize"))
             }

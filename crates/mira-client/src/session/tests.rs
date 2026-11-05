@@ -1,7 +1,5 @@
-use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::rc::Rc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -61,6 +59,10 @@ impl Peer {
         self.stream.write_all(&[0]).unwrap();
     }
 
+    fn expect_logout(&mut self) {
+        while self.recv() != packet::logout() {}
+    }
+
     fn wait_for_close(&mut self) {
         let mut chunk = [0u8; 4096];
         while self.stream.read(&mut chunk).unwrap() > 0 {}
@@ -116,9 +118,8 @@ fn compress(text: &str) -> Vec<u8> {
 }
 
 struct Harness {
-    session: Session,
-    events: Rc<RefCell<Vec<Event>>>,
-    server: Server,
+    session: Handle,
+    events: mpsc::Receiver<Event>,
     script: JoinHandle<()>,
 }
 
@@ -140,29 +141,19 @@ impl Harness {
             member: false,
             servers: vec![server.clone()],
         };
-        let events = Rc::new(RefCell::new(Vec::new()));
-        let sink = Rc::clone(&events);
-        let session = Session::new(&account, options, move |e: &Event| {
-            sink.borrow_mut().push(e.clone())
-        })
-        .unwrap();
+        let script = thread::spawn(move || script(listener));
+        let (session, events) = spawn(&account, server, options).unwrap();
         Harness {
             session,
             events,
-            server,
-            script: thread::spawn(move || script(listener)),
+            script,
         }
     }
 
-    fn login(&mut self) -> Result<(), LoginError> {
-        let server = self.server.clone();
-        self.session.login(&server)
-    }
-
     fn finish(self) -> Vec<Event> {
-        drop(self.session);
+        let events = self.events.iter().collect();
         self.script.join().expect("the fake server failed");
-        self.events.take()
+        events
     }
 }
 
@@ -176,16 +167,22 @@ fn phases(events: &[Event]) -> Vec<Phase> {
         .collect()
 }
 
+fn closed_with(events: &[Event]) -> Option<Disconnect> {
+    match phases(events).pop() {
+        Some(Phase::Closed { reason }) => Some(reason),
+        _ => None,
+    }
+}
+
 #[test]
 fn logs_in_reports_each_phase_and_logs_out() {
-    let mut harness = Harness::start(Options::default(), |listener| {
+    let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
         peer.expect(&packet::logout());
     });
-    harness.login().unwrap();
-    harness.session.control().logout();
-    assert_eq!(harness.session.run(), Disconnect::LoggedOut);
+    harness.session.ready().wait().unwrap();
+    harness.session.logout();
 
     let events = harness.finish();
     assert_eq!(
@@ -227,7 +224,7 @@ fn logs_in_reports_each_phase_and_logs_out() {
 
 #[test]
 fn retries_with_the_version_the_server_requires() {
-    let mut harness = Harness::start(Options::default(), |listener| {
+    let harness = Harness::start(Options::default(), |listener| {
         let mut outdated = Peer::accept(&listener);
         outdated.expect(&packet::version_check());
         outdated.send(API_OK);
@@ -236,9 +233,10 @@ fn retries_with_the_version_the_server_requires() {
         outdated.wait_for_close();
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.40");
-        peer.wait_for_close();
+        peer.expect_logout();
     });
-    harness.login().unwrap();
+    harness.session.ready().wait().unwrap();
+    harness.session.logout();
 
     let versions: Vec<String> = phases(&harness.finish())
         .into_iter()
@@ -251,12 +249,36 @@ fn retries_with_the_version_the_server_requires() {
 }
 
 #[test]
+fn a_retry_that_cannot_reconnect_ends_the_login() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut outdated = Peer::accept(&listener);
+        drop(listener);
+        outdated.expect(&packet::version_check());
+        outdated.send(API_OK);
+        outdated.expect(&packet::login("player1", "5.31", TOKEN));
+        outdated.send(OUTDATED);
+        outdated.wait_for_close();
+    });
+    let started = Instant::now();
+    let ready = harness.session.ready().wait();
+    assert!(
+        matches!(
+            ready,
+            Err(ActionError::Closed(Disconnect::ConnectionLost(_)))
+        ),
+        "{ready:?}"
+    );
+    assert!(started.elapsed() < READY_TIMEOUT / 2);
+    harness.finish();
+}
+
+#[test]
 fn a_pinned_version_is_not_retried() {
     let options = Options {
         client_version: Some("5.20".into()),
         ..Options::default()
     };
-    let mut harness = Harness::start(options, |listener| {
+    let harness = Harness::start(options, |listener| {
         let mut peer = Peer::accept(&listener);
         peer.expect(&packet::version_check());
         peer.send(API_OK);
@@ -264,14 +286,17 @@ fn a_pinned_version_is_not_retried() {
         peer.send(OUTDATED);
         peer.wait_for_close();
     });
-    let err = harness.login().unwrap_err();
-    assert!(matches!(err, LoginError::Closed(Disconnect::ClientVersion(v)) if v == "5.40"));
+    let ready = harness.session.ready().wait();
+    assert!(
+        matches!(&ready, Err(ActionError::Closed(Disconnect::ClientVersion(v))) if v == "5.40"),
+        "{ready:?}"
+    );
     harness.finish();
 }
 
 #[test]
 fn a_rejected_login_reports_the_servers_reason() {
-    let mut harness = Harness::start(Options::default(), |listener| {
+    let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.expect(&packet::version_check());
         peer.send(API_OK);
@@ -279,14 +304,17 @@ fn a_rejected_login_reports_the_servers_reason() {
         peer.send("%xt%loginResponse%-1%0%-1%%Server is full.%");
         peer.wait_for_close();
     });
-    let err = harness.login().unwrap_err();
-    assert!(matches!(err, LoginError::Closed(Disconnect::Rejected(m)) if m == "Server is full."));
+    let ready = harness.session.ready().wait();
+    assert!(
+        matches!(&ready, Err(ActionError::Closed(Disconnect::Rejected(m))) if m == "Server is full."),
+        "{ready:?}"
+    );
     harness.finish();
 }
 
 #[test]
 fn later_joins_skip_own_data_and_chat_flows_until_logged_in_elsewhere() {
-    let mut harness = Harness::start(Options::default(), |listener| {
+    let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
         peer.send(&move_to_area(43, "yulgar-2"));
@@ -296,10 +324,9 @@ fn later_joins_skip_own_data_and_chat_flows_until_logged_in_elsewhere() {
         peer.send("%xt%chatm%-1%zone~hello there%player2%");
         peer.send("%xt%multiLoginWarning%-1%");
     });
-    harness.login().unwrap();
-    assert_eq!(harness.session.run(), Disconnect::LoggedInElsewhere);
 
     let events = harness.finish();
+    assert_eq!(closed_with(&events), Some(Disconnect::LoggedInElsewhere));
     assert!(events.contains(&Event::Chat {
         channel: "zone".into(),
         sender: "player2".into(),
@@ -314,7 +341,7 @@ fn later_joins_skip_own_data_and_chat_flows_until_logged_in_elsewhere() {
 
 #[test]
 fn joins_a_map_then_moves_between_its_cells() {
-    let mut harness = Harness::start(Options::default(), |listener| {
+    let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
         peer.expect(&packet::transfer("player1", "yulgar"));
@@ -328,27 +355,78 @@ fn joins_a_map_then_moves_between_its_cells() {
         peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
         peer.expect(&packet::logout());
     });
-    harness.login().unwrap();
-    harness.session.join("yulgar").unwrap();
-    assert_eq!(harness.session.room().unwrap().name, "yulgar-2");
-    harness.session.join("yulgar").unwrap();
-    harness.session.move_to_cell("r2", "Left").unwrap();
-    harness.session.move_to_cell("Enter", "Spawn").unwrap();
-    harness.session.move_to_cell("r2", "Left").unwrap();
-    let room = harness.session.room().unwrap();
+    let session = &harness.session;
+    session.join("yulgar").wait().unwrap();
+    assert_eq!(session.snapshot().room.as_ref().unwrap().name, "yulgar-2");
+    session.join("yulgar").wait().unwrap();
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    session.move_to_cell("Enter", "Spawn").wait().unwrap();
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    let world = session.snapshot();
+    let room = world.room.as_ref().unwrap();
     assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r2", "Left"));
-    harness.session.control().logout();
-    assert_eq!(harness.session.run(), Disconnect::LoggedOut);
+    session.logout();
 
-    assert!(harness.finish().contains(&Event::Moved {
+    let events = harness.finish();
+    assert_eq!(closed_with(&events), Some(Disconnect::LoggedOut));
+    assert!(events.contains(&Event::Moved {
         cell: "r2".into(),
         pad: "Left".into(),
     }));
 }
 
 #[test]
+fn a_move_sent_during_a_join_runs_after_the_join() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.send(&move_to_area(43, "yulgar-2"));
+        peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(8)]));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect_logout();
+    });
+    let joined = harness.session.join("yulgar");
+    let moved = harness.session.move_to_cell("r2", "Left");
+    joined.wait().unwrap();
+    moved.wait().unwrap();
+    harness.session.logout();
+    harness.finish();
+}
+
+#[test]
+fn the_snapshot_shows_a_joined_room_before_its_event_arrives() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.send(&move_to_area(43, "yulgar-2"));
+        peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
+        peer.expect_logout();
+    });
+    let joined = harness.session.join("yulgar");
+    let room_at_event = harness.events.iter().find_map(|event| match event {
+        Event::Joined { map, .. } if map == "yulgar-2" => Some(
+            harness
+                .session
+                .snapshot()
+                .room
+                .as_ref()
+                .map(|r| r.name.clone()),
+        ),
+        _ => None,
+    });
+    assert_eq!(room_at_event, Some(Some("yulgar-2".into())));
+    joined.wait().unwrap();
+    harness.session.logout();
+    harness.finish();
+}
+
+#[test]
 fn a_refused_join_reports_the_warning_and_the_next_join_waits_out_the_cooldown() {
-    let mut harness = Harness::start(Options::default(), |listener| {
+    let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
         peer.expect(&packet::transfer("player1", "doomvault"));
@@ -358,35 +436,83 @@ fn a_refused_join_reports_the_warning_and_the_next_join_waits_out_the_cooldown()
         assert!(refused_at.elapsed() >= TRANSFER_COOLDOWN - Duration::from_millis(100));
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
-        peer.wait_for_close();
+        peer.expect_logout();
     });
-    harness.login().unwrap();
-    let refused = harness.session.join("doomvault").unwrap_err();
+    let refused = harness.session.join("doomvault").wait().unwrap_err();
     assert!(matches!(refused, ActionError::Refused(why) if why == "Cannot join that map."));
-    harness.session.join("yulgar").unwrap();
-    assert_eq!(harness.session.room().unwrap().name, "yulgar-2");
+    harness.session.join("yulgar").wait().unwrap();
+    assert_eq!(
+        harness.session.snapshot().room.as_ref().unwrap().name,
+        "yulgar-2"
+    );
+    harness.session.logout();
     harness.finish();
 }
 
 #[test]
-fn a_move_on_a_dead_socket_reports_the_closed_session() {
-    let mut harness = Harness::start(Options::default(), |listener| {
+fn a_logout_cancels_a_join_waiting_out_the_cooldown() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::transfer("player1", "doomvault"));
+        peer.send("%xt%warning%-1%Cannot join that map.%");
+        peer.expect(&packet::logout());
+    });
+    harness.session.join("doomvault").wait().unwrap_err();
+    let cooling = harness.session.join("yulgar");
+    thread::sleep(Duration::from_millis(100));
+    harness.session.logout();
+    let started = Instant::now();
+    let joined = cooling.wait();
+    assert!(
+        matches!(joined, Err(ActionError::Closed(Disconnect::LoggedOut))),
+        "{joined:?}"
+    );
+    assert!(started.elapsed() < TRANSFER_COOLDOWN / 2);
+    harness.finish();
+}
+
+#[test]
+fn a_pending_join_reports_the_closed_session_when_the_server_drops() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::transfer("player1", "yulgar"));
+    });
+    let joined = harness.session.join("yulgar").wait();
+    assert!(
+        matches!(
+            joined,
+            Err(ActionError::Closed(Disconnect::ConnectionLost(_)))
+        ),
+        "{joined:?}"
+    );
+    harness.finish();
+}
+
+#[test]
+fn a_move_after_the_session_ends_reports_why_it_closed() {
+    let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
         thread::sleep(Duration::from_millis(100));
     });
-    harness.login().unwrap();
-    thread::sleep(Duration::from_millis(300));
-    let _ = harness.session.move_to_cell("r2", "Left");
-    thread::sleep(Duration::from_millis(200));
-    let moved = harness.session.move_to_cell("r3", "Left");
-    assert!(matches!(moved, Err(ActionError::Closed(_))), "{moved:?}");
+    harness.session.ready().wait().unwrap();
+    let session = harness.session.clone();
     harness.finish();
+    let moved = session.move_to_cell("r3", "Left").wait();
+    assert!(
+        matches!(
+            moved,
+            Err(ActionError::Closed(Disconnect::ConnectionLost(_)))
+        ),
+        "{moved:?}"
+    );
 }
 
 #[test]
 fn tracks_players_entering_moving_and_leaving_the_room() {
-    let mut harness = Harness::start(Options::default(), |listener| {
+    let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
         peer.send(
@@ -399,11 +525,13 @@ fn tracks_players_entering_moving_and_leaving_the_room() {
         peer.send("<msg t='sys'><body action='userGone' r='42'><user id='8' /></body></msg>");
         peer.send("%xt%multiLoginWarning%-1%");
     });
-    harness.login().unwrap();
-    assert_eq!(harness.session.run(), Disconnect::LoggedInElsewhere);
-    let players: Vec<(String, Option<String>)> = harness
-        .session
-        .room()
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert_eq!(closed_with(&events), Some(Disconnect::LoggedInElsewhere));
+    let players: Vec<(String, Option<String>)> = session
+        .snapshot()
+        .room
+        .as_ref()
         .unwrap()
         .players
         .iter()
@@ -416,8 +544,6 @@ fn tracks_players_entering_moving_and_leaving_the_room() {
             ("player4".into(), Some("r2".into())),
         ]
     );
-
-    let events = harness.finish();
     assert!(events.contains(&Event::PlayerEntered {
         name: "player4".into()
     }));
@@ -439,12 +565,13 @@ fn packet_trace_hides_the_token_and_personal_fields() {
         trace_packets: true,
         ..Options::default()
     };
-    let mut harness = Harness::start(options, |listener| {
+    let harness = Harness::start(options, |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
-        peer.wait_for_close();
+        peer.expect_logout();
     });
-    harness.login().unwrap();
+    harness.session.ready().wait().unwrap();
+    harness.session.logout();
 
     let traced: Vec<(Direction, String)> = harness
         .finish()
