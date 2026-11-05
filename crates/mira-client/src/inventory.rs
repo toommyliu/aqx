@@ -11,6 +11,8 @@ use crate::player::Me;
 use crate::rank::rank;
 use crate::shop::{Bought, ShopItem};
 
+const KEPT_AT_ZERO: ItemId = ItemId(45739);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "WireItem")]
 pub struct Item {
@@ -102,7 +104,7 @@ pub enum Pool {
     House,
 }
 
-fn pool(kind: &str, meta: &str, house: bool) -> Pool {
+pub(crate) fn pool(kind: &str, meta: &str, house: bool) -> Pool {
     let meta = meta.trim();
     let numeric_meta = !meta.is_empty() && meta.bytes().all(|b| b.is_ascii_digit());
     match kind {
@@ -378,6 +380,54 @@ impl Inventory {
         self.no_room(item.id, item.pool(), me)
     }
 
+    pub(crate) fn full_for_purchase(&self, listing: &ShopItem, qty: u32, me: &Me) -> bool {
+        let used = |pool| self.items.iter().filter(|i| i.pool() == pool).count();
+        let owned = self.items.iter().find(|i| i.id == listing.id);
+        let pool = listing.pool();
+        if pool == Pool::House {
+            return used(Pool::House) >= me.house_slots as usize;
+        }
+        if pool == Pool::Class || owned.is_some_and(|i| i.qty < i.max_stack) {
+            return false;
+        }
+        let room = me.bag_slots as usize + self.freed_by(listing, qty, pool);
+        match pool {
+            Pool::Misc => owned.is_none() && used(Pool::Misc) >= room,
+            _ => used(Pool::Bag) >= room,
+        }
+    }
+
+    fn freed_by(&self, listing: &ShopItem, qty: u32, pool: Pool) -> usize {
+        let held = |id: ItemId| self.items.iter().find(|i| i.id == id && i.pool() == pool);
+        if self.items.iter().any(|i| i.id == listing.id) {
+            return 0;
+        }
+        let sets = u64::from((qty / listing.qty.max(1)).max(1));
+        let token = listing.tokens_needed(qty);
+        let mut token_counted = false;
+        let mut freed = 0;
+        for cost in &listing.merge {
+            let mut need = u64::from(cost.qty) * sets;
+            if let Some((id, more)) = token
+                && id == cost.id
+            {
+                token_counted = true;
+                need += more;
+            }
+            let used_up =
+                held(cost.id).is_some_and(|item| item.slot == "ar" || u64::from(item.qty) <= need);
+            freed += usize::from(cost.id != KEPT_AT_ZERO && used_up);
+        }
+        if let Some((id, need)) = token
+            && !token_counted
+            && id != KEPT_AT_ZERO
+            && held(id).is_some_and(|item| u64::from(item.qty) <= need)
+        {
+            freed += 1;
+        }
+        freed
+    }
+
     fn no_room(&self, id: ItemId, pool: Pool, me: &Me) -> bool {
         let used = |pool| self.items.iter().filter(|i| i.pool() == pool).count();
         let owned = self.items.iter().find(|i| i.id == id);
@@ -531,4 +581,73 @@ pub(crate) struct Worn {
     pub(crate) uid: EntityId,
     #[serde(rename = "ItemID")]
     pub(crate) id: ItemId,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn inventory(items: Value) -> Inventory {
+        Inventory {
+            items: Arc::new(serde_json::from_value(items).unwrap()),
+            ..Inventory::default()
+        }
+    }
+
+    fn listing(item: Value) -> ShopItem {
+        let mut base =
+            json!({"ShopItemID": 1, "ItemID": 500, "sName": "Buy", "iQty": 1, "iStk": 1});
+        base.as_object_mut()
+            .unwrap()
+            .extend(item.as_object().unwrap().clone());
+        serde_json::from_value(base).unwrap()
+    }
+
+    fn me(bag: u32, house: u32) -> Me {
+        Me {
+            bag_slots: bag,
+            house_slots: house,
+            ..Me::default()
+        }
+    }
+
+    #[test]
+    fn a_merge_purchase_counts_the_slots_its_inputs_free() {
+        let held = |id: i64, kind: &str, qty: u32, slot: &str| {
+            json!({"ItemID": id, "CharItemID": id, "sName": "Held", "iQty": qty, "iStk": 99,
+                   "sType": kind, "sES": slot})
+        };
+        let full_bag = inventory(json!([
+            held(1, "Axe", 1, "Weapon"),
+            held(2, "Axe", 1, "Weapon")
+        ]));
+        let axe = listing(json!({"sType": "Axe"}));
+        assert!(full_bag.full_for_purchase(&axe, 1, &me(2, 0)));
+        assert!(!full_bag.full_for_purchase(&listing(json!({"sType": "Class"})), 1, &me(2, 0)));
+        let stacking = listing(json!({"ItemID": 1, "sType": "Axe"}));
+        assert!(!full_bag.full_for_purchase(&stacking, 1, &me(2, 0)));
+        let consumes = |id: i64, qty: u32| {
+            listing(json!({"sType": "Axe", "turnin": [{"ItemID": id, "iQty": qty}]}))
+        };
+        assert!(!full_bag.full_for_purchase(&consumes(1, 1), 1, &me(2, 0)));
+        let kept = inventory(json!([
+            held(45739, "Axe", 1, "Weapon"),
+            held(2, "Axe", 1, "Weapon")
+        ]));
+        assert!(kept.full_for_purchase(&consumes(45739, 1), 1, &me(2, 0)));
+        let worn = inventory(json!([
+            held(1, "Axe", 5, "ar"),
+            held(2, "Axe", 1, "Weapon")
+        ]));
+        assert!(!worn.full_for_purchase(&consumes(1, 1), 1, &me(2, 0)));
+        let misc = inventory(json!([held(3, "Item", 1, "None")]));
+        let gem = listing(json!({"sType": "Item"}));
+        assert!(misc.full_for_purchase(&gem, 1, &me(1, 0)));
+        let house = inventory(json!([held(4, "Wall Item", 1, "hi")]));
+        let rug = listing(json!({"ItemID": 4, "sType": "Floor Item"}));
+        assert!(house.full_for_purchase(&rug, 1, &me(5, 1)));
+        assert!(!house.full_for_purchase(&rug, 1, &me(5, 2)));
+    }
 }

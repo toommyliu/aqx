@@ -5,6 +5,7 @@ use mira_protocol::{CharItemId, ItemId, ShopItemId, packet};
 
 use super::{ActionError, Limit, Op, Session};
 use crate::REPLY_TIMEOUT;
+use crate::inventory::Pool;
 use crate::quest::Held;
 use crate::shop::{Bought, ShopItem};
 
@@ -113,6 +114,14 @@ impl Session {
             && u64::from(held.qty(token).unwrap_or(0)) < needed
         {
             return unusable(format!("{name} needs {needed} of item {token}"));
+        }
+        if shop.merges() && self.inventory.full_for_purchase(listed, qty, me) {
+            let pool = match listed.pool() {
+                Pool::House => "house inventory",
+                Pool::Misc => "misc inventory",
+                _ => "inventory",
+            };
+            return unusable(format!("the {pool} has no room for {name}"));
         }
         let most = listed.most_buyable(me, held);
         if most == 0 {

@@ -2476,7 +2476,17 @@ fn a_kick_reports_how_long_until_the_account_can_log_in() {
 fn buys_and_sells_within_the_clients_limits() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_with_items(
+            "5.31",
+            json!([
+                {"ItemID": 100, "CharItemID": 5000, "sName": "Default Sword", "iQty": 1,
+                 "iStk": 1, "sType": "Sword", "sES": "Weapon", "bEquip": 1},
+                {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5,
+                 "iStk": 10, "sType": "Item", "sES": "None"},
+                {"ItemID": 102, "CharItemID": 5002, "sName": "Spare Axe", "iQty": 1,
+                 "iStk": 1, "sType": "Axe", "sES": "Weapon"},
+            ]),
+        );
         peer.expect(&packet::load_shop(AreaId(42), ShopId(7)));
         peer.send(&json_message(json!({"cmd": "loadShop", "shopinfo": {
             "ShopID": 7, "sName": "Mixed", "Location": "battleon", "items": [
@@ -2491,6 +2501,8 @@ fn buys_and_sells_within_the_clients_limits() {
                  "iQty": 1},
                 {"ItemID": 905, "ShopItemID": 74, "sName": "Token Buy", "iCost": 0, "iStk": 10,
                  "iQty": 1, "TokID": 101, "TokQty": 2},
+                {"ItemID": 906, "ShopItemID": 75, "sName": "Bow", "iCost": 1, "iStk": 1,
+                 "iQty": 1, "sType": "Bow"},
             ],
         }})));
         let bought = peer.expect_at(&packet::buy_item(
@@ -2536,6 +2548,7 @@ fn buys_and_sells_within_the_clients_limits() {
     assert!(unusable(session.buy(ShopItemId(72), 1)));
     assert!(unusable(session.buy(ShopItemId(73), 1)));
     assert!(unusable(session.buy(ShopItemId(74), u32::MAX)));
+    assert!(unusable(session.buy(ShopItemId(75), 1)));
     assert!(matches!(
         session.buy(ShopItemId(99), 1).wait(),
         Err(ActionError::NoTarget(_))

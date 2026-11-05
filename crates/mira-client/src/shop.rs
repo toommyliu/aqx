@@ -1,6 +1,7 @@
 use mira_protocol::{CharItemId, FactionId, ItemId, ShopId, ShopItemId, flex};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::inventory::{Pool, pool};
 use crate::player::Me;
 use crate::quest::Held;
 
@@ -24,6 +25,12 @@ pub struct Shop {
     pub limited: bool,
     #[serde(rename(deserialize = "Location"), default, deserialize_with = "maps")]
     pub maps: Vec<String>,
+    #[serde(
+        rename(deserialize = "bHouse"),
+        default,
+        deserialize_with = "flex::bool"
+    )]
+    pub house: bool,
     #[serde(rename(deserialize = "items"), default)]
     pub items: Vec<ShopItem>,
 }
@@ -114,7 +121,17 @@ pub struct MergeCost {
 
 const MAX_BUY: u32 = 100_000;
 
+impl Shop {
+    pub(crate) fn merges(&self) -> bool {
+        !self.house && self.items.iter().any(|item| !item.merge.is_empty())
+    }
+}
+
 impl ShopItem {
+    pub fn pool(&self) -> Pool {
+        pool(&self.kind, &self.meta, self.house)
+    }
+
     fn token(&self) -> Option<(ItemId, u32)> {
         (self.token > 0 && self.token_qty > 0).then_some((ItemId(self.token), self.token_qty))
     }
