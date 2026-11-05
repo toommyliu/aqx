@@ -3055,3 +3055,79 @@ fn a_refused_join_at_never_places_an_arrival_in_the_same_batch() {
     session.logout();
     harness.finish();
 }
+
+#[test]
+fn goes_to_players_the_way_the_client_does() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::goto("nobody"));
+        peer.send("%xt%warning%-1%Player 'nobody' could not be found.%");
+        let ignored = peer.expect_at(&packet::goto("player9"));
+        peer.send("%xt%server%-1%player9 is ignoring goto requests.%");
+        peer.expect(&packet::move_to_cell(AreaId(42), "r2", "Left"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(42), &[EntityId(9)]));
+        peer.send(&json_message(json!({"cmd": "uotls", "unm": "player2",
+            "o": {"strFrame": "r6", "strPad": "Up"}})));
+        peer.expect(&packet::move_to_cell(AreaId(42), "r6", "Up"));
+        let followed = peer.expect_at(&packet::goto("player10"));
+        assert!(followed - ignored >= Limit::Transfer.gap() - SLACK);
+        peer.send(&json_message(json!({
+            "cmd": "moveToArea", "areaId": 47, "areaName": "yulgar-3", "intType": "1",
+            "uoBranch": [
+                {"entID": 7, "strUsername": "player1", "strFrame": "r4", "strPad": "Down"},
+                {"entID": 11, "strUsername": "player11", "strFrame": "r5", "strPad": "Up"},
+            ],
+        })));
+        peer.send("%xt%server%-1%You joined \"yulgar-3\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(47), "r4", "Down"));
+        thread::sleep(Duration::from_millis(300));
+        peer.send(
+            "<msg t='sys'><body action='uER' r='47'><u i='12' m='0' s='0' p='3'>\
+             <n><![CDATA[player12]]></n><vars></vars></u></body></msg>",
+        );
+        peer.expect(&packet::retrieve_user_data(AreaId(47), EntityId(12)));
+        peer.send("%xt%uotls%-1%player12%strFrame:r8,strPad:Left%");
+        peer.expect(&packet::move_to_cell(AreaId(47), "r8", "Left"));
+        peer.send(&json_message(
+            json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}),
+        ));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let refused = |pending: Pending| matches!(pending.wait(), Err(ActionError::Refused(_)));
+    assert!(refused(session.goto("nobody")));
+    let started = Instant::now();
+    assert!(refused(session.goto("Player9")));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    session.goto("player3").wait().unwrap();
+    assert_eq!(session.snapshot().room.as_ref().unwrap().cell, "r2");
+    while session
+        .snapshot()
+        .room
+        .as_ref()
+        .unwrap()
+        .players
+        .iter()
+        .all(|p| p.cell.as_deref() != Some("r6"))
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "player2 never moved"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    session.goto("player2").wait().unwrap();
+    session.goto("player10").wait().unwrap();
+    assert_eq!(session.snapshot().room.as_ref().unwrap().name, "yulgar-3");
+    session.goto("player12").wait().unwrap();
+    assert_eq!(session.snapshot().room.as_ref().unwrap().cell, "r8");
+    wait_until(session, |me| me.state == CombatState::InCombat);
+    assert!(matches!(
+        session.goto("player11").wait(),
+        Err(ActionError::InCombat)
+    ));
+    session.logout();
+    harness.finish();
+}

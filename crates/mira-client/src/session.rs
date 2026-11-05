@@ -241,6 +241,7 @@ enum Action {
     },
     MapItem(MapItemId),
     Rest,
+    Goto(String),
 }
 
 enum Op {
@@ -337,14 +338,22 @@ enum Prepared {
     },
 }
 
-enum JoinStage {
-    Cooling {
+enum JoinTarget {
+    Map {
         map: String,
         spot: Option<(String, String)>,
+    },
+    Player(String),
+}
+
+enum JoinStage {
+    Cooling {
+        to: JoinTarget,
         until: Instant,
     },
     Sent {
         joins: u64,
+        goto: bool,
         deadline: Instant,
     },
 }
@@ -423,6 +432,10 @@ impl Handle {
 
     pub fn load_bank(&self) -> Pending {
         self.act(Action::Bank(None))
+    }
+
+    pub fn goto(&self, player: &str) -> Pending {
+        self.act(Action::Goto(player.to_owned()))
     }
 
     pub fn rest(&self) -> Pending {
@@ -739,6 +752,11 @@ impl Session {
         let result = match action {
             Action::Ready => self.ensure_ready(),
             Action::MoveToCell { cell, pad } => self.move_to_cell(&cell, &pad),
+            Action::Goto(name) => match self.start_goto(name, now) {
+                Ok(Some(stage)) => return Some(Op::Join { reply, stage }),
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            },
             Action::Join { map, spot } => match self.start_join(map, spot, now) {
                 Ok(Some(stage)) => return Some(Op::Join { reply, stage }),
                 Ok(None) => Ok(()),
@@ -878,7 +896,7 @@ impl Session {
             },
             Op::Join {
                 reply,
-                stage: JoinStage::Cooling { map, spot, .. },
+                stage: JoinStage::Cooling { to, .. },
             } => {
                 let state = self.character.as_ref().map(|me| me.state);
                 let refused = match (self.ensure_ready(), state) {
@@ -894,36 +912,56 @@ impl Session {
                 if let Some(until) = self.cooling(Limit::Transfer, now) {
                     return Some(Op::Join {
                         reply,
-                        stage: JoinStage::Cooling { map, spot, until },
+                        stage: JoinStage::Cooling { to, until },
                     });
+                }
+                if let JoinTarget::Player(name) = &to
+                    && let Some(result) = self.goto_in_room(name)
+                {
+                    self.replies.push((reply, result));
+                    return None;
                 }
                 let joins = self.joins;
                 self.refusal = None;
                 let area = self.room.as_ref().map(|room| room.area);
-                let transfer = match (&spot, area) {
-                    (Some((cell, pad)), Some(area)) => {
-                        packet::transfer_to(area, &self.username, &map, cell, pad)
-                    }
-                    _ => packet::transfer(&self.username, &map),
+                let transfer = match (&to, area) {
+                    (JoinTarget::Player(name), _) => packet::goto(&name.to_lowercase()),
+                    (
+                        JoinTarget::Map {
+                            map,
+                            spot: Some((cell, pad)),
+                        },
+                        Some(area),
+                    ) => packet::transfer_to(area, &self.username, map, cell, pad),
+                    (JoinTarget::Map { map, .. }, _) => packet::transfer(&self.username, map),
                 };
-                self.requested_spot = spot.map(|(cell, pad)| Spot {
-                    map: map.clone(),
-                    cell,
-                    pad,
-                });
+                let goto = matches!(to, JoinTarget::Player(_));
+                self.requested_spot = match to {
+                    JoinTarget::Map {
+                        map,
+                        spot: Some((cell, pad)),
+                    } => Some(Spot { map, cell, pad }),
+                    _ => None,
+                };
                 self.send(&transfer);
                 self.limits.used(Limit::Transfer, now);
                 Some(Op::Join {
                     reply,
                     stage: JoinStage::Sent {
                         joins,
+                        goto,
                         deadline: now + REPLY_TIMEOUT,
                     },
                 })
             }
             Op::Join {
                 reply,
-                stage: JoinStage::Sent { joins, deadline },
+                stage:
+                    JoinStage::Sent {
+                        joins,
+                        goto,
+                        deadline,
+                    },
             } => {
                 let result = if let Err(e) = self.ensure_ready() {
                     Err(e)
@@ -936,7 +974,11 @@ impl Session {
                 } else {
                     return Some(Op::Join {
                         reply,
-                        stage: JoinStage::Sent { joins, deadline },
+                        stage: JoinStage::Sent {
+                            joins,
+                            goto,
+                            deadline,
+                        },
                     });
                 };
                 if result.is_err() {
@@ -1256,7 +1298,45 @@ impl Session {
             return Ok(None);
         }
         let until = self.cooling(Limit::Transfer, now).unwrap_or(now);
-        Ok(Some(JoinStage::Cooling { map, spot, until }))
+        let to = JoinTarget::Map { map, spot };
+        Ok(Some(JoinStage::Cooling { to, until }))
+    }
+
+    fn start_goto(&mut self, name: String, now: Instant) -> Result<Option<JoinStage>, ActionError> {
+        self.ensure_ready()?;
+        match self.character.as_ref().map(|me| me.state) {
+            Some(CombatState::Dead) => return Err(ActionError::Dead),
+            Some(CombatState::InCombat) => return Err(ActionError::InCombat),
+            _ => {}
+        }
+        if name.eq_ignore_ascii_case(&self.username) {
+            return Err(ActionError::NoTarget("that's this player".into()));
+        }
+        if let Some(result) = self.goto_in_room(&name) {
+            return result.map(|()| None);
+        }
+        let until = self.cooling(Limit::Transfer, now).unwrap_or(now);
+        let to = JoinTarget::Player(name);
+        Ok(Some(JoinStage::Cooling { to, until }))
+    }
+
+    fn goto_in_room(&mut self, name: &str) -> Option<Result<(), ActionError>> {
+        let room = self.room.as_ref()?;
+        let player = room
+            .players
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(name))?;
+        let Some(cell) = player.cell.clone() else {
+            return Some(Err(ActionError::Unusable(format!(
+                "{}'s cell isn't known yet",
+                player.name
+            ))));
+        };
+        if cell == room.cell {
+            return Some(Ok(()));
+        }
+        let pad = player.pad.clone().unwrap_or_else(|| CELL_PAD.to_owned());
+        Some(self.move_to_cell(&cell, &pad))
     }
 
     fn cooling(&self, limit: Limit, now: Instant) -> Option<Instant> {
@@ -1505,6 +1585,17 @@ impl Session {
                     self.closing = Some(Disconnect::InvalidSession);
                 }
                 let joined = text.starts_with("You joined ");
+                let goto_refused = text.to_ascii_lowercase().contains("goto")
+                    && matches!(
+                        self.current,
+                        Some(Op::Join {
+                            stage: JoinStage::Sent { goto: true, .. },
+                            ..
+                        })
+                    );
+                if goto_refused {
+                    self.refusal = Some(text.clone());
+                }
                 self.emit(Event::Notice {
                     kind: NoticeKind::Server,
                     text,
@@ -1697,7 +1788,10 @@ impl Session {
             }
             "uotls" => {
                 let update: PlayerUpdate = read(&json)?;
-                self.patch_player(&update.name, &update.o);
+                self.patch_player(&update.name, &update.o.vitals);
+                if let Some(room) = &mut self.room {
+                    room.place_player(&update.name, update.o.cell, update.o.pad);
+                }
             }
             "stu" => {
                 let stats: Stats = read(&json)?;

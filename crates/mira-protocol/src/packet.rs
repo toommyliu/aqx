@@ -35,6 +35,10 @@ pub fn transfer_to(room: AreaId, username: &str, map: &str, cell: &str, pad: &st
     zm("cmd", room, &["tfer", username, map, cell, pad])
 }
 
+pub fn goto(name: &str) -> String {
+    zm("cmd", 1, &["goto", name])
+}
+
 pub fn move_to_cell(room: AreaId, cell: &str, pad: &str) -> String {
     zm("moveToCell", room, &[cell, pad])
 }
@@ -326,6 +330,7 @@ mod tests {
             transfer("player1", "yulgar-2"),
             "%xt%zm%cmd%1%tfer%player1%yulgar-2%"
         );
+        assert_eq!(goto("player2"), "%xt%zm%cmd%1%goto%player2%");
         assert_eq!(
             transfer_to(room, "player1", "xantown", "r7", "Left"),
             "%xt%zm%cmd%42%tfer%player1%xantown%r7%Left%"

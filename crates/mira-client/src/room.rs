@@ -25,6 +25,7 @@ pub struct Player {
     pub(crate) eid: EntityId,
     pub name: String,
     pub cell: Option<String>,
+    pub pad: Option<String>,
     pub level: Option<u32>,
     pub class_name: Option<String>,
     pub hp: u32,
@@ -42,6 +43,7 @@ impl Player {
             eid,
             name,
             cell,
+            pad: None,
             level: None,
             class_name: None,
             hp: 0,
@@ -154,6 +156,7 @@ impl Room {
                 .map(|p| {
                     let cell = Some(p.cell).filter(|cell| !cell.is_empty());
                     let mut player = Player::new(p.eid, p.name, cell, false);
+                    player.pad = Some(p.pad).filter(|pad| !pad.is_empty());
                     player.level = p.level;
                     player.apply(&p.vitals);
                     player
@@ -206,6 +209,16 @@ impl Room {
     }
 
     pub(crate) fn move_player(&mut self, name: &str, fields: &str) {
+        let field = |wanted: &str| {
+            fields
+                .split(',')
+                .filter_map(|pair| pair.split_once(':'))
+                .find_map(|(key, value)| (key == wanted).then(|| value.to_owned()))
+        };
+        self.place_player(name, field("strFrame"), field("strPad"));
+    }
+
+    pub(crate) fn place_player(&mut self, name: &str, cell: Option<String>, pad: Option<String>) {
         let Some(player) = self
             .players
             .iter_mut()
@@ -213,12 +226,11 @@ impl Room {
         else {
             return;
         };
-        let cell = fields
-            .split(',')
-            .filter_map(|pair| pair.split_once(':'))
-            .find_map(|(key, value)| (key == "strFrame").then_some(value));
-        if let Some(cell) = cell {
-            player.cell = Some(cell.to_owned());
+        if cell.is_some() {
+            player.cell = cell;
+        }
+        if pad.is_some() {
+            player.pad = pad;
         }
     }
 
@@ -384,7 +396,17 @@ pub(crate) struct MonsterUpdate {
 pub(crate) struct PlayerUpdate {
     #[serde(rename = "unm")]
     pub(crate) name: String,
-    pub(crate) o: Vitals,
+    pub(crate) o: PlayerPatch,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PlayerPatch {
+    #[serde(flatten)]
+    pub(crate) vitals: Vitals,
+    #[serde(rename = "strFrame", default)]
+    pub(crate) cell: Option<String>,
+    #[serde(rename = "strPad", default)]
+    pub(crate) pad: Option<String>,
 }
 
 #[derive(Deserialize)]
