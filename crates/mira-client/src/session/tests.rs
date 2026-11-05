@@ -185,7 +185,7 @@ fn move_to_area(area: i64, name: &str) -> String {
         "uoBranch": [
             {"entID": 7, "strUsername": "player1", "strFrame": "Enter", "intHP": 950, "intHPMax": 1000},
             {"entID": 8, "strUsername": "player2", "strFrame": "Enter"},
-            {"entID": 9, "strUsername": "player3", "strFrame": "r2", "intLevel": 10},
+            {"entID": 9, "strUsername": "player3", "strFrame": "r2", "intLevel": 10, "afk": true},
         ],
     }))
 }
@@ -640,6 +640,7 @@ fn tracks_players_entering_moving_and_leaving_the_room() {
         );
         peer.expect(&packet::retrieve_user_data(AreaId(42), EntityId(10)));
         peer.send("%xt%uotls%-1%player4%strFrame:r2,strPad:Left%");
+        peer.send("%xt%uotls%-1%player4%afk:true%");
         peer.send("%xt%exitArea%-1%8%player2%");
         peer.send("<msg t='sys'><body action='userGone' r='42'><user id='8' /></body></msg>");
         peer.send("%xt%multiLoginWarning%-1%");
@@ -647,20 +648,20 @@ fn tracks_players_entering_moving_and_leaving_the_room() {
     let session = harness.session.clone();
     let events = harness.finish();
     assert_eq!(closed_with(&events), Some(Disconnect::LoggedInElsewhere));
-    let players: Vec<(String, Option<String>)> = session
+    let players: Vec<(String, Option<String>, bool)> = session
         .snapshot()
         .room
         .as_ref()
         .unwrap()
         .players
         .iter()
-        .map(|p| (p.name.clone(), p.cell.clone()))
+        .map(|p| (p.name.clone(), p.cell.clone(), p.away))
         .collect();
     assert_eq!(
         players,
         [
-            ("player3".into(), Some("r2".into())),
-            ("player4".into(), Some("r2".into())),
+            ("player3".into(), Some("r2".into()), true),
+            ("player4".into(), Some("r2".into()), true),
         ]
     );
     assert!(events.contains(&Event::PlayerEntered {
@@ -765,6 +766,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
             "uoBranch": [{
                 "entID": 7, "strUsername": "player1", "strFrame": "Enter",
                 "intHP": 900, "intHPMax": "1000", "intMP": 80, "intMPMax": 100, "intState": 1,
+                "afk": true,
             }],
         })));
         peer.send("%xt%server%-1%You joined \"farm-1\"!%");
@@ -818,6 +820,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
             mp: 60,
             max_mp: 100,
             state: CombatState::InCombat,
+            away: true,
             haste: 0.12,
             mana_rate: Some(0.8),
             quests: session.snapshot().me.as_ref().unwrap().quests.clone(),
@@ -3604,6 +3607,53 @@ fn respawns_back_in_the_cell_where_it_died_when_asked() {
         done.send(()).unwrap();
     }
     next.recv().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn clears_the_away_mark_before_acting_only_when_asked() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.send("%xt%uotls%-1%player1%afk:true%");
+        peer.expect(&gar(0, "a2", &[Aim::Player(EntityId(7))]));
+        peer.answer(0, 1);
+        peer.expect(&packet::afk(false));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
+        peer.send("%xt%uotls%-1%player1%afk:false%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.send("%xt%uotls%-1%player1%afk:true%");
+        peer.send(&json_message(
+            json!({"cmd": "equipItem", "uid": 7, "ItemID": 100}),
+        ));
+        peer.expect(&packet::afk(false));
+        peer.send(&json_message(
+            json!({"cmd": "ct", "p": {"player1": {"intHP": 500}}}),
+        ));
+        peer.expect(&packet::rest_request());
+        peer.expect(&packet::emote("rest"));
+        peer.expect(&packet::afk(false));
+        peer.send(&json_message(
+            json!({"cmd": "ct", "p": {"player1": {"intHP": 1000}}}),
+        ));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    wait_for_farm(&harness);
+    wait_until(session, |me| me.away);
+    session.use_skill("a2", None).wait().unwrap();
+    session.set_anti_afk(true);
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    session.move_to_cell("Enter", "Spawn").wait().unwrap();
+    wait_until(session, |me| !me.away);
+    thread::sleep(Duration::from_millis(600));
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    wait_until(session, |me| me.away && me.hp == 500);
+    thread::sleep(Duration::from_millis(600));
+    session.rest().wait().unwrap();
     session.logout();
     harness.finish();
 }

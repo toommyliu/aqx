@@ -60,6 +60,7 @@ const CELL_PAD: &str = "Left";
 const VERSION_RETRIES: usize = 3;
 const WALK_SPEED: u32 = 8;
 const AGGRO_EVERY: Duration = Duration::from_millis(500);
+const AFK_EVERY: Duration = Duration::from_millis(500);
 const STAGE_WIDTH: i32 = 960;
 const STAGE_HEIGHT: i32 = 500;
 const REDACTED_KEYS: [&str; 2] = ["strEmail", "strIP"];
@@ -238,6 +239,7 @@ enum Request {
     CounterHold(CounterHold),
     Aggro(Option<Aggro>),
     RespawnWhereDied(bool),
+    AntiAfk(bool),
     Logout,
 }
 
@@ -532,6 +534,10 @@ impl Handle {
         self.request(Request::RespawnWhereDied(on));
     }
 
+    pub fn set_anti_afk(&self, on: bool) {
+        self.request(Request::AntiAfk(on));
+    }
+
     pub fn logout(&self) {
         self.request(Request::Logout);
     }
@@ -633,6 +639,8 @@ pub fn spawn(
         aggro: None,
         respawn_where_died: false,
         died_in: None,
+        anti_afk: false,
+        afk_cleared: None,
         combat: Combat::default(),
         closing: None,
         logout_deadline: None,
@@ -690,6 +698,8 @@ struct Session {
     aggro: Option<(Aggro, Instant)>,
     respawn_where_died: bool,
     died_in: Option<(AreaId, String, String)>,
+    anti_afk: bool,
+    afk_cleared: Option<Instant>,
     combat: Combat,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -760,6 +770,7 @@ impl Session {
                 Request::CounterHold(hold) => self.counter_hold = hold,
                 Request::Aggro(aggro) => self.aggro = aggro.map(|aggro| (aggro, Instant::now())),
                 Request::RespawnWhereDied(on) => self.respawn_where_died = on,
+                Request::AntiAfk(on) => self.anti_afk = on,
                 Request::Act(Action::ExitCombat, reply) => {
                     if matches!(self.current, Some(Op::Kill { .. } | Op::Cast { .. }))
                         && let Some(Op::Kill { reply, .. } | Op::Cast { reply, .. }) =
@@ -1239,6 +1250,7 @@ impl Session {
                         self.limits.used(Limit::Rest, now);
                         self.send(&packet::rest_request());
                         self.send(&packet::emote("rest"));
+                        self.clear_afk();
                         match self.ensure_ready() {
                             Ok(()) => {
                                 let deadline = now + REPLY_TIMEOUT;
@@ -1498,7 +1510,7 @@ impl Session {
         (room.x, room.y) = (x, y);
         let area = room.area;
         self.limits.used(Limit::Walk, now);
-        self.send(&packet::walk(area, x, y, WALK_SPEED));
+        self.send_action(&packet::walk(area, x, y, WALK_SPEED));
         self.ensure_ready().map(|()| None)
     }
 
@@ -1536,7 +1548,7 @@ impl Session {
         (room.x, room.y) = (0, 0);
         let area = room.area;
         self.combat.disengage();
-        self.send(&packet::move_to_cell(area, cell, pad));
+        self.send_action(&packet::move_to_cell(area, cell, pad));
         self.fetch_cellmates();
         self.aggro_cell();
         self.ensure_ready()?;
@@ -1632,6 +1644,20 @@ impl Session {
 
     fn emit(&mut self, event: Event) {
         self.outgoing.push(event);
+    }
+
+    fn send_action(&mut self, packet: &str) {
+        self.clear_afk();
+        self.send(packet);
+    }
+
+    fn clear_afk(&mut self) {
+        let now = Instant::now();
+        let away = self.character.as_ref().is_some_and(|me| me.away);
+        if self.anti_afk && away && self.afk_cleared.is_none_or(|at| now >= at + AFK_EVERY) {
+            self.afk_cleared = Some(now);
+            self.send(&packet::afk(false));
+        }
     }
 
     fn send(&mut self, packet: &str) {
@@ -1912,8 +1938,9 @@ impl Session {
                 let area: MoveToArea = read(&json)?;
                 let requested = self.requested_spot.take_if(|spot| area.is_for(&spot.map));
                 let (room, mine) = Room::arriving(area, self.me, requested);
-                if let (Some(mine), Some(character)) = (mine, &mut self.character) {
-                    character.apply(&mine);
+                if let (Some((vitals, away)), Some(character)) = (mine, &mut self.character) {
+                    character.apply(&vitals);
+                    character.away = away;
                 }
                 self.arriving = Some(room);
             }
@@ -2090,6 +2117,9 @@ impl Session {
                 let worn: Worn = read(&json)?;
                 if Some(worn.uid) == self.me {
                     let on = json.cmd == "equipItem";
+                    if on && self.inventory.items.iter().any(|i| i.id == worn.id) {
+                        self.clear_afk();
+                    }
                     self.inventory.wear(worn.id, on);
                     self.on_worn(worn.id, on);
                 }
@@ -2193,7 +2223,7 @@ impl Session {
             == (Phase::Loading {
                 step: Load::Joining,
             });
-        self.send(&packet::move_to_cell(room.area, &room.cell, &room.pad));
+        self.send_action(&packet::move_to_cell(room.area, &room.cell, &room.pad));
         if first {
             self.send(&packet::retrieve_user_data(room.area, me));
         }
@@ -2540,14 +2570,14 @@ impl Session {
         let act = self.combat.cast(slot, now);
         match self.slotted_item().filter(|_| slot == ITEM_SLOT) {
             Some(item) => {
-                self.send(&packet::gar_item(act, slot, aims, item));
+                self.send_action(&packet::gar_item(act, slot, aims, item));
                 if let Some(me) = &mut self.character
                     && let Some(skill) = me.skills.iter_mut().find(|s| s.slot == slot)
                 {
                     skill.old_cooldown_ms = None;
                 }
             }
-            None => self.send(&packet::gar(act, slot, aims)),
+            None => self.send_action(&packet::gar(act, slot, aims)),
         }
         if let Some(target) = hostile {
             self.combat.engage(target, now);
@@ -2654,7 +2684,7 @@ impl Session {
             && let (Some(room), Some(eid)) = (&self.room, self.me)
         {
             let area = room.area;
-            self.send(&packet::res_player_timed(area, eid));
+            self.send_action(&packet::res_player_timed(area, eid));
         }
         let Some(target) = self.combat.auto_target() else {
             return;
@@ -2742,6 +2772,15 @@ impl Session {
     }
 
     fn on_player_moved(&mut self, name: &str, fields: &str) {
+        let away = fields
+            .split(',')
+            .find_map(|pair| pair.strip_prefix("afk:"))
+            .map(|value| value == "true");
+        if let (Some(away), Some(me)) = (away, &mut self.character)
+            && name.eq_ignore_ascii_case(&self.username)
+        {
+            me.away = away;
+        }
         if let Some(room) = &mut self.room {
             room.move_player(name, fields);
         }

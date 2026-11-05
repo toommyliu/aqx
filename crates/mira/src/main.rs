@@ -18,7 +18,7 @@ const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <mons
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
-     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, respawn back|spawn, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout";
+     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, respawn back|spawn, antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -41,7 +41,7 @@ enum Command {
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
     /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
     /// unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>,
-    /// respawn back|spawn, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout)
+    /// respawn back|spawn, antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout)
     /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
@@ -442,6 +442,8 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
             session.swap(id(inventory)?, id(bank)?).wait()?;
         }
         ["rest"] => session.rest().wait()?,
+        ["antiafk", "on"] => session.set_anti_afk(true),
+        ["antiafk", "off"] => session.set_anti_afk(false),
         ["respawn", "back"] => session.set_respawn_where_died(true),
         ["respawn", "spawn"] => session.set_respawn_where_died(false),
         ["aggro", "on"] => session.set_aggro(Some(Aggro::Cell)),

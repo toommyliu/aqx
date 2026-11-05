@@ -32,6 +32,7 @@ pub struct Me {
     pub mp: u32,
     pub max_mp: u32,
     pub state: CombatState,
+    pub away: bool,
     pub haste: f64,
     #[serde(skip)]
     pub(crate) mana_rate: Option<f64>,

@@ -222,6 +222,10 @@ pub fn rest_request() -> String {
     zm("restRequest", 1, &[""])
 }
 
+pub fn afk(away: bool) -> String {
+    zm("afk", 1, &[away])
+}
+
 pub fn emote(name: &str) -> String {
     zm("emotea", 1, &[name])
 }
@@ -267,6 +271,7 @@ mod tests {
         assert_eq!(logout(), "%xt%zm%cmd%1%logout%");
         assert_eq!(rest_request(), "%xt%zm%restRequest%1%%");
         assert_eq!(emote("rest"), "%xt%zm%emotea%1%rest%");
+        assert_eq!(afk(false), "%xt%zm%afk%1%false%");
         assert_eq!(
             gar(
                 3,

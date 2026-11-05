@@ -38,6 +38,7 @@ pub struct Player {
     pub mp: u32,
     pub max_mp: u32,
     pub state: CombatState,
+    pub away: bool,
     #[serde(skip)]
     fetched: bool,
 }
@@ -58,6 +59,7 @@ impl Player {
             mp: 0,
             max_mp: 0,
             state: CombatState::default(),
+            away: false,
             fetched,
         }
     }
@@ -190,7 +192,7 @@ impl Room {
         area: MoveToArea,
         me: Option<EntityId>,
         requested: Option<Spot>,
-    ) -> (Room, Option<Vitals>) {
+    ) -> (Room, Option<(Vitals, bool)>) {
         let (mine, others): (Vec<AreaPlayer>, Vec<AreaPlayer>) =
             area.players.into_iter().partition(|p| Some(p.eid) == me);
         let (x, y) = mine.first().map_or((0, 0), |p| (p.tx, p.ty));
@@ -218,13 +220,14 @@ impl Room {
                     player.pad = Some(p.pad).filter(|pad| !pad.is_empty());
                     (player.x, player.y) = (p.tx, p.ty);
                     player.level = p.level;
+                    player.away = p.afk;
                     player.apply(&p.vitals);
                     player
                 })
                 .collect(),
             monsters: monsters(area.monster_types, area.monster_spots, area.monsters),
         };
-        (room, mine.into_iter().next().map(|p| p.vitals))
+        (room, mine.into_iter().next().map(|p| (p.vitals, p.afk)))
     }
 
     pub(crate) fn is_in(&self, map: &str) -> bool {
@@ -277,6 +280,11 @@ impl Room {
         };
         self.place_player(name, field("strFrame"), field("strPad"));
         let at = |key| field(key).and_then(|value| value.parse().ok());
+        if let Some(away) = field("afk").map(|value| value == "true")
+            && let Some(player) = self.player_named(name)
+        {
+            player.away = away;
+        }
         if let (Some(x), Some(y)) = (at("tx"), at("ty"))
             && let Some(player) = self
                 .players
@@ -404,6 +412,8 @@ struct AreaPlayer {
     ty: i32,
     #[serde(rename = "intLevel", default, deserialize_with = "flex::opt_int")]
     level: Option<u32>,
+    #[serde(default, deserialize_with = "flex::bool")]
+    afk: bool,
     #[serde(flatten)]
     vitals: Vitals,
 }
