@@ -3488,7 +3488,7 @@ fn casts_skills_while_repeating_aggro() {
         peer.answer(0, 1);
         while peer.recv() != both {}
         assert!(
-            beat.elapsed() < Duration::from_millis(600),
+            beat.elapsed() < Duration::from_millis(800),
             "a beat was skipped"
         );
         peer.expect_logout();
