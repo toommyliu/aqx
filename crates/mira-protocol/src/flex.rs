@@ -5,6 +5,7 @@ use serde::{Deserialize, Deserializer};
 #[serde(untagged)]
 enum Scalar {
     Int(i64),
+    Float(f64),
     Bool(bool),
     Str(String),
 }
@@ -16,6 +17,10 @@ where
 {
     let n: i64 = match Scalar::deserialize(d)? {
         Scalar::Int(n) => n,
+        Scalar::Float(f) if f.fract() == 0.0 && (i64::MIN as f64..i64::MAX as f64).contains(&f) => {
+            f as i64
+        }
+        Scalar::Float(f) => return Err(D::Error::custom(format!("expected an integer, got {f}"))),
         Scalar::Str(s) => s
             .parse()
             .map_err(|_| D::Error::custom(format!("expected an integer, got {s:?}")))?,
@@ -76,12 +81,17 @@ mod tests {
             expected
         );
         assert!(!parse(json!({"port": 1, "online": "false"})).unwrap().online);
+        assert_eq!(
+            parse(serde_json::from_str(r#"{"port": 5.588E3, "online": 1}"#).unwrap()).unwrap(),
+            expected
+        );
     }
 
     #[test]
     fn values_outside_the_target_type_are_errors() {
         assert!(parse(json!({"port": 70000, "online": 1})).is_err());
         assert!(parse(json!({"port": "abc", "online": 1})).is_err());
+        assert!(parse(json!({"port": 5588.5, "online": 1})).is_err());
         assert!(parse(json!({"port": 1, "online": 2})).is_err());
     }
 }
