@@ -6,12 +6,12 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use mira_client::{
-    ActionError, CombatState, DeviceId, Direction, Disconnect, Event, Handle, Load, Monster,
-    NoticeKind, Options, Phase, Room, Server, api,
+    ActionError, CombatState, DeviceId, Direction, Disconnect, Event, Handle, Load, Me, Monster,
+    NoticeKind, Options, Phase, Room, Server, SkillTarget, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
-const COMMANDS: &str = "join <map>, cell <cell> [pad], who, mons [all], logout";
+const COMMANDS: &str = "join <map>, cell <cell> [pad], who, mons [all], me, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -29,7 +29,7 @@ enum Command {
         json: bool,
     },
     /// Log in, then print what the account does and run commands read from stdin
-    /// (join <map>, cell <cell> [pad], who, mons [all], logout) until it logs out.
+    /// (join <map>, cell <cell> [pad], who, mons [all], me, logout) until it logs out.
     Login {
         #[arg(long)]
         user: String,
@@ -200,6 +200,11 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
         },
         ["mons"] => list_monsters(session, json, false)?,
         ["mons", "all"] => list_monsters(session, json, true)?,
+        ["me"] => match &session.snapshot().me {
+            Some(me) if json => println!("{}", serde_json::to_string(me).expect("me serializes")),
+            Some(me) => print!("{}", describe_me(me)),
+            None => return Err(CommandError::Action(ActionError::NotReady)),
+        },
         _ => {
             return Err(CommandError::Usage(format!(
                 "can't run {line:?}; commands are {COMMANDS}"
@@ -241,17 +246,48 @@ fn list_monsters(session: &Handle, json: bool, all: bool) -> Result<(), CommandE
     Ok(())
 }
 
+fn describe_me(me: &Me) -> String {
+    let mut text = format!(
+        "level {}, {} gold, {}/{} HP, {}/{} MP, {}, haste {}\n",
+        me.level,
+        me.gold,
+        me.hp,
+        me.max_hp,
+        me.mp,
+        me.max_mp,
+        state_name(me.state),
+        me.haste
+    );
+    for skill in &me.skills {
+        let target = match skill.target {
+            SkillTarget::Hostile => "hostile",
+            SkillTarget::Friendly => "friendly",
+            SkillTarget::Myself => "self",
+        };
+        let locked = if skill.unlocked { "" } else { ", locked" };
+        text.push_str(&format!(
+            "  {:<3} {} ({} ms, {} MP, {target} x{}{locked})\n",
+            skill.slot, skill.name, skill.cooldown_ms, skill.mana, skill.max_targets
+        ));
+    }
+    text
+}
+
+fn state_name(state: CombatState) -> &'static str {
+    match state {
+        CombatState::Dead => "dead",
+        CombatState::Idle => "idle",
+        CombatState::InCombat => "in combat",
+    }
+}
+
 fn describe_monsters(monsters: &[&Monster]) -> String {
     if monsters.is_empty() {
         return "no monsters\n".into();
     }
     let mut text = String::new();
     for m in monsters {
-        let state = match m.state {
-            CombatState::Dead => "dead",
-            CombatState::Idle => "idle",
-            CombatState::InCombat => "in combat",
-        };
+        let state = state_name(m.state);
         let aggressive = if m.aggressive { ", aggressive" } else { "" };
         text.push_str(&format!(
             "  {:<12} {} #{} {}/{} {state}{aggressive}\n",

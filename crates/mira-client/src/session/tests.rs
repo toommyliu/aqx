@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -87,9 +87,21 @@ impl Peer {
             "data": {"intLevel": "50", "intGold": 1200, "strEmail": "player1@example.com", "strIP": "192.0.2.1"},
         })));
         self.expect(&packet::retrieve_inventory(AreaId(42), EntityId(7)));
+        self.send(&json_message(json!({"cmd": "sAct", "actions": {"active": [
+            {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "mp": -10, "tgt": "h", "tgtMax": 1},
+        ]}})));
+        self.send(&json_message(json!({"cmd": "stu", "sta": {"$tha": 0.05}})));
         let inventory =
             json_message(json!({"cmd": "loadInventoryBig", "items": [{}, {}], "factions": []}));
         self.send_bytes(&compress(&inventory));
+    }
+}
+
+impl Drop for Peer {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(Shutdown::Write);
+        let mut chunk = [0u8; 4096];
+        while matches!(self.stream.read(&mut chunk), Ok(n) if n > 0) {}
     }
 }
 
@@ -103,7 +115,7 @@ fn move_to_area(area: i64, name: &str) -> String {
         "areaId": area,
         "areaName": name,
         "uoBranch": [
-            {"entID": 7, "strUsername": "player1", "strFrame": "Enter"},
+            {"entID": 7, "strUsername": "player1", "strFrame": "Enter", "intHP": 950, "intHPMax": 1000},
             {"entID": 8, "strUsername": "player2", "strFrame": "Enter"},
             {"entID": 9, "strUsername": "player3", "strFrame": "r2"},
         ],
@@ -182,6 +194,11 @@ fn logs_in_reports_each_phase_and_logs_out() {
         peer.expect(&packet::logout());
     });
     harness.session.ready().wait().unwrap();
+    let me = harness.session.snapshot().me.clone().unwrap();
+    assert_eq!(
+        (me.level, me.hp, me.max_hp, me.haste, me.skills.len()),
+        (50, 950, 1000, 0.05, 1)
+    );
     harness.session.logout();
 
     let events = harness.finish();
@@ -648,6 +665,92 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
                 aggressive: false,
             },
         ]
+    );
+}
+
+#[test]
+fn tracks_the_players_vitals_haste_and_skills() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.send(&json_message(json!({
+            "cmd": "moveToArea",
+            "areaId": 43,
+            "areaName": "farm-1",
+            "uoBranch": [{
+                "entID": 7, "strUsername": "player1", "strFrame": "Enter",
+                "intHP": 900, "intHPMax": "1000", "intMP": 80, "intMPMax": 100, "intState": 1,
+            }],
+        })));
+        peer.send("%xt%server%-1%You joined \"farm-1\"!%");
+        peer.send(&json_message(
+            json!({"cmd": "stu", "sta": {"$tha": 0.12, "$STR": 50}}),
+        ));
+        peer.send(&json_message(json!({"cmd": "sAct", "actions": {"active": [
+            {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "mp": -10, "tgt": "h", "tgtMax": 1},
+            {"ref": "a1", "nam": "Guard", "cd": "3000", "mp": 15, "tgt": "s", "tgtMax": "3", "isOK": false},
+            {"ref": "i1", "nam": "Health Potion", "cd": 60000, "mp": 0, "tgt": "s", "tgtMax": null},
+        ]}})));
+        peer.send(&json_message(json!({
+            "cmd": "ct",
+            "p": {"player1": {"intHP": 700, "intState": 2}, "player2": {"intHP": 1}},
+        })));
+        peer.send(&json_message(
+            json!({"cmd": "uotls", "unm": "Player1", "o": {"intMP": 60}}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "uotls", "unm": "player2", "o": {"intMP": 1}}),
+        ));
+        peer.send(&json_message(json!({"cmd": "stu", "sta": {"$tdo": 0.1}})));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
+        "{events:?}"
+    );
+    assert_eq!(
+        session.snapshot().me,
+        Some(Me {
+            level: 50,
+            gold: 1200,
+            hp: 700,
+            max_hp: 1000,
+            mp: 60,
+            max_mp: 100,
+            state: CombatState::InCombat,
+            haste: 0.12,
+            skills: vec![
+                Skill {
+                    slot: "aa".into(),
+                    name: "Auto Attack".into(),
+                    cooldown_ms: 2000,
+                    mana: -10,
+                    target: SkillTarget::Hostile,
+                    max_targets: 1,
+                    unlocked: true,
+                },
+                Skill {
+                    slot: "a1".into(),
+                    name: "Guard".into(),
+                    cooldown_ms: 3000,
+                    mana: 15,
+                    target: SkillTarget::Myself,
+                    max_targets: 3,
+                    unlocked: false,
+                },
+                Skill {
+                    slot: "i1".into(),
+                    name: "Health Potion".into(),
+                    cooldown_ms: 60000,
+                    mana: 0,
+                    target: SkillTarget::Myself,
+                    max_targets: 1,
+                    unlocked: true,
+                },
+            ],
+        })
     );
 }
 
