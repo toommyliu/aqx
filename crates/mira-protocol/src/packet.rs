@@ -128,6 +128,41 @@ pub fn sell_item(room: AreaId, item: ItemId, qty: u32, char_item: CharItemId) ->
     )
 }
 
+pub fn bank_from_inv(room: AreaId, item: ItemId, char_item: CharItemId) -> String {
+    zm(
+        "bankFromInv",
+        room,
+        &[item.to_string(), char_item.to_string()],
+    )
+}
+
+pub fn bank_to_inv(room: AreaId, item: ItemId, char_item: CharItemId) -> String {
+    zm(
+        "bankToInv",
+        room,
+        &[item.to_string(), char_item.to_string()],
+    )
+}
+
+pub fn bank_swap_inv(
+    room: AreaId,
+    inv_item: ItemId,
+    inv_char_item: CharItemId,
+    bank_item: ItemId,
+    bank_char_item: CharItemId,
+) -> String {
+    zm(
+        "bankSwapInv",
+        room,
+        &[
+            inv_item.to_string(),
+            inv_char_item.to_string(),
+            bank_item.to_string(),
+            bank_char_item.to_string(),
+        ],
+    )
+}
+
 pub fn get_drop(room: AreaId, item: ItemId) -> String {
     zm("getDrop", room, &[item])
 }
@@ -196,6 +231,18 @@ mod tests {
         assert_eq!(accept_quest(room, QuestId(3)), "%xt%zm%acceptQuest%42%3%");
         assert_eq!(get_drop(room, ItemId(1027)), "%xt%zm%getDrop%42%1027%");
         assert_eq!(load_shop(room, ShopId(5)), "%xt%zm%loadShop%42%5%");
+        assert_eq!(
+            bank_from_inv(room, ItemId(1), CharItemId(2)),
+            "%xt%zm%bankFromInv%42%1%2%"
+        );
+        assert_eq!(
+            bank_to_inv(room, ItemId(1), CharItemId(2)),
+            "%xt%zm%bankToInv%42%1%2%"
+        );
+        assert_eq!(
+            bank_swap_inv(room, ItemId(1), CharItemId(2), ItemId(3), CharItemId(4)),
+            "%xt%zm%bankSwapInv%42%1%2%3%4%"
+        );
         assert_eq!(
             buy_item(room, ItemId(900), ShopId(5), ShopItemId(4005), 3),
             "%xt%zm%buyItem%42%900%5%4005%3%"

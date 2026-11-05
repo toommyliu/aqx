@@ -2400,8 +2400,7 @@ fn buys_and_sells_within_the_clients_limits() {
     harness.finish();
 }
 
-#[test]
-fn loads_the_bank_once_over_http_with_the_character_id() {
+fn serve_bank(items: Value) -> (String, JoinHandle<(Vec<String>, String)>) {
     use std::io::{BufRead, BufReader};
     let api = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", api.local_addr().unwrap());
@@ -2424,9 +2423,7 @@ fn loads_the_bank_once_over_http_with_the_character_id() {
         }
         let mut body = vec![0; length];
         reader.read_exact(&mut body).unwrap();
-        let bank = json!([{"ItemID": 300, "CharItemID": 9300, "sName": "Banked Gem", "iQty": 4,
-                           "iStk": 10, "sType": "Item", "bBank": true}])
-        .to_string();
+        let bank = items.to_string();
         write!(
             stream,
             "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{bank}",
@@ -2435,6 +2432,13 @@ fn loads_the_bank_once_over_http_with_the_character_id() {
         .unwrap();
         (head, String::from_utf8(body).unwrap())
     });
+    (base, http)
+}
+
+#[test]
+fn loads_the_bank_once_over_http_with_the_character_id() {
+    let (base, http) = serve_bank(json!([{"ItemID": 300, "CharItemID": 9300,
+        "sName": "Banked Gem", "iQty": 4, "iStk": 10, "sType": "Item", "bBank": true}]));
     let harness = Harness::start_with_api(Options::default(), base, |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
@@ -2453,6 +2457,99 @@ fn loads_the_bank_once_over_http_with_the_character_id() {
     let world = session.snapshot();
     let bank = world.bank.as_ref().unwrap();
     assert_eq!((bank[0].id, bank[0].qty), (ItemId(300), 4));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn moves_items_between_the_bank_and_inventory_after_the_clients_checks() {
+    let banked = |id: i64, name: &str, kind: &str| {
+        json!({"ItemID": id, "CharItemID": 9000 + id, "sName": name, "iQty": 1, "iStk": 1,
+               "sType": kind, "bBank": true})
+    };
+    let (base, http) = serve_bank(json!([
+        banked(301, "Banked Axe", "Axe"),
+        banked(302, "Banked Bow", "Bow"),
+    ]));
+    let harness = Harness::start_with_api(Options::default(), base, |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::bank_from_inv(
+            AreaId(42),
+            ItemId(101),
+            CharItemId(5001),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "bankFromInv", "ItemID": 101, "bSuccess": 1}),
+        ));
+        peer.expect(&packet::bank_to_inv(
+            AreaId(42),
+            ItemId(301),
+            CharItemId(9301),
+        ));
+        peer.send(&json_message(json!({"cmd": "bankToInv", "ItemID": "301"})));
+        peer.expect(&packet::bank_swap_inv(
+            AreaId(42),
+            ItemId(301),
+            CharItemId(9301),
+            ItemId(302),
+            CharItemId(9302),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "bankSwapInv", "invItemID": 301, "bankItemID": "302"}),
+        ));
+        peer.expect(&packet::bank_from_inv(
+            AreaId(42),
+            ItemId(302),
+            CharItemId(9302),
+        ));
+        peer.send(&json_message(json!({
+            "cmd": "bankFromInv", "ItemID": 302, "bSuccess": 0, "msg": "Bank is full",
+        })));
+        peer.send(&json_message(
+            json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}),
+        ));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let unusable = |pending: Pending| matches!(pending.wait(), Err(ActionError::Unusable(_)));
+    assert!(unusable(session.deposit(ItemId(100))));
+    session.deposit(ItemId(101)).wait().unwrap();
+    assert_eq!(session.snapshot().me.as_ref().unwrap().bank_count, 2);
+    session.withdraw(ItemId(301)).wait().unwrap();
+    assert!(unusable(session.withdraw(ItemId(302))));
+    let world = session.snapshot();
+    let held: Vec<ItemId> = world.inventory.iter().map(|i| i.id).collect();
+    let stored: Vec<ItemId> = world.bank.as_ref().unwrap().iter().map(|i| i.id).collect();
+    assert_eq!(
+        (held, stored),
+        (
+            vec![ItemId(100), ItemId(301)],
+            vec![ItemId(302), ItemId(101)]
+        )
+    );
+    assert_eq!(world.me.as_ref().unwrap().bank_count, 1);
+    session.swap(ItemId(301), ItemId(302)).wait().unwrap();
+    let world = session.snapshot();
+    assert!(world.inventory.iter().any(|i| i.id == ItemId(302)));
+    assert!(
+        world
+            .bank
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|i| i.id == ItemId(301))
+    );
+    let refused = session.deposit(ItemId(302)).wait();
+    assert!(matches!(refused, Err(ActionError::Refused(why)) if why == "Bank is full"));
+    wait_until(session, |me| me.state == CombatState::InCombat);
+    let fighting = session.withdraw(ItemId(301)).wait();
+    assert!(
+        matches!(fighting, Err(ActionError::InCombat)),
+        "{fighting:?}"
+    );
+    http.join().unwrap();
     session.logout();
     harness.finish();
 }

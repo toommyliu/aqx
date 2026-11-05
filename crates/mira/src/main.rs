@@ -7,7 +7,7 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use mira_client::{
     ActionError, Auras, BoostKind, CombatState, DeviceId, Direction, Disconnect, Event, Handle,
-    ItemId, Load, Me, MonMapId, Monster, NoticeKind, Options, Pending, Phase, Place, QuestId,
+    Item, ItemId, Load, Me, MonMapId, Monster, NoticeKind, Options, Pending, Phase, Place, QuestId,
     QuestStatus, Room, Server, ShopId, ShopItemId, SkillTarget, World, api,
 };
 
@@ -15,7 +15,8 @@ const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str = "join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], \
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
-     buy <#listing> [qty], sell <item> [qty], bank, logout";
+     buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
+     swap <#inventory item> <#bank item>, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -36,7 +37,7 @@ enum Command {
     /// (join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop,
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
-    /// logout)
+    /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, logout)
     /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
@@ -408,6 +409,22 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                 }
             }
         }
+        ["deposit", item @ ..] if !item.is_empty() => {
+            let world = session.snapshot();
+            let id = item_id(&item.join(" "), &world.inventory, "inventory")?;
+            session.deposit(id).wait()?;
+        }
+        ["withdraw", item @ ..] if !item.is_empty() => {
+            session.load_bank().wait()?;
+            let world = session.snapshot();
+            let bank = world.bank.as_deref().map_or(&[][..], Vec::as_slice);
+            let id = item_id(&item.join(" "), bank, "bank")?;
+            session.withdraw(id).wait()?;
+        }
+        ["swap", inventory, bank] => {
+            let id = |text: &str| number(text.trim_start_matches('#')).map(ItemId);
+            session.swap(id(inventory)?, id(bank)?).wait()?;
+        }
         ["me"] => match &session.snapshot().me {
             Some(me) if json => println!("{}", serde_json::to_string(me).expect("me serializes")),
             Some(me) => print!("{}", describe_me(me)),
@@ -425,6 +442,17 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
 fn number(text: &str) -> Result<i64, CommandError> {
     text.parse()
         .map_err(|_| CommandError::Usage(format!("{text:?} isn't a number")))
+}
+
+fn item_id(wanted: &str, items: &[Item], place: &str) -> Result<ItemId, CommandError> {
+    if let Some(Ok(id)) = wanted.strip_prefix('#').map(str::parse) {
+        return Ok(ItemId(id));
+    }
+    items
+        .iter()
+        .find(|i| i.name.eq_ignore_ascii_case(wanted))
+        .map(|i| i.id)
+        .ok_or_else(|| CommandError::Usage(format!("no {wanted} in the {place}")))
 }
 
 fn count(text: &str) -> Result<u32, CommandError> {
@@ -683,6 +711,7 @@ fn describe(event: &Event) -> Option<String> {
             let place = match place {
                 Place::Inventory => "inventory",
                 Place::Temp => "temp",
+                Place::Bank => "the bank",
             };
             format!("{name}: {qty} in {place}")
         }

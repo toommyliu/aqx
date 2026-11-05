@@ -92,4 +92,5 @@ pub enum Direction {
 pub enum Place {
     Inventory,
     Temp,
+    Bank,
 }

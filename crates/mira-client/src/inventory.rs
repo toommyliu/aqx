@@ -307,13 +307,21 @@ impl Inventory {
     }
 
     pub(crate) fn full_for(&self, offer: &DropOffer, slots: u32) -> bool {
-        let owned = self.items.iter().find(|i| i.id == offer.id);
+        self.no_room(offer.id, offer.pool(), slots)
+    }
+
+    pub(crate) fn full_for_item(&self, item: &Item, slots: u32) -> bool {
+        self.no_room(item.id, item.pool(), slots)
+    }
+
+    fn no_room(&self, id: ItemId, pool: Pool, slots: u32) -> bool {
+        let owned = self.items.iter().find(|i| i.id == id);
         if owned.is_some_and(|i| i.qty < i.max_stack) {
             return false;
         }
         let used = |pool| self.items.iter().filter(|i| i.pool() == pool).count();
         let slots = slots as usize;
-        match offer.pool() {
+        match pool {
             Pool::Class | Pool::House => false,
             Pool::Misc => owned.is_none() && used(Pool::Misc) >= slots,
             Pool::Bag => used(Pool::Bag) >= slots,

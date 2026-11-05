@@ -19,7 +19,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::REPLY_TIMEOUT;
-use crate::api::{self, Account, ApiError, Server, Token};
+use crate::api::{Account, ApiError, Server, Token};
 use crate::aura::{self, AuraChange, Target};
 use crate::combat::{self, AUTO_ATTACK, ActionResult, Combat, Gate, ITEM_SLOT, Outcome};
 use crate::event::{Direction, Event, NoticeKind};
@@ -38,9 +38,11 @@ use crate::room::{
 };
 use crate::shop::{Bought, LoadedShop, Shop};
 use crate::world::World;
+use bank::{BankMove, BankStage};
 use quests::{Answer, QuestAction, QuestCall, Verdict};
 use shops::{Trade, TradeStage};
 
+mod bank;
 mod quests;
 mod shops;
 
@@ -222,7 +224,7 @@ enum Action {
     PickDrop(ItemId),
     LoadShop(ShopId),
     Trade(Trade),
-    LoadBank,
+    Bank(Option<BankMove>),
 }
 
 enum Op {
@@ -274,7 +276,8 @@ enum Op {
     },
     Bank {
         reply: Reply,
-        fetching: bool,
+        mv: Option<BankMove>,
+        stage: BankStage,
     },
 }
 
@@ -368,7 +371,19 @@ impl Handle {
     }
 
     pub fn load_bank(&self) -> Pending {
-        self.act(Action::LoadBank)
+        self.act(Action::Bank(None))
+    }
+
+    pub fn deposit(&self, item: ItemId) -> Pending {
+        self.act(Action::Bank(Some(BankMove::Deposit(item))))
+    }
+
+    pub fn withdraw(&self, item: ItemId) -> Pending {
+        self.act(Action::Bank(Some(BankMove::Withdraw(item))))
+    }
+
+    pub fn swap(&self, inventory: ItemId, bank: ItemId) -> Pending {
+        self.act(Action::Bank(Some(BankMove::Swap { inventory, bank })))
     }
 
     pub fn pick_drop(&self, item: ItemId) -> Pending {
@@ -561,18 +576,30 @@ impl Session {
 
     fn take_bank_results(&mut self) {
         while let Ok(result) = self.bank_results.try_recv() {
-            let Some(Op::Bank { reply, .. }) = self
-                .current
-                .take_if(|op| matches!(op, Op::Bank { fetching: true, .. }))
-            else {
+            let fetching = matches!(
+                self.current,
+                Some(Op::Bank {
+                    stage: BankStage::Fetching,
+                    ..
+                })
+            );
+            if !fetching {
                 continue;
-            };
-            let result = self.ensure_ready().and_then(|()| {
+            }
+            let loaded = self.ensure_ready().and_then(|()| {
                 let values = result.map_err(|e| ActionError::Http(e.to_string()))?;
                 self.bank = Some(Arc::new(self.parse_each("bank item", values)));
                 Ok(())
             });
-            self.replies.push((reply, result));
+            match (loaded, &mut self.current) {
+                (Ok(()), Some(Op::Bank { stage, .. })) => *stage = BankStage::Idle,
+                (Err(e), _) => {
+                    if let Some(Op::Bank { reply, .. }) = self.current.take() {
+                        self.replies.push((reply, Err(e)));
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -668,12 +695,9 @@ impl Session {
                 }
                 Err(e) => Err(e),
             },
-            Action::LoadBank => {
-                let op = Op::Bank {
-                    reply,
-                    fetching: false,
-                };
-                return self.step(op, now);
+            Action::Bank(mv) => {
+                let stage = BankStage::Idle;
+                return self.step(Op::Bank { reply, mv, stage }, now);
             }
             Action::Trade(trade) => {
                 let stage = TradeStage::Waiting { wake: None };
@@ -905,28 +929,17 @@ impl Session {
                     None
                 }
             },
-            Op::Bank { reply, fetching } => {
-                let result = match (self.ensure_ready(), &self.bank, &self.character) {
-                    (Err(e), _, _) => Err(e),
-                    (Ok(()), Some(_), _) => Ok(()),
-                    (Ok(()), None, _) if fetching => return Some(Op::Bank { reply, fetching }),
-                    (Ok(()), None, Some(me)) => {
-                        let (account, char_id) = (self.account.clone(), me.char_id);
-                        let (results, waker) = (self.bank_out.clone(), Arc::clone(&self.waker));
-                        thread::spawn(move || {
-                            let _ = results.send(api::bank(&account, char_id));
-                            let _ = waker.wake();
-                        });
-                        return Some(Op::Bank {
-                            reply,
-                            fetching: true,
-                        });
-                    }
-                    (Ok(()), None, None) => Err(ActionError::NotReady),
-                };
-                self.replies.push((reply, result));
-                None
-            }
+            Op::Bank {
+                reply,
+                mv,
+                mut stage,
+            } => match self.step_bank(mv, &mut stage, now) {
+                task::Poll::Pending => Some(Op::Bank { reply, mv, stage }),
+                task::Poll::Ready(result) => {
+                    self.replies.push((reply, result));
+                    None
+                }
+            },
             Op::Trade {
                 reply,
                 trade,
@@ -972,6 +985,10 @@ impl Session {
             | Some(Op::Kill { wake, .. }) => *wake,
             Some(Op::Quest { call, .. }) => call.stage.deadline(),
             Some(Op::Trade { stage, .. }) => stage.deadline(),
+            Some(Op::Bank {
+                stage: BankStage::Sent { deadline },
+                ..
+            }) => Some(*deadline),
             Some(Op::Bank { .. }) => None,
             Some(Op::Shop {
                 stage: ShopStage::Waiting { wake },
@@ -1539,6 +1556,9 @@ impl Session {
                 self.on_sold(sold.char_item_id);
             }
             "buyItem" => self.on_bought(read::<Bought>(&json)?),
+            "bankFromInv" => self.on_moved(read::<bank::Deposited>(&json)?.into()),
+            "bankToInv" => self.on_moved(read::<bank::Withdrew>(&json)?.into()),
+            "bankSwapInv" => self.on_moved(read::<bank::Swapped>(&json)?.into()),
             "equipItem" | "unequipItem" => {
                 let worn: Worn = read(&json)?;
                 if Some(worn.uid) == self.me {
