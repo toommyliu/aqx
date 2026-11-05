@@ -715,7 +715,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
         })));
         peer.send("%xt%server%-1%You joined \"farm-1\"!%");
         peer.send(&json_message(
-            json!({"cmd": "stu", "sta": {"$tha": 0.12, "$STR": 50}}),
+            json!({"cmd": "stu", "sta": {"$tha": 0.12, "$cmc": 0.8, "$STR": 50}}),
         ));
         peer.send(&json_message(json!({"cmd": "sAct", "actions": {"active": [
             {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "mp": -10, "tgt": "h", "tgtMax": 1},
@@ -759,6 +759,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
             max_mp: 100,
             state: CombatState::InCombat,
             haste: 0.12,
+            mana_rate: Some(0.8),
             quests: session.snapshot().me.as_ref().unwrap().quests.clone(),
             auras: Auras::default(),
             skills: vec![
@@ -1683,4 +1684,282 @@ fn phase_events_serialize_flat() {
         })),
         json!({"event": "phase", "phase": "closed", "reason": "logged out"})
     );
+}
+
+const FARM_SKILLS: &str = r#"{"cmd": "sAct", "actions": {"active": [
+    {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "mp": -10, "tgt": "h", "tgtMax": 1},
+    {"ref": "a1", "nam": "Strike", "cd": 4000, "mp": 10, "tgt": "h", "tgtMax": 2},
+    {"ref": "a2", "nam": "Shield", "cd": 4000, "mp": 5, "tgt": "s", "tgtMax": 1},
+    {"ref": "a3", "nam": "Meteor", "cd": 4000, "mp": 999, "tgt": "h", "tgtMax": 1},
+    {"ref": "a4", "nam": "Ultimate", "cd": 4000, "mp": 0, "tgt": "h", "tgtMax": 1, "isOK": false}
+]}}"#;
+
+impl Peer {
+    fn serve_farm(&mut self) {
+        self.serve_to_ready("5.31");
+        self.send(&json_message(serde_json::from_str(FARM_SKILLS).unwrap()));
+        self.send(&json_message(
+            json!({"cmd": "stu", "sta": {"$tha": 0.84, "$cmc": 1}}),
+        ));
+        self.send(&json_message(json!({
+            "cmd": "moveToArea", "areaId": 43, "areaName": "farm-1",
+            "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "Enter",
+                          "intHP": 1000, "intHPMax": 1000, "intMP": 100, "intMPMax": 100}],
+            "mondef": [{"MonID": 10, "strMonName": "Mosquito"}, {"MonID": 11, "strMonName": "Frogzard"}],
+            "monmap": [
+                {"MonMapID": 1, "MonID": 10, "strFrame": "Enter", "bRed": 1},
+                {"MonMapID": 2, "MonID": 10, "strFrame": "Enter", "bRed": 0},
+                {"MonMapID": 3, "MonID": 11, "strFrame": "r2", "bRed": 0},
+            ],
+            "monBranch": [
+                {"MonMapID": 1, "MonID": 10, "intHP": 500, "intHPMax": 500, "intState": 1},
+                {"MonMapID": 2, "MonID": 10, "intHP": 200, "intHPMax": 500, "intState": 1},
+                {"MonMapID": 3, "MonID": 11, "intHP": 800, "intHPMax": 800, "intState": 1},
+            ],
+        })));
+        self.send("%xt%server%-1%You joined \"farm-1\"!%");
+        self.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        self.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
+    }
+
+    fn expect_at(&mut self, packet: &str) -> Instant {
+        self.expect(packet);
+        Instant::now()
+    }
+
+    fn answer(&mut self, act: u8, res: u8) {
+        self.send(&json_message(json!({
+            "cmd": "ct",
+            "sarsa": [{"actID": act, "cInf": "p:7", "iRes": res, "a": []}],
+        })));
+    }
+}
+
+fn gar(act: u8, slot: &str, aims: &[Aim]) -> String {
+    packet::gar(act, slot, aims)
+}
+
+fn wait_for_farm(harness: &Harness) {
+    harness
+        .events
+        .iter()
+        .find(|e| matches!(e, Event::Joined { map, .. } if map == "farm-1"))
+        .expect("the farm join");
+}
+
+const ONE: Aim = Aim::Monster(MonMapId(1));
+const TWO: Aim = Aim::Monster(MonMapId(2));
+const SLACK: Duration = Duration::from_millis(20);
+
+#[test]
+fn kills_a_monster_with_skills_and_the_auto_attack_at_the_clients_pace() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        let quick = FARM_SKILLS.replacen(r#""cd": 4000"#, r#""cd": 1000"#, 1);
+        peer.send(&json_message(serde_json::from_str(&quick).unwrap()));
+        let strike = peer.expect_at(&gar(0, "a1", &[ONE, TWO]));
+        peer.answer(0, 1);
+        let auto = peer.expect_at(&gar(1, "aa", &[ONE]));
+        assert!(auto - strike >= Duration::from_millis(300) - SLACK);
+        peer.answer(1, 1);
+        let shield = peer.expect_at(&gar(2, "a2", &[Aim::Player(EntityId(7))]));
+        assert!(shield - strike >= Duration::from_millis(750) - SLACK);
+        assert!(shield - auto >= Duration::from_millis(700) - SLACK);
+        peer.answer(2, 1);
+        peer.send(&json_message(
+            json!({"cmd": "ct", "m": {"1": {"intHP": 0, "intState": 0}}}),
+        ));
+        peer.expect(&packet::logout());
+    });
+    wait_for_farm(&harness);
+    while harness.session.snapshot().me.as_ref().unwrap().skills[1].cooldown_ms != 1000 {
+        thread::sleep(Duration::from_millis(5));
+    }
+    harness.session.kill(MonMapId(1)).wait().unwrap();
+    thread::sleep(Duration::from_millis(1200));
+    harness.session.logout();
+    harness.finish();
+}
+
+#[test]
+fn the_auto_attack_waits_for_a_class_skill_held_back_by_slow_down_warnings() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.send("%xt%warning%-1%Please slow down%");
+        peer.send("%xt%warning%-1%Please slow down%");
+        let strike = peer.expect_at(&gar(0, "a1", &[ONE, TWO]));
+        peer.answer(0, 1);
+        let auto = peer.expect_at(&gar(1, "aa", &[ONE]));
+        assert!(auto - strike >= Duration::from_millis(900) - SLACK);
+        peer.answer(1, 1);
+        let shield = peer.expect_at(&gar(2, "a2", &[Aim::Player(EntityId(7))]));
+        assert!(shield - auto >= Duration::from_millis(1300) - SLACK);
+        peer.send(&json_message(
+            json!({"cmd": "ct", "m": {"1": {"intHP": 0, "intState": 0}}}),
+        ));
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    for _ in 0..2 {
+        harness
+            .events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    Event::Notice {
+                        kind: NoticeKind::Warning,
+                        ..
+                    }
+                )
+            })
+            .expect("a warning");
+    }
+    harness.session.kill(MonMapId(1)).wait().unwrap();
+    harness.session.logout();
+    harness.finish();
+}
+
+fn wait_until(session: &Handle, done: impl Fn(&Me) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !session.snapshot().me.as_ref().is_some_and(&done) {
+        assert!(Instant::now() < deadline, "the player never got there");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn leaving_combat_interrupts_the_fight_moves_away_from_aggressive_monsters_and_waits_for_the_server()
+ {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        let fight =
+            |state: u8| json_message(json!({"cmd": "cb", "p": {"player1": {"intState": state}}}));
+        let calm = json_message(json!({"cmd": "uotls", "unm": "player1", "o": {"intState": 1}}));
+        peer.expect(&gar(0, "a1", &[ONE, TWO]));
+        peer.send(&fight(2));
+        while peer.recv() != packet::move_to_cell(AreaId(43), "r2", "Left") {}
+        peer.send(&calm);
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.send(&fight(2));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        thread::sleep(EXIT_TIMEOUT + Duration::from_millis(300));
+        peer.send(&calm);
+        peer.expect(&packet::logout());
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    let in_combat = |me: &Me| me.state == CombatState::InCombat;
+    let killing = session.kill(MonMapId(1));
+    wait_until(session, in_combat);
+    session.exit_combat().wait().unwrap();
+    assert!(matches!(killing.wait(), Err(ActionError::Interrupted)));
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    wait_until(session, in_combat);
+    assert!(matches!(
+        session.exit_combat().wait(),
+        Err(ActionError::StillInCombat(cell)) if cell == "r2"
+    ));
+    wait_until(session, |me| me.state == CombatState::Idle);
+    session.exit_combat().wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_refused_skill_reports_it_and_keeps_its_old_cooldown() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        let first = peer.expect_at(&gar(0, "a1", &[ONE, TWO]));
+        peer.send(&json_message(
+            json!({"cmd": "sars", "actID": 0, "cInf": "p:7", "iRes": 0, "a": []}),
+        ));
+        peer.expect(&gar(1, "aa", &[ONE]));
+        peer.answer(1, 1);
+        let second = peer.expect_at(&gar(2, "a1", &[ONE, TWO]));
+        assert!(second - first < Duration::from_millis(1800));
+        peer.answer(2, 1);
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    let unusable = |slot, target| match session.use_skill(slot, target).wait() {
+        Err(ActionError::Unusable(why)) => why,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(unusable("a3", None), "not enough mana for Meteor");
+    assert_eq!(
+        unusable("a4", None),
+        "Ultimate is locked at this class rank"
+    );
+    assert_eq!(unusable("a9", None), "no skill in slot a9");
+    assert!(matches!(
+        session.kill(MonMapId(3)).wait(),
+        Err(ActionError::NoTarget(why)) if why == "Frogzard #3 is in r2, not this cell"
+    ));
+    assert!(matches!(
+        session.use_skill("a1", Some(MonMapId(1))).wait(),
+        Err(ActionError::Refused(why)) if why == "the server refused Strike"
+    ));
+    session.use_skill("a1", Some(MonMapId(1))).wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn moves_where_the_respawn_says_and_aggroes_monsters_that_come_back() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        let state = |peer: &mut Peer, state: u8| {
+            peer.send(&json_message(
+                json!({"cmd": "uotls", "unm": "player1", "o": {"intState": state}}),
+            ))
+        };
+        state(&mut peer, 0);
+        peer.send("%xt%respawnMon%-1%1%");
+        state(&mut peer, 1);
+        peer.send("%xt%resTimed%-1%r2%Left%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.send("%xt%resTimed%-1%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
+        peer.send("%xt%respawnMon%-1%2,1%");
+        peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let events = harness.finish();
+    assert!(events.contains(&Event::Moved {
+        cell: "r2".into(),
+        pad: "Left".into(),
+    }));
+}
+
+#[test]
+fn leaving_combat_cancels_fights_queued_behind_another_action() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::transfer("player1", "yulgar"));
+        thread::sleep(Duration::from_millis(300));
+        peer.send(&move_to_area(43, "yulgar-2"));
+        peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(8)]));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let joined = session.join("yulgar");
+    let killing = session.kill(MonMapId(1));
+    let leaving = session.exit_combat();
+    leaving.wait().unwrap();
+    assert!(matches!(killing.wait(), Err(ActionError::Interrupted)));
+    joined.wait().unwrap();
+    session.logout();
+    harness.finish();
 }

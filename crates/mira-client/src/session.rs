@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 
 use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
+use mira_protocol::packet::Aim;
 use mira_protocol::{
-    EntityId, Framer, JsonMessage, Message, QuestId, XmlMessage, XmlUser, XtMessage, packet,
+    EntityId, Framer, JsonMessage, Message, MonMapId, QuestId, XmlMessage, XmlUser, XtMessage,
+    packet,
 };
 use serde::de::DeserializeOwned;
 use serde::{Serialize, Serializer};
@@ -17,15 +19,18 @@ use serde_json::Value;
 
 use crate::api::{Account, Server, Token};
 use crate::aura::{self, AuraChange, Target};
+use crate::combat::{self, AUTO_ATTACK, ActionResult, Combat, Gate, ITEM_SLOT, Outcome};
 use crate::event::{Direction, Event, NoticeKind};
 use crate::faction::{self, AddedFaction, Faction, FactionData};
 use crate::inventory::{AddedItems, Inventory, LoadInventory, Picked, Sold, TurnIn, Worn};
 use crate::player::{
-    BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, SkillList, Stats,
+    BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, Skill, SkillList, SkillTarget,
+    Stats,
 };
 use crate::quest::{self, AchievementUpdate, Quest, QuestList, QuestUpdate};
 use crate::room::{
-    CombatState, MonsterUpdate, MoveToArea, PlayerUpdate, Room, Tick, UserEntry, UserList, Vitals,
+    CombatState, Monster, MonsterUpdate, MoveToArea, PlayerUpdate, Room, SPAWN, Tick, UserEntry,
+    UserList, Vitals,
 };
 use crate::world::World;
 
@@ -38,6 +43,8 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(3);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 const TRANSFER_COOLDOWN: Duration = Duration::from_millis(3000);
+const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+const CELL_PAD: &str = "Left";
 const VERSION_RETRIES: usize = 3;
 const REDACTED_KEYS: [&str; 2] = ["strEmail", "strIP"];
 
@@ -99,8 +106,18 @@ pub enum ActionError {
     NotReady,
     #[error("the server refused: {0}")]
     Refused(String),
-    #[error("the server did not answer within {} s", JOIN_TIMEOUT.as_secs())]
+    #[error("the server did not answer")]
     NoReply,
+    #[error("{0}")]
+    NoTarget(String),
+    #[error("{0}")]
+    Unusable(String),
+    #[error("the player is dead")]
+    Dead,
+    #[error("stopped to leave combat")]
+    Interrupted,
+    #[error("still in combat {secs} s after moving to {0}", secs = EXIT_TIMEOUT.as_secs())]
+    StillInCombat(String),
     #[error("{0}")]
     Closed(Disconnect),
     #[error("the session stopped without closing")]
@@ -127,8 +144,24 @@ enum Request {
 
 enum Action {
     Ready,
-    Join { map: String },
-    MoveToCell { cell: String, pad: String },
+    Join {
+        map: String,
+    },
+    MoveToCell {
+        cell: String,
+        pad: String,
+    },
+    Attack {
+        target: MonMapId,
+    },
+    UseSkill {
+        slot: String,
+        target: Option<MonMapId>,
+    },
+    Kill {
+        target: MonMapId,
+    },
+    ExitCombat,
 }
 
 enum Op {
@@ -141,6 +174,36 @@ enum Op {
     Join {
         reply: Reply,
         stage: JoinStage,
+    },
+    Cast {
+        reply: Reply,
+        slot: String,
+        target: Option<MonMapId>,
+        stage: CastStage,
+    },
+    Kill {
+        reply: Reply,
+        target: MonMapId,
+        wake: Option<Instant>,
+        next: usize,
+    },
+    Leave {
+        reply: Reply,
+        cell: String,
+        deadline: Instant,
+    },
+}
+
+enum CastStage {
+    Waiting { wake: Option<Instant> },
+    Sent { act: u8 },
+}
+
+enum Prepared {
+    Wait(Option<Instant>),
+    Fire {
+        aims: Vec<Aim>,
+        hostile: Option<MonMapId>,
     },
 }
 
@@ -172,6 +235,25 @@ impl Handle {
             cell: cell.to_owned(),
             pad: pad.to_owned(),
         })
+    }
+
+    pub fn attack(&self, target: MonMapId) -> Pending {
+        self.act(Action::Attack { target })
+    }
+
+    pub fn use_skill(&self, slot: &str, target: Option<MonMapId>) -> Pending {
+        self.act(Action::UseSkill {
+            slot: slot.to_owned(),
+            target,
+        })
+    }
+
+    pub fn kill(&self, target: MonMapId) -> Pending {
+        self.act(Action::Kill { target })
+    }
+
+    pub fn exit_combat(&self) -> Pending {
+        self.act(Action::ExitCombat)
     }
 
     pub fn logout(&self) {
@@ -260,6 +342,7 @@ pub fn spawn(
         inventory: Inventory::default(),
         factions: Vec::new(),
         quests: Arc::default(),
+        combat: Combat::default(),
         closing: None,
         logout_deadline: None,
     };
@@ -302,6 +385,7 @@ struct Session {
     inventory: Inventory,
     factions: Vec<Faction>,
     quests: Arc<BTreeMap<QuestId, Quest>>,
+    combat: Combat,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
 }
@@ -338,6 +422,28 @@ impl Session {
         while let Ok(request) = self.requests.try_recv() {
             match request {
                 Request::Logout => self.begin_logout(),
+                Request::Act(Action::ExitCombat, reply) => {
+                    if matches!(self.current, Some(Op::Kill { .. } | Op::Cast { .. }))
+                        && let Some(Op::Kill { reply, .. } | Op::Cast { reply, .. }) =
+                            self.current.take()
+                    {
+                        self.replies.push((reply, Err(ActionError::Interrupted)));
+                    }
+                    let (fights, rest): (Vec<_>, Vec<_>) =
+                        self.queue.drain(..).partition(|(action, _)| {
+                            matches!(
+                                action,
+                                Action::Attack { .. }
+                                    | Action::UseSkill { .. }
+                                    | Action::Kill { .. }
+                            )
+                        });
+                    for (_, reply) in fights {
+                        self.replies.push((reply, Err(ActionError::Interrupted)));
+                    }
+                    self.queue = rest.into();
+                    self.queue.push_front((Action::ExitCombat, reply));
+                }
                 Request::Act(action, reply) => self.queue.push_back((action, reply)),
             }
         }
@@ -347,6 +453,14 @@ impl Session {
         if self.logout_deadline.is_some_and(|d| now >= d) {
             self.close(Disconnect::LoggedOut);
         }
+        if let Some(me) = &self.character {
+            self.combat.expire(me, now);
+        }
+        self.run_ops(now);
+        self.tick_combat(now);
+    }
+
+    fn run_ops(&mut self, now: Instant) {
         loop {
             match self.current.take() {
                 Some(op) => {
@@ -374,6 +488,42 @@ impl Session {
                 Ok(None) => Ok(()),
                 Err(e) => Err(e),
             },
+            Action::Attack { target } => self.attack(target, now),
+            Action::ExitCombat => match self.start_leaving(now) {
+                Ok(Some((cell, deadline))) => {
+                    return Some(Op::Leave {
+                        reply,
+                        cell,
+                        deadline,
+                    });
+                }
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            },
+            Action::UseSkill { slot, target } => {
+                let stage = CastStage::Waiting { wake: None };
+                return self.step(
+                    Op::Cast {
+                        reply,
+                        slot,
+                        target,
+                        stage,
+                    },
+                    now,
+                );
+            }
+            Action::Kill { target } => {
+                let (wake, next) = (None, 0);
+                return self.step(
+                    Op::Kill {
+                        reply,
+                        target,
+                        wake,
+                        next,
+                    },
+                    now,
+                );
+            }
         };
         self.replies.push((reply, result));
         None
@@ -459,12 +609,77 @@ impl Session {
                 self.replies.push((reply, result));
                 None
             }
+            Op::Cast {
+                reply,
+                slot,
+                target,
+                stage,
+            } => match self.step_cast(&slot, target, stage, now) {
+                Ok(Some(stage)) => Some(Op::Cast {
+                    reply,
+                    slot,
+                    target,
+                    stage,
+                }),
+                Ok(None) => {
+                    self.replies.push((reply, Ok(())));
+                    None
+                }
+                Err(e) => {
+                    self.replies.push((reply, Err(e)));
+                    None
+                }
+            },
+            Op::Kill {
+                reply,
+                target,
+                next,
+                ..
+            } => match self.step_kill(target, next, now) {
+                Ok(Some((wake, next))) => Some(Op::Kill {
+                    reply,
+                    target,
+                    wake,
+                    next,
+                }),
+                Ok(None) => {
+                    self.replies.push((reply, Ok(())));
+                    None
+                }
+                Err(e) => {
+                    self.replies.push((reply, Err(e)));
+                    None
+                }
+            },
+            Op::Leave {
+                reply,
+                cell,
+                deadline,
+            } => {
+                let state = self.character.as_ref().map(|me| me.state);
+                let result = match (self.ensure_ready(), state) {
+                    (Err(e), _) => Err(e),
+                    (Ok(()), Some(CombatState::Dead)) => Err(ActionError::Dead),
+                    (Ok(()), Some(CombatState::InCombat)) if now < deadline => {
+                        return Some(Op::Leave {
+                            reply,
+                            cell,
+                            deadline,
+                        });
+                    }
+                    (Ok(()), Some(CombatState::InCombat)) => Err(ActionError::StillInCombat(cell)),
+                    (Ok(()), _) => Ok(()),
+                };
+                self.replies.push((reply, result));
+                None
+            }
         }
     }
 
     fn next_deadline(&self) -> Option<Instant> {
         let op = match &self.current {
             Some(Op::Login { deadline, .. })
+            | Some(Op::Leave { deadline, .. })
             | Some(Op::Join {
                 stage: JoinStage::Sent { deadline, .. },
                 ..
@@ -473,9 +688,25 @@ impl Session {
                 stage: JoinStage::Cooling { until, .. },
                 ..
             }) => Some(*until),
-            None => None,
+            Some(Op::Cast {
+                stage: CastStage::Waiting { wake },
+                ..
+            })
+            | Some(Op::Kill { wake, .. }) => *wake,
+            Some(Op::Cast {
+                stage: CastStage::Sent { .. },
+                ..
+            })
+            | None => None,
         };
-        op.into_iter().chain(self.logout_deadline).min()
+        op.into_iter()
+            .chain(self.logout_deadline)
+            .chain(
+                self.ensure_ready()
+                    .ok()
+                    .and_then(|()| self.combat.next_deadline(Instant::now())),
+            )
+            .min()
     }
 
     fn publish(&mut self) {
@@ -524,8 +755,10 @@ impl Session {
         room.cell = cell.to_owned();
         room.pad = pad.to_owned();
         let area = room.area;
+        self.combat.disengage();
         self.send(&packet::move_to_cell(area, cell, pad));
         self.fetch_cellmates();
+        self.aggro_cell();
         self.ensure_ready()?;
         self.emit(Event::Moved {
             cell: cell.to_owned(),
@@ -579,6 +812,7 @@ impl Session {
         self.inventory = Inventory::default();
         self.factions.clear();
         self.quests = Arc::default();
+        self.combat = Combat::default();
         self.closing = None;
         self.logout_deadline = None;
         self.version = version.to_owned();
@@ -628,6 +862,7 @@ impl Session {
                 text,
             });
         }
+        self.combat.sent(Instant::now());
         self.outbox.extend_from_slice(packet.as_bytes());
         self.outbox.push(0);
         self.flush();
@@ -764,6 +999,7 @@ impl Session {
             }),
             "warning" => {
                 let text = text();
+                self.combat.warned(&text, Instant::now());
                 self.refusal = Some(text.clone());
                 self.emit(Event::Notice {
                     kind: NoticeKind::Warning,
@@ -793,6 +1029,20 @@ impl Session {
                 if let (Some(name), Some(fields)) = (xt.field(4), xt.field(5)) {
                     self.on_player_moved(name, fields);
                 }
+            }
+            "respawnMon" => {
+                for id in text().split(',').filter_map(|id| id.parse().ok()) {
+                    self.aggro_respawned(MonMapId(id));
+                }
+            }
+            "resTimed" => {
+                let (cell, pad) = match (xt.field(4), xt.field(5)) {
+                    (Some(cell), Some(pad)) if !cell.is_empty() && !pad.is_empty() => {
+                        (cell.to_owned(), pad.to_owned())
+                    }
+                    _ => (SPAWN.0.to_owned(), SPAWN.1.to_owned()),
+                };
+                let _ = self.move_to_cell(&cell, &pad);
             }
             _ => {}
         }
@@ -887,7 +1137,11 @@ impl Session {
                 for change in tick.auras {
                     self.apply_aura(change);
                 }
+                for result in &tick.sarsa {
+                    self.settle(result);
+                }
             }
+            "sars" => self.settle(&read(&json)?),
             "aura+" | "aura++" | "aura+p" | "aura-" | "aura--" => {
                 self.apply_aura(read(&json)?);
             }
@@ -902,8 +1156,9 @@ impl Session {
             }
             "stu" => {
                 let stats: Stats = read(&json)?;
-                if let (Some(haste), Some(character)) = (stats.sta.haste, &mut self.character) {
-                    character.haste = haste;
+                if let Some(character) = &mut self.character {
+                    character.haste = stats.sta.haste.unwrap_or(character.haste);
+                    character.mana_rate = stats.sta.mana_rate.or(character.mana_rate);
                 }
             }
             "sAct" => {
@@ -1060,7 +1315,9 @@ impl Session {
         };
         self.room = Some(room);
         self.joins += 1;
+        self.combat.disengage();
         self.fetch_cellmates();
+        self.aggro_cell();
         self.emit(joined);
         if first {
             self.set_phase(Phase::Loading {
@@ -1075,6 +1332,347 @@ impl Session {
         if !eids.is_empty() {
             let area = room.area;
             self.send(&packet::retrieve_user_datas(area, &eids));
+        }
+    }
+
+    fn aggro_cell(&mut self) {
+        let (Some(me), Some(room)) = (&self.character, &self.room) else {
+            return;
+        };
+        if me.state == CombatState::Dead {
+            return;
+        }
+        let ids: Vec<MonMapId> = room
+            .monsters
+            .iter()
+            .filter(|m| m.aggressive && m.cell == room.cell && m.alive())
+            .map(|m| m.id)
+            .collect();
+        if !ids.is_empty() {
+            let area = room.area;
+            self.send(&packet::aggro_mon(area, &ids));
+        }
+    }
+
+    fn aggro_respawned(&mut self, id: MonMapId) {
+        let (Some(me), Some(room)) = (&self.character, &self.room) else {
+            return;
+        };
+        let here = room
+            .monsters
+            .iter()
+            .any(|m| m.id == id && m.aggressive && m.cell == room.cell);
+        if here && me.state != CombatState::Dead {
+            let area = room.area;
+            self.send(&packet::aggro_mon(area, &[id]));
+        }
+    }
+
+    fn attack(&mut self, target: MonMapId, now: Instant) -> Result<(), ActionError> {
+        self.ensure_ready()?;
+        if self
+            .character
+            .as_ref()
+            .is_some_and(|me| me.state == CombatState::Dead)
+        {
+            return Err(ActionError::Dead);
+        }
+        let target = self.pick_target(Some(target))?;
+        self.combat.engage(target, now);
+        Ok(())
+    }
+
+    fn start_leaving(&mut self, now: Instant) -> Result<Option<(String, Instant)>, ActionError> {
+        self.ensure_ready()?;
+        self.combat.disengage();
+        if self
+            .character
+            .as_ref()
+            .is_none_or(|me| me.state != CombatState::InCombat)
+        {
+            return Ok(None);
+        }
+        let Some((cell, pad)) = self.calm_cell() else {
+            return Err(ActionError::Unusable(
+                "every known cell in this map has aggressive monsters".into(),
+            ));
+        };
+        self.move_to_cell(&cell, &pad)?;
+        Ok(Some((cell, now + EXIT_TIMEOUT)))
+    }
+
+    fn calm_cell(&self) -> Option<(String, String)> {
+        let room = self.room.as_ref()?;
+        let calm = |cell: &str| {
+            !room
+                .monsters
+                .iter()
+                .any(|m| m.cell == cell && m.aggressive && m.alive())
+        };
+        if calm(&room.cell) {
+            return Some((room.cell.clone(), room.pad.clone()));
+        }
+        let cell = std::iter::once(SPAWN.0)
+            .chain(room.monsters.iter().map(|m| m.cell.as_str()))
+            .find(|cell| calm(cell))?;
+        let pad = if cell == SPAWN.0 { SPAWN.1 } else { CELL_PAD };
+        Some((cell.to_owned(), pad.to_owned()))
+    }
+
+    fn pick_target(&self, wanted: Option<MonMapId>) -> Result<MonMapId, ActionError> {
+        let Some(room) = &self.room else {
+            return Err(ActionError::NotReady);
+        };
+        let Some(id) = wanted else {
+            let alive_here = |m: &&Monster| m.cell == room.cell && m.alive();
+            if let Some(id) = self
+                .combat
+                .auto_target()
+                .filter(|id| room.monsters.iter().filter(alive_here).any(|m| m.id == *id))
+            {
+                return Ok(id);
+            }
+            return room
+                .monsters
+                .iter()
+                .filter(alive_here)
+                .min_by_key(|m| m.hp)
+                .map(|m| m.id)
+                .ok_or_else(|| ActionError::NoTarget("no live monster in this cell".into()));
+        };
+        let Some(monster) = room.monsters.iter().find(|m| m.id == id) else {
+            return Err(ActionError::NoTarget(format!(
+                "no monster #{id} in this map"
+            )));
+        };
+        if monster.cell != room.cell {
+            return Err(ActionError::NoTarget(format!(
+                "{} #{id} is in {}, not this cell",
+                monster.name, monster.cell
+            )));
+        }
+        if !monster.alive() {
+            return Err(ActionError::NoTarget(format!(
+                "{} #{id} is dead",
+                monster.name
+            )));
+        }
+        Ok(id)
+    }
+
+    fn step_cast(
+        &mut self,
+        slot: &str,
+        target: Option<MonMapId>,
+        stage: CastStage,
+        now: Instant,
+    ) -> Result<Option<CastStage>, ActionError> {
+        self.ensure_ready()?;
+        if let CastStage::Sent { act } = stage {
+            return match self.combat.outcome(slot, act) {
+                None => Ok(Some(stage)),
+                Some(Outcome::Landed) => Ok(None),
+                Some(Outcome::Refused) => Err(ActionError::Refused(format!(
+                    "the server refused {}",
+                    self.skill_name(slot)
+                ))),
+                Some(Outcome::Lost) => Err(ActionError::NoReply),
+            };
+        }
+        match self.prepare(slot, target, now)? {
+            Prepared::Wait(wake) => Ok(Some(CastStage::Waiting { wake })),
+            Prepared::Fire { aims, hostile } => {
+                let act = self.fire(slot, &aims, hostile, now);
+                Ok(Some(CastStage::Sent { act }))
+            }
+        }
+    }
+
+    fn skill_name(&self, slot: &str) -> String {
+        self.character
+            .as_ref()
+            .and_then(|me| me.skills.iter().find(|s| s.slot == slot))
+            .map_or_else(|| slot.to_owned(), |s| s.name.clone())
+    }
+
+    fn prepare(
+        &self,
+        slot: &str,
+        target: Option<MonMapId>,
+        now: Instant,
+    ) -> Result<Prepared, ActionError> {
+        let (Some(me), Some(room), Some(eid)) = (&self.character, &self.room, self.me) else {
+            return Err(ActionError::NotReady);
+        };
+        if me.state == CombatState::Dead {
+            return Err(ActionError::Dead);
+        }
+        if slot == AUTO_ATTACK {
+            return Err(ActionError::Unusable(
+                "the auto attack repeats on its own once it starts; attack a monster instead"
+                    .into(),
+            ));
+        }
+        if slot == ITEM_SLOT {
+            return Err(ActionError::Unusable(
+                "nothing is equipped in the item slot".into(),
+            ));
+        }
+        let Some(skill) = me.skills.iter().find(|s| s.slot == slot) else {
+            return Err(ActionError::Unusable(format!("no skill in slot {slot}")));
+        };
+        let hostile = match skill.target {
+            SkillTarget::Hostile => Some(self.pick_target(target)?),
+            _ => None,
+        };
+        match self.combat.gate(me, skill, now) {
+            Gate::Locked => Err(ActionError::Unusable(format!(
+                "{} is locked at this class rank",
+                skill.name
+            ))),
+            Gate::NoMana => Err(ActionError::Unusable(format!(
+                "not enough mana for {}",
+                skill.name
+            ))),
+            Gate::Held => Ok(Prepared::Wait(None)),
+            Gate::At(at) => Ok(Prepared::Wait(Some(at))),
+            Gate::Open => Ok(Prepared::Fire {
+                aims: combat::aims(skill, hostile, eid, room),
+                hostile,
+            }),
+        }
+    }
+
+    fn fire(&mut self, slot: &str, aims: &[Aim], hostile: Option<MonMapId>, now: Instant) -> u8 {
+        let act = self.combat.cast(slot, now);
+        self.send(&packet::gar(act, slot, aims));
+        if let Some(target) = hostile {
+            self.combat.engage(target, now);
+        }
+        act
+    }
+
+    fn step_kill(
+        &mut self,
+        target: MonMapId,
+        mut next: usize,
+        now: Instant,
+    ) -> Result<Option<(Option<Instant>, usize)>, ActionError> {
+        self.ensure_ready()?;
+        let (Some(me), Some(room)) = (&self.character, &self.room) else {
+            return Err(ActionError::NotReady);
+        };
+        if me.state == CombatState::Dead {
+            return Err(ActionError::Dead);
+        }
+        if room.monsters.iter().any(|m| m.id == target && !m.alive()) {
+            return Ok(None);
+        }
+        let target = self.pick_target(Some(target))?;
+        if let (Some((at, slot)), _) = self.rotation(next, now)
+            && let Prepared::Fire { aims, hostile } = self.prepare(&slot, Some(target), now)?
+        {
+            self.fire(&slot, &aims, hostile, now);
+            next = at + 1;
+        }
+        if self.combat.auto_target() != Some(target) && !self.hostile_coming(now) {
+            self.combat.engage(target, now);
+        }
+        Ok(Some((self.rotation(next, now).1, next)))
+    }
+
+    fn rotation_skills(&self) -> impl Iterator<Item = &Skill> {
+        self.character
+            .iter()
+            .flat_map(|me| &me.skills)
+            .filter(|s| s.slot != AUTO_ATTACK && s.slot != ITEM_SLOT)
+    }
+
+    fn rotation(&self, next: usize, now: Instant) -> (Option<(usize, String)>, Option<Instant>) {
+        let Some(me) = &self.character else {
+            return (None, None);
+        };
+        let skills: Vec<&Skill> = self.rotation_skills().collect();
+        let mut wake = None;
+        for at in (0..skills.len()).map(|i| (next + i) % skills.len()) {
+            match self.combat.gate(me, skills[at], now) {
+                Gate::Open => return (Some((at, skills[at].slot.clone())), None),
+                Gate::At(ready) => wake = Some(wake.map_or(ready, |w: Instant| w.min(ready))),
+                Gate::Held | Gate::Locked | Gate::NoMana => {}
+            }
+        }
+        (None, wake)
+    }
+
+    fn class_skill_due(&self, now: Instant) -> Option<Instant> {
+        let me = self.character.as_ref()?;
+        let waiting: Vec<&Skill> = match &self.current {
+            Some(Op::Kill { .. }) => self.rotation_skills().collect(),
+            Some(Op::Cast {
+                slot,
+                stage: CastStage::Waiting { .. },
+                ..
+            }) => me.skills.iter().filter(|s| s.slot == *slot).collect(),
+            _ => Vec::new(),
+        };
+        waiting
+            .into_iter()
+            .filter(|s| self.combat.ready_but_for_gap(me, s, now))
+            .filter_map(|s| match self.combat.gate(me, s, now) {
+                Gate::At(at) => Some(at),
+                _ => None,
+            })
+            .min()
+    }
+
+    fn hostile_coming(&self, now: Instant) -> bool {
+        let Some(me) = &self.character else {
+            return false;
+        };
+        self.rotation_skills()
+            .filter(|s| s.target == SkillTarget::Hostile)
+            .any(|s| matches!(self.combat.gate(me, s, now), Gate::Open | Gate::At(_)))
+    }
+
+    fn tick_combat(&mut self, now: Instant) {
+        if self.ensure_ready().is_err() {
+            return;
+        }
+        if self.combat.respawn_due(now)
+            && let (Some(room), Some(eid)) = (&self.room, self.me)
+        {
+            let area = room.area;
+            self.send(&packet::res_player_timed(area, eid));
+        }
+        let Some(target) = self.combat.auto_target() else {
+            return;
+        };
+        let (Some(me), Some(room), Some(eid)) = (&self.character, &self.room, self.me) else {
+            return;
+        };
+        let fighting = me.state != CombatState::Dead
+            && room
+                .monsters
+                .iter()
+                .any(|m| m.id == target && m.cell == room.cell && m.alive());
+        let skill = me.skills.iter().find(|s| s.slot == AUTO_ATTACK);
+        let Some(skill) = skill.filter(|_| fighting) else {
+            return self.combat.disengage();
+        };
+        let aims = combat::aims(skill, Some(target), eid, room);
+        if self.combat.auto_went_last()
+            && let Some(due) = self.class_skill_due(now)
+        {
+            return self.combat.defer_auto(due);
+        }
+        if self.combat.auto_ready(me, now) {
+            self.fire(AUTO_ATTACK, &aims, None, now);
+        }
+    }
+
+    fn settle(&mut self, result: &ActionResult) {
+        if let (Some(eid), Some(me)) = (self.me, &self.character) {
+            self.combat.settle(result, eid, me, Instant::now());
         }
     }
 
@@ -1146,8 +1744,14 @@ impl Session {
             character.apply(patch);
             match (was, character.state) {
                 (CombatState::Dead, CombatState::Dead) => {}
-                (_, CombatState::Dead) => self.emit(Event::Died),
-                (CombatState::Dead, _) => self.emit(Event::Respawned),
+                (_, CombatState::Dead) => {
+                    self.combat.died(Instant::now());
+                    self.emit(Event::Died);
+                }
+                (CombatState::Dead, _) => {
+                    self.combat.revived();
+                    self.emit(Event::Respawned);
+                }
                 _ => {}
             }
         } else if let Some(player) = self.room.as_mut().and_then(|r| r.player_named(name)) {

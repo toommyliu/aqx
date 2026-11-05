@@ -7,13 +7,13 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use mira_client::{
     ActionError, Auras, BoostKind, CombatState, DeviceId, Direction, Disconnect, Event, Handle,
-    Load, Me, Monster, NoticeKind, Options, Phase, Place, QuestStatus, Room, Server, SkillTarget,
-    World, api,
+    Load, Me, MonMapId, Monster, NoticeKind, Options, Pending, Phase, Place, QuestStatus, Room,
+    Server, SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
-const COMMANDS: &str =
-    "join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, reps, quests, logout";
+const COMMANDS: &str = "join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], \
+     kill <monster>, stop, who, mons [all], me, inv, drops, reps, quests, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -31,7 +31,9 @@ enum Command {
         json: bool,
     },
     /// Log in, then print what the account does and run commands read from stdin
-    /// (join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, reps, quests, logout) until it logs out.
+    /// (join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop,
+    /// who, mons [all], me, inv, drops, reps, quests, logout) until it logs out. A monster is its
+    /// #id or its name.
     Login {
         #[arg(long)]
         user: String,
@@ -193,6 +195,20 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
         ["join", map] => session.join(map).wait()?,
         ["cell", cell] => session.move_to_cell(cell, DEFAULT_PAD).wait()?,
         ["cell", cell, pad] => session.move_to_cell(cell, pad).wait()?,
+        ["attack", monster @ ..] if !monster.is_empty() => {
+            let target = find_monster(session, &monster.join(" "))?;
+            in_background("attack", session.attack(target));
+        }
+        ["kill", monster @ ..] if !monster.is_empty() => {
+            let target = find_monster(session, &monster.join(" "))?;
+            in_background("kill", session.kill(target));
+        }
+        ["skill", slot] => in_background("skill", session.use_skill(slot, None)),
+        ["skill", slot, monster @ ..] => {
+            let target = find_monster(session, &monster.join(" "))?;
+            in_background("skill", session.use_skill(slot, Some(target)));
+        }
+        ["stop"] => session.exit_combat().wait()?,
         ["who"] => match &session.snapshot().room {
             Some(room) if json => {
                 println!("{}", serde_json::to_string(room).expect("rooms serialize"))
@@ -280,6 +296,30 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
         }
     }
     Ok(())
+}
+
+fn in_background(what: &'static str, pending: Pending) {
+    thread::spawn(move || {
+        if let Err(e) = pending.wait() {
+            eprintln!("mira: {what}: {e}");
+        }
+    });
+}
+
+fn find_monster(session: &Handle, wanted: &str) -> Result<MonMapId, CommandError> {
+    if let Ok(id) = wanted.trim_start_matches('#').parse() {
+        return Ok(MonMapId(id));
+    }
+    let world = session.snapshot();
+    let Some(room) = &world.room else {
+        return Err(CommandError::Action(ActionError::NotReady));
+    };
+    room.monsters
+        .iter()
+        .filter(|m| m.cell == room.cell && m.alive() && m.name.eq_ignore_ascii_case(wanted))
+        .min_by_key(|m| m.hp)
+        .map(|m| m.id)
+        .ok_or_else(|| CommandError::Usage(format!("no live {wanted} in this cell")))
 }
 
 fn describe_room(room: &Room) -> String {

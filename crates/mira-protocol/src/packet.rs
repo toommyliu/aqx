@@ -1,6 +1,6 @@
-use std::fmt::Display;
+use std::fmt::{self, Display};
 
-use crate::{AreaId, EntityId};
+use crate::{AreaId, EntityId, MonMapId};
 
 const CLIENT_TOKEN: &str = "SPIDER#0001";
 const SMARTFOX_VERSION: &str = "157";
@@ -45,6 +45,41 @@ pub fn retrieve_inventory(room: AreaId, eid: EntityId) -> String {
     zm("retrieveInventory", room, &[eid])
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Aim {
+    Monster(MonMapId),
+    Player(EntityId),
+}
+
+impl Display for Aim {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Aim::Monster(id) => write!(f, "m:{id}"),
+            Aim::Player(eid) => write!(f, "p:{eid}"),
+        }
+    }
+}
+
+pub fn gar(act: u8, slot: &str, aims: &[Aim]) -> String {
+    let targets = if aims.is_empty() {
+        format!("{slot}>")
+    } else {
+        aims.iter()
+            .map(|aim| format!("{slot}>{aim}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    zm("gar", 1, &[act.to_string(), targets, "wvz".to_owned()])
+}
+
+pub fn aggro_mon(room: AreaId, ids: &[MonMapId]) -> String {
+    zm("aggroMon", room, ids)
+}
+
+pub fn res_player_timed(room: AreaId, eid: EntityId) -> String {
+    zm("resPlayerTimed", room, &[eid])
+}
+
 pub fn logout() -> String {
     zm("cmd", 1, &["logout"])
 }
@@ -84,6 +119,24 @@ mod tests {
             "%xt%zm%retrieveInventory%42%7%"
         );
         assert_eq!(logout(), "%xt%zm%cmd%1%logout%");
+        assert_eq!(
+            gar(
+                3,
+                "a1",
+                &[Aim::Monster(MonMapId(5)), Aim::Monster(MonMapId(6))]
+            ),
+            "%xt%zm%gar%1%3%a1>m:5,a1>m:6%wvz%"
+        );
+        assert_eq!(
+            gar(0, "a2", &[Aim::Player(eid)]),
+            "%xt%zm%gar%1%0%a2>p:7%wvz%"
+        );
+        assert_eq!(gar(250, "a3", &[]), "%xt%zm%gar%1%250%a3>%wvz%");
+        assert_eq!(
+            aggro_mon(room, &[MonMapId(1), MonMapId(2)]),
+            "%xt%zm%aggroMon%42%1%2%"
+        );
+        assert_eq!(res_player_timed(room, eid), "%xt%zm%resPlayerTimed%42%7%");
         assert_eq!(
             transfer("player1", "yulgar-2"),
             "%xt%zm%cmd%1%tfer%player1%yulgar-2%"

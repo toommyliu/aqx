@@ -27,6 +27,8 @@ pub struct Me {
     pub max_mp: u32,
     pub state: CombatState,
     pub haste: f64,
+    #[serde(skip)]
+    pub(crate) mana_rate: Option<f64>,
     pub skills: Vec<Skill>,
     pub quests: QuestProgress,
     pub auras: Auras,
@@ -256,6 +258,8 @@ pub(crate) struct Stats {
 pub(crate) struct StatValues {
     #[serde(rename = "$tha")]
     pub(crate) haste: Option<f64>,
+    #[serde(rename = "$cmc")]
+    pub(crate) mana_rate: Option<f64>,
 }
 
 #[derive(Deserialize)]

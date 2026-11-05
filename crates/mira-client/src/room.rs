@@ -4,8 +4,9 @@ use mira_protocol::{AreaId, EntityId, MonId, MonMapId, XmlUser, flex};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::aura::{AuraChange, Auras};
+use crate::combat::ActionResult;
 
-const SPAWN: (&str, &str) = ("Enter", "Spawn");
+pub(crate) const SPAWN: (&str, &str) = ("Enter", "Spawn");
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Room {
@@ -21,7 +22,7 @@ pub struct Room {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Player {
     #[serde(skip)]
-    eid: EntityId,
+    pub(crate) eid: EntityId,
     pub name: String,
     pub cell: Option<String>,
     pub level: Option<u32>,
@@ -78,6 +79,12 @@ pub struct Monster {
     pub state: CombatState,
     pub aggressive: bool,
     pub auras: Auras,
+}
+
+impl Monster {
+    pub fn alive(&self) -> bool {
+        self.hp > 0 && self.state != CombatState::Dead
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -358,4 +365,6 @@ pub(crate) struct Tick {
     pub(crate) players: HashMap<String, Vitals>,
     #[serde(rename = "a", default)]
     pub(crate) auras: Vec<AuraChange>,
+    #[serde(default)]
+    pub(crate) sarsa: Vec<ActionResult>,
 }

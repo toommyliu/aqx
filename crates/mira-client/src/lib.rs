@@ -1,5 +1,6 @@
 pub mod api;
 mod aura;
+mod combat;
 mod event;
 mod faction;
 mod inventory;
@@ -15,6 +16,7 @@ pub use aura::{Aura, Auras, Caster, StatEffect};
 pub use event::{Direction, Event, NoticeKind, Place};
 pub use faction::Faction;
 pub use inventory::{DropOffer, Item, TempItem};
+pub use mira_protocol::MonMapId;
 pub use player::{BoostKind, Boosts, Me, Skill, SkillTarget};
 pub use quest::{
     Quest, QuestItem, QuestPeriod, QuestProgress, QuestReward, QuestStatus, RewardKind,
