@@ -8,7 +8,9 @@ use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use serde_json::json;
 
-use mira_protocol::{AreaId, CharItemId, FactionId, ItemId, MonMapId, ShopId, ShopItemId};
+use mira_protocol::{
+    AreaId, CharItemId, FactionId, ItemId, MapItemId, MonMapId, ShopId, ShopItemId,
+};
 
 use super::*;
 use crate::Place;
@@ -2888,6 +2890,30 @@ fn the_item_slot_keeps_its_fill_across_class_changes_and_restarts_its_clock() {
     assert_eq!(session.snapshot().me.as_ref().unwrap().item_slot, None);
     let empty = session.use_skill("i1", None).wait();
     assert!(matches!(empty, Err(ActionError::Unusable(_))), "{empty:?}");
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn picks_up_map_items_one_per_second() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        let first = peer.expect_at(&packet::get_map_item(AreaId(42), MapItemId(56)));
+        peer.send(&json_message(json!({"cmd": "addItems", "items": {"700": {
+            "ItemID": 700, "sName": "Tavern Token", "iQty": 1, "iStk": 7, "bTemp": true,
+        }}})));
+        let second = peer.expect_at(&packet::get_map_item(AreaId(42), MapItemId(56)));
+        assert!(second - first >= Limit::MapItem.gap() - SLACK);
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    session.get_map_item(MapItemId(56)).wait().unwrap();
+    session.get_map_item(MapItemId(56)).wait().unwrap();
+    while !session.snapshot().temp.iter().any(|i| i.id == ItemId(700)) {
+        thread::sleep(Duration::from_millis(5));
+    }
     session.logout();
     harness.finish();
 }

@@ -1,6 +1,8 @@
 use std::fmt::{self, Display};
 
-use crate::{AreaId, CharItemId, EntityId, ItemId, MonMapId, QuestId, ShopId, ShopItemId};
+use crate::{
+    AreaId, CharItemId, EntityId, ItemId, MapItemId, MonMapId, QuestId, ShopId, ShopItemId,
+};
 
 const CLIENT_TOKEN: &str = "SPIDER#0001";
 const SMARTFOX_VERSION: &str = "157";
@@ -192,6 +194,10 @@ pub fn unequip_item(room: AreaId, item: ItemId) -> String {
     zm("unequipItem", room, &[item])
 }
 
+pub fn get_map_item(room: AreaId, item: MapItemId) -> String {
+    zm("getMapItem", room, &[item])
+}
+
 pub fn get_drop(room: AreaId, item: ItemId) -> String {
     zm("getDrop", room, &[item])
 }
@@ -268,6 +274,10 @@ mod tests {
         assert_eq!(accept_quest(room, QuestId(3)), "%xt%zm%acceptQuest%42%3%");
         assert_eq!(get_drop(room, ItemId(1027)), "%xt%zm%getDrop%42%1027%");
         assert_eq!(load_shop(room, ShopId(5)), "%xt%zm%loadShop%42%5%");
+        assert_eq!(
+            get_map_item(room, MapItemId(56)),
+            "%xt%zm%getMapItem%42%56%"
+        );
         assert_eq!(equip_item(room, ItemId(9)), "%xt%zm%equipItem%42%9%");
         assert_eq!(unequip_item(room, ItemId(9)), "%xt%zm%unequipItem%42%9%");
         assert_eq!(

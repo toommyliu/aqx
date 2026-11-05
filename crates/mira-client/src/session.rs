@@ -11,8 +11,8 @@ use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
 use mira_protocol::packet::Aim;
 use mira_protocol::{
-    EntityId, Framer, ItemId, JsonMessage, Message, MonMapId, QuestId, ShopId, ShopItemId,
-    XmlMessage, XmlUser, XtMessage, packet,
+    EntityId, Framer, ItemId, JsonMessage, MapItemId, Message, MonMapId, QuestId, ShopId,
+    ShopItemId, XmlMessage, XmlUser, XtMessage, packet,
 };
 use serde::de::DeserializeOwned;
 use serde::{Serialize, Serializer};
@@ -162,10 +162,11 @@ enum Limit {
     SellItem,
     EquipItem,
     UnequipItem,
+    MapItem,
 }
 
 impl Limit {
-    const COUNT: usize = 9;
+    const COUNT: usize = 10;
 
     fn gap(self) -> Duration {
         Duration::from_millis(match self {
@@ -176,6 +177,7 @@ impl Limit {
             Limit::LoadShop => 3000,
             Limit::BuyItem | Limit::SellItem => 1000,
             Limit::EquipItem | Limit::UnequipItem => 1500,
+            Limit::MapItem => 1000,
         })
     }
 }
@@ -234,6 +236,7 @@ enum Action {
         item: ItemId,
         on: bool,
     },
+    MapItem(MapItemId),
 }
 
 enum Op {
@@ -293,6 +296,11 @@ enum Op {
         item: ItemId,
         on: bool,
         stage: EquipStage,
+    },
+    MapItem {
+        reply: Reply,
+        item: MapItemId,
+        wake: Option<Instant>,
     },
 }
 
@@ -387,6 +395,10 @@ impl Handle {
 
     pub fn load_bank(&self) -> Pending {
         self.act(Action::Bank(None))
+    }
+
+    pub fn get_map_item(&self, item: MapItemId) -> Pending {
+        self.act(Action::MapItem(item))
     }
 
     pub fn equip(&self, item: ItemId) -> Pending {
@@ -720,6 +732,14 @@ impl Session {
                 }
                 Err(e) => Err(e),
             },
+            Action::MapItem(item) => {
+                let op = Op::MapItem {
+                    reply,
+                    item,
+                    wake: None,
+                };
+                return self.step(op, now);
+            }
             Action::Equip { item, on } => {
                 let stage = EquipStage::Waiting { wake: None };
                 return self.step(
@@ -966,6 +986,26 @@ impl Session {
                     None
                 }
             },
+            Op::MapItem { reply, item, .. } => {
+                let area = self.room.as_ref().map(|room| room.area);
+                let result = match (self.ensure_ready(), area) {
+                    (Err(e), _) => Err(e),
+                    (Ok(()), None) => Err(ActionError::NotReady),
+                    (Ok(()), Some(area)) => match self.cooling(Limit::MapItem, now) {
+                        Some(until) => {
+                            let wake = Some(until);
+                            return Some(Op::MapItem { reply, item, wake });
+                        }
+                        None => {
+                            self.limits.used(Limit::MapItem, now);
+                            self.send(&packet::get_map_item(area, item));
+                            self.ensure_ready()
+                        }
+                    },
+                };
+                self.replies.push((reply, result));
+                None
+            }
             Op::Equip {
                 reply,
                 item,
@@ -1045,6 +1085,7 @@ impl Session {
             }) => Some(*deadline),
             Some(Op::Bank { .. }) => None,
             Some(Op::Equip { stage, .. }) => stage.deadline(),
+            Some(Op::MapItem { wake, .. }) => *wake,
             Some(Op::Shop {
                 stage: ShopStage::Waiting { wake },
                 ..

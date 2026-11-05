@@ -44,6 +44,9 @@ pub struct QuestId(pub i64);
 pub struct ShopId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MapItemId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ShopItemId(pub i64);
 
 macro_rules! flex_id {
@@ -77,6 +80,7 @@ flex_id!(CharItemId);
 flex_id!(FactionId);
 flex_id!(QuestId);
 flex_id!(ShopId);
+flex_id!(MapItemId);
 flex_id!(ShopItemId);
 
 #[derive(Debug, Clone, PartialEq)]
