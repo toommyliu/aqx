@@ -11,7 +11,7 @@ use mira_client::{
 };
 
 const DEFAULT_PAD: &str = "Left";
-const COMMANDS: &str = "join <map>, cell <cell> [pad], who, mons [all], me, inv, logout";
+const COMMANDS: &str = "join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -29,7 +29,7 @@ enum Command {
         json: bool,
     },
     /// Log in, then print what the account does and run commands read from stdin
-    /// (join <map>, cell <cell> [pad], who, mons [all], me, inv, logout) until it logs out.
+    /// (join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, logout) until it logs out.
     Login {
         #[arg(long)]
         user: String,
@@ -209,6 +209,21 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                 print!("{}", describe_inventory(&world));
             }
         }
+        ["drops"] => {
+            let world = session.snapshot();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&world.drops).expect("drops serialize")
+                );
+            } else if world.drops.is_empty() {
+                println!("no drops");
+            } else {
+                for drop in &world.drops {
+                    println!("  {} x{}", drop.name, drop.qty);
+                }
+            }
+        }
         ["me"] => match &session.snapshot().me {
             Some(me) if json => println!("{}", serde_json::to_string(me).expect("me serializes")),
             Some(me) => print!("{}", describe_me(me)),
@@ -278,9 +293,12 @@ fn describe_inventory(world: &World) -> String {
 
 fn describe_me(me: &Me) -> String {
     let mut text = format!(
-        "level {}, {} gold, {}/{} HP, {}/{} MP, {}, haste {}\n",
+        "level {} ({}/{} xp), {} gold, {} AC, {}/{} HP, {}/{} MP, {}, haste {}\n",
         me.level,
+        me.exp,
+        me.exp_to_level,
         me.gold,
+        me.coins,
         me.hp,
         me.max_hp,
         me.mp,

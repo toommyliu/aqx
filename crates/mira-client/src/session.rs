@@ -111,6 +111,7 @@ pub struct World {
     pub me: Option<Me>,
     pub inventory: Arc<Vec<Item>>,
     pub temp: Vec<TempItem>,
+    pub drops: Vec<DropOffer>,
 }
 
 type Slot = Arc<Mutex<Arc<World>>>;
@@ -237,6 +238,7 @@ pub fn spawn(
         me: None,
         inventory: Arc::default(),
         temp: Vec::new(),
+        drops: Vec::new(),
     })));
     let session = Session {
         username: account.username.clone(),
@@ -265,6 +267,7 @@ pub fn spawn(
         character: None,
         inventory: Arc::default(),
         temp: Vec::new(),
+        drops: Vec::new(),
         closing: None,
         logout_deadline: None,
     };
@@ -334,7 +337,10 @@ impl Monster {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Me {
     pub level: u32,
+    pub exp: u64,
+    pub exp_to_level: u64,
     pub gold: u64,
+    pub coins: u64,
     pub hp: u32,
     pub max_hp: u32,
     pub mp: u32,
@@ -383,6 +389,18 @@ pub struct Item {
     )]
     pub coins: bool,
     #[serde(rename(deserialize = "bUpg"), default, deserialize_with = "flex::bool")]
+    pub member: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DropOffer {
+    pub id: ItemId,
+    pub name: String,
+    pub qty: u32,
+    pub max_stack: u32,
+    pub kind: String,
+    pub slot: String,
+    pub coins: bool,
     pub member: bool,
 }
 
@@ -481,6 +499,7 @@ struct Session {
     character: Option<Me>,
     inventory: Arc<Vec<Item>>,
     temp: Vec<TempItem>,
+    drops: Vec<DropOffer>,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
 }
@@ -664,6 +683,7 @@ impl Session {
             me: self.character.clone(),
             inventory: Arc::clone(&self.inventory),
             temp: self.temp.clone(),
+            drops: self.drops.clone(),
         });
         for event in self.outgoing.drain(..) {
             let _ = self.events.send(event);
@@ -754,6 +774,7 @@ impl Session {
         self.character = None;
         self.inventory = Arc::default();
         self.temp.clear();
+        self.drops.clear();
         self.closing = None;
         self.logout_deadline = None;
         self.version = version.to_owned();
@@ -1043,6 +1064,9 @@ impl Session {
                     if let Some(character) = &mut self.character {
                         character.level = user.data.level;
                         character.gold = user.data.gold;
+                        character.coins = user.data.coins;
+                        character.exp = user.data.exp;
+                        character.exp_to_level = user.data.exp_to_level;
                     }
                     self.send(&packet::retrieve_inventory(room, me));
                     self.set_phase(Phase::Loading {
@@ -1124,6 +1148,39 @@ impl Session {
                 {
                     take(Arc::make_mut(&mut self.inventory), at, sold.qty);
                 }
+                if let Some(character) = &mut self.character {
+                    let purse = if sold.coins {
+                        &mut character.coins
+                    } else {
+                        &mut character.gold
+                    };
+                    *purse += sold.amount;
+                }
+            }
+            "addGoldExp" => {
+                let reward: Reward = serde_json::from_value(json.data).map_err(unreadable)?;
+                if let Some(character) = &mut self.character {
+                    character.gold += reward.gold;
+                    character.exp += reward.exp;
+                }
+            }
+            "levelUp" => {
+                let level: LevelUp = serde_json::from_value(json.data).map_err(unreadable)?;
+                if let Some(character) = &mut self.character {
+                    character.level = level.level;
+                    character.exp = level.exp;
+                    character.exp_to_level = level.exp_to_level;
+                }
+            }
+            "dropItem" => {
+                let dropped: AddedItems = serde_json::from_value(json.data).map_err(unreadable)?;
+                for (key, item) in dropped.items {
+                    self.offer_drop(&key, item);
+                }
+            }
+            "getDrop" => {
+                let picked: Picked = serde_json::from_value(json.data).map_err(unreadable)?;
+                self.pick_drop(picked);
             }
             "equipItem" | "unequipItem" => {
                 let worn: Worn = serde_json::from_value(json.data).map_err(unreadable)?;
@@ -1269,6 +1326,57 @@ impl Session {
                     }),
                 }
             }
+        }
+    }
+
+    fn offer_drop(&mut self, key: &str, offered: AddedItem) {
+        let Some(id) = offered.id.or_else(|| key.parse().ok().map(ItemId)) else {
+            return;
+        };
+        let qty = offered.qty.max(1);
+        match self.drops.iter_mut().find(|d| d.id == id) {
+            Some(offer) => offer.qty += qty,
+            None => self.drops.push(DropOffer {
+                id,
+                name: offered.name,
+                qty,
+                max_stack: offered.max_stack,
+                kind: offered.kind,
+                slot: offered.slot,
+                coins: offered.coins,
+                member: offered.member,
+            }),
+        }
+    }
+
+    fn pick_drop(&mut self, picked: Picked) {
+        if !picked.ok {
+            return;
+        }
+        let offer = self
+            .drops
+            .iter()
+            .position(|d| d.id == picked.id)
+            .map(|at| self.drops.remove(at));
+        if picked.bank {
+            return;
+        }
+        let inventory = Arc::make_mut(&mut self.inventory);
+        if let Some(held) = inventory.iter_mut().find(|i| i.id == picked.id) {
+            held.qty = picked.qty_now.unwrap_or(held.qty + picked.qty);
+        } else if let (Some(offer), Some(char_item_id)) = (offer, picked.char_item_id) {
+            inventory.push(Item {
+                id: offer.id,
+                char_item_id,
+                name: offer.name,
+                qty: picked.qty_now.unwrap_or(picked.qty),
+                max_stack: offer.max_stack,
+                kind: offer.kind,
+                slot: offer.slot,
+                equipped: false,
+                coins: offer.coins,
+                member: offer.member,
+            });
         }
     }
 
@@ -1541,6 +1649,12 @@ struct UserData {
     level: u32,
     #[serde(rename = "intGold", deserialize_with = "flex::int")]
     gold: u64,
+    #[serde(rename = "intCoins", default, deserialize_with = "flex::int")]
+    coins: u64,
+    #[serde(rename = "intExp", default, deserialize_with = "flex::int")]
+    exp: u64,
+    #[serde(rename = "intExpToLevel", default, deserialize_with = "flex::int")]
+    exp_to_level: u64,
 }
 
 #[derive(Deserialize)]
@@ -1594,6 +1708,44 @@ struct Sold {
     char_item_id: CharItemId,
     #[serde(rename = "iQty", deserialize_with = "flex::int")]
     qty: u32,
+    #[serde(rename = "intAmount", default, deserialize_with = "flex::int")]
+    amount: u64,
+    #[serde(rename = "bCoins", default, deserialize_with = "flex::bool")]
+    coins: bool,
+}
+
+#[derive(Deserialize)]
+struct Reward {
+    #[serde(rename = "intGold", default, deserialize_with = "flex::int")]
+    gold: u64,
+    #[serde(rename = "intExp", default, deserialize_with = "flex::int")]
+    exp: u64,
+}
+
+#[derive(Deserialize)]
+struct LevelUp {
+    #[serde(rename = "intLevel", deserialize_with = "flex::int")]
+    level: u32,
+    #[serde(rename = "xp", default, deserialize_with = "flex::int")]
+    exp: u64,
+    #[serde(rename = "intExpToLevel", default, deserialize_with = "flex::int")]
+    exp_to_level: u64,
+}
+
+#[derive(Deserialize)]
+struct Picked {
+    #[serde(rename = "bSuccess", deserialize_with = "flex::bool")]
+    ok: bool,
+    #[serde(rename = "ItemID")]
+    id: ItemId,
+    #[serde(rename = "CharItemID", default)]
+    char_item_id: Option<CharItemId>,
+    #[serde(rename = "iQty", default, deserialize_with = "flex::int")]
+    qty: u32,
+    #[serde(rename = "iQtyNow", default, deserialize_with = "flex::opt_int")]
+    qty_now: Option<u32>,
+    #[serde(rename = "bBank", default, deserialize_with = "flex::bool")]
+    bank: bool,
 }
 
 #[derive(Deserialize)]
