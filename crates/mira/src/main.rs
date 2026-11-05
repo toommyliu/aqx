@@ -7,12 +7,12 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use mira_client::{
     ActionError, CombatState, DeviceId, Direction, Disconnect, Event, Handle, Load, Me, Monster,
-    NoticeKind, Options, Phase, Room, Server, SkillTarget, World, api,
+    NoticeKind, Options, Phase, QuestStatus, Room, Server, SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str =
-    "join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, reps, logout";
+    "join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, reps, quests, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -30,7 +30,7 @@ enum Command {
         json: bool,
     },
     /// Log in, then print what the account does and run commands read from stdin
-    /// (join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, reps, logout) until it logs out.
+    /// (join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, reps, quests, logout) until it logs out.
     Login {
         #[arg(long)]
         user: String,
@@ -208,6 +208,30 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                 println!("{inv}");
             } else {
                 print!("{}", describe_inventory(&world));
+            }
+        }
+        ["quests"] => {
+            let world = session.snapshot();
+            if json {
+                let quests: Vec<_> = world
+                    .quests
+                    .values()
+                    .map(|quest| serde_json::json!({"quest": quest, "status": world.quest_status(quest.id)}))
+                    .collect();
+                println!("{}", serde_json::Value::Array(quests));
+            } else if world.quests.is_empty() {
+                println!("no quests loaded");
+            } else {
+                for quest in world.quests.values() {
+                    let status = match world.quest_status(quest.id) {
+                        Some(QuestStatus::Done) => "done",
+                        Some(QuestStatus::DoneThisPeriod) => "done for now",
+                        Some(QuestStatus::Locked) => "locked",
+                        Some(QuestStatus::Available) => "available",
+                        None => "unknown",
+                    };
+                    println!("  {} {} ({status})", quest.id, quest.name);
+                }
             }
         }
         ["reps"] => {

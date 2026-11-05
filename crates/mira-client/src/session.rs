@@ -10,7 +10,7 @@ use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
 use mira_protocol::{
     AreaId, CharItemId, EntityId, FactionId, Framer, ItemId, JsonMessage, Message, MonId, MonMapId,
-    XmlMessage, XmlUser, XtMessage, flex, packet,
+    QuestId, XmlMessage, XmlUser, XtMessage, flex, packet,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -18,6 +18,7 @@ use serde_json::Value;
 
 use crate::api::{Account, Server, Token};
 use crate::event::{Direction, Event, NoticeKind};
+use crate::quest::{self, Quest};
 
 pub const DEFAULT_CLIENT_VERSION: &str = "5.31";
 
@@ -113,6 +114,7 @@ pub struct World {
     pub temp: Vec<TempItem>,
     pub drops: Vec<DropOffer>,
     pub factions: Vec<Faction>,
+    pub quests: Arc<BTreeMap<QuestId, Quest>>,
 }
 
 type Slot = Arc<Mutex<Arc<World>>>;
@@ -241,6 +243,7 @@ pub fn spawn(
         temp: Vec::new(),
         drops: Vec::new(),
         factions: Vec::new(),
+        quests: Arc::default(),
     })));
     let session = Session {
         username: account.username.clone(),
@@ -271,6 +274,7 @@ pub fn spawn(
         temp: Vec::new(),
         drops: Vec::new(),
         factions: Vec::new(),
+        quests: Arc::default(),
         closing: None,
         logout_deadline: None,
     };
@@ -344,6 +348,8 @@ pub struct Me {
     pub exp_to_level: u64,
     pub gold: u64,
     pub coins: u64,
+    pub member: bool,
+    pub class_points: u32,
     pub hp: u32,
     pub max_hp: u32,
     pub mp: u32,
@@ -369,6 +375,20 @@ impl QuestProgress {
     pub fn value(&self, slot: u32) -> Option<u32> {
         let string = self.strings.get((slot / 100) as usize)?.as_ref()?;
         string.chars().nth((slot % 100) as usize)?.to_digit(36)
+    }
+
+    pub(crate) fn client_value(&self, slot: i64) -> f64 {
+        let Ok(slot) = usize::try_from(slot) else {
+            return -1.0;
+        };
+        match self.strings.get(slot / 100) {
+            Some(Some(string)) => string
+                .chars()
+                .nth(slot % 100)
+                .and_then(|c| c.to_digit(36))
+                .map_or(f64::NAN, f64::from),
+            _ => -1.0,
+        }
     }
 
     pub fn achievement(&self, field: &str, bit: u32) -> Option<bool> {
@@ -609,6 +629,7 @@ struct Session {
     temp: Vec<TempItem>,
     drops: Vec<DropOffer>,
     factions: Vec<Faction>,
+    quests: Arc<BTreeMap<QuestId, Quest>>,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
 }
@@ -794,6 +815,7 @@ impl Session {
             temp: self.temp.clone(),
             drops: self.drops.clone(),
             factions: self.factions.clone(),
+            quests: Arc::clone(&self.quests),
         });
         for event in self.outgoing.drain(..) {
             let _ = self.events.send(event);
@@ -886,6 +908,7 @@ impl Session {
         self.temp.clear();
         self.drops.clear();
         self.factions.clear();
+        self.quests = Arc::default();
         self.closing = None;
         self.logout_deadline = None;
         self.version = version.to_owned();
@@ -1176,6 +1199,8 @@ impl Session {
                         character.level = user.data.level;
                         character.gold = user.data.gold;
                         character.coins = user.data.coins;
+                        character.member = user.data.member_days >= 0;
+                        character.class_points = user.data.class_points;
                         character.exp = user.data.exp;
                         character.exp_to_level = user.data.exp_to_level;
                         character.quests = QuestProgress::from_user_data(&user.data.rest);
@@ -1279,6 +1304,16 @@ impl Session {
                 if let Some(character) = &mut self.character {
                     character.gold += reward.gold;
                     character.exp += reward.exp;
+                    if let Some(gained) = reward.class_points {
+                        character.class_points = character.class_points.saturating_add(gained);
+                        let points = character.class_points;
+                        if let Some(class) = Arc::make_mut(&mut self.inventory)
+                            .iter_mut()
+                            .find(|i| i.slot == "ar" && i.equipped)
+                        {
+                            class.qty = points;
+                        }
+                    }
                 }
                 if let Some(faction) = reward
                     .faction
@@ -1303,12 +1338,37 @@ impl Session {
                         .set_achievement(&update.field, update.index, update.value);
                 }
             }
+            "getQuests" => {
+                let list: quest::QuestList =
+                    serde_json::from_value(json.data).map_err(unreadable)?;
+                for (key, value) in list.quests {
+                    match quest::parse(&key, value) {
+                        Ok(parsed) if !self.quests.contains_key(&parsed.id) => {
+                            Arc::make_mut(&mut self.quests).insert(parsed.id, parsed);
+                        }
+                        Ok(_) => {}
+                        Err(e) => self.emit(Event::Unreadable {
+                            error: format!("quest {key}: {e}"),
+                        }),
+                    }
+                }
+            }
             "addFaction" => {
                 let added: AddedFaction = serde_json::from_value(json.data).map_err(unreadable)?;
                 let faction = added.faction.into_faction();
                 match self.factions.iter_mut().find(|f| f.id == faction.id) {
                     Some(known) => *known = faction,
                     None => self.factions.push(faction),
+                }
+            }
+            "updateClass" => {
+                let class: ClassChange = serde_json::from_value(json.data).map_err(unreadable)?;
+                if let Some(character) = self
+                    .character
+                    .as_mut()
+                    .filter(|_| Some(class.uid) == self.me)
+                {
+                    character.class_points = class.class_points;
                 }
             }
             "levelUp" => {
@@ -1802,6 +1862,10 @@ struct UserData {
     exp: u64,
     #[serde(rename = "intExpToLevel", default, deserialize_with = "flex::int")]
     exp_to_level: u64,
+    #[serde(rename = "iUpgDays", default, deserialize_with = "flex::int")]
+    member_days: i64,
+    #[serde(rename = "iCP", default, deserialize_with = "flex::int")]
+    class_points: u32,
     #[serde(flatten)]
     rest: serde_json::Map<String, Value>,
 }
@@ -1913,6 +1977,15 @@ struct Reward {
     faction: Option<FactionId>,
     #[serde(rename = "iRep", default, deserialize_with = "flex::int")]
     rep: i64,
+    #[serde(rename = "iCP", default, deserialize_with = "flex::opt_int")]
+    class_points: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct ClassChange {
+    uid: EntityId,
+    #[serde(rename = "iCP", deserialize_with = "flex::int")]
+    class_points: u32,
 }
 
 #[derive(Deserialize)]
