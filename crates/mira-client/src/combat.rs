@@ -47,15 +47,31 @@ pub(crate) struct Combat {
 #[derive(Default)]
 struct Clock {
     from: Option<Instant>,
-    before: Option<Instant>,
-    flight: Option<Flight>,
-    settled: Option<(u8, Outcome)>,
+    shot: Shot,
 }
 
-#[derive(Clone, Copy)]
-struct Flight {
-    act: u8,
-    sent: Instant,
+#[derive(Default)]
+enum Shot {
+    #[default]
+    Idle,
+    Flying {
+        act: u8,
+        sent: Instant,
+        before: Option<Instant>,
+    },
+    Settled {
+        act: u8,
+        outcome: Outcome,
+    },
+}
+
+impl Clock {
+    fn sent(&self) -> Option<Instant> {
+        match self.shot {
+            Shot::Flying { sent, .. } => Some(sent),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +156,7 @@ impl Combat {
             return Gate::NoMana;
         }
         let clock = self.clocks.get(&skill.slot);
-        if disabled(me) || clock.is_some_and(|c| c.flight.is_some()) {
+        if disabled(me) || clock.is_some_and(|c| c.sent().is_some()) {
             return Gate::Held;
         }
         let own = clock
@@ -167,7 +183,9 @@ impl Combat {
     pub(crate) fn restart_clock(&mut self, slot: &str) {
         if let Some(clock) = self.clocks.get_mut(slot) {
             clock.from = None;
-            clock.before = None;
+            if let Shot::Flying { before, .. } = &mut clock.shot {
+                *before = None;
+            }
         }
     }
 
@@ -183,10 +201,12 @@ impl Combat {
         let act = self.next_act;
         self.next_act = if act >= LAST_ACT { 0 } else { act + 1 };
         let clock = self.clocks.entry(slot.to_owned()).or_default();
-        clock.before = clock.from;
+        clock.shot = Shot::Flying {
+            act,
+            sent: now,
+            before: clock.from,
+        };
         clock.from = Some(now);
-        clock.flight = Some(Flight { act, sent: now });
-        clock.settled = None;
         self.auto_last = slot == AUTO_ATTACK;
         if !self.auto_last {
             self.global_from = Some(now);
@@ -198,12 +218,14 @@ impl Combat {
         if result.caster != format!("p:{eid}") {
             return;
         }
-        let Some(slot) = self.clocks.iter().find_map(|(slot, clock)| {
-            clock
-                .flight
-                .filter(|f| i64::from(f.act) == result.act)
-                .map(|_| slot.clone())
-        }) else {
+        let Some(slot) = self
+            .clocks
+            .iter()
+            .find_map(|(slot, clock)| match clock.shot {
+                Shot::Flying { act, .. } if i64::from(act) == result.act => Some(slot.clone()),
+                _ => None,
+            })
+        else {
             return;
         };
         let outcome = if result.result == 0 {
@@ -218,16 +240,16 @@ impl Combat {
         let Some(clock) = self.clocks.get_mut(slot) else {
             return;
         };
-        let Some(flight) = clock.flight.take() else {
+        let Shot::Flying { act, sent, before } = clock.shot else {
             return;
         };
-        let trip = now.saturating_duration_since(flight.sent);
+        let trip = now.saturating_duration_since(sent);
         match outcome {
-            Outcome::Landed => clock.from = Some(flight.sent + (trip / 2).max(MIN_ONE_WAY)),
-            Outcome::Refused => clock.from = clock.before,
+            Outcome::Landed => clock.from = Some(sent + (trip / 2).max(MIN_ONE_WAY)),
+            Outcome::Refused => clock.from = before,
             Outcome::Lost => {}
         }
-        clock.settled = Some((flight.act, outcome));
+        clock.shot = Shot::Settled { act, outcome };
         if slot == AUTO_ATTACK {
             let cooldown = me
                 .skills
@@ -246,7 +268,7 @@ impl Combat {
         let lost: Vec<String> = self
             .clocks
             .iter()
-            .filter(|(_, c)| c.flight.is_some_and(|f| now >= f.sent + REPLY_TIMEOUT))
+            .filter(|(_, c)| c.sent().is_some_and(|sent| now >= sent + REPLY_TIMEOUT))
             .map(|(slot, _)| slot.clone())
             .collect();
         for slot in lost {
@@ -255,11 +277,13 @@ impl Combat {
     }
 
     pub(crate) fn outcome(&self, slot: &str, act: u8) -> Option<Outcome> {
-        self.clocks
-            .get(slot)?
-            .settled
-            .filter(|(settled, _)| *settled == act)
-            .map(|(_, outcome)| outcome)
+        match self.clocks.get(slot)?.shot {
+            Shot::Settled {
+                act: settled,
+                outcome,
+            } if settled == act => Some(outcome),
+            _ => None,
+        }
     }
 
     pub(crate) fn engage(&mut self, target: MonMapId, now: Instant) {
@@ -295,7 +319,7 @@ impl Combat {
         if self
             .clocks
             .get(AUTO_ATTACK)
-            .is_some_and(|c| c.flight.is_some())
+            .is_some_and(|c| c.sent().is_some())
         {
             return None;
         }
@@ -345,7 +369,7 @@ impl Combat {
         let expiries = self
             .clocks
             .values()
-            .filter_map(|c| c.flight.map(|f| f.sent + REPLY_TIMEOUT));
+            .filter_map(|c| c.sent().map(|sent| sent + REPLY_TIMEOUT));
         expiries
             .chain(self.auto_due(now).filter(|_| auto))
             .chain(self.respawn_at)
