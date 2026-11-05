@@ -23,7 +23,7 @@ use crate::room::{
 use crate::shop::{Bought, LoadedShop};
 
 use super::{
-    BOOST_CHECK, Disconnect, JoinStage, Load, Op, Phase, Respawn, Session, ShopStage,
+    BOOST_CHECK, Disconnect, JoinStage, Load, Op, Phase, Recovery, Respawn, Session, ShopStage,
     required_version,
 };
 
@@ -350,7 +350,7 @@ impl Session {
                 self.ready_once = true;
                 self.reconnects = 0;
                 self.boost_check = Some(Instant::now() + BOOST_CHECK);
-                if let Some(why) = self.lost.take() {
+                if let Some(Recovery { why, .. }) = self.recovery.take() {
                     self.epoch.fetch_add(1, Ordering::SeqCst);
                     self.stale = Some(why);
                 }

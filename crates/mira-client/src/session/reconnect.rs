@@ -1,8 +1,21 @@
 use std::sync::Arc;
 use std::thread;
 
-use super::{CounterHold, Disconnect, Phase, Respawn, Session};
+use std::time::Instant;
+
+use super::{CounterHold, Disconnect, Respawn, Session};
 use crate::api::{self, ApiError};
+
+pub(super) struct Recovery {
+    pub(super) why: Disconnect,
+    pub(super) step: Step,
+}
+
+pub(super) enum Step {
+    Waiting(Instant),
+    Relogging,
+    Rejoining,
+}
 
 impl Session {
     pub(super) fn forget_session(&mut self) {
@@ -32,7 +45,13 @@ impl Session {
 
     pub(super) fn take_relogin_results(&mut self) {
         while let Ok(result) = self.relogin_results.try_recv() {
-            if !matches!(self.phase, Phase::Reconnecting { .. }) || self.reconnect_at.is_some() {
+            if !matches!(
+                self.recovery,
+                Some(Recovery {
+                    step: Step::Relogging,
+                    ..
+                })
+            ) {
                 continue;
             }
             let account = match result {
@@ -55,6 +74,9 @@ impl Session {
             };
             self.token = account.token.clone();
             self.account = account;
+            if let Some(recovery) = &mut self.recovery {
+                recovery.step = Step::Rejoining;
+            }
             let version = self.version.clone();
             self.current = Some(self.start_login(server, version, 1));
         }

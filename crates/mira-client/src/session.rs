@@ -34,6 +34,7 @@ use crate::world::World;
 use bank::{BankMove, BankStage};
 use equip::EquipStage;
 use quests::{QuestAction, QuestCall};
+use reconnect::{Recovery, Step};
 use shops::{Trade, TradeStage};
 
 mod bank;
@@ -736,8 +737,7 @@ pub fn spawn(
         stale: None,
         ready_once: false,
         reconnects: 0,
-        reconnect_at: None,
-        lost: None,
+        recovery: None,
         bank: None,
         procs: Arc::default(),
         username: account.username.clone(),
@@ -806,8 +806,7 @@ struct Session {
     stale: Option<Disconnect>,
     ready_once: bool,
     reconnects: u32,
-    reconnect_at: Option<Instant>,
-    lost: Option<Disconnect>,
+    recovery: Option<Recovery>,
     bank: Option<Arc<Vec<Item>>>,
     procs: Arc<HashMap<u32, String>>,
     username: String,
@@ -916,7 +915,7 @@ impl Session {
     }
 
     fn stale_epoch(&self, epoch: u64) -> bool {
-        self.lost.is_some() || epoch != self.epoch.load(Ordering::SeqCst)
+        self.recovery.is_some() || epoch != self.epoch.load(Ordering::SeqCst)
     }
 
     fn apply(&mut self, setting: Setting) {
@@ -932,7 +931,8 @@ impl Session {
         while let Ok(request) = self.requests.try_recv() {
             match request {
                 Request::Act(_, reply, epoch) if self.stale_epoch(epoch) => {
-                    let why = self.lost.clone().or_else(|| self.stale.clone());
+                    let why = self.recovery.as_ref().map(|r| r.why.clone());
+                    let why = why.or_else(|| self.stale.clone());
                     let why = why.unwrap_or(Disconnect::Ended);
                     self.replies.push((reply, Err(ActionError::Closed(why))));
                 }
@@ -971,8 +971,10 @@ impl Session {
         if self.logout_deadline.is_some_and(|d| now >= d) {
             self.close(Disconnect::LoggedOut);
         }
-        if self.reconnect_at.is_some_and(|at| now >= at) {
-            self.reconnect_at = None;
+        if let Some(recovery) = &mut self.recovery
+            && matches!(recovery.step, Step::Waiting(at) if now >= at)
+        {
+            recovery.step = Step::Relogging;
             self.relogin();
         }
         if let Some(me) = &self.character {
@@ -1575,7 +1577,10 @@ impl Session {
         op.into_iter()
             .chain(counters)
             .chain(self.logout_deadline)
-            .chain(self.reconnect_at)
+            .chain(self.recovery.as_ref().and_then(|r| match r.step {
+                Step::Waiting(at) => Some(at),
+                Step::Relogging | Step::Rejoining => None,
+            }))
             .chain(self.boost_check.filter(|_| {
                 self.ensure_ready().is_ok()
                     && self
@@ -1831,12 +1836,11 @@ impl Session {
                 self.ready_once && why.retryable() && self.reconnects < plan.attempts
             });
         let Some(wait) = plan.map(|plan| plan.wait(self.reconnects, why.lockout())) else {
-            self.reconnect_at = None;
-            self.lost = None;
+            self.recovery = None;
             return self.set_phase(Phase::Closed { reason: why });
         };
         self.reconnects += 1;
-        self.reconnect_at = Some(Instant::now() + wait);
+        let at = Instant::now() + wait;
         let dropped = self.current.take().and_then(Op::into_reply);
         for reply in dropped
             .into_iter()
@@ -1845,7 +1849,10 @@ impl Session {
             self.replies
                 .push((reply, Err(ActionError::Closed(why.clone()))));
         }
-        self.lost = Some(why.clone());
+        self.recovery = Some(Recovery {
+            why: why.clone(),
+            step: Step::Waiting(at),
+        });
         self.forget_session();
         self.set_phase(Phase::Reconnecting {
             reason: why,
