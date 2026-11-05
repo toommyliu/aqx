@@ -1,10 +1,13 @@
 use std::task::Poll;
 use std::time::Instant;
 
-use mira_protocol::{ItemId, packet};
+use mira_protocol::{ItemId, flex, packet};
+use serde::Deserialize;
 
 use super::{ActionError, Limit, Op, Session};
 use crate::REPLY_TIMEOUT;
+use crate::combat::ITEM_SLOT;
+use crate::player::SlotSkill;
 use crate::room::CombatState;
 
 const ALWAYS_EQUIPPABLE: [&str; 4] = ["mi", "co", "pe", "am"];
@@ -21,6 +24,21 @@ impl EquipStage {
             EquipStage::Sent { deadline } => Some(*deadline),
         }
     }
+}
+
+enum Plan {
+    Done,
+    Gear,
+    Consumable { link: String, meta: String },
+    ClearSlot,
+}
+
+#[derive(Deserialize)]
+pub(super) struct SlotFilled {
+    #[serde(rename = "iRes", default, deserialize_with = "flex::int")]
+    res: i64,
+    #[serde(default)]
+    o: Option<SlotSkill>,
 }
 
 impl Session {
@@ -41,31 +59,41 @@ impl Session {
                 Poll::Pending
             };
         }
-        let worn = match self.check_equip(item, on) {
-            Ok(worn) => worn,
+        let plan = match self.plan_equip(item, on) {
+            Ok(plan) => plan,
             Err(e) => return Poll::Ready(Err(e)),
         };
-        if worn == on {
-            return Poll::Ready(Ok(()));
-        }
-        let limit = if on {
-            Limit::EquipItem
-        } else {
-            Limit::UnequipItem
-        };
-        if let Some(until) = self.cooling(limit, now) {
-            *stage = EquipStage::Waiting { wake: Some(until) };
-            return Poll::Pending;
-        }
-        let Some(room) = &self.room else {
+        let Some(area) = self.room.as_ref().map(|room| room.area) else {
             return Poll::Ready(Err(ActionError::NotReady));
         };
-        let packet = if on {
-            packet::equip_item(room.area, item)
-        } else {
-            packet::unequip_item(room.area, item)
+        let packet = match plan {
+            Plan::Done => return Poll::Ready(Ok(())),
+            Plan::ClearSlot => {
+                if let Some(me) = &mut self.character {
+                    me.item_slot = None;
+                }
+                self.inventory.set_consumable(None);
+                return Poll::Ready(Ok(()));
+            }
+            Plan::Consumable { link, meta } => packet::geia(area, &link, &meta, item),
+            Plan::Gear => {
+                let limit = if on {
+                    Limit::EquipItem
+                } else {
+                    Limit::UnequipItem
+                };
+                if let Some(until) = self.cooling(limit, now) {
+                    *stage = EquipStage::Waiting { wake: Some(until) };
+                    return Poll::Pending;
+                }
+                self.limits.used(limit, now);
+                if on {
+                    packet::equip_item(area, item)
+                } else {
+                    packet::unequip_item(area, item)
+                }
+            }
         };
-        self.limits.used(limit, now);
         self.send(&packet);
         *stage = EquipStage::Sent {
             deadline: now + REPLY_TIMEOUT,
@@ -73,7 +101,7 @@ impl Session {
         Poll::Pending
     }
 
-    fn check_equip(&self, id: ItemId, on: bool) -> Result<bool, ActionError> {
+    fn plan_equip(&self, id: ItemId, on: bool) -> Result<Plan, ActionError> {
         let unusable = |why: String| Err(ActionError::Unusable(why));
         let Some(me) = &self.character else {
             return Err(ActionError::NotReady);
@@ -88,24 +116,26 @@ impl Session {
             CombatState::InCombat => return Err(ActionError::InCombat),
             CombatState::Idle => {}
         }
-        if item.equipped == on {
-            return Ok(on);
-        }
         let consumable = item.kind.eq_ignore_ascii_case("item");
-        if consumable {
-            return unusable(format!(
-                "{} goes in the item slot, not on the character",
-                item.name
-            ));
+        let worn = if consumable {
+            me.item_slot == Some(id)
+        } else {
+            item.equipped
+        };
+        if worn == on {
+            return Ok(Plan::Done);
         }
         if !on {
+            if consumable {
+                return Ok(Plan::ClearSlot);
+            }
             if item.slot == "Weapon" || item.slot == "ar" {
                 return unusable(format!(
                     "{} can't be unequipped; equip another instead",
                     item.name
                 ));
             }
-            return Ok(true);
+            return Ok(Plan::Gear);
         }
         if item.member && !me.member {
             return unusable(format!("{} is for members", item.name));
@@ -114,10 +144,19 @@ impl Session {
         if level > me.level {
             return unusable(format!("{} needs level {level}", item.name));
         }
+        if consumable {
+            if item.link.is_empty() || item.link.eq_ignore_ascii_case("none") {
+                return unusable(format!("{} can't go in the item slot", item.name));
+            }
+            return Ok(Plan::Consumable {
+                link: item.link.clone(),
+                meta: item.meta.clone(),
+            });
+        }
         if !ALWAYS_EQUIPPABLE.contains(&item.slot.as_str()) && item.enhancement.is_none() {
             return unusable(format!("{} needs an enhancement first", item.name));
         }
-        Ok(false)
+        Ok(Plan::Gear)
     }
 
     pub(super) fn on_worn(&mut self, item: ItemId, on: bool) {
@@ -128,6 +167,41 @@ impl Session {
         );
         if answers && let Some(Op::Equip { reply, .. }) = self.current.take() {
             self.replies.push((reply, Ok(())));
+        }
+    }
+
+    pub(super) fn on_slot_filled(&mut self, filled: SlotFilled, now: Instant) {
+        let Some(Op::Equip {
+            item,
+            on: true,
+            stage: EquipStage::Sent { .. },
+            ..
+        }) = self.current
+        else {
+            return;
+        };
+        let result = match (filled.res, filled.o) {
+            (1, Some(skill)) => {
+                if let Some(me) = &mut self.character {
+                    let cooling = me
+                        .skills
+                        .iter()
+                        .find(|s| s.slot == ITEM_SLOT)
+                        .is_some_and(|s| self.combat.cooling(me, s, now));
+                    if !cooling {
+                        self.combat.restart_clock(ITEM_SLOT);
+                    }
+                    me.fill_item_slot(item, &skill, cooling);
+                }
+                self.inventory.set_consumable(Some(item));
+                Ok(())
+            }
+            _ => Err(ActionError::Refused(
+                "the server wouldn't put that item in the item slot".into(),
+            )),
+        };
+        if let Some(Op::Equip { reply, .. }) = self.current.take() {
+            self.replies.push((reply, result));
         }
     }
 }

@@ -145,7 +145,7 @@ impl Combat {
         }
         let own = clock
             .and_then(|c| c.from)
-            .map(|from| from + scaled(skill.cooldown_ms, me));
+            .map(|from| from + scaled(skill.old_cooldown_ms.unwrap_or(skill.cooldown_ms), me));
         let global = self
             .global_from
             .map(|from| from + scaled(GLOBAL_COOLDOWN_MS, me));
@@ -162,6 +162,21 @@ impl Combat {
 
     fn gap(&self, gap: Duration, now: Instant) -> Option<Instant> {
         self.last_packet.map(|at| at + gap + self.backoff.now(now))
+    }
+
+    pub(crate) fn restart_clock(&mut self, slot: &str) {
+        if let Some(clock) = self.clocks.get_mut(slot) {
+            clock.from = None;
+            clock.before = None;
+        }
+    }
+
+    pub(crate) fn cooling(&self, me: &Me, skill: &Skill, now: Instant) -> bool {
+        let cooldown = skill.old_cooldown_ms.unwrap_or(skill.cooldown_ms);
+        self.clocks
+            .get(&skill.slot)
+            .and_then(|c| c.from)
+            .is_some_and(|from| from + scaled(cooldown, me) > now)
     }
 
     pub(crate) fn cast(&mut self, slot: &str, now: Instant) -> u8 {
@@ -415,6 +430,7 @@ mod tests {
             target: SkillTarget::Hostile,
             max_targets: 1,
             unlocked: true,
+            old_cooldown_ms: None,
         }
     }
 

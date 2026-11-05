@@ -68,6 +68,8 @@ pub struct ShopItem {
     pub slot: String,
     #[serde(rename(deserialize = "sMeta"), default)]
     pub meta: String,
+    #[serde(rename(deserialize = "sLink"), default)]
+    pub link: String,
     #[serde(
         rename(deserialize = "bHouse"),
         default,

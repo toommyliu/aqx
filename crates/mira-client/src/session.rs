@@ -1547,10 +1547,13 @@ impl Session {
                     character.mana_rate = stats.sta.mana_rate.or(character.mana_rate);
                 }
             }
+            "seia" => self.on_slot_filled(read(&json)?, Instant::now()),
             "sAct" => {
                 let skills: SkillList = read(&json)?;
-                if let Some(character) = &mut self.character {
-                    character.learn_skills(skills);
+                if let Some(character) = &mut self.character
+                    && character.learn_skills(skills)
+                {
+                    self.combat.restart_clock(ITEM_SLOT);
                 }
             }
             "loadInventoryBig"
@@ -2027,7 +2030,7 @@ impl Session {
                     .into(),
             ));
         }
-        if slot == ITEM_SLOT {
+        if slot == ITEM_SLOT && self.slotted_item().is_none() {
             return Err(ActionError::Unusable(
                 "nothing is equipped in the item slot".into(),
             ));
@@ -2057,9 +2060,29 @@ impl Session {
         }
     }
 
+    fn slotted_item(&self) -> Option<ItemId> {
+        let item = self.character.as_ref()?.item_slot?;
+        let held = self
+            .inventory
+            .items
+            .iter()
+            .any(|i| i.id == item && i.qty > 0);
+        held.then_some(item)
+    }
+
     fn fire(&mut self, slot: &str, aims: &[Aim], hostile: Option<MonMapId>, now: Instant) -> u8 {
         let act = self.combat.cast(slot, now);
-        self.send(&packet::gar(act, slot, aims));
+        match self.slotted_item().filter(|_| slot == ITEM_SLOT) {
+            Some(item) => {
+                self.send(&packet::gar_item(act, slot, aims, item));
+                if let Some(me) = &mut self.character
+                    && let Some(skill) = me.skills.iter_mut().find(|s| s.slot == slot)
+                {
+                    skill.old_cooldown_ms = None;
+                }
+            }
+            None => self.send(&packet::gar(act, slot, aims)),
+        }
         if let Some(target) = hostile {
             self.combat.engage(target, now);
         }

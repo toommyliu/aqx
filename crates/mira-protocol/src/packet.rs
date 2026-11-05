@@ -72,6 +72,27 @@ pub fn gar(act: u8, slot: &str, aims: &[Aim]) -> String {
     zm("gar", 1, &[act.to_string(), targets, "wvz".to_owned()])
 }
 
+pub fn gar_item(act: u8, slot: &str, aims: &[Aim], item: ItemId) -> String {
+    let targets = aims
+        .iter()
+        .map(|aim| format!("{slot}>{aim}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    zm(
+        "gar",
+        1,
+        &[act.to_string(), targets, item.to_string(), "wvz".to_owned()],
+    )
+}
+
+pub fn geia(room: AreaId, link: &str, meta: &str, item: ItemId) -> String {
+    zm(
+        "geia",
+        room,
+        &[link.to_owned(), meta.to_owned(), item.to_string()],
+    )
+}
+
 pub fn aggro_mon(room: AreaId, ids: &[MonMapId]) -> String {
     zm("aggroMon", room, ids)
 }
@@ -227,6 +248,14 @@ mod tests {
             "%xt%zm%gar%1%0%a2>p:7%wvz%"
         );
         assert_eq!(gar(250, "a3", &[]), "%xt%zm%gar%1%250%a3>%wvz%");
+        assert_eq!(
+            gar_item(4, "i1", &[Aim::Player(eid)], ItemId(600)),
+            "%xt%zm%gar%1%4%i1>p:7%600%wvz%"
+        );
+        assert_eq!(
+            geia(room, "potion", "1044", ItemId(600)),
+            "%xt%zm%geia%42%potion%1044%600%"
+        );
         assert_eq!(
             aggro_mon(room, &[MonMapId(1), MonMapId(2)]),
             "%xt%zm%aggroMon%42%1%2%"

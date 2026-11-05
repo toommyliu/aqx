@@ -770,6 +770,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
             bag_slots: 2,
             bank_slots: 3,
             bank_count: 1,
+            item_slot: None,
             boosts: session.snapshot().me.as_ref().unwrap().boosts.clone(),
             hp: 700,
             max_hp: 1000,
@@ -789,6 +790,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
                     target: SkillTarget::Hostile,
                     max_targets: 1,
                     unlocked: true,
+                    old_cooldown_ms: None,
                 },
                 Skill {
                     slot: "a1".into(),
@@ -798,6 +800,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
                     target: SkillTarget::Myself,
                     max_targets: 3,
                     unlocked: false,
+                    old_cooldown_ms: None,
                 },
                 Skill {
                     slot: "i1".into(),
@@ -807,6 +810,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
                     target: SkillTarget::Myself,
                     max_targets: 1,
                     unlocked: true,
+                    old_cooldown_ms: None,
                 },
             ],
         })
@@ -869,6 +873,7 @@ fn tracks_inventory_and_temp_items() {
             coins: false,
             member: false,
             meta: String::new(),
+            link: String::new(),
             house: false,
             enhancement: None,
         };
@@ -992,6 +997,7 @@ fn tracks_gold_exp_levels_and_drops() {
             coins: false,
             member: false,
             meta: String::new(),
+            link: String::new(),
             house: false,
             enhancement: Default::default(),
         }]
@@ -2295,6 +2301,7 @@ fn loads_shops_once_each_and_refuses_one_known_to_open_elsewhere() {
             kind: "Sword".into(),
             slot: String::new(),
             meta: String::new(),
+            link: String::new(),
             house: false,
             merge: vec![],
             token: 0,
@@ -2756,5 +2763,131 @@ fn names_enhancements_on_gear_with_the_servers_proc_names() {
         ]
     );
     harness.session.logout();
+    harness.finish();
+}
+
+#[test]
+fn fills_the_item_slot_and_uses_it_at_the_clients_pace() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_with_items(
+            "5.31",
+            json!([
+                {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5,
+                 "iStk": 10, "sType": "Item", "sES": "None", "sLink": "potion", "sMeta": "1044"},
+                {"ItemID": 102, "CharItemID": 5002, "sName": "Gem", "iQty": 1, "iStk": 10,
+                 "sType": "Item", "sES": "None", "sLink": "None"},
+            ]),
+        );
+        peer.send(&json_message(json!({"cmd": "sAct", "actions": {"active": [
+            {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "tgt": "h"},
+            {"ref": "i1", "nam": "Potions", "cd": 60000, "tgt": "f", "mp": 0},
+        ]}})));
+        let slot = |cd: u32| {
+            json_message(json!({"cmd": "seia", "iRes": 1, "o": {
+                "id": 1044, "cd": cd, "tgt": "s", "mp": 0, "anim": "Salute", "strl": "",
+            }}))
+        };
+        peer.expect(&packet::geia(AreaId(42), "potion", "1044", ItemId(101)));
+        peer.send(&slot(2500));
+        let me = [Aim::Player(EntityId(7))];
+        let used = peer.expect_at(&packet::gar_item(0, "i1", &me, ItemId(101)));
+        peer.answer(0, 1);
+        peer.expect(&packet::geia(AreaId(42), "potion", "1044", ItemId(101)));
+        peer.send(&slot(200));
+        let again = peer.expect_at(&packet::gar_item(1, "i1", &me, ItemId(101)));
+        assert!(again - used >= Duration::from_millis(2375) - SLACK);
+        peer.answer(1, 1);
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    wait_until(session, |me| me.skills.iter().any(|s| s.slot == "i1"));
+    let unusable = |pending: Pending| matches!(pending.wait(), Err(ActionError::Unusable(_)));
+    assert!(unusable(session.use_skill("i1", None)));
+    assert!(unusable(session.equip(ItemId(102))));
+    session.equip(ItemId(101)).wait().unwrap();
+    let world = session.snapshot();
+    let me = world.me.as_ref().unwrap();
+    assert_eq!(me.item_slot, Some(ItemId(101)));
+    let slot = me.skills.iter().find(|s| s.slot == "i1").unwrap();
+    assert_eq!((slot.cooldown_ms, slot.target), (2500, SkillTarget::Myself));
+    assert!(
+        world
+            .inventory
+            .iter()
+            .any(|i| i.id == ItemId(101) && i.equipped)
+    );
+    session.use_skill("i1", None).wait().unwrap();
+    session.unequip(ItemId(101)).wait().unwrap();
+    assert_eq!(session.snapshot().me.as_ref().unwrap().item_slot, None);
+    assert!(unusable(session.use_skill("i1", None)));
+    session.equip(ItemId(101)).wait().unwrap();
+    session.use_skill("i1", None).wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn the_item_slot_keeps_its_fill_across_class_changes_and_restarts_its_clock() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_with_items(
+            "5.31",
+            json!([{"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 1,
+                    "iStk": 10, "sType": "Item", "sES": "None", "sLink": "potion",
+                    "sMeta": "1044"}]),
+        );
+        let skills = json_message(json!({"cmd": "sAct", "actions": {"active": [
+            {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "tgt": "h"},
+            {"ref": "i1", "nam": "Potions", "cd": 60000, "tgt": "f", "mp": 0, "tgtMax": 2},
+        ]}}));
+        peer.send(&skills);
+        let slot =
+            |cd: u32| json_message(json!({"cmd": "seia", "iRes": 1, "o": {"cd": cd, "tgt": "s"}}));
+        let me = [Aim::Player(EntityId(7))];
+        peer.expect(&packet::geia(AreaId(42), "potion", "1044", ItemId(101)));
+        peer.send(&slot(300));
+        peer.expect(&packet::gar_item(0, "i1", &me, ItemId(101)));
+        peer.answer(0, 1);
+        peer.expect(&packet::geia(AreaId(42), "potion", "1044", ItemId(101)));
+        let refilled = Instant::now();
+        peer.send(&slot(60000));
+        peer.expect(&packet::gar_item(1, "i1", &me, ItemId(101)));
+        assert!(refilled.elapsed() < Duration::from_secs(2));
+        peer.answer(1, 1);
+        peer.send(&skills);
+        peer.expect(&packet::gar_item(2, "i1", &me, ItemId(101)));
+        peer.answer(2, 1);
+        peer.send(&json_message(json!({"cmd": "turnIn", "sItems": "101:1"})));
+        peer.send(&json_message(json!({"cmd": "addItems", "items": {"101": {
+            "ItemID": 101, "CharItemID": 5009, "sName": "Health Potion", "iQty": 1,
+            "iStk": 10, "sType": "Item", "sES": "None", "sLink": "potion", "sMeta": "1044",
+        }}})));
+        peer.send("%xt%server%-1%restocked%");
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    wait_until(session, |me| me.skills.iter().any(|s| s.slot == "i1"));
+    session.equip(ItemId(101)).wait().unwrap();
+    session.use_skill("i1", None).wait().unwrap();
+    thread::sleep(Duration::from_millis(1600));
+    session.unequip(ItemId(101)).wait().unwrap();
+    session.equip(ItemId(101)).wait().unwrap();
+    session.use_skill("i1", None).wait().unwrap();
+    thread::sleep(Duration::from_millis(1600));
+    let used = session.use_skill("i1", None);
+    used.wait().unwrap();
+    harness
+        .events
+        .iter()
+        .find(|e| matches!(e, Event::Notice { text, .. } if text == "restocked"))
+        .unwrap();
+    session.unequip(ItemId(101)).wait().unwrap();
+    assert_eq!(session.snapshot().me.as_ref().unwrap().item_slot, None);
+    let empty = session.use_skill("i1", None).wait();
+    assert!(matches!(empty, Err(ActionError::Unusable(_))), "{empty:?}");
+    session.logout();
     harness.finish();
 }

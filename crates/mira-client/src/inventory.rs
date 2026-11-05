@@ -24,6 +24,7 @@ pub struct Item {
     pub coins: bool,
     pub member: bool,
     pub meta: String,
+    pub link: String,
     pub house: bool,
     pub enhancement: Option<Enhancement>,
 }
@@ -52,6 +53,8 @@ struct WireItem {
     member: bool,
     #[serde(rename = "sMeta", default)]
     meta: String,
+    #[serde(rename = "sLink", default)]
+    link: String,
     #[serde(rename = "bHouse", default, deserialize_with = "flex::bool")]
     house: bool,
     #[serde(flatten)]
@@ -72,6 +75,7 @@ impl From<WireItem> for Item {
             coins: wire.coins,
             member: wire.member,
             meta: wire.meta,
+            link: wire.link,
             house: wire.house,
             enhancement: wire.enhancement.enhancement(),
         }
@@ -129,6 +133,7 @@ pub struct DropOffer {
     pub coins: bool,
     pub member: bool,
     pub meta: String,
+    pub link: String,
     pub house: bool,
     #[serde(serialize_with = "computed_enhancement")]
     pub(crate) enhancement: EnhancementFields,
@@ -202,6 +207,7 @@ impl Inventory {
                             coins: added.coins,
                             member: added.member,
                             meta: added.meta,
+                            link: added.link,
                             house: added.house,
                             enhancement: added.enhancement.enhancement(),
                         });
@@ -238,6 +244,7 @@ impl Inventory {
                 coins: offered.coins,
                 member: offered.member,
                 meta: offered.meta,
+                link: offered.link,
                 house: offered.house,
                 enhancement: offered.enhancement,
             }),
@@ -275,6 +282,7 @@ impl Inventory {
                 coins: offer.coins,
                 member: offer.member,
                 meta: offer.meta,
+                link: offer.link,
                 house: offer.house,
                 enhancement: picked.enhancement.or(offer.enhancement).enhancement(),
             });
@@ -338,6 +346,7 @@ impl Inventory {
                     coins: listed.coins,
                     member: listed.member,
                     meta: listed.meta.clone(),
+                    link: listed.link.clone(),
                     house: listed.house,
                     enhancement: EnhancementFields::from_id(listed.enhancement_id).enhancement(),
                 });
@@ -350,6 +359,14 @@ impl Inventory {
             qty,
             place: Place::Inventory,
         })
+    }
+
+    pub(crate) fn set_consumable(&mut self, slotted: Option<ItemId>) {
+        for item in Arc::make_mut(&mut self.items) {
+            if item.kind.eq_ignore_ascii_case("item") && !item.link.eq_ignore_ascii_case("none") {
+                item.equipped = Some(item.id) == slotted;
+            }
+        }
     }
 
     pub(crate) fn full_for(&self, offer: &DropOffer, slots: u32) -> bool {
@@ -459,6 +476,8 @@ pub(crate) struct AddedItem {
     member: bool,
     #[serde(rename = "sMeta", default)]
     meta: String,
+    #[serde(rename = "sLink", default)]
+    link: String,
     #[serde(rename = "bHouse", default, deserialize_with = "flex::bool")]
     house: bool,
     #[serde(flatten)]

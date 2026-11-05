@@ -1,11 +1,12 @@
 use std::time::{Duration, Instant};
 
-use mira_protocol::{EntityId, FactionId, MonMapId, flex};
+use mira_protocol::{EntityId, FactionId, ItemId, MonMapId, flex};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::aura::Auras;
+use crate::combat::ITEM_SLOT;
 use crate::quest::QuestProgress;
 use crate::rank::rank;
 use crate::room::{CombatState, Vitals};
@@ -34,6 +35,7 @@ pub struct Me {
     #[serde(skip)]
     pub(crate) mana_rate: Option<f64>,
     pub skills: Vec<Skill>,
+    pub item_slot: Option<ItemId>,
     pub quests: QuestProgress,
     pub auras: Auras,
 }
@@ -204,6 +206,20 @@ pub struct Skill {
         deserialize_with = "flex::bool"
     )]
     pub unlocked: bool,
+    #[serde(skip)]
+    pub(crate) old_cooldown_ms: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SlotSkill {
+    #[serde(default, deserialize_with = "flex::opt_int")]
+    cd: Option<u32>,
+    #[serde(default, deserialize_with = "flex::opt_int")]
+    mp: Option<i32>,
+    #[serde(default)]
+    tgt: Option<SkillTarget>,
+    #[serde(rename = "tgtMax", default, deserialize_with = "flex::opt_int")]
+    max_targets: Option<u32>,
 }
 
 fn one() -> u32 {
@@ -290,8 +306,31 @@ pub(crate) struct SkillList {
 }
 
 impl Me {
-    pub(crate) fn learn_skills(&mut self, list: SkillList) {
+    pub(crate) fn learn_skills(&mut self, list: SkillList) -> bool {
+        let slot = self.skills.iter().find(|s| s.slot == ITEM_SLOT).cloned();
         self.skills = list.actions.active;
+        let Some(slot) = slot else {
+            return false;
+        };
+        match self.skills.iter_mut().find(|s| s.slot == ITEM_SLOT) {
+            Some(incoming) => *incoming = slot,
+            None => self.skills.push(slot),
+        }
+        true
+    }
+
+    pub(crate) fn fill_item_slot(&mut self, item: ItemId, update: &SlotSkill, cooling: bool) {
+        self.item_slot = Some(item);
+        let Some(skill) = self.skills.iter_mut().find(|s| s.slot == ITEM_SLOT) else {
+            return;
+        };
+        if cooling && skill.old_cooldown_ms.is_none() {
+            skill.old_cooldown_ms = Some(skill.cooldown_ms);
+        }
+        skill.cooldown_ms = update.cd.unwrap_or(skill.cooldown_ms);
+        skill.mana = update.mp.unwrap_or(skill.mana);
+        skill.target = update.tgt.unwrap_or(skill.target);
+        skill.max_targets = update.max_targets.unwrap_or(1);
     }
 
     pub(crate) fn change_class(&mut self, class: &ClassChange) {
