@@ -108,6 +108,7 @@ impl Peer {
                 "intLevel": "50", "intGold": 1200, "intCoins": 30, "intExp": 400, "intExpToLevel": 2000,
                 "strQuests": format!("00A{}", "0".repeat(97)), "strQuests2": "1".repeat(60),
                 "iUpgDays": -1, "iCP": 899, "iBoostRep": 120, "iBagSlots": 2,
+                "CharID": "4242", "iBankSlots": 3,
                 "ia0": 5, "iw0": "8", "im0": 2.147483648E9,
                 "strEmail": "player1@example.com", "strIP": "192.0.2.1",
             },
@@ -118,7 +119,7 @@ impl Peer {
         ]}})));
         self.send(&json_message(json!({"cmd": "stu", "sta": {"$tha": 0.05}})));
         let inventory = json_message(
-            json!({"cmd": "loadInventoryBig", "items": items, "factions": [
+            json!({"cmd": "loadInventoryBig", "items": items, "bankCount": 1, "factions": [
                 {"FactionID": "46", "CharFactionID": "900", "sName": "Good", "iRep": "1000"},
             ]}),
         );
@@ -166,6 +167,14 @@ struct Harness {
 
 impl Harness {
     fn start(options: Options, script: impl FnOnce(TcpListener) + Send + 'static) -> Harness {
+        Harness::start_with_api(options, "http://127.0.0.1:9".into(), script)
+    }
+
+    fn start_with_api(
+        options: Options,
+        api: String,
+        script: impl FnOnce(TcpListener) + Send + 'static,
+    ) -> Harness {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let server = Server {
             name: "Test".into(),
@@ -181,6 +190,8 @@ impl Harness {
             token: crate::api::Token::for_tests(TOKEN),
             member: false,
             servers: vec![server.clone()],
+            device: crate::api::DeviceId::for_tests(),
+            api,
         };
         let script = thread::spawn(move || script(listener));
         let (session, events) = spawn(&account, server, options).unwrap();
@@ -755,7 +766,10 @@ fn tracks_the_players_vitals_haste_and_skills() {
             member: false,
             class_name: String::new(),
             class_points: 899,
+            char_id: 4242,
             bag_slots: 2,
+            bank_slots: 3,
+            bank_count: 1,
             boosts: session.snapshot().me.as_ref().unwrap().boosts.clone(),
             hp: 700,
             max_hp: 1000,
@@ -2383,5 +2397,106 @@ fn buys_and_sells_within_the_clients_limits() {
     let world = session.snapshot();
     assert_eq!((potions(&world), world.me.as_ref().unwrap().gold), (7, 850));
     session.logout();
+    harness.finish();
+}
+
+#[test]
+fn loads_the_bank_once_over_http_with_the_character_id() {
+    use std::io::{BufRead, BufReader};
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", api.local_addr().unwrap());
+    let http = thread::spawn(move || {
+        let (mut stream, _) = api.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut head = Vec::new();
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let line = line.trim().to_owned();
+            if line.is_empty() {
+                break;
+            }
+            if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length: ") {
+                length = n.parse().unwrap();
+            }
+            head.push(line);
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        let bank = json!([{"ItemID": 300, "CharItemID": 9300, "sName": "Banked Gem", "iQty": 4,
+                           "iStk": 10, "sType": "Item", "bBank": true}])
+        .to_string();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{bank}",
+            bank.len()
+        )
+        .unwrap();
+        (head, String::from_utf8(body).unwrap())
+    });
+    let harness = Harness::start_with_api(Options::default(), base, |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    assert!(session.snapshot().bank.is_none());
+    session.load_bank().wait().unwrap();
+    session.load_bank().wait().unwrap();
+    let (head, body) = http.join().unwrap();
+    assert!(head[0].starts_with("POST /char/bank?v=0."), "{head:?}");
+    assert!(head.contains(&"ccid: 4242".to_owned()), "{head:?}");
+    assert!(head.contains(&format!("token: {TOKEN}")), "{head:?}");
+    assert_eq!(body, "layout=%7B%22cat%22%3A%22all%22%7D");
+    let world = session.snapshot();
+    let bank = world.bank.as_ref().unwrap();
+    assert_eq!((bank[0].id, bank[0].qty), (ItemId(300), 4));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_bank_load_interrupted_by_logout_reports_the_logout() {
+    use std::io::{BufRead, BufReader};
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", api.local_addr().unwrap());
+    let (logging_out, respond) = mpsc::channel::<()>();
+    let (responded, answered) = mpsc::channel::<()>();
+    let (requested, asked) = mpsc::channel::<()>();
+    let http = thread::spawn(move || {
+        let (mut stream, _) = api.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap() > 2 {
+            line.clear();
+        }
+        requested.send(()).unwrap();
+        respond.recv().unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n[]")
+            .unwrap();
+        responded.send(()).unwrap();
+    });
+    let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::logout());
+        logging_out.send(()).unwrap();
+        answered.recv().unwrap();
+        thread::sleep(Duration::from_millis(100));
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let loading = session.load_bank();
+    asked.recv_timeout(Duration::from_secs(5)).unwrap();
+    session.logout();
+    let result = loading.wait();
+    assert!(
+        matches!(result, Err(ActionError::Closed(Disconnect::LoggedOut))),
+        "{result:?}"
+    );
+    http.join().unwrap();
     harness.finish();
 }

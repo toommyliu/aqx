@@ -23,6 +23,7 @@ pub struct World {
     pub quests: Arc<BTreeMap<QuestId, Quest>>,
     pub accepted_quests: BTreeSet<QuestId>,
     pub shop: Option<Arc<Shop>>,
+    pub bank: Option<Arc<Vec<Item>>>,
 }
 
 impl World {
@@ -38,6 +39,7 @@ impl World {
             quests: Arc::default(),
             accepted_quests: BTreeSet::new(),
             shop: None,
+            bank: None,
         }
     }
 }

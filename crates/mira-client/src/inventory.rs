@@ -370,6 +370,8 @@ fn take(items: &mut Vec<Item>, at: usize, qty: u32) -> Event {
 pub(crate) struct LoadInventory {
     #[serde(default)]
     pub(crate) items: Vec<Value>,
+    #[serde(rename = "bankCount", default, deserialize_with = "flex::int")]
+    pub(crate) bank_count: u32,
     #[serde(default)]
     pub(crate) factions: Vec<Value>,
 }

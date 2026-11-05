@@ -15,7 +15,7 @@ const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str = "join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], \
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
-     buy <#listing> [qty], sell <item> [qty], logout";
+     buy <#listing> [qty], sell <item> [qty], bank, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -35,7 +35,8 @@ enum Command {
     /// Log in, then print what the account does and run commands read from stdin
     /// (join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop,
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
-    /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], logout)
+    /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
+    /// logout)
     /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
@@ -389,6 +390,23 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                 }
             };
             session.sell(id, qty).wait()?;
+        }
+        ["bank"] => {
+            session.load_bank().wait()?;
+            let world = session.snapshot();
+            let bank = world.bank.as_deref().map_or(&[][..], Vec::as_slice);
+            if json {
+                println!("{}", serde_json::to_string(bank).expect("items serialize"));
+            } else if bank.is_empty() {
+                println!("the bank is empty");
+            } else {
+                for item in bank {
+                    println!(
+                        "  {} x{}/{} ({})",
+                        item.name, item.qty, item.max_stack, item.kind
+                    );
+                }
+            }
         }
         ["me"] => match &session.snapshot().me {
             Some(me) if json => println!("{}", serde_json::to_string(me).expect("me serializes")),

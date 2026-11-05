@@ -4,6 +4,7 @@ use std::{fmt, fs, io, process};
 
 use mira_protocol::flex;
 use serde::Deserialize;
+use serde_json::Value;
 use ureq::config::AutoHeaderValue;
 
 const API_BASE: &str = "https://game.aq.com/game/api";
@@ -63,6 +64,8 @@ pub struct Account {
     pub token: Token,
     pub member: bool,
     pub servers: Vec<Server>,
+    pub device: DeviceId,
+    pub(crate) api: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -116,6 +119,11 @@ impl DeviceId {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> DeviceId {
+        DeviceId("0123456789abcdef0123456789abcdef".into())
+    }
+
     fn random() -> io::Result<DeviceId> {
         let mut bytes = [0u8; 16];
         getrandom::getrandom(&mut bytes).map_err(|e| io::Error::other(e.to_string()))?;
@@ -161,7 +169,7 @@ pub fn login(device: &DeviceId, username: &str, password: &str) -> Result<Accoun
         .send_form([("user", username), ("pass", password), ("option", "1")])
         .and_then(|mut reply| reply.body_mut().read_to_string())
         .map_err(|e| ApiError::Http(format!("login request failed: {e}")))?;
-    parse_login(username, &body)
+    parse_login(device, username, &body)
 }
 
 fn cache_buster() -> String {
@@ -171,7 +179,18 @@ fn cache_buster() -> String {
     format!("0.{nanos:09}")
 }
 
-fn parse_login(username: &str, body: &str) -> Result<Account, ApiError> {
+pub(crate) fn bank(account: &Account, char_id: i64) -> Result<Vec<Value>, ApiError> {
+    let url = format!("{}/char/bank?v={}", account.api, cache_buster());
+    let body = request(ureq::post(url), &account.device)
+        .header("ccid", char_id.to_string())
+        .header("token", account.token.as_str())
+        .send_form([("layout", r#"{"cat":"all"}"#)])
+        .and_then(|mut reply| reply.body_mut().read_to_string())
+        .map_err(|e| ApiError::Http(format!("bank request failed: {e}")))?;
+    serde_json::from_str(&body).map_err(|e| ApiError::Http(format!("unreadable bank: {e}")))
+}
+
+fn parse_login(device: &DeviceId, username: &str, body: &str) -> Result<Account, ApiError> {
     #[derive(Deserialize)]
     struct Reply {
         login: Option<Grant>,
@@ -199,6 +218,8 @@ fn parse_login(username: &str, body: &str) -> Result<Account, ApiError> {
             token: Token(grant.token),
             member: grant.upgrade > 0,
             servers: reply.servers,
+            device: device.clone(),
+            api: API_BASE.to_owned(),
         }),
         grant => Err(ApiError::Rejected(
             grant
@@ -244,9 +265,13 @@ mod tests {
                    {"sName":"Gravelyn","sIP":"10.0.0.2","iPort":"5589","iCount":1000,"iMax":1000,"bOnline":1,"bUpg":0},
                    {"sName":"Sir Ver","sIP":"10.0.0.3","iPort":5590,"iCount":10,"iMax":1000,"bOnline":1,"bUpg":1}]}"#;
 
+    fn test_device() -> DeviceId {
+        DeviceId("0123456789abcdef0123456789abcdef".into())
+    }
+
     #[test]
     fn login_reply_gives_the_token_and_servers() {
-        let account = parse_login("player1", REPLY).unwrap();
+        let account = parse_login(&test_device(), "player1", REPLY).unwrap();
         assert_eq!(account.token.as_str(), "tok");
         assert!(!account.member);
         let twilly = &account.servers[0];
@@ -257,18 +282,24 @@ mod tests {
     #[test]
     fn rejected_login_reports_the_servers_reason() {
         let err = parse_login(
+            &test_device(),
             "player1",
             r#"{"login":{"bSuccess":0,"sMsg":"Invalid password"}}"#,
         )
         .unwrap_err();
         assert!(matches!(err, ApiError::Rejected(m) if m == "Invalid password"));
-        let err = parse_login("player1", r#"{"login":{"bSuccess":1,"sToken":""}}"#).unwrap_err();
+        let err = parse_login(
+            &test_device(),
+            "player1",
+            r#"{"login":{"bSuccess":1,"sToken":""}}"#,
+        )
+        .unwrap_err();
         assert!(matches!(err, ApiError::Rejected(_)));
     }
 
     #[test]
     fn pick_server_refuses_full_and_member_servers() {
-        let account = parse_login("player1", REPLY).unwrap();
+        let account = parse_login(&test_device(), "player1", REPLY).unwrap();
         assert_eq!(account.pick_server("twilly").unwrap().name, "Twilly");
         let refusal = |name| account.pick_server(name).unwrap_err().to_string();
         assert_eq!(refusal("Gravelyn"), "Gravelyn is full");

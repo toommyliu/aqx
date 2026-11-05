@@ -19,12 +19,14 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::REPLY_TIMEOUT;
-use crate::api::{Account, Server, Token};
+use crate::api::{self, Account, ApiError, Server, Token};
 use crate::aura::{self, AuraChange, Target};
 use crate::combat::{self, AUTO_ATTACK, ActionResult, Combat, Gate, ITEM_SLOT, Outcome};
 use crate::event::{Direction, Event, NoticeKind};
 use crate::faction::{self, AddedFaction, Faction, FactionData};
-use crate::inventory::{AddedItems, Inventory, LoadInventory, Picked, Pool, Sold, TurnIn, Worn};
+use crate::inventory::{
+    AddedItems, Inventory, Item, LoadInventory, Picked, Pool, Sold, TurnIn, Worn,
+};
 use crate::player::{
     BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, Skill, SkillList, SkillTarget,
     Stats,
@@ -132,6 +134,8 @@ pub enum ActionError {
     #[error("still in combat {secs} s after moving to {0}", secs = EXIT_TIMEOUT.as_secs())]
     StillInCombat(String),
     #[error("{0}")]
+    Http(String),
+    #[error("{0}")]
     Closed(Disconnect),
     #[error("the session stopped without closing")]
     Stopped,
@@ -218,6 +222,7 @@ enum Action {
     PickDrop(ItemId),
     LoadShop(ShopId),
     Trade(Trade),
+    LoadBank,
 }
 
 enum Op {
@@ -267,7 +272,13 @@ enum Op {
         trade: Trade,
         stage: TradeStage,
     },
+    Bank {
+        reply: Reply,
+        fetching: bool,
+    },
 }
+
+type BankResult = Result<Vec<Value>, ApiError>;
 
 enum ShopStage {
     Waiting { wake: Option<Instant> },
@@ -356,6 +367,10 @@ impl Handle {
         self.act(Action::Trade(Trade::Sell { item, qty }))
     }
 
+    pub fn load_bank(&self) -> Pending {
+        self.act(Action::LoadBank)
+    }
+
     pub fn pick_drop(&self, item: ItemId) -> Pending {
         self.act(Action::PickDrop(item))
     }
@@ -422,7 +437,13 @@ pub fn spawn(
         version: version.clone(),
     };
     let world = Arc::new(Mutex::new(Arc::new(World::connecting(phase.clone()))));
+    let (bank_out, bank_results) = mpsc::channel();
     let session = Session {
+        account: account.clone(),
+        waker: Arc::clone(&waker),
+        bank_out,
+        bank_results,
+        bank: None,
         username: account.username.clone(),
         token: account.token.clone(),
         options,
@@ -469,6 +490,11 @@ pub fn spawn(
 }
 
 struct Session {
+    account: Account,
+    waker: Arc<Waker>,
+    bank_out: mpsc::Sender<BankResult>,
+    bank_results: mpsc::Receiver<BankResult>,
+    bank: Option<Arc<Vec<Item>>>,
     username: String,
     token: Token,
     options: Options,
@@ -509,6 +535,7 @@ impl Session {
         self.current = Some(self.start_login(server, version, 1));
         loop {
             self.take_requests();
+            self.take_bank_results();
             self.advance(Instant::now());
             if matches!(self.phase, Phase::Closed { .. }) && self.current.is_none() {
                 self.take_requests();
@@ -529,6 +556,23 @@ impl Session {
             }
             self.read_socket();
             self.flush();
+        }
+    }
+
+    fn take_bank_results(&mut self) {
+        while let Ok(result) = self.bank_results.try_recv() {
+            let Some(Op::Bank { reply, .. }) = self
+                .current
+                .take_if(|op| matches!(op, Op::Bank { fetching: true, .. }))
+            else {
+                continue;
+            };
+            let result = self.ensure_ready().and_then(|()| {
+                let values = result.map_err(|e| ActionError::Http(e.to_string()))?;
+                self.bank = Some(Arc::new(self.parse_each("bank item", values)));
+                Ok(())
+            });
+            self.replies.push((reply, result));
         }
     }
 
@@ -624,6 +668,13 @@ impl Session {
                 }
                 Err(e) => Err(e),
             },
+            Action::LoadBank => {
+                let op = Op::Bank {
+                    reply,
+                    fetching: false,
+                };
+                return self.step(op, now);
+            }
             Action::Trade(trade) => {
                 let stage = TradeStage::Waiting { wake: None };
                 return self.step(
@@ -854,6 +905,28 @@ impl Session {
                     None
                 }
             },
+            Op::Bank { reply, fetching } => {
+                let result = match (self.ensure_ready(), &self.bank, &self.character) {
+                    (Err(e), _, _) => Err(e),
+                    (Ok(()), Some(_), _) => Ok(()),
+                    (Ok(()), None, _) if fetching => return Some(Op::Bank { reply, fetching }),
+                    (Ok(()), None, Some(me)) => {
+                        let (account, char_id) = (self.account.clone(), me.char_id);
+                        let (results, waker) = (self.bank_out.clone(), Arc::clone(&self.waker));
+                        thread::spawn(move || {
+                            let _ = results.send(api::bank(&account, char_id));
+                            let _ = waker.wake();
+                        });
+                        return Some(Op::Bank {
+                            reply,
+                            fetching: true,
+                        });
+                    }
+                    (Ok(()), None, None) => Err(ActionError::NotReady),
+                };
+                self.replies.push((reply, result));
+                None
+            }
             Op::Trade {
                 reply,
                 trade,
@@ -899,6 +972,7 @@ impl Session {
             | Some(Op::Kill { wake, .. }) => *wake,
             Some(Op::Quest { call, .. }) => call.stage.deadline(),
             Some(Op::Trade { stage, .. }) => stage.deadline(),
+            Some(Op::Bank { .. }) => None,
             Some(Op::Shop {
                 stage: ShopStage::Waiting { wake },
                 ..
@@ -935,6 +1009,7 @@ impl Session {
             quests: Arc::clone(&self.quests),
             accepted_quests: self.accepted_quests.clone(),
             shop: self.shop.clone(),
+            bank: self.bank.clone(),
         });
         for event in self.outgoing.drain(..) {
             let _ = self.events.send(event);
@@ -1035,6 +1110,7 @@ impl Session {
         self.quests = Arc::default();
         self.accepted_quests.clear();
         self.shop = None;
+        self.bank = None;
         self.combat = Combat::default();
         self.closing = None;
         self.logout_deadline = None;
@@ -1409,6 +1485,9 @@ impl Session {
                     return Ok(());
                 };
                 let (level, gold) = (character.level, character.gold);
+                if let Some(character) = &mut self.character {
+                    character.bank_count = loaded.bank_count;
+                }
                 self.inventory.items = Arc::new(self.parse_each("inventory item", loaded.items));
                 self.factions = self
                     .parse_each::<FactionData>("faction", loaded.factions)
