@@ -341,13 +341,13 @@ impl Combat {
         }
     }
 
-    pub(crate) fn next_deadline(&self, now: Instant) -> Option<Instant> {
+    pub(crate) fn next_deadline(&self, now: Instant, auto: bool) -> Option<Instant> {
         let expiries = self
             .clocks
             .values()
             .filter_map(|c| c.flight.map(|f| f.sent + REPLY_TIMEOUT));
         expiries
-            .chain(self.auto_due(now))
+            .chain(self.auto_due(now).filter(|_| auto))
             .chain(self.respawn_at)
             .min()
     }
@@ -505,13 +505,13 @@ mod tests {
         combat.cast("aa", t0);
         assert!(!combat.auto_ready(&me, t0 + ms(5000)));
         combat.settle(&landed(0), EntityId(7), &me, t0 + ms(40));
-        assert_eq!(combat.next_deadline(t0), Some(t0 + ms(1000)));
+        assert_eq!(combat.next_deadline(t0, true), Some(t0 + ms(1000)));
         combat.cast("aa", t0 + ms(1000));
         combat.settle(&landed(1), EntityId(7), &me, t0 + ms(1400));
-        assert_eq!(combat.next_deadline(t0), Some(t0 + ms(2300)));
+        assert_eq!(combat.next_deadline(t0, true), Some(t0 + ms(2300)));
         combat.disengage();
         combat.engage(MonMapId(2), t0 + ms(1500));
-        assert_eq!(combat.next_deadline(t0), Some(t0 + ms(2300)));
+        assert_eq!(combat.next_deadline(t0, true), Some(t0 + ms(2300)));
     }
 
     #[test]

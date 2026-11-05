@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use mira_protocol::{AreaId, EntityId, MonId, MonMapId, XmlUser, flex};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -87,12 +88,61 @@ pub struct Monster {
     pub state: CombatState,
     pub aggressive: bool,
     pub auras: Auras,
+    #[serde(skip)]
+    pub(crate) counter: Option<Counter>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Counter {
+    Warned(Instant),
+    Active { until: Instant },
+}
+
+pub(crate) const COUNTER_AURA: &str = "Counter Attack";
+const COUNTER_WARNING: &str = "prepares a counter attack";
+const COUNTER_WINDOW: Duration = Duration::from_secs(7);
 
 impl Monster {
     pub fn alive(&self) -> bool {
         self.hp > 0 && self.state != CombatState::Dead
     }
+
+    pub fn countering(&self, now: Instant) -> bool {
+        self.alive() && self.counter_deadline().is_some_and(|until| now < until)
+    }
+
+    pub(crate) fn warn_counter(&mut self, now: Instant) {
+        if !matches!(self.counter, Some(Counter::Active { until }) if now < until) {
+            self.counter = Some(Counter::Warned(now));
+        }
+    }
+
+    pub(crate) fn apply_aura(&mut self, change: AuraChange, now: Instant) {
+        let counter = change.names().any(|name| name == COUNTER_AURA);
+        let removed = change.removes();
+        let lasts = change
+            .duration_of(COUNTER_AURA)
+            .filter(|secs| secs.is_finite() && *secs > 0.0)
+            .map_or(COUNTER_WINDOW, Duration::from_secs_f64);
+        self.auras.apply(change);
+        let aura = self.auras.active.iter().any(|a| a.name == COUNTER_AURA);
+        match (counter, removed, aura) {
+            (true, true, _) => self.counter = None,
+            (true, false, true) => self.counter = Some(Counter::Active { until: now + lasts }),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn counter_deadline(&self) -> Option<Instant> {
+        match self.counter? {
+            Counter::Warned(at) => Some(at + COUNTER_WINDOW),
+            Counter::Active { until } => Some(until),
+        }
+    }
+}
+
+pub(crate) fn counter_warning(message: &str) -> bool {
+    message.to_ascii_lowercase().contains(COUNTER_WARNING)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -263,21 +313,20 @@ impl Room {
             monster.hp = hp;
             if hp == 0 && monster.cell == self.cell {
                 monster.auras.clear();
+                monster.counter = None;
             }
         }
         if let Some(state) = patch.state {
             monster.state = state;
             if state != CombatState::InCombat {
                 monster.auras.clear();
+                monster.counter = None;
             }
         }
     }
 
-    pub(crate) fn monster_auras(&mut self, id: MonMapId) -> Option<&mut Auras> {
-        self.monsters
-            .iter_mut()
-            .find(|m| m.id == id)
-            .map(|m| &mut m.auras)
+    pub(crate) fn monster(&mut self, id: MonMapId) -> Option<&mut Monster> {
+        self.monsters.iter_mut().find(|m| m.id == id)
     }
 }
 
@@ -301,6 +350,7 @@ fn monsters(
                 state: m.state,
                 aggressive: spot.aggressive,
                 auras: Auras::default(),
+                counter: None,
             })
         })
         .collect()
@@ -443,11 +493,84 @@ pub(crate) struct Tick {
     pub(crate) auras: Vec<AuraChange>,
     #[serde(default)]
     pub(crate) sarsa: Vec<ActionResult>,
+    #[serde(default)]
+    pub(crate) anims: Vec<Anim>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Anim {
+    #[serde(default)]
+    pub(crate) msg: Option<String>,
+    #[serde(rename = "cInf", default)]
+    pub(crate) caster: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_counter_lasts_through_its_aura_or_seven_seconds_after_the_warning() {
+        let now = Instant::now();
+        let at = |ms| now + Duration::from_millis(ms);
+        let change =
+            |json: serde_json::Value| -> AuraChange { serde_json::from_value(json).unwrap() };
+        let mut monster = Monster {
+            id: MonMapId(1),
+            name: "Mosquito".into(),
+            cell: "Enter".into(),
+            hp: 10,
+            max_hp: 10,
+            state: CombatState::InCombat,
+            aggressive: false,
+            auras: Auras::default(),
+            counter: None,
+        };
+        monster.warn_counter(now);
+        assert!(monster.countering(at(6900)));
+        assert!(!monster.countering(at(7100)));
+        monster.apply_aura(
+            change(serde_json::json!({"cmd": "aura++", "tInf": "m:1",
+                "auras": [{"nam": "Counter Attack", "dur": 6}]})),
+            at(500),
+        );
+        assert_eq!(monster.counter, Some(Counter::Warned(now)));
+        monster.apply_aura(
+            change(serde_json::json!({"cmd": "aura++", "tInf": "m:1",
+                "auras": [{"nam": "Counter Attack", "dur": 6, "isNew": true}]})),
+            at(1000),
+        );
+        assert!(monster.countering(at(6900)));
+        assert!(!monster.countering(at(7100)));
+        monster.warn_counter(at(2000));
+        assert!(monster.countering(at(6900)));
+        monster.apply_aura(
+            change(serde_json::json!({"cmd": "aura--", "tInf": "m:1",
+                "aura": {"nam": "Counter Attack"}})),
+            at(3000),
+        );
+        assert!(!monster.countering(at(3000)));
+        monster.warn_counter(at(4000));
+        let area: MoveToArea = serde_json::from_value(serde_json::json!({
+            "areaId": 1, "areaName": "farm-1", "intType": "0",
+            "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "Enter", "strPad": "Spawn"}],
+        }))
+        .unwrap();
+        let (mut room, _) = Room::arriving(area, Some(EntityId(7)), None);
+        monster.cell.clone_from(&room.cell);
+        room.monsters.push(monster);
+        let vitals = |json| -> Vitals { serde_json::from_value(json).unwrap() };
+        room.patch_monster(
+            MonMapId(1),
+            &vitals(serde_json::json!({"intHP": 0, "intState": 0})),
+        );
+        assert!(!room.monsters[0].countering(at(4000)));
+        room.patch_monster(
+            MonMapId(1),
+            &vitals(serde_json::json!({"intHP": 10, "intState": 1})),
+        );
+        assert!(!room.monsters[0].countering(at(4500)));
+    }
 
     #[test]
     fn a_requested_cell_applies_only_to_its_own_map() {

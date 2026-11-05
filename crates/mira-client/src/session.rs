@@ -33,7 +33,7 @@ use crate::player::{
 };
 use crate::quest::{self, AchievementUpdate, Quest, QuestList, QuestUpdate};
 use crate::room::{
-    CombatState, Monster, MonsterUpdate, MoveToArea, PlayerUpdate, Room, SPAWN, Spot, Tick,
+    self, CombatState, Monster, MonsterUpdate, MoveToArea, PlayerUpdate, Room, SPAWN, Spot, Tick,
     UserEntry, UserList, Vitals,
 };
 use crate::shop::{Bought, LoadedShop, Shop};
@@ -209,8 +209,17 @@ fn latest(slot: &Slot) -> Arc<World> {
     Arc::clone(&slot.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CounterHold {
+    #[default]
+    Off,
+    All,
+    Attacks,
+}
+
 enum Request {
     Act(Action, Reply),
+    CounterHold(CounterHold),
     Logout,
 }
 
@@ -493,6 +502,10 @@ impl Handle {
         self.act(Action::Quest(QuestAction::TurnIn { id, reward, times }))
     }
 
+    pub fn set_counter_hold(&self, hold: CounterHold) {
+        self.request(Request::CounterHold(hold));
+    }
+
     pub fn logout(&self) {
         self.request(Request::Logout);
     }
@@ -590,6 +603,7 @@ pub fn spawn(
         shop: None,
         shop_maps: HashMap::new(),
         requested_spot: None,
+        counter_hold: CounterHold::Off,
         combat: Combat::default(),
         closing: None,
         logout_deadline: None,
@@ -643,6 +657,7 @@ struct Session {
     shop: Option<Arc<Shop>>,
     shop_maps: HashMap<ShopId, Vec<String>>,
     requested_spot: Option<Spot>,
+    counter_hold: CounterHold,
     combat: Combat,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -710,6 +725,7 @@ impl Session {
         while let Ok(request) = self.requests.try_recv() {
             match request {
                 Request::Logout => self.begin_logout(),
+                Request::CounterHold(hold) => self.counter_hold = hold,
                 Request::Act(Action::ExitCombat, reply) => {
                     if matches!(self.current, Some(Op::Kill { .. } | Op::Cast { .. }))
                         && let Some(Op::Kill { reply, .. } | Op::Cast { reply, .. }) =
@@ -1286,13 +1302,29 @@ impl Session {
             })
             | None => None,
         };
+        let counters = self
+            .room
+            .iter()
+            .filter(|_| self.counter_hold != CounterHold::Off)
+            .flat_map(|room| &room.monsters)
+            .filter_map(Monster::counter_deadline)
+            .filter(|until| Instant::now() < *until);
         op.into_iter()
+            .chain(counters)
             .chain(self.logout_deadline)
-            .chain(
-                self.ensure_ready()
-                    .ok()
-                    .and_then(|()| self.combat.next_deadline(Instant::now())),
-            )
+            .chain(self.ensure_ready().ok().and_then(|()| {
+                let now = Instant::now();
+                let auto_held = self
+                    .character
+                    .iter()
+                    .flat_map(|me| &me.skills)
+                    .find(|s| s.slot == AUTO_ATTACK)
+                    .zip(self.combat.auto_target())
+                    .is_some_and(|(skill, target)| {
+                        self.held_by_counter(skill, Some(target), now).is_some()
+                    });
+                self.combat.next_deadline(now, !auto_held)
+            }))
             .min()
     }
 
@@ -1853,6 +1885,15 @@ impl Session {
                 for result in &tick.sarsa {
                     self.settle(result);
                 }
+                for anim in &tick.anims {
+                    let telegraph = anim.msg.as_deref().is_some_and(room::counter_warning);
+                    if let (true, Some(Target::Monster(id))) =
+                        (telegraph, anim.caster.as_deref().and_then(aura::target))
+                        && let Some(monster) = self.room.as_mut().and_then(|r| r.monster(id))
+                    {
+                        monster.warn_counter(Instant::now());
+                    }
+                }
             }
             "sars" => self.settle(&read(&json)?),
             "aura+" | "aura++" | "aura+p" | "aura-" | "aura--" => {
@@ -2372,6 +2413,9 @@ impl Session {
             SkillTarget::Hostile => Some(self.pick_target(target)?),
             _ => None,
         };
+        if let Some(until) = self.held_by_counter(skill, hostile, now) {
+            return Ok(Prepared::Wait(Some(until)));
+        }
         match self.combat.gate(me, skill, now) {
             Gate::Locked => Err(ActionError::Unusable(format!(
                 "{} is locked at this class rank",
@@ -2436,7 +2480,7 @@ impl Session {
             return Ok(None);
         }
         let target = self.pick_target(Some(target))?;
-        if let (Some((at, slot)), _) = self.rotation(next, now)
+        if let (Some((at, slot)), _) = self.rotation(next, now, target)
             && let Prepared::Fire { aims, hostile } = self.prepare(&slot, Some(target), now)?
         {
             self.fire(&slot, &aims, hostile, now);
@@ -2445,7 +2489,7 @@ impl Session {
         if self.combat.auto_target() != Some(target) && !self.hostile_coming(now) {
             self.combat.engage(target, now);
         }
-        Ok(Some((self.rotation(next, now).1, next)))
+        Ok(Some((self.rotation(next, now, target).1, next)))
     }
 
     fn rotation_skills(&self) -> impl Iterator<Item = &Skill> {
@@ -2455,16 +2499,25 @@ impl Session {
             .filter(|s| s.slot != AUTO_ATTACK && s.slot != ITEM_SLOT)
     }
 
-    fn rotation(&self, next: usize, now: Instant) -> (Option<(usize, String)>, Option<Instant>) {
+    fn rotation(
+        &self,
+        next: usize,
+        now: Instant,
+        target: MonMapId,
+    ) -> (Option<(usize, String)>, Option<Instant>) {
         let Some(me) = &self.character else {
             return (None, None);
         };
         let skills: Vec<&Skill> = self.rotation_skills().collect();
         let mut wake = None;
         for at in (0..skills.len()).map(|i| (next + i) % skills.len()) {
+            if let Some(until) = self.held_by_counter(skills[at], Some(target), now) {
+                wake = wake.into_iter().chain(Some(until)).min();
+                continue;
+            }
             match self.combat.gate(me, skills[at], now) {
                 Gate::Open => return (Some((at, skills[at].slot.clone())), None),
-                Gate::At(ready) => wake = Some(wake.map_or(ready, |w: Instant| w.min(ready))),
+                Gate::At(ready) => wake = wake.into_iter().chain(Some(ready)).min(),
                 Gate::Held | Gate::Locked | Gate::NoMana => {}
             }
         }
@@ -2532,9 +2585,41 @@ impl Session {
         {
             return self.combat.defer_auto(due);
         }
-        if self.combat.auto_ready(me, now) {
+        if self.combat.auto_ready(me, now)
+            && self.held_by_counter(skill, Some(target), now).is_none()
+        {
             self.fire(AUTO_ATTACK, &aims, None, now);
         }
+    }
+
+    fn held_by_counter(
+        &self,
+        skill: &Skill,
+        target: Option<MonMapId>,
+        now: Instant,
+    ) -> Option<Instant> {
+        let room = self.room.as_ref()?;
+        let hit: Vec<MonMapId> = match self.counter_hold {
+            CounterHold::Off => return None,
+            CounterHold::All => room
+                .monsters
+                .iter()
+                .filter(|m| m.cell == room.cell)
+                .map(|m| m.id)
+                .collect(),
+            CounterHold::Attacks => combat::aims(skill, target, self.me?, room)
+                .into_iter()
+                .filter_map(|aim| match aim {
+                    Aim::Monster(id) => Some(id),
+                    Aim::Player(_) => None,
+                })
+                .collect(),
+        };
+        room.monsters
+            .iter()
+            .filter(|m| hit.contains(&m.id) && m.countering(now))
+            .filter_map(Monster::counter_deadline)
+            .min()
     }
 
     fn settle(&mut self, result: &ActionResult) {
@@ -2586,19 +2671,19 @@ impl Session {
     }
 
     fn apply_aura(&mut self, change: AuraChange) {
-        let auras = match change.target.as_deref().and_then(aura::target) {
+        match change.target.as_deref().and_then(aura::target) {
             Some(Target::Player(eid)) if Some(eid) == self.me => {
-                self.character.as_mut().map(|c| &mut c.auras)
+                if let Some(character) = &mut self.character {
+                    character.auras.apply(change);
+                }
             }
-            Some(Target::Monster(id)) => self
-                .arriving
-                .as_mut()
-                .or(self.room.as_mut())
-                .and_then(|room| room.monster_auras(id)),
-            _ => None,
-        };
-        if let Some(auras) = auras {
-            auras.apply(change);
+            Some(Target::Monster(id)) => {
+                let room = self.arriving.as_mut().or(self.room.as_mut());
+                if let Some(monster) = room.and_then(|room| room.monster(id)) {
+                    monster.apply_aura(change, Instant::now());
+                }
+            }
+            _ => {}
         }
     }
 

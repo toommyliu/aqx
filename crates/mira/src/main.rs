@@ -6,9 +6,10 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use mira_client::{
-    ActionError, Auras, BoostKind, CombatState, DeviceId, Direction, Disconnect, Event, Handle,
-    Item, ItemId, Load, MapItemId, Me, MonMapId, Monster, NoticeKind, Options, Pending, Phase,
-    Place, QuestId, QuestStatus, Room, Server, ShopId, ShopItemId, SkillTarget, World, api,
+    ActionError, Auras, BoostKind, CombatState, CounterHold, DeviceId, Direction, Disconnect,
+    Event, Handle, Item, ItemId, Load, MapItemId, Me, MonMapId, Monster, NoticeKind, Options,
+    Pending, Phase, Place, QuestId, QuestStatus, Room, Server, ShopId, ShopItemId, SkillTarget,
+    World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
@@ -16,7 +17,7 @@ const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <mons
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
-     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, logout";
+     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, anticounter off|all|attacks, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -38,7 +39,8 @@ enum Command {
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
     /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
-    /// unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, logout)
+    /// unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>,
+    /// anticounter off|all|attacks, logout)
     /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
@@ -439,6 +441,9 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
             session.swap(id(inventory)?, id(bank)?).wait()?;
         }
         ["rest"] => session.rest().wait()?,
+        ["anticounter", "off"] => session.set_counter_hold(CounterHold::Off),
+        ["anticounter", "all"] => session.set_counter_hold(CounterHold::All),
+        ["anticounter", "attacks"] => session.set_counter_hold(CounterHold::Attacks),
         ["walk", x, y] => {
             let at = |text: &str| {
                 text.parse()

@@ -158,6 +158,25 @@ struct AuraData {
     effects: Vec<StatEffect>,
 }
 
+impl AuraChange {
+    pub(crate) fn removes(&self) -> bool {
+        self.cmd.starts_with("aura-")
+    }
+
+    pub(crate) fn duration_of(&self, name: &str) -> Option<f64> {
+        self.auras
+            .iter()
+            .flatten()
+            .find(|a| a.name == name)
+            .map(|a| a.duration)
+    }
+
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        let added = self.auras.iter().flatten().map(|a| a.name.as_str());
+        added.chain(self.aura.iter().map(|a| a.name.as_str()))
+    }
+}
+
 impl AuraData {
     fn into_aura(self, caster: Option<Caster>) -> Aura {
         Aura {

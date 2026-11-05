@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -67,6 +67,29 @@ impl Peer {
     fn send_bytes(&mut self, frame: &[u8]) {
         self.stream.write_all(frame).unwrap();
         self.stream.write_all(&[0]).unwrap();
+    }
+
+    fn expect_silence(&mut self, quiet: Duration) {
+        assert!(!self.buf.contains(&0), "the client sent something early");
+        self.stream.set_read_timeout(Some(quiet)).unwrap();
+        let mut chunk = [0u8; 4096];
+        let read = self.stream.read(&mut chunk);
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        match read {
+            Ok(n) => panic!(
+                "the client sent {:?} early",
+                String::from_utf8_lossy(&chunk[..n])
+            ),
+            Err(e) => assert!(
+                matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ),
+                "{e}"
+            ),
+        }
     }
 
     fn send_together(&mut self, texts: &[&str]) {
@@ -709,6 +732,7 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
                 state: CombatState::InCombat,
                 aggressive: true,
                 auras: Auras::default(),
+                counter: None,
             },
             Monster {
                 id: MonMapId(2),
@@ -719,6 +743,7 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
                 state: CombatState::Dead,
                 aggressive: false,
                 auras: Auras::default(),
+                counter: None,
             },
         ]
     );
@@ -3181,6 +3206,198 @@ fn walks_within_a_cell_and_tracks_where_players_stand() {
     session.move_to_cell("r2", "Left").wait().unwrap();
     let room = session.snapshot().room.clone().unwrap();
     assert_eq!((room.x, room.y), (0, 0));
+    session.logout();
+    harness.finish();
+}
+
+fn counter_starts(monster: i64) -> [String; 2] {
+    let at = format!("m:{monster}");
+    [
+        json_message(json!({"cmd": "ct", "anims": [{"cInf": at, "tInf": "p:7",
+            "msg": "Mosquito prepares a counter attack!!", "animStr": "Charge"}]})),
+        json_message(json!({"cmd": "ct", "a": [{"cmd": "aura++", "tInf": at,
+            "cInf": at, "auras": [{"nam": "Counter Attack", "dur": 6, "isNew": true}]}]})),
+    ]
+}
+
+fn counter_ends(monster: i64) -> String {
+    json_message(json!({"cmd": "ct", "a": [{"cmd": "aura--",
+        "tInf": format!("m:{monster}"), "aura": {"nam": "Counter Attack"}}]}))
+}
+
+fn wait_for_counter(session: &Handle, monster: i64) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let world = session.snapshot();
+        let room = world.room.as_ref().unwrap();
+        if room
+            .monsters
+            .iter()
+            .any(|m| m.id == MonMapId(monster) && m.countering(Instant::now()))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the counter never started: {:?}",
+            room.monsters
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn attacks_through_counters_unless_asked_to_hold() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        for message in counter_starts(1) {
+            peer.send(&message);
+        }
+        peer.expect(&gar(0, "a1", &[ONE, TWO]));
+        peer.answer(0, 1);
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    wait_for_farm(&harness);
+    wait_for_counter(session, 1);
+    session.use_skill("a1", Some(MonMapId(1))).wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn holds_a_skill_that_would_hit_a_countering_monster() {
+    let (countering, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        for message in counter_starts(2) {
+            peer.send(&message);
+        }
+        next.recv().unwrap();
+        peer.expect_silence(Duration::from_millis(800));
+        let ended = Instant::now();
+        peer.send(&counter_ends(2));
+        let cast = peer.expect_at(&gar(0, "a1", &[ONE, TWO]));
+        assert!(cast >= ended);
+        peer.answer(0, 1);
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.set_counter_hold(CounterHold::Attacks);
+    wait_for_farm(&harness);
+    wait_for_counter(session, 2);
+    let cast = session.use_skill("a1", Some(MonMapId(1)));
+    countering.send(()).unwrap();
+    cast.wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn holds_the_auto_attack_on_a_countering_monster_when_asked() {
+    let (countering, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        for message in counter_starts(1) {
+            peer.send(&message);
+        }
+        next.recv().unwrap();
+        peer.expect_silence(Duration::from_millis(800));
+        let ended = Instant::now();
+        peer.send(&counter_ends(1));
+        let swing = peer.expect_at(&gar(0, "aa", &[ONE]));
+        assert!(swing >= ended);
+        peer.answer(0, 1);
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.set_counter_hold(CounterHold::Attacks);
+    wait_for_farm(&harness);
+    wait_for_counter(session, 1);
+    session.attack(MonMapId(1)).wait().unwrap();
+    countering.send(()).unwrap();
+    thread::sleep(Duration::from_millis(1200));
+    session.logout();
+    harness.finish();
+}
+
+fn kill_through_a_counter(hold: CounterHold, monster: i64, during: fn(&mut Peer) -> u8) {
+    let (countering, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        for message in counter_starts(monster) {
+            peer.send(&message);
+        }
+        next.recv().unwrap();
+        let act = during(&mut peer);
+        peer.expect_silence(Duration::from_millis(800));
+        let ended = Instant::now();
+        peer.send(&counter_ends(monster));
+        let strike = peer.expect_at(&gar(act, "a1", &[ONE, TWO]));
+        assert!(strike >= ended);
+        peer.answer(act, 1);
+        peer.send(&json_message(
+            json!({"cmd": "ct", "m": {"1": {"intHP": 0, "intState": 0}}}),
+        ));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.set_counter_hold(hold);
+    wait_for_farm(&harness);
+    wait_for_counter(session, monster);
+    let kill = session.kill(MonMapId(1));
+    countering.send(()).unwrap();
+    kill.wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn holding_attacks_keeps_casting_self_skills_during_a_counter() {
+    kill_through_a_counter(CounterHold::Attacks, 1, |peer| {
+        peer.expect(&gar(0, "a2", &[Aim::Player(EntityId(7))]));
+        peer.answer(0, 1);
+        1
+    });
+}
+
+#[test]
+fn holding_everything_casts_nothing_while_a_monster_in_the_cell_counters() {
+    kill_through_a_counter(CounterHold::All, 2, |_| 0);
+}
+
+#[test]
+fn a_counter_keeps_the_rotation_in_order() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        let usable = FARM_SKILLS.replace(r#""mp": 999"#, r#""mp": 0"#).replace(
+            r#""tgt": "h", "tgtMax": 1, "isOK": false"#,
+            r#""tgt": "s", "tgtMax": 1"#,
+        );
+        peer.send(&json_message(serde_json::from_str(&usable).unwrap()));
+        peer.expect(&gar(0, "a1", &[ONE, TWO]));
+        peer.answer(0, 1);
+        let [warning, aura] = counter_starts(1);
+        peer.send_together(&[&warning, &aura]);
+        peer.expect(&gar(1, "a2", &[Aim::Player(EntityId(7))]));
+        peer.answer(1, 1);
+        peer.send(&json_message(
+            json!({"cmd": "ct", "m": {"1": {"intHP": 0, "intState": 0}}}),
+        ));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.set_counter_hold(CounterHold::Attacks);
+    wait_for_farm(&harness);
+    while session.snapshot().me.as_ref().unwrap().skills[4].target != SkillTarget::Myself {
+        thread::sleep(Duration::from_millis(5));
+    }
+    session.kill(MonMapId(1)).wait().unwrap();
     session.logout();
     harness.finish();
 }
