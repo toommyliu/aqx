@@ -14,14 +14,19 @@ const ALWAYS_EQUIPPABLE: [&str; 4] = ["mi", "co", "pe", "am"];
 
 pub(super) enum EquipStage {
     Waiting { wake: Option<Instant> },
-    Sent { deadline: Instant },
+    Sent { deadline: Instant, awaits: Ack },
+}
+
+pub(super) enum Ack {
+    Worn,
+    SlotFilled,
 }
 
 impl EquipStage {
     pub(super) fn deadline(&self) -> Option<Instant> {
         match self {
             EquipStage::Waiting { wake } => *wake,
-            EquipStage::Sent { deadline } => Some(*deadline),
+            EquipStage::Sent { deadline, .. } => Some(*deadline),
         }
     }
 }
@@ -52,7 +57,7 @@ impl Session {
         if let Err(e) = self.ensure_ready() {
             return Poll::Ready(Err(e));
         }
-        if let EquipStage::Sent { deadline } = *stage {
+        if let EquipStage::Sent { deadline, .. } = *stage {
             return if now >= deadline {
                 Poll::Ready(Err(ActionError::NoReply))
             } else {
@@ -66,7 +71,7 @@ impl Session {
         let Some(area) = self.room.as_ref().map(|room| room.area) else {
             return Poll::Ready(Err(ActionError::NotReady));
         };
-        let packet = match plan {
+        let (packet, awaits) = match plan {
             Plan::Done => return Poll::Ready(Ok(())),
             Plan::ClearSlot => {
                 if let Some(me) = &mut self.character {
@@ -75,7 +80,9 @@ impl Session {
                 self.inventory.set_consumable(None);
                 return Poll::Ready(Ok(()));
             }
-            Plan::Consumable { link, meta } => packet::geia(area, &link, &meta, item),
+            Plan::Consumable { link, meta } => {
+                (packet::geia(area, &link, &meta, item), Ack::SlotFilled)
+            }
             Plan::Gear => {
                 let limit = if on {
                     Limit::EquipItem
@@ -87,16 +94,18 @@ impl Session {
                     return Poll::Pending;
                 }
                 self.limits.used(limit, now);
-                if on {
+                let packet = if on {
                     packet::equip_item(area, item)
                 } else {
                     packet::unequip_item(area, item)
-                }
+                };
+                (packet, Ack::Worn)
             }
         };
         self.send(&packet);
         *stage = EquipStage::Sent {
             deadline: now + REPLY_TIMEOUT,
+            awaits,
         };
         Poll::Pending
     }
@@ -173,8 +182,11 @@ impl Session {
     pub(super) fn on_slot_filled(&mut self, filled: SlotFilled, now: Instant) {
         let Some(Op::Equip {
             item,
-            on: true,
-            stage: EquipStage::Sent { .. },
+            stage:
+                EquipStage::Sent {
+                    awaits: Ack::SlotFilled,
+                    ..
+                },
             ..
         }) = self.current
         else {

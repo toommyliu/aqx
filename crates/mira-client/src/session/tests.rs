@@ -2893,6 +2893,9 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
         );
         let worn = |cmd: &str, id: i64| json_message(json!({"cmd": cmd, "uid": 7, "ItemID": id}));
         let first = peer.expect_at(&packet::equip_item(AreaId(42), ItemId(2)));
+        peer.send(&json_message(
+            json!({"cmd": "seia", "iRes": 1, "o": {"cd": 60000, "tgt": "s"}}),
+        ));
         peer.send(&worn("equipItem", 2));
         peer.expect(&packet::unequip_item(AreaId(42), ItemId(3)));
         peer.send(&worn("unequipItem", 3));
@@ -2940,6 +2943,7 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
         .map(|i| i.id)
         .collect();
     assert_eq!(worn, [ItemId(2), ItemId(6)]);
+    assert_eq!(world.me.as_ref().unwrap().item_slot, None);
     while !session
         .snapshot()
         .inventory
