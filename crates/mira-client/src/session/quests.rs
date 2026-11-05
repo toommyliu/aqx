@@ -214,10 +214,6 @@ impl Session {
         }
     }
 
-    fn cooling(&self, limit: Limit, now: Instant) -> Option<Instant> {
-        self.limits.until(limit).filter(|until| now < *until)
-    }
-
     fn quest(&self, id: QuestId) -> Result<&Quest, ActionError> {
         self.quests
             .get(&id)

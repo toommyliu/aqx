@@ -644,13 +644,13 @@ impl Session {
             },
             Op::Join {
                 reply,
-                stage: JoinStage::Cooling { map, until },
+                stage: JoinStage::Cooling { map, .. },
             } => {
                 if let Err(e) = self.ensure_ready() {
                     self.replies.push((reply, Err(e)));
                     return None;
                 }
-                if now < until {
+                if let Some(until) = self.cooling(Limit::Transfer, now) {
                     return Some(Op::Join {
                         reply,
                         stage: JoinStage::Cooling { map, until },
@@ -852,8 +852,13 @@ impl Session {
         if self.room.as_ref().is_some_and(|room| room.is_in(&map)) {
             return Ok(None);
         }
-        let until = self.limits.until(Limit::Transfer).unwrap_or(now);
+        let until = self.cooling(Limit::Transfer, now).unwrap_or(now);
         Ok(Some(JoinStage::Cooling { map, until }))
+    }
+
+    fn cooling(&self, limit: Limit, now: Instant) -> Option<Instant> {
+        let until = self.limits.until(limit)? + self.combat.backoff(now);
+        (now < until).then_some(until)
     }
 
     fn move_to_cell(&mut self, cell: &str, pad: &str) -> Result<(), ActionError> {

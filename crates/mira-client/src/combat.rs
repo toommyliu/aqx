@@ -19,7 +19,7 @@ const AUTO_GAP: Duration = Duration::from_millis(300);
 const MIN_ONE_WAY: Duration = Duration::from_millis(20);
 const AUTO_SLACK: Duration = Duration::from_millis(100);
 const DISABLED_RETRY: Duration = Duration::from_millis(500);
-const BACKOFF_STEP: Duration = Duration::from_millis(300);
+pub(crate) const BACKOFF_STEP: Duration = Duration::from_millis(300);
 const MAX_BACKOFF: Duration = Duration::from_millis(2400);
 const BACKOFF_QUIET: Duration = Duration::from_secs(60);
 const LAST_ACT: u8 = 250;
@@ -154,6 +154,10 @@ impl Combat {
             Some(at) if at > now => Gate::At(at),
             _ => Gate::Open,
         }
+    }
+
+    pub(crate) fn backoff(&self, now: Instant) -> Duration {
+        self.backoff.now(now)
     }
 
     fn gap(&self, gap: Duration, now: Instant) -> Option<Instant> {

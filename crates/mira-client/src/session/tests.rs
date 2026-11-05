@@ -471,15 +471,18 @@ fn the_snapshot_shows_a_joined_room_before_its_event_arrives() {
 }
 
 #[test]
-fn a_refused_join_reports_the_warning_and_the_next_join_waits_out_the_cooldown() {
+fn a_refused_join_reports_the_warning_and_the_next_join_waits_out_the_cooldown_and_backoff() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
         peer.expect(&packet::transfer("player1", "doomvault"));
         let refused_at = Instant::now();
         peer.send("%xt%warning%-1%Cannot join that map.%");
+        thread::sleep(Duration::from_millis(300));
+        peer.send("%xt%warning%-1%Please slow down.%");
         peer.expect(&packet::transfer("player1", "yulgar"));
-        assert!(refused_at.elapsed() >= Limit::Transfer.gap() - Duration::from_millis(100));
+        let gap = Limit::Transfer.gap() + combat::BACKOFF_STEP;
+        assert!(refused_at.elapsed() >= gap - Duration::from_millis(100));
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
         peer.expect_logout();
@@ -2081,7 +2084,7 @@ fn quest_actions_make_the_clients_checks_before_sending() {
         let dropped = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(45), QuestId(46)]));
         peer.send("%xt%warning%-1%Please slow down. Last action was too soon!%");
         let resent = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(45), QuestId(46)]));
-        assert!(resent - dropped >= Limit::LoadQuests.gap() - SLACK);
+        assert!(resent - dropped >= Limit::LoadQuests.gap() + combat::BACKOFF_STEP - SLACK);
         peer.send(&json_message(json!({"cmd": "getQuests", "quests": {
             "45": {"QuestID": 45, "sName": "Real"},
         }})));
