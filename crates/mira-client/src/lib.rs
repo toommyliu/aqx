@@ -5,6 +5,7 @@ mod session;
 pub use api::{Account, ApiError, DeviceId, Server};
 pub use event::{Direction, Event, NoticeKind};
 pub use session::{
-    ActionError, CombatState, DEFAULT_CLIENT_VERSION, Disconnect, DropOffer, Handle, Item, Load,
-    Me, Monster, Options, Pending, Phase, Player, Room, Skill, SkillTarget, TempItem, World, spawn,
+    ActionError, CombatState, DEFAULT_CLIENT_VERSION, Disconnect, DropOffer, Faction, Handle, Item,
+    Load, Me, Monster, Options, Pending, Phase, Player, Room, Skill, SkillTarget, TempItem, World,
+    spawn,
 };

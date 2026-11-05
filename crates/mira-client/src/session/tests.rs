@@ -103,8 +103,11 @@ impl Peer {
             {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "mp": -10, "tgt": "h", "tgtMax": 1},
         ]}})));
         self.send(&json_message(json!({"cmd": "stu", "sta": {"$tha": 0.05}})));
-        let inventory =
-            json_message(json!({"cmd": "loadInventoryBig", "items": items, "factions": []}));
+        let inventory = json_message(
+            json!({"cmd": "loadInventoryBig", "items": items, "factions": [
+                {"FactionID": "46", "CharFactionID": "900", "sName": "Good", "iRep": "1000"},
+            ]}),
+        );
         self.send_bytes(&compress(&inventory));
     }
 }
@@ -945,6 +948,51 @@ fn tracks_gold_exp_levels_and_drops() {
             coins: false,
             member: false,
         }]
+    );
+}
+
+#[test]
+fn tracks_faction_reputation_and_rank() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.send(&json_message(json!({
+            "cmd": "addGoldExp", "intGold": 0, "intExp": 0, "iRep": 2600, "bonusRep": 100,
+            "FactionID": 46, "typ": "q",
+        })));
+        peer.send(&json_message(json!({"cmd": "addFaction", "faction": {
+            "FactionID": "23", "CharFactionID": "901", "sName": "Evil", "iRep": "0",
+        }})));
+        peer.send(&json_message(
+            json!({"cmd": "addGoldExp", "intGold": 5, "intExp": 5, "iRep": 50, "FactionID": 99}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "addGoldExp", "intGold": 5, "intExp": 5, "typ": "m", "id": 1}),
+        ));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
+        "{events:?}"
+    );
+    assert_eq!(
+        session.snapshot().factions,
+        [
+            Faction {
+                id: FactionId(46),
+                name: "Good".into(),
+                rep: 3600,
+                rank: 3,
+            },
+            Faction {
+                id: FactionId(23),
+                name: "Evil".into(),
+                rep: 0,
+                rank: 1,
+            },
+        ]
     );
 }
 
