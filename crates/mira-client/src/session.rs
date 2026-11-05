@@ -23,7 +23,7 @@ use crate::aura::{self, AuraChange, Target};
 use crate::combat::{self, AUTO_ATTACK, ActionResult, Combat, Gate, ITEM_SLOT, Outcome};
 use crate::event::{Direction, Event, NoticeKind};
 use crate::faction::{self, AddedFaction, Faction, FactionData};
-use crate::inventory::{AddedItems, Inventory, LoadInventory, Picked, Sold, TurnIn, Worn};
+use crate::inventory::{AddedItems, Inventory, LoadInventory, Picked, Pool, Sold, TurnIn, Worn};
 use crate::player::{
     BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, Skill, SkillList, SkillTarget,
     Stats,
@@ -47,6 +47,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(3);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const CELL_PAD: &str = "Left";
 const VERSION_RETRIES: usize = 3;
 const REDACTED_KEYS: [&str; 2] = ["strEmail", "strIP"];
@@ -200,6 +201,7 @@ enum Action {
     },
     ExitCombat,
     Quest(QuestAction),
+    PickDrop(ItemId),
 }
 
 enum Op {
@@ -233,6 +235,11 @@ enum Op {
     Quest {
         reply: Reply,
         call: QuestCall,
+    },
+    Pick {
+        reply: Reply,
+        item: ItemId,
+        deadline: Instant,
     },
 }
 
@@ -304,6 +311,10 @@ impl Handle {
 
     pub fn accept_quest(&self, id: QuestId) -> Pending {
         self.act(Action::Quest(QuestAction::Accept(id)))
+    }
+
+    pub fn pick_drop(&self, item: ItemId) -> Pending {
+        self.act(Action::PickDrop(item))
     }
 
     pub fn complete_quest(&self, id: QuestId, reward: Option<ItemId>, times: u32) -> Pending {
@@ -556,6 +567,16 @@ impl Session {
                 Ok(None) => Ok(()),
                 Err(e) => Err(e),
             },
+            Action::PickDrop(item) => match self.start_pick(item, now) {
+                Ok(deadline) => {
+                    return Some(Op::Pick {
+                        reply,
+                        item,
+                        deadline,
+                    });
+                }
+                Err(e) => Err(e),
+            },
             Action::Quest(action) => {
                 let call = self.start_quest(action);
                 return self.step(Op::Quest { reply, call }, now);
@@ -733,6 +754,25 @@ impl Session {
                 self.replies.push((reply, result));
                 None
             }
+            Op::Pick {
+                reply,
+                item,
+                deadline,
+            } => {
+                let result = match self.ensure_ready() {
+                    Err(e) => Err(e),
+                    Ok(()) if now >= deadline => Err(ActionError::NoReply),
+                    Ok(()) => {
+                        return Some(Op::Pick {
+                            reply,
+                            item,
+                            deadline,
+                        });
+                    }
+                };
+                self.replies.push((reply, result));
+                None
+            }
             Op::Quest { reply, mut call } => match self.step_quest(&mut call, now) {
                 task::Poll::Pending => Some(Op::Quest { reply, call }),
                 task::Poll::Ready(result) => {
@@ -747,6 +787,7 @@ impl Session {
         let op = match &self.current {
             Some(Op::Login { deadline, .. })
             | Some(Op::Leave { deadline, .. })
+            | Some(Op::Pick { deadline, .. })
             | Some(Op::Join {
                 stage: JoinStage::Sent { deadline, .. },
                 ..
@@ -1280,9 +1321,12 @@ impl Session {
                 }
             }
             "getDrop" => {
-                if let Some(event) = self.inventory.pick(read::<Picked>(&json)?) {
+                let picked: Picked = read(&json)?;
+                let (id, ok) = (picked.id, picked.ok);
+                if let Some(event) = self.inventory.pick(picked) {
                     self.emit(event);
                 }
+                self.picked(id, ok);
             }
             "turnIn" => {
                 for event in self.inventory.turn_in(&read::<TurnIn>(&json)?) {
@@ -1469,6 +1513,46 @@ impl Session {
         let target = self.pick_target(Some(target))?;
         self.combat.engage(target, now);
         Ok(())
+    }
+
+    fn start_pick(&mut self, item: ItemId, now: Instant) -> Result<Instant, ActionError> {
+        self.ensure_ready()?;
+        let (Some(me), Some(room)) = (&self.character, &self.room) else {
+            return Err(ActionError::NotReady);
+        };
+        let Some(offer) = self.inventory.drops.iter().find(|d| d.id == item) else {
+            return Err(ActionError::NoTarget(format!("item {item} isn't on offer")));
+        };
+        if self.inventory.full_for(offer, me.bag_slots) {
+            let pool = match offer.pool() {
+                Pool::Misc => "misc inventory",
+                _ => "inventory",
+            };
+            return Err(ActionError::Unusable(format!(
+                "the {pool} has no room for {}",
+                offer.name
+            )));
+        }
+        let area = room.area;
+        self.send(&packet::get_drop(area, item));
+        Ok(now + REPLY_TIMEOUT)
+    }
+
+    fn picked(&mut self, id: ItemId, ok: bool) {
+        if !matches!(&self.current, Some(Op::Pick { item, .. }) if *item == id) {
+            return;
+        }
+        let Some(Op::Pick { reply, .. }) = self.current.take() else {
+            return;
+        };
+        let result = if ok {
+            Ok(())
+        } else {
+            Err(ActionError::Refused(
+                "the item couldn't be added; the inventory may be full or already hold it".into(),
+            ))
+        };
+        self.replies.push((reply, result));
     }
 
     fn start_leaving(&mut self, now: Instant) -> Result<Option<(String, Instant)>, ActionError> {

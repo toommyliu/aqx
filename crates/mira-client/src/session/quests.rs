@@ -1,14 +1,13 @@
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use mira_protocol::{ItemId, QuestId, packet};
 use serde::Deserialize;
 
-use super::{ActionError, Limit, Op, Session};
+use super::{ActionError, Limit, Op, REPLY_TIMEOUT, Session};
 use crate::quest::{self, Held, Quest, QuestStatus, RewardKind};
 
 const QUESTS_PER_REQUEST: usize = 14;
-const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const LOAD_TRIES: u32 = 5;
 
 pub(super) enum QuestAction {

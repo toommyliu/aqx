@@ -38,11 +38,45 @@ pub struct Item {
     pub coins: bool,
     #[serde(rename(deserialize = "bUpg"), default, deserialize_with = "flex::bool")]
     pub member: bool,
+    #[serde(rename(deserialize = "sMeta"), default)]
+    pub meta: String,
+    #[serde(
+        rename(deserialize = "bHouse"),
+        default,
+        deserialize_with = "flex::bool"
+    )]
+    pub house: bool,
 }
 
 impl Item {
     pub fn class_rank(&self) -> Option<u32> {
         (self.kind == "Class").then(|| rank(self.qty))
+    }
+
+    pub fn pool(&self) -> Pool {
+        pool(&self.kind, &self.meta, self.house)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Pool {
+    Bag,
+    Misc,
+    Class,
+    House,
+}
+
+fn pool(kind: &str, meta: &str, house: bool) -> Pool {
+    let meta = meta.trim();
+    let numeric_meta = !meta.is_empty() && meta.bytes().all(|b| b.is_ascii_digit());
+    match kind {
+        "Class" => Pool::Class,
+        "House" | "Wall Item" | "Floor Item" | "Guild" => Pool::House,
+        _ if house => Pool::House,
+        "Item" if numeric_meta => Pool::Bag,
+        "Item" | "Note" | "Quest Item" | "Resource" => Pool::Misc,
+        _ => Pool::Bag,
     }
 }
 
@@ -64,6 +98,14 @@ pub struct DropOffer {
     pub slot: String,
     pub coins: bool,
     pub member: bool,
+    pub meta: String,
+    pub house: bool,
+}
+
+impl DropOffer {
+    pub fn pool(&self) -> Pool {
+        pool(&self.kind, &self.meta, self.house)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -116,6 +158,8 @@ impl Inventory {
                             equipped: false,
                             coins: added.coins,
                             member: added.member,
+                            meta: added.meta,
+                            house: added.house,
                         });
                         (added.name, qty, Place::Inventory)
                     }
@@ -149,6 +193,8 @@ impl Inventory {
                 slot: offered.slot,
                 coins: offered.coins,
                 member: offered.member,
+                meta: offered.meta,
+                house: offered.house,
             }),
         }
         Some(event)
@@ -183,6 +229,8 @@ impl Inventory {
                 equipped: false,
                 coins: offer.coins,
                 member: offer.member,
+                meta: offer.meta,
+                house: offer.house,
             });
             (offer.name, qty)
         } else {
@@ -219,6 +267,20 @@ impl Inventory {
             }
         }
         events
+    }
+
+    pub(crate) fn full_for(&self, offer: &DropOffer, slots: u32) -> bool {
+        let owned = self.items.iter().find(|i| i.id == offer.id);
+        if owned.is_some_and(|i| i.qty < i.max_stack) {
+            return false;
+        }
+        let used = |pool| self.items.iter().filter(|i| i.pool() == pool).count();
+        let slots = slots as usize;
+        match offer.pool() {
+            Pool::Class | Pool::House => false,
+            Pool::Misc => owned.is_none() && used(Pool::Misc) >= slots,
+            Pool::Bag => used(Pool::Bag) >= slots,
+        }
     }
 
     pub(crate) fn sell(&mut self, sold: &Sold) -> Option<Event> {
@@ -302,6 +364,10 @@ pub(crate) struct AddedItem {
     coins: bool,
     #[serde(rename = "bUpg", default, deserialize_with = "flex::bool")]
     member: bool,
+    #[serde(rename = "sMeta", default)]
+    meta: String,
+    #[serde(rename = "bHouse", default, deserialize_with = "flex::bool")]
+    house: bool,
     #[serde(rename = "bBank", default, deserialize_with = "flex::bool")]
     bank: bool,
     #[serde(rename = "bTemp", default, deserialize_with = "flex::bool")]
@@ -329,9 +395,9 @@ pub(crate) struct Sold {
 #[derive(Deserialize)]
 pub(crate) struct Picked {
     #[serde(rename = "bSuccess", deserialize_with = "flex::bool")]
-    ok: bool,
+    pub(crate) ok: bool,
     #[serde(rename = "ItemID")]
-    id: ItemId,
+    pub(crate) id: ItemId,
     #[serde(rename = "CharItemID", default)]
     char_item_id: Option<CharItemId>,
     #[serde(rename = "iQty", default, deserialize_with = "flex::int")]

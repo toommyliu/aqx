@@ -20,6 +20,7 @@ pub struct Me {
     pub member: bool,
     pub class_name: String,
     pub class_points: u32,
+    pub bag_slots: u32,
     pub boosts: Boosts,
     pub hp: u32,
     pub max_hp: u32,
@@ -61,6 +62,7 @@ impl Me {
         self.coins = data.coins;
         self.member = data.member_days >= 0;
         self.class_points = data.class_points;
+        self.bag_slots = data.bag_slots;
         self.exp = data.exp;
         self.exp_to_level = data.exp_to_level;
         self.quests = QuestProgress::from_user_data(&data.rest);
@@ -236,6 +238,8 @@ pub(crate) struct UserData {
     member_days: i64,
     #[serde(rename = "iCP", default, deserialize_with = "flex::int")]
     class_points: u32,
+    #[serde(rename = "iBagSlots", default, deserialize_with = "flex::int")]
+    bag_slots: u32,
     #[serde(rename = "iBoostXP", default, deserialize_with = "flex::int")]
     boost_xp: u64,
     #[serde(rename = "iBoostG", default, deserialize_with = "flex::int")]

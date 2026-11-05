@@ -13,8 +13,8 @@ use mira_client::{
 
 const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str = "join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], \
-     kill <monster>, stop, who, mons [all], me, inv, drops, reps, quests, load <quest>..., \
-     accept <quest>, complete <quest> [times] [reward], logout";
+     kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
+     load <quest>..., accept <quest>, complete <quest> [times] [reward], logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -33,9 +33,9 @@ enum Command {
     },
     /// Log in, then print what the account does and run commands read from stdin
     /// (join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop,
-    /// who, mons [all], me, inv, drops, reps, quests, load <quest>..., accept <quest>,
-    /// complete <quest> [times] [reward], logout) until it logs out. A monster is its #id or its
-    /// name. Quests and rewards are ids.
+    /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
+    /// complete <quest> [times] [reward], logout) until it logs out. A monster or a dropped item is
+    /// its #id or its name. Quests and rewards are ids.
     Login {
         #[arg(long)]
         user: String,
@@ -309,9 +309,23 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                 println!("no drops");
             } else {
                 for drop in &world.drops {
-                    println!("  {} x{}", drop.name, drop.qty);
+                    println!("  #{} {} x{}", drop.id, drop.name, drop.qty);
                 }
             }
+        }
+        ["pick", item @ ..] if !item.is_empty() => {
+            let wanted = item.join(" ");
+            let id = match wanted.trim_start_matches('#').parse() {
+                Ok(id) => ItemId(id),
+                Err(_) => session
+                    .snapshot()
+                    .drops
+                    .iter()
+                    .find(|d| d.name.eq_ignore_ascii_case(&wanted))
+                    .map(|d| d.id)
+                    .ok_or_else(|| CommandError::Usage(format!("no {wanted} on offer")))?,
+            };
+            session.pick_drop(id).wait()?;
         }
         ["me"] => match &session.snapshot().me {
             Some(me) if json => println!("{}", serde_json::to_string(me).expect("me serializes")),

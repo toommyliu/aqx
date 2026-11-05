@@ -103,6 +103,10 @@ pub fn try_quest_complete(room: AreaId, id: QuestId, reward: Option<ItemId>, tim
     )
 }
 
+pub fn get_drop(room: AreaId, item: ItemId) -> String {
+    zm("getDrop", room, &[item])
+}
+
 pub fn logout() -> String {
     zm("cmd", 1, &["logout"])
 }
@@ -165,6 +169,7 @@ mod tests {
             "%xt%zm%getQuests%42%1%2%"
         );
         assert_eq!(accept_quest(room, QuestId(3)), "%xt%zm%acceptQuest%42%3%");
+        assert_eq!(get_drop(room, ItemId(1027)), "%xt%zm%getDrop%42%1027%");
         assert_eq!(
             try_quest_complete(room, QuestId(3), None, 1),
             "%xt%zm%tryQuestComplete%42%3%-1%false%1%wvz%"

@@ -107,7 +107,7 @@ impl Peer {
             "data": {
                 "intLevel": "50", "intGold": 1200, "intCoins": 30, "intExp": 400, "intExpToLevel": 2000,
                 "strQuests": format!("00A{}", "0".repeat(97)), "strQuests2": "1".repeat(60),
-                "iUpgDays": -1, "iCP": 899, "iBoostRep": 120,
+                "iUpgDays": -1, "iCP": 899, "iBoostRep": 120, "iBagSlots": 2,
                 "ia0": 5, "iw0": "8", "im0": 2.147483648E9,
                 "strEmail": "player1@example.com", "strIP": "192.0.2.1",
             },
@@ -752,6 +752,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
             member: false,
             class_name: String::new(),
             class_points: 899,
+            bag_slots: 2,
             boosts: session.snapshot().me.as_ref().unwrap().boosts.clone(),
             hp: 700,
             max_hp: 1000,
@@ -850,6 +851,8 @@ fn tracks_inventory_and_temp_items() {
             equipped,
             coins: false,
             member: false,
+            meta: String::new(),
+            house: false,
         };
     assert_eq!(
         *world.inventory,
@@ -970,6 +973,8 @@ fn tracks_gold_exp_levels_and_drops() {
             slot: "None".into(),
             coins: false,
             member: false,
+            meta: String::new(),
+            house: false,
         }]
     );
 }
@@ -2111,6 +2116,69 @@ fn quest_actions_make_the_clients_checks_before_sending() {
     assert!(session.snapshot().quests.contains_key(&QuestId(45)));
     let echoed = session.complete_quest(QuestId(44), None, 1).wait();
     assert!(matches!(echoed, Err(ActionError::Refused(_))));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn picks_up_drops_while_the_bag_has_room() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        let offer = |id: i64, name: &str, kind: &str, extra: Value| {
+            let mut item =
+                json!({"ItemID": id, "sName": name, "sType": kind, "iStk": 1, "iQty": 1});
+            item.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            json_message(json!({"cmd": "dropItem", "items": {id.to_string(): item}}))
+        };
+        peer.send(&offer(1027, "Twilly Twig", "Staff", json!({})));
+        peer.send(&offer(1028, "Spare Axe", "Axe", json!({})));
+        peer.send(&offer(1029, "Gem", "Item", json!({"iStk": 10})));
+        peer.send(&offer(1030, "Scroll", "Item", json!({"sMeta": " 12 "})));
+        peer.send(&offer(1031, "Ore", "Resource", json!({})));
+        peer.send(&offer(1032, "Warrior", "Class", json!({})));
+        peer.expect(&packet::get_drop(AreaId(42), ItemId(1027)));
+        peer.send(&json_message(json!({
+            "cmd": "getDrop", "bSuccess": 1, "ItemID": 1027, "CharItemID": 7027,
+            "iQty": 1, "iQtyNow": 1, "bBank": 0,
+        })));
+        peer.expect(&packet::get_drop(AreaId(42), ItemId(1029)));
+        peer.send(&json_message(json!({
+            "cmd": "getDrop", "bSuccess": 1, "ItemID": 1029, "CharItemID": 7029, "iQty": 1,
+        })));
+        peer.expect(&packet::get_drop(AreaId(42), ItemId(1032)));
+        peer.send(&json_message(
+            json!({"cmd": "getDrop", "bSuccess": 0, "ItemID": 1032}),
+        ));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    while session.snapshot().drops.len() < 6 {
+        thread::sleep(Duration::from_millis(5));
+    }
+    session.pick_drop(ItemId(1027)).wait().unwrap();
+    let world = session.snapshot();
+    assert!(world.inventory.iter().any(|i| i.id == ItemId(1027)));
+    assert!(world.drops.iter().all(|d| d.id != ItemId(1027)));
+    let full = |pending: Pending| matches!(pending.wait(), Err(ActionError::Unusable(_)));
+    assert!(full(session.pick_drop(ItemId(1028))));
+    assert!(full(session.pick_drop(ItemId(1030))));
+    session.pick_drop(ItemId(1029)).wait().unwrap();
+    let missing = session.pick_drop(ItemId(9999)).wait();
+    assert!(matches!(missing, Err(ActionError::NoTarget(_))));
+    assert!(full(session.pick_drop(ItemId(1031))));
+    let refused = session.pick_drop(ItemId(1032)).wait();
+    assert!(matches!(refused, Err(ActionError::Refused(_))));
+    assert!(
+        session
+            .snapshot()
+            .drops
+            .iter()
+            .any(|d| d.id == ItemId(1032))
+    );
     session.logout();
     harness.finish();
 }
