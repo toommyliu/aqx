@@ -59,6 +59,7 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
 const CELL_PAD: &str = "Left";
 const VERSION_RETRIES: usize = 3;
 const WALK_SPEED: u32 = 8;
+const AGGRO_EVERY: Duration = Duration::from_millis(500);
 const STAGE_WIDTH: i32 = 960;
 const STAGE_HEIGHT: i32 = 500;
 const REDACTED_KEYS: [&str; 2] = ["strEmail", "strIP"];
@@ -220,6 +221,7 @@ pub enum CounterHold {
 enum Request {
     Act(Action, Reply),
     CounterHold(CounterHold),
+    Aggro(bool),
     Logout,
 }
 
@@ -506,6 +508,10 @@ impl Handle {
         self.request(Request::CounterHold(hold));
     }
 
+    pub fn set_aggro(&self, on: bool) {
+        self.request(Request::Aggro(on));
+    }
+
     pub fn logout(&self) {
         self.request(Request::Logout);
     }
@@ -604,6 +610,7 @@ pub fn spawn(
         shop_maps: HashMap::new(),
         requested_spot: None,
         counter_hold: CounterHold::Off,
+        aggro: None,
         combat: Combat::default(),
         closing: None,
         logout_deadline: None,
@@ -658,6 +665,7 @@ struct Session {
     shop_maps: HashMap<ShopId, Vec<String>>,
     requested_spot: Option<Spot>,
     counter_hold: CounterHold,
+    aggro: Option<Instant>,
     combat: Combat,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -726,6 +734,7 @@ impl Session {
             match request {
                 Request::Logout => self.begin_logout(),
                 Request::CounterHold(hold) => self.counter_hold = hold,
+                Request::Aggro(on) => self.aggro = on.then(Instant::now),
                 Request::Act(Action::ExitCombat, reply) => {
                     if matches!(self.current, Some(Op::Kill { .. } | Op::Cast { .. }))
                         && let Some(Op::Kill { reply, .. } | Op::Cast { reply, .. }) =
@@ -762,6 +771,41 @@ impl Session {
         }
         self.run_ops(now);
         self.tick_combat(now);
+        self.tick_aggro(now);
+    }
+
+    fn tick_aggro(&mut self, now: Instant) {
+        if self.aggro.is_none_or(|due| now < due) {
+            return;
+        }
+        self.aggro = Some(now + AGGRO_EVERY);
+        let joining = matches!(
+            self.current,
+            Some(Op::Join {
+                stage: JoinStage::Sent { .. },
+                ..
+            })
+        );
+        let (Some(me), Some(room)) = (&self.character, &self.room) else {
+            return;
+        };
+        if joining
+            || me.state == CombatState::Dead
+            || self.ensure_ready().is_err()
+            || self.class_skill_due(now).is_some()
+        {
+            return;
+        }
+        let ids: Vec<MonMapId> = room
+            .monsters
+            .iter()
+            .filter(|m| m.cell == room.cell && m.alive())
+            .map(|m| m.id)
+            .collect();
+        if !ids.is_empty() {
+            let area = room.area;
+            self.send(&packet::aggro_mon(area, &ids));
+        }
     }
 
     fn run_ops(&mut self, now: Instant) {
@@ -1312,6 +1356,7 @@ impl Session {
         op.into_iter()
             .chain(counters)
             .chain(self.logout_deadline)
+            .chain(self.aggro)
             .chain(self.ensure_ready().ok().and_then(|()| {
                 let now = Instant::now();
                 let auto_held = self

@@ -3401,3 +3401,92 @@ fn a_counter_keeps_the_rotation_in_order() {
     session.logout();
     harness.finish();
 }
+
+#[test]
+fn repeats_aggro_on_the_cells_live_monsters_when_asked() {
+    let (dead, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        let both = packet::aggro_mon(AreaId(43), &[MonMapId(1), MonMapId(2)]);
+        let first = peer.expect_at(&both);
+        let second = peer.expect_at(&both);
+        assert!(second - first >= Duration::from_millis(500) - SLACK);
+        peer.send(&json_message(
+            json!({"cmd": "ct", "m": {"2": {"intHP": 0, "intState": 0}}}),
+        ));
+        while peer.recv() != packet::aggro_mon(AreaId(43), &[MonMapId(1)]) {}
+        peer.send(&json_message(
+            json!({"cmd": "ct", "p": {"player1": {"intState": 0}}}),
+        ));
+        next.recv().unwrap();
+        peer.expect_silence(Duration::from_millis(800));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    wait_for_farm(&harness);
+    session.set_aggro(true);
+    wait_until(session, |me| me.state == CombatState::Dead);
+    dead.send(()).unwrap();
+    thread::sleep(Duration::from_millis(1000));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn stops_repeating_aggro_when_turned_off_or_joining() {
+    let (step, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        let both = packet::aggro_mon(AreaId(43), &[MonMapId(1), MonMapId(2)]);
+        peer.expect(&both);
+        step.send(()).unwrap();
+        peer.expect_silence(Duration::from_millis(800));
+        step.send(()).unwrap();
+        while peer.recv() != packet::transfer("player1", "yulgar") {}
+        peer.expect_silence(Duration::from_millis(800));
+        peer.send(&move_to_area(44, "yulgar-2"));
+        peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    wait_for_farm(&harness);
+    session.set_aggro(true);
+    next.recv().unwrap();
+    session.set_aggro(false);
+    next.recv().unwrap();
+    session.set_aggro(true);
+    session.join("yulgar").wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn casts_skills_while_repeating_aggro() {
+    let (asked, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1), MonMapId(2)]));
+        next.recv().unwrap();
+        let asked = Instant::now();
+        while peer.recv() != gar(0, "a1", &[ONE, TWO]) {
+            assert!(
+                asked.elapsed() < Duration::from_millis(1500),
+                "the cast starved"
+            );
+        }
+        peer.answer(0, 1);
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    wait_for_farm(&harness);
+    session.set_aggro(true);
+    thread::sleep(Duration::from_millis(100));
+    let cast = session.use_skill("a1", Some(MonMapId(1)));
+    asked.send(()).unwrap();
+    cast.wait().unwrap();
+    session.logout();
+    harness.finish();
+}

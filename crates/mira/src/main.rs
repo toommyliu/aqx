@@ -17,7 +17,7 @@ const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <mons
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
-     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, anticounter off|all|attacks, logout";
+     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, aggro on|off, anticounter off|all|attacks, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -40,7 +40,7 @@ enum Command {
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
     /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
     /// unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>,
-    /// anticounter off|all|attacks, logout)
+    /// aggro on|off, anticounter off|all|attacks, logout)
     /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
@@ -441,6 +441,8 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
             session.swap(id(inventory)?, id(bank)?).wait()?;
         }
         ["rest"] => session.rest().wait()?,
+        ["aggro", "on"] => session.set_aggro(true),
+        ["aggro", "off"] => session.set_aggro(false),
         ["anticounter", "off"] => session.set_counter_hold(CounterHold::Off),
         ["anticounter", "all"] => session.set_counter_hold(CounterHold::All),
         ["anticounter", "attacks"] => session.set_counter_hold(CounterHold::Attacks),
