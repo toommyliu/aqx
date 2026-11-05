@@ -3991,3 +3991,56 @@ fn reconnects_only_when_asked_and_only_after_a_retryable_disconnect() {
         );
     }
 }
+
+#[test]
+fn uses_server_use_items_and_ends_boosts_like_the_client() {
+    let (quiet, done) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_with_items(
+            "5.31",
+            json!([
+                {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5,
+                 "iStk": 10, "sType": "Item", "sES": "None"},
+                {"ItemID": 900, "CharItemID": 5900, "sName": "XP Boost", "iQty": 1,
+                 "iStk": 1, "sType": "ServerUse", "sES": "None"},
+            ]),
+        );
+        peer.expect(&packet::use_item(ItemId(900)));
+        let started = Instant::now();
+        peer.send(&json_message(
+            json!({"cmd": "gboost", "op": "+", "iSecsLeft": 2, "bShowShop": false}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "xpboost", "op": "+", "iSecsLeft": 3, "bShowShop": false}),
+        ));
+        let check = Duration::from_secs_f64(52.0 / 24.0);
+        let first = peer.expect_at(&packet::end_boost("xpboost"));
+        peer.expect(&packet::end_boost("gboost"));
+        assert!(first - started >= Duration::from_secs(2) - SLACK);
+        let second = peer.expect_at(&packet::end_boost("xpboost"));
+        peer.expect(&packet::end_boost("gboost"));
+        assert!(second - first >= check - SLACK);
+        peer.send(&json_message(json!({"cmd": "xpboost", "op": "-"})));
+        peer.send(&json_message(json!({"cmd": "gboost", "op": "-"})));
+        peer.expect_silence(check + Duration::from_millis(200));
+        quiet.send(()).unwrap();
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let unusable = session.use_item(ItemId(101)).wait();
+    assert!(
+        matches!(unusable, Err(ActionError::Unusable(_))),
+        "{unusable:?}"
+    );
+    let missing = session.use_item(ItemId(9999)).wait();
+    assert!(
+        matches!(missing, Err(ActionError::NoTarget(_))),
+        "{missing:?}"
+    );
+    session.use_item(ItemId(900)).wait().unwrap();
+    done.recv().unwrap();
+    session.logout();
+    harness.finish();
+}

@@ -222,6 +222,14 @@ pub fn rest_request() -> String {
     zm("restRequest", 1, &[""])
 }
 
+pub fn use_item(item: ItemId) -> String {
+    zm("serverUseItem", -1, &["+".to_owned(), item.to_string()])
+}
+
+pub fn end_boost(boost: &str) -> String {
+    zm("serverUseItem", -1, &["-", boost])
+}
+
 pub fn afk(away: bool) -> String {
     zm("afk", 1, &[away])
 }
@@ -272,6 +280,8 @@ mod tests {
         assert_eq!(rest_request(), "%xt%zm%restRequest%1%%");
         assert_eq!(emote("rest"), "%xt%zm%emotea%1%rest%");
         assert_eq!(afk(false), "%xt%zm%afk%1%false%");
+        assert_eq!(use_item(ItemId(18927)), "%xt%zm%serverUseItem%-1%+%18927%");
+        assert_eq!(end_boost("xpboost"), "%xt%zm%serverUseItem%-1%-%xpboost%");
         assert_eq!(
             gar(
                 3,

@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+const BOOST_LEAD: Duration = Duration::from_secs(1);
+
 use mira_protocol::{EntityId, FactionId, ItemId, MonMapId, flex};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -132,12 +134,15 @@ impl BoostKind {
     ];
 
     fn from_cmd(cmd: &str) -> Option<BoostKind> {
-        match cmd {
-            "xpboost" => Some(BoostKind::Xp),
-            "gboost" => Some(BoostKind::Gold),
-            "repboost" => Some(BoostKind::Rep),
-            "cpboost" => Some(BoostKind::ClassPoints),
-            _ => None,
+        BoostKind::ALL.into_iter().find(|kind| kind.cmd() == cmd)
+    }
+
+    pub(crate) fn cmd(self) -> &'static str {
+        match self {
+            BoostKind::Xp => "xpboost",
+            BoostKind::Gold => "gboost",
+            BoostKind::Rep => "repboost",
+            BoostKind::ClassPoints => "cpboost",
         }
     }
 }
@@ -150,6 +155,12 @@ pub struct Boosts {
 impl Boosts {
     pub fn remaining(&self, kind: BoostKind, now: Instant) -> Duration {
         self.ends[kind as usize].map_or(Duration::ZERO, |end| end.saturating_duration_since(now))
+    }
+
+    pub(crate) fn ending(&self) -> impl Iterator<Item = (BoostKind, Instant)> + '_ {
+        BoostKind::ALL
+            .into_iter()
+            .filter_map(|kind| Some((kind, self.ends[kind as usize]?.checked_sub(BOOST_LEAD)?)))
     }
 
     fn set(&mut self, kind: BoostKind, secs: u64, now: Instant) {

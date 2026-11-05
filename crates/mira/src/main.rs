@@ -18,7 +18,7 @@ const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <mons
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
-     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, respawn back|spawn, antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout";
+     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, use <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, respawn back|spawn, antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -40,7 +40,7 @@ enum Command {
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
     /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
-    /// unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>,
+    /// unequip <item>, use <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>,
     /// respawn back|spawn, antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout)
     /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
@@ -443,6 +443,11 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                     );
                 }
             }
+        }
+        ["use", item @ ..] if !item.is_empty() => {
+            let world = session.snapshot();
+            let id = item_id(&item.join(" "), &world.inventory, "inventory")?;
+            session.use_item(id).wait()?;
         }
         [verb @ ("equip" | "unequip"), item @ ..] if !item.is_empty() => {
             let world = session.snapshot();

@@ -29,8 +29,8 @@ use crate::inventory::{
     AddedItems, Inventory, Item, LoadInventory, Picked, Pool, Sold, TurnIn, Worn,
 };
 use crate::player::{
-    BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, Skill, SkillList, SkillTarget,
-    StatUpdate,
+    BoostKind, BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, Skill, SkillList,
+    SkillTarget, StatUpdate,
 };
 use crate::quest::{self, AchievementUpdate, Quest, QuestList, QuestUpdate};
 use crate::room::{
@@ -62,6 +62,7 @@ const VERSION_RETRIES: usize = 3;
 const WALK_SPEED: u32 = 8;
 const AGGRO_EVERY: Duration = Duration::from_millis(500);
 const AFK_EVERY: Duration = Duration::from_millis(500);
+const BOOST_CHECK: Duration = Duration::from_millis(2167);
 pub const DEFAULT_RECONNECT_ATTEMPTS: u32 = 5;
 const MAX_RECONNECT_WAIT: Duration = Duration::from_secs(300);
 const STAGE_WIDTH: i32 = 960;
@@ -353,6 +354,7 @@ enum Action {
     },
     MapItem(MapItemId),
     Rest,
+    UseItem(ItemId),
     Goto(String),
     Walk {
         x: i32,
@@ -590,6 +592,10 @@ impl Handle {
         self.act(Action::Rest)
     }
 
+    pub fn use_item(&self, item: ItemId) -> Pending {
+        self.act(Action::UseItem(item))
+    }
+
     pub fn get_map_item(&self, item: MapItemId) -> Pending {
         self.act(Action::MapItem(item))
     }
@@ -758,6 +764,7 @@ pub fn spawn(
         died_in: None,
         anti_afk: false,
         afk_cleared: None,
+        boost_check: None,
         combat: Combat::default(),
         closing: None,
         logout_deadline: None,
@@ -827,6 +834,7 @@ struct Session {
     died_in: Option<(AreaId, String, String)>,
     anti_afk: bool,
     afk_cleared: Option<Instant>,
+    boost_check: Option<Instant>,
     combat: Combat,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -959,6 +967,48 @@ impl Session {
         self.run_ops(now);
         self.tick_combat(now);
         self.tick_aggro(now);
+        self.end_boosts(now);
+    }
+
+    fn end_boosts(&mut self, now: Instant) {
+        let Some(check) = self.boost_check.filter(|check| now >= *check) else {
+            return;
+        };
+        if self.ensure_ready().is_err() {
+            return;
+        }
+        let missed = (now - check).as_nanos() / BOOST_CHECK.as_nanos();
+        let skip = u32::try_from(missed + 1).unwrap_or(u32::MAX);
+        self.boost_check = Some(check + BOOST_CHECK.saturating_mul(skip));
+        let Some(me) = &self.character else {
+            return;
+        };
+        let due: Vec<BoostKind> = me
+            .boosts
+            .ending()
+            .filter(|&(_, at)| now >= at)
+            .map(|(kind, _)| kind)
+            .collect();
+        for kind in due {
+            self.send(&packet::end_boost(kind.cmd()));
+        }
+    }
+
+    fn use_item(&mut self, id: ItemId) -> Result<(), ActionError> {
+        self.ensure_ready()?;
+        let Some(item) = self.inventory.items.iter().find(|i| i.id == id) else {
+            return Err(ActionError::NoTarget(format!(
+                "item {id} isn't in the inventory"
+            )));
+        };
+        if !item.kind.eq_ignore_ascii_case("ServerUse") {
+            return Err(ActionError::Unusable(format!(
+                "{} can't be used",
+                item.name
+            )));
+        }
+        self.send(&packet::use_item(id));
+        Ok(())
     }
 
     fn tick_aggro(&mut self, now: Instant) {
@@ -1022,6 +1072,7 @@ impl Session {
         let result = match action {
             Action::Ready => self.ensure_ready(),
             Action::MoveToCell { cell, pad } => self.move_to_cell(&cell, &pad),
+            Action::UseItem(item) => self.use_item(item),
             Action::Walk { x, y } => {
                 let op = Op::Walk {
                     reply,
@@ -1549,6 +1600,13 @@ impl Session {
             .chain(counters)
             .chain(self.logout_deadline)
             .chain(self.reconnect_at)
+            .chain(self.boost_check.filter(|_| {
+                self.ensure_ready().is_ok()
+                    && self
+                        .character
+                        .as_ref()
+                        .is_some_and(|me| me.boosts.ending().next().is_some())
+            }))
             .chain(self.aggro.as_ref().map(|(_, due)| *due))
             .chain(self.ensure_ready().ok().and_then(|()| {
                 let now = Instant::now();
@@ -2316,6 +2374,7 @@ impl Session {
                     .collect();
                 self.ready_once = true;
                 self.reconnects = 0;
+                self.boost_check = Some(Instant::now() + BOOST_CHECK);
                 if let Some(why) = self.lost.take() {
                     self.epoch.fetch_add(1, Ordering::SeqCst);
                     self.stale = Some(why);
