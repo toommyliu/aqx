@@ -96,7 +96,7 @@ impl Peer {
         self.send(&json_message(json!({
             "cmd": "initUserData",
             "uid": 7,
-            "data": {"intLevel": "50", "intGold": 1200, "strEmail": "player1@example.com", "strIP": "192.0.2.1"},
+            "data": {"intLevel": "50", "intGold": 1200, "intCoins": 30, "intExp": 400, "intExpToLevel": 2000, "strEmail": "player1@example.com", "strIP": "192.0.2.1"},
         })));
         self.expect(&packet::retrieve_inventory(AreaId(42), EntityId(7)));
         self.send(&json_message(json!({"cmd": "sAct", "actions": {"active": [
@@ -726,7 +726,10 @@ fn tracks_the_players_vitals_haste_and_skills() {
         session.snapshot().me,
         Some(Me {
             level: 50,
+            exp: 400,
+            exp_to_level: 2000,
             gold: 1200,
+            coins: 30,
             hp: 700,
             max_hp: 1000,
             mp: 60,
@@ -869,6 +872,79 @@ fn a_malformed_inventory_item_is_skipped_without_blocking_login() {
         events.iter().any(
             |e| matches!(e, Event::Unreadable { error } if error.starts_with("inventory item"))
         )
+    );
+}
+
+#[test]
+fn tracks_gold_exp_levels_and_drops() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.send(&json_message(
+            json!({"cmd": "addGoldExp", "intGold": 25, "intExp": 100, "typ": "m", "id": 1}),
+        ));
+        peer.send(&json_message(json!({"cmd": "dropItem", "items": {
+            "300": {"ItemID": 300, "sName": "Treeant Branch", "iQty": 1, "iStk": 50,
+                    "sType": "Item", "sES": "None"},
+            "101": {"ItemID": 101, "sName": "Health Potion", "iQty": 2, "iStk": 10,
+                    "sType": "Item", "sES": "None"},
+        }})));
+        peer.send(&json_message(json!({"cmd": "dropItem", "items": {
+            "300": {"ItemID": 300, "sName": "Treeant Branch", "iQty": 2, "iStk": 50},
+            "101": {"ItemID": 101, "sName": "Health Potion", "iQty": 1, "iStk": 10},
+        }})));
+        peer.send(&json_message(json!({
+            "cmd": "getDrop", "bSuccess": 1, "ItemID": 300, "CharItemID": 6000,
+            "iQty": 3, "iQtyNow": 3, "bBank": 0,
+        })));
+        peer.send(&json_message(
+            json!({"cmd": "getDrop", "bSuccess": 0, "ItemID": 101}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "levelUp", "intLevel": 51, "intExpToLevel": 2500, "xp": 100}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "addGoldExp", "intGold": 0, "intExp": 50, "typ": "m", "id": 1}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "sellItem", "CharItemID": 5000, "iQty": 1, "intAmount": 2, "bCoins": 1}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "sellItem", "CharItemID": 5001, "iQty": 1, "intAmount": 10, "bCoins": 0}),
+        ));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
+        "{events:?}"
+    );
+    let world = session.snapshot();
+    let me = world.me.as_ref().unwrap();
+    assert_eq!(
+        (me.level, me.exp, me.exp_to_level, me.gold, me.coins),
+        (51, 150, 2500, 1235, 32)
+    );
+    let held: Vec<(&str, u32)> = world
+        .inventory
+        .iter()
+        .map(|i| (i.name.as_str(), i.qty))
+        .collect();
+    assert_eq!(held, [("Health Potion", 4), ("Treeant Branch", 3)]);
+    assert_eq!(world.inventory[1].char_item_id, CharItemId(6000));
+    assert_eq!(
+        world.drops,
+        [DropOffer {
+            id: ItemId(101),
+            name: "Health Potion".into(),
+            qty: 3,
+            max_stack: 10,
+            kind: "Item".into(),
+            slot: "None".into(),
+            coins: false,
+            member: false,
+        }]
     );
 }
 
