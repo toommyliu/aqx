@@ -351,6 +351,78 @@ pub struct Me {
     pub state: CombatState,
     pub haste: f64,
     pub skills: Vec<Skill>,
+    pub quests: QuestProgress,
+}
+
+const QUEST_STRINGS: usize = 8;
+const ACHIEVEMENT_FIELDS: [&str; 13] = [
+    "ia0", "ia1", "iq0", "id0", "id1", "id2", "id3", "id4", "id5", "id6", "id7", "iw0", "im0",
+];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct QuestProgress {
+    strings: [Option<String>; QUEST_STRINGS],
+    achievements: BTreeMap<String, i64>,
+}
+
+impl QuestProgress {
+    pub fn value(&self, slot: u32) -> Option<u32> {
+        let string = self.strings.get((slot / 100) as usize)?.as_ref()?;
+        string.chars().nth((slot % 100) as usize)?.to_digit(36)
+    }
+
+    pub fn achievement(&self, field: &str, bit: u32) -> Option<bool> {
+        if bit > 31 {
+            return None;
+        }
+        Some(self.achievements.get(field)? & (1 << bit) != 0)
+    }
+
+    fn from_user_data(data: &serde_json::Map<String, Value>) -> QuestProgress {
+        let int = |value: &Value| flex::int::<_, i64>(value.clone()).ok();
+        QuestProgress {
+            strings: std::array::from_fn(|i| {
+                let key = match i {
+                    0 => "strQuests".to_owned(),
+                    n => format!("strQuests{}", n + 1),
+                };
+                data.get(&key).and_then(Value::as_str).map(str::to_owned)
+            }),
+            achievements: ACHIEVEMENT_FIELDS
+                .iter()
+                .filter_map(|&field| Some((field.to_owned(), int(data.get(field)?)?)))
+                .collect(),
+        }
+    }
+
+    fn set_value(&mut self, slot: u32, value: i64) {
+        let Some(Some(string)) = self.strings.get_mut((slot / 100) as usize) else {
+            return;
+        };
+        let digit = u32::try_from(value)
+            .ok()
+            .and_then(|value| char::from_digit(value, 36))
+            .map_or('0', |c| c.to_ascii_uppercase());
+        let at = (slot % 100) as usize;
+        let mut chars: Vec<char> = string.chars().collect();
+        match chars.get_mut(at) {
+            Some(c) => *c = digit,
+            None => chars.push(digit),
+        }
+        *string = chars.into_iter().collect();
+    }
+
+    fn set_achievement(&mut self, field: &str, bit: u32, value: u8) {
+        if bit > 31 || value > 1 {
+            return;
+        }
+        let flags = self.achievements.entry(field.to_owned()).or_insert(0);
+        if value == 1 {
+            *flags |= 1 << bit;
+        } else {
+            *flags &= !(1 << bit);
+        }
+    }
 }
 
 impl Me {
@@ -1106,6 +1178,7 @@ impl Session {
                         character.coins = user.data.coins;
                         character.exp = user.data.exp;
                         character.exp_to_level = user.data.exp_to_level;
+                        character.quests = QuestProgress::from_user_data(&user.data.rest);
                     }
                     self.send(&packet::retrieve_inventory(room, me));
                     self.set_phase(Phase::Loading {
@@ -1213,6 +1286,21 @@ impl Session {
                 {
                     let rep = (i64::from(faction.rep) + reward.rep).clamp(0, i64::from(u32::MAX));
                     faction.set_rep(rep as u32);
+                }
+            }
+            "updateQuest" => {
+                let update: QuestUpdate = serde_json::from_value(json.data).map_err(unreadable)?;
+                if let Some(character) = &mut self.character {
+                    character.quests.set_value(update.slot, update.value);
+                }
+            }
+            "setAchievement" => {
+                let update: AchievementUpdate =
+                    serde_json::from_value(json.data).map_err(unreadable)?;
+                if let Some(character) = &mut self.character {
+                    character
+                        .quests
+                        .set_achievement(&update.field, update.index, update.value);
                 }
             }
             "addFaction" => {
@@ -1714,6 +1802,25 @@ struct UserData {
     exp: u64,
     #[serde(rename = "intExpToLevel", default, deserialize_with = "flex::int")]
     exp_to_level: u64,
+    #[serde(flatten)]
+    rest: serde_json::Map<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct QuestUpdate {
+    #[serde(rename = "iIndex", deserialize_with = "flex::int")]
+    slot: u32,
+    #[serde(rename = "iValue", deserialize_with = "flex::int")]
+    value: i64,
+}
+
+#[derive(Deserialize)]
+struct AchievementUpdate {
+    field: String,
+    #[serde(deserialize_with = "flex::int")]
+    index: u32,
+    #[serde(deserialize_with = "flex::int")]
+    value: u8,
 }
 
 #[derive(Deserialize)]
