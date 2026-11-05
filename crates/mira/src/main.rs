@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -6,10 +7,10 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use mira_client::{
-    ActionError, Auras, BoostKind, CombatState, CounterHold, DeviceId, Direction, Disconnect,
-    Event, Handle, Item, ItemId, Load, MapItemId, Me, MonMapId, Monster, NoticeKind, Options,
-    Pending, Phase, Place, QuestId, QuestStatus, Room, Server, ShopId, ShopItemId, SkillTarget,
-    World, api,
+    ActionError, Aggro, Auras, BoostKind, CombatState, CounterHold, DeviceId, Direction,
+    Disconnect, Event, Handle, Item, ItemId, Load, MapItemId, Me, MonMapId, Monster, NoticeKind,
+    Options, Pending, Phase, Place, QuestId, QuestStatus, Room, Server, ShopId, ShopItemId,
+    SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
@@ -17,7 +18,7 @@ const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <mons
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
-     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, aggro on|off, anticounter off|all|attacks, logout";
+     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -40,7 +41,7 @@ enum Command {
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
     /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
     /// unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>,
-    /// aggro on|off, anticounter off|all|attacks, logout)
+    /// aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout)
     /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
@@ -441,8 +442,12 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
             session.swap(id(inventory)?, id(bank)?).wait()?;
         }
         ["rest"] => session.rest().wait()?,
-        ["aggro", "on"] => session.set_aggro(true),
-        ["aggro", "off"] => session.set_aggro(false),
+        ["aggro", "on"] => session.set_aggro(Some(Aggro::Cell)),
+        ["aggro", "off"] => session.set_aggro(None),
+        ["aggro", monsters @ ..] if !monsters.is_empty() => {
+            let ids = find_monsters(session, &monsters.join(" "))?;
+            session.set_aggro(Some(Aggro::Only(ids)));
+        }
         ["anticounter", "off"] => session.set_counter_hold(CounterHold::Off),
         ["anticounter", "all"] => session.set_counter_hold(CounterHold::All),
         ["anticounter", "attacks"] => session.set_counter_hold(CounterHold::Attacks),
@@ -518,6 +523,33 @@ fn find_monster(session: &Handle, wanted: &str) -> Result<MonMapId, CommandError
         .min_by_key(|m| m.hp)
         .map(|m| m.id)
         .ok_or_else(|| CommandError::Usage(format!("no live {wanted} in this cell")))
+}
+
+fn find_monsters(session: &Handle, wanted: &str) -> Result<HashSet<MonMapId>, CommandError> {
+    let world = session.snapshot();
+    let Some(room) = &world.room else {
+        return Err(CommandError::Action(ActionError::NotReady));
+    };
+    let mut ids = HashSet::new();
+    for wanted in wanted.split(',').map(str::trim) {
+        if let Ok(id) = wanted.trim_start_matches('#').parse() {
+            ids.insert(MonMapId(id));
+            continue;
+        }
+        let named: Vec<MonMapId> = room
+            .monsters
+            .iter()
+            .filter(|m| m.cell == room.cell && m.alive() && m.name.eq_ignore_ascii_case(wanted))
+            .map(|m| m.id)
+            .collect();
+        if named.is_empty() {
+            return Err(CommandError::Usage(format!(
+                "no live {wanted} in this cell"
+            )));
+        }
+        ids.extend(named);
+    }
+    Ok(ids)
 }
 
 fn describe_room(room: &Room) -> String {

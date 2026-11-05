@@ -3425,7 +3425,7 @@ fn repeats_aggro_on_the_cells_live_monsters_when_asked() {
     });
     let session = &harness.session;
     wait_for_farm(&harness);
-    session.set_aggro(true);
+    session.set_aggro(Some(Aggro::Cell));
     wait_until(session, |me| me.state == CombatState::Dead);
     dead.send(()).unwrap();
     thread::sleep(Duration::from_millis(1000));
@@ -3452,11 +3452,11 @@ fn stops_repeating_aggro_when_turned_off_or_joining() {
     });
     let session = &harness.session;
     wait_for_farm(&harness);
-    session.set_aggro(true);
+    session.set_aggro(Some(Aggro::Cell));
     next.recv().unwrap();
-    session.set_aggro(false);
+    session.set_aggro(None);
     next.recv().unwrap();
-    session.set_aggro(true);
+    session.set_aggro(Some(Aggro::Cell));
     session.join("yulgar").wait().unwrap();
     session.logout();
     harness.finish();
@@ -3468,25 +3468,57 @@ fn casts_skills_while_repeating_aggro() {
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_farm();
-        peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1), MonMapId(2)]));
+        let both = packet::aggro_mon(AreaId(43), &[MonMapId(1), MonMapId(2)]);
+        let mut beat = peer.expect_at(&both);
         next.recv().unwrap();
         let asked = Instant::now();
-        while peer.recv() != gar(0, "a1", &[ONE, TWO]) {
+        loop {
+            let packet = peer.recv();
             assert!(
                 asked.elapsed() < Duration::from_millis(1500),
                 "the cast starved"
             );
+            if packet == both {
+                beat = Instant::now();
+                continue;
+            }
+            assert_eq!(packet, gar(0, "a1", &[ONE, TWO]));
+            break;
         }
         peer.answer(0, 1);
+        while peer.recv() != both {}
+        assert!(
+            beat.elapsed() < Duration::from_millis(600),
+            "a beat was skipped"
+        );
         peer.expect_logout();
     });
     let session = &harness.session;
     wait_for_farm(&harness);
-    session.set_aggro(true);
+    session.set_aggro(Some(Aggro::Cell));
     thread::sleep(Duration::from_millis(100));
     let cast = session.use_skill("a1", Some(MonMapId(1)));
     asked.send(()).unwrap();
     cast.wait().unwrap();
+    thread::sleep(Duration::from_millis(700));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn aggroes_only_the_chosen_monsters_in_the_cell() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        let chosen = packet::aggro_mon(AreaId(43), &[MonMapId(2)]);
+        peer.expect(&chosen);
+        peer.expect(&chosen);
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    wait_for_farm(&harness);
+    session.set_aggro(Some(Aggro::Only(HashSet::from([MonMapId(2), MonMapId(3)]))));
+    thread::sleep(Duration::from_millis(700));
     session.logout();
     harness.finish();
 }

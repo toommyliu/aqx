@@ -28,8 +28,8 @@ pub use quest::{
 };
 pub use room::{CombatState, Monster, Player, Room};
 pub use session::{
-    ActionError, CounterHold, DEFAULT_CLIENT_VERSION, Disconnect, Handle, Load, Options, Pending,
-    Phase, spawn,
+    ActionError, Aggro, CounterHold, DEFAULT_CLIENT_VERSION, Disconnect, Handle, Load, Options,
+    Pending, Phase, spawn,
 };
 pub use shop::{MergeCost, Shop, ShopItem};
 pub use world::World;

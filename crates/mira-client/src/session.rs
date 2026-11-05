@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
@@ -210,6 +210,21 @@ fn latest(slot: &Slot) -> Arc<World> {
     Arc::clone(&slot.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Aggro {
+    Cell,
+    Only(HashSet<MonMapId>),
+}
+
+impl Aggro {
+    fn covers(&self, id: MonMapId) -> bool {
+        match self {
+            Aggro::Cell => true,
+            Aggro::Only(ids) => ids.contains(&id),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CounterHold {
     #[default]
@@ -221,7 +236,7 @@ pub enum CounterHold {
 enum Request {
     Act(Action, Reply),
     CounterHold(CounterHold),
-    Aggro(bool),
+    Aggro(Option<Aggro>),
     Logout,
 }
 
@@ -508,8 +523,8 @@ impl Handle {
         self.request(Request::CounterHold(hold));
     }
 
-    pub fn set_aggro(&self, on: bool) {
-        self.request(Request::Aggro(on));
+    pub fn set_aggro(&self, aggro: Option<Aggro>) {
+        self.request(Request::Aggro(aggro));
     }
 
     pub fn logout(&self) {
@@ -665,7 +680,7 @@ struct Session {
     shop_maps: HashMap<ShopId, Vec<String>>,
     requested_spot: Option<Spot>,
     counter_hold: CounterHold,
-    aggro: Option<Instant>,
+    aggro: Option<(Aggro, Instant)>,
     combat: Combat,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -734,7 +749,7 @@ impl Session {
             match request {
                 Request::Logout => self.begin_logout(),
                 Request::CounterHold(hold) => self.counter_hold = hold,
-                Request::Aggro(on) => self.aggro = on.then(Instant::now),
+                Request::Aggro(aggro) => self.aggro = aggro.map(|aggro| (aggro, Instant::now())),
                 Request::Act(Action::ExitCombat, reply) => {
                     if matches!(self.current, Some(Op::Kill { .. } | Op::Cast { .. }))
                         && let Some(Op::Kill { reply, .. } | Op::Cast { reply, .. }) =
@@ -775,10 +790,13 @@ impl Session {
     }
 
     fn tick_aggro(&mut self, now: Instant) {
-        if self.aggro.is_none_or(|due| now < due) {
+        let Some((_, due)) = &mut self.aggro else {
+            return;
+        };
+        if now < *due {
             return;
         }
-        self.aggro = Some(now + AGGRO_EVERY);
+        *due = now + AGGRO_EVERY;
         let joining = matches!(
             self.current,
             Some(Op::Join {
@@ -789,11 +807,7 @@ impl Session {
         let (Some(me), Some(room)) = (&self.character, &self.room) else {
             return;
         };
-        if joining
-            || me.state == CombatState::Dead
-            || self.ensure_ready().is_err()
-            || self.class_skill_due(now).is_some()
-        {
+        if joining || me.state == CombatState::Dead || self.ensure_ready().is_err() {
             return;
         }
         let ids: Vec<MonMapId> = room
@@ -801,10 +815,15 @@ impl Session {
             .iter()
             .filter(|m| m.cell == room.cell && m.alive())
             .map(|m| m.id)
+            .filter(|id| {
+                self.aggro
+                    .as_ref()
+                    .is_some_and(|(aggro, _)| aggro.covers(*id))
+            })
             .collect();
         if !ids.is_empty() {
             let area = room.area;
-            self.send(&packet::aggro_mon(area, &ids));
+            self.send_unpaced(&packet::aggro_mon(area, &ids));
         }
     }
 
@@ -1356,7 +1375,7 @@ impl Session {
         op.into_iter()
             .chain(counters)
             .chain(self.logout_deadline)
-            .chain(self.aggro)
+            .chain(self.aggro.as_ref().map(|(_, due)| *due))
             .chain(self.ensure_ready().ok().and_then(|()| {
                 let now = Instant::now();
                 let auto_held = self
@@ -1606,6 +1625,13 @@ impl Session {
     }
 
     fn send(&mut self, packet: &str) {
+        if self.stream.is_some() {
+            self.combat.sent(Instant::now());
+        }
+        self.send_unpaced(packet);
+    }
+
+    fn send_unpaced(&mut self, packet: &str) {
         if self.stream.is_none() {
             return;
         }
@@ -1616,7 +1642,6 @@ impl Session {
                 text,
             });
         }
-        self.combat.sent(Instant::now());
         self.outbox.extend_from_slice(packet.as_bytes());
         self.outbox.push(0);
         self.flush();
@@ -2194,7 +2219,7 @@ impl Session {
             .collect();
         if !ids.is_empty() {
             let area = room.area;
-            self.send(&packet::aggro_mon(area, &ids));
+            self.send_unpaced(&packet::aggro_mon(area, &ids));
         }
     }
 
@@ -2208,7 +2233,7 @@ impl Session {
             .any(|m| m.id == id && m.aggressive && m.cell == room.cell);
         if here && me.state != CombatState::Dead {
             let area = room.area;
-            self.send(&packet::aggro_mon(area, &[id]));
+            self.send_unpaced(&packet::aggro_mon(area, &[id]));
         }
     }
 
