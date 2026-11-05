@@ -9,7 +9,7 @@ use flate2::write::ZlibEncoder;
 use serde_json::json;
 
 use mira_protocol::{
-    AreaId, CharItemId, FactionId, ItemId, MapItemId, MonMapId, ShopId, ShopItemId,
+    AreaId, CharItemId, FactionId, ItemId, MapItemId, MonId, MonMapId, ShopId, ShopItemId,
 };
 
 use super::*;
@@ -17,7 +17,7 @@ use crate::Place;
 use crate::quest::{QuestItem, QuestReward, QuestStatus, RewardKind};
 use crate::{
     Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Item, Monster, Skill, SkillTarget,
-    StatEffect, TempItem,
+    StatEffect, Stats, TempItem,
 };
 
 const TOKEN: &str = "tok-abc123";
@@ -280,7 +280,7 @@ fn logs_in_reports_each_phase_and_logs_out() {
     harness.session.ready().wait().unwrap();
     let me = harness.session.snapshot().me.clone().unwrap();
     assert_eq!(
-        (me.level, me.hp, me.max_hp, me.haste, me.skills.len()),
+        (me.level, me.hp, me.max_hp, me.stats.haste, me.skills.len()),
         (50, 950, 1000, 0.05, 1)
     );
     harness.session.logout();
@@ -736,6 +736,7 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
         [
             Monster {
                 id: MonMapId(1),
+                mon_id: MonId(10),
                 name: "Mosquito".into(),
                 cell: "Enter".into(),
                 hp: 300,
@@ -747,6 +748,7 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
             },
             Monster {
                 id: MonMapId(2),
+                mon_id: MonId(11),
                 name: "Frogzard".into(),
                 cell: "r2".into(),
                 hp: 0,
@@ -770,7 +772,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
             "areaId": 43,
             "areaName": "farm-1",
             "uoBranch": [{
-                "entID": 7, "strUsername": "player1", "strFrame": "Enter",
+                "entID": 7, "strUsername": "Player1", "strFrame": "Enter",
                 "intHP": 900, "intHPMax": "1000", "intMP": 80, "intMPMax": 100, "intState": 1,
                 "afk": true,
             }],
@@ -806,6 +808,8 @@ fn tracks_the_players_vitals_haste_and_skills() {
     assert_eq!(
         session.snapshot().me,
         Some(Me {
+            id: EntityId(7),
+            name: "Player1".into(),
             level: 50,
             exp: 400,
             exp_to_level: 2000,
@@ -827,7 +831,12 @@ fn tracks_the_players_vitals_haste_and_skills() {
             max_mp: 100,
             state: CombatState::InCombat,
             away: true,
-            haste: 0.12,
+            stats: Stats {
+                strength: 50.0,
+                evasion: 0.1,
+                haste: 0.12,
+                ..Stats::default()
+            },
             mana_rate: Some(0.8),
             quests: session.snapshot().me.as_ref().unwrap().quests.clone(),
             auras: Auras::default(),
@@ -1445,12 +1454,26 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
         persist: true,
         caster,
         effects: Vec::new(),
+        expires: None,
+    };
+    let untimed = |auras: &[Aura]| -> Vec<Aura> {
+        let drop_time = |a: &Aura| Aura {
+            expires: None,
+            ..a.clone()
+        };
+        auras.iter().map(drop_time).collect()
     };
     let from_monster = Some(Caster::Monster(MonMapId(1)));
     assert_eq!(world.me.as_ref().unwrap().class_points, 41107);
     assert_eq!(world.me.as_ref().unwrap().class_rank(), 5);
+    let mine = &world.me.as_ref().unwrap().auras;
+    assert!(mine.active[0].expires.is_some_and(|at| at > Instant::now()));
+    assert_eq!(mine.passive[0].expires, None);
     assert_eq!(
-        world.me.as_ref().unwrap().auras,
+        Auras {
+            active: untimed(&mine.active),
+            passive: untimed(&mine.passive),
+        },
         Auras {
             active: vec![
                 aura("Stun", 6.0, Some(2.0), from_monster),
@@ -1478,7 +1501,7 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
     let monsters = &world.room.as_ref().unwrap().monsters;
     assert!(monsters[0].auras.active.is_empty());
     assert_eq!(
-        monsters[1].auras.active,
+        untimed(&monsters[1].auras.active),
         [Aura {
             name: "Poison".into(),
             duration: 5.0,
@@ -1488,10 +1511,11 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
             persist: false,
             caster: Some(Caster::Player(EntityId(7))),
             effects: Vec::new(),
+            expires: None,
         }]
     );
     assert_eq!(
-        monsters[2].auras.active,
+        untimed(&monsters[2].auras.active),
         [Aura {
             persist: false,
             caster: Some(Caster::Player(EntityId(7))),
@@ -3411,7 +3435,9 @@ fn holds_the_auto_attack_on_a_countering_monster_when_asked() {
     session.set_counter_hold(CounterHold::Attacks);
     wait_for_farm(&harness);
     wait_for_counter(session, 1);
+    assert_eq!(session.snapshot().target, None);
     session.attack(MonMapId(1)).wait().unwrap();
+    assert_eq!(session.snapshot().target, Some(MonMapId(1)));
     countering.send(()).unwrap();
     thread::sleep(Duration::from_millis(1200));
     session.logout();

@@ -675,7 +675,7 @@ fn describe_me(me: &Me) -> String {
         me.mp,
         me.max_mp,
         state_name(me.state),
-        me.haste
+        me.stats.haste
     );
     let now = std::time::Instant::now();
     let boosts: Vec<String> = [

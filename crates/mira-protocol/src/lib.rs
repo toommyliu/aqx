@@ -16,7 +16,7 @@ use serde_json::Value;
 
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct EntityId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

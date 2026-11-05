@@ -24,8 +24,7 @@ pub struct Room {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Player {
-    #[serde(skip)]
-    pub(crate) eid: EntityId,
+    pub eid: EntityId,
     pub name: String,
     pub cell: Option<String>,
     pub pad: Option<String>,
@@ -83,6 +82,7 @@ impl Player {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Monster {
     pub id: MonMapId,
+    pub mon_id: MonId,
     pub name: String,
     pub cell: String,
     pub hp: u32,
@@ -122,15 +122,17 @@ impl Monster {
     pub(crate) fn apply_aura(&mut self, change: AuraChange, now: Instant) {
         let counter = change.names().any(|name| name == COUNTER_AURA);
         let removed = change.removes();
-        let lasts = change
+        let until = change
             .duration_of(COUNTER_AURA)
-            .filter(|secs| secs.is_finite() && *secs > 0.0)
-            .map_or(COUNTER_WINDOW, Duration::from_secs_f64);
-        self.auras.apply(change);
+            .filter(|secs| *secs > 0.0)
+            .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
+            .and_then(|lasts| now.checked_add(lasts))
+            .unwrap_or(now + COUNTER_WINDOW);
+        self.auras.apply(change, now);
         let aura = self.auras.active.iter().any(|a| a.name == COUNTER_AURA);
         match (counter, removed, aura) {
             (true, true, _) => self.counter = None,
-            (true, false, true) => self.counter = Some(Counter::Active { until: now + lasts }),
+            (true, false, true) => self.counter = Some(Counter::Active { until }),
             _ => {}
         }
     }
@@ -192,7 +194,7 @@ impl Room {
         area: MoveToArea,
         me: Option<EntityId>,
         requested: Option<Spot>,
-    ) -> (Room, Option<(Vitals, bool)>) {
+    ) -> (Room, Option<Mine>) {
         let (mine, others): (Vec<AreaPlayer>, Vec<AreaPlayer>) =
             area.players.into_iter().partition(|p| Some(p.eid) == me);
         let (x, y) = mine.first().map_or((0, 0), |p| (p.tx, p.ty));
@@ -227,7 +229,12 @@ impl Room {
                 .collect(),
             monsters: monsters(area.monster_types, area.monster_spots, area.monsters),
         };
-        (room, mine.into_iter().next().map(|p| (p.vitals, p.afk)))
+        let mine = mine.into_iter().next().map(|p| Mine {
+            vitals: p.vitals,
+            away: p.afk,
+            name: p.name,
+        });
+        (room, mine)
     }
 
     pub(crate) fn is_in(&self, map: &str) -> bool {
@@ -351,6 +358,7 @@ fn monsters(
             let spot = spots.get(&m.id)?;
             Some(Monster {
                 id: m.id,
+                mon_id: m.kind,
                 name: names.get(&m.kind).cloned().unwrap_or_default(),
                 cell: spot.cell.clone(),
                 hp: m.hp,
@@ -394,6 +402,12 @@ pub(crate) struct MoveToArea {
     monster_spots: Vec<MonsterSpot>,
     #[serde(rename = "monBranch", default)]
     monsters: Vec<MonsterBranch>,
+}
+
+pub(crate) struct Mine {
+    pub(crate) vitals: Vitals,
+    pub(crate) away: bool,
+    pub(crate) name: String,
 }
 
 #[derive(Deserialize)]
@@ -527,6 +541,7 @@ mod tests {
             |json: serde_json::Value| -> AuraChange { serde_json::from_value(json).unwrap() };
         let mut monster = Monster {
             id: MonMapId(1),
+            mon_id: MonId(10),
             name: "Mosquito".into(),
             cell: "Enter".into(),
             hp: 10,

@@ -30,7 +30,7 @@ use crate::inventory::{
 };
 use crate::player::{
     BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, Skill, SkillList, SkillTarget,
-    Stats,
+    StatUpdate,
 };
 use crate::quest::{self, AchievementUpdate, Quest, QuestList, QuestUpdate};
 use crate::room::{
@@ -1580,6 +1580,7 @@ impl Session {
             shop: self.shop.clone(),
             bank: self.bank.clone(),
             procs: Arc::clone(&self.procs),
+            target: self.combat.auto_target(),
         });
         for event in self.outgoing.drain(..) {
             let _ = self.events.send(event);
@@ -2141,7 +2142,11 @@ impl Session {
         match xt.field(5).and_then(|eid| eid.parse().ok()) {
             Some(eid) if accepted => {
                 self.me = Some(EntityId(eid));
-                self.character = Some(Me::default());
+                self.character = Some(Me {
+                    id: EntityId(eid),
+                    name: self.username.clone(),
+                    ..Me::default()
+                });
                 self.send(&packet::first_join());
                 self.send(&packet::clear_ignore_list());
                 self.set_phase(Phase::Loading {
@@ -2174,9 +2179,10 @@ impl Session {
                 let area: MoveToArea = read(&json)?;
                 let requested = self.requested_spot.take_if(|spot| area.is_for(&spot.map));
                 let (room, mine) = Room::arriving(area, self.me, requested);
-                if let (Some((vitals, away)), Some(character)) = (mine, &mut self.character) {
-                    character.apply(&vitals);
-                    character.away = away;
+                if let (Some(mine), Some(character)) = (mine, &mut self.character) {
+                    character.apply(&mine.vitals);
+                    character.away = mine.away;
+                    character.name = mine.name;
                 }
                 self.arriving = Some(room);
             }
@@ -2264,10 +2270,9 @@ impl Session {
                 }
             }
             "stu" => {
-                let stats: Stats = read(&json)?;
+                let update: StatUpdate = read(&json)?;
                 if let Some(character) = &mut self.character {
-                    character.haste = stats.sta.haste.unwrap_or(character.haste);
-                    character.mana_rate = stats.sta.mana_rate.or(character.mana_rate);
+                    character.apply_stats(update);
                 }
             }
             "seia" => self.on_slot_filled(read(&json)?, Instant::now()),
@@ -3047,7 +3052,7 @@ impl Session {
         match change.target.as_deref().and_then(aura::target) {
             Some(Target::Player(eid)) if Some(eid) == self.me => {
                 if let Some(character) = &mut self.character {
-                    character.auras.apply(change);
+                    character.auras.apply(change, Instant::now());
                 }
             }
             Some(Target::Monster(id)) => {

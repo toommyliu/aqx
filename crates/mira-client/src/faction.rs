@@ -1,7 +1,7 @@
 use mira_protocol::{FactionId, flex};
 use serde::{Deserialize, Serialize};
 
-use crate::rank::rank;
+use crate::rank::{progress, rank};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Faction {
@@ -12,6 +12,14 @@ pub struct Faction {
 }
 
 impl Faction {
+    pub fn rep_in_rank(&self) -> u32 {
+        progress(self.rep).0
+    }
+
+    pub fn rep_for_next_rank(&self) -> u32 {
+        progress(self.rep).1
+    }
+
     fn set_rep(&mut self, rep: u32) {
         self.rep = rep;
         self.rank = rank(rep);

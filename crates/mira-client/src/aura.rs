@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use mira_protocol::{EntityId, MonMapId, flex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,6 +14,8 @@ pub struct Aura {
     pub persist: bool,
     pub caster: Option<Caster>,
     pub effects: Vec<StatEffect>,
+    #[serde(skip)]
+    pub expires: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -43,13 +47,13 @@ pub(crate) enum Target {
 }
 
 impl Auras {
-    pub(crate) fn apply(&mut self, change: AuraChange) {
+    pub(crate) fn apply(&mut self, change: AuraChange, now: Instant) {
         let caster = change.caster.as_deref().and_then(caster);
         match change.cmd.as_str() {
             "aura+" | "aura++" => {
                 for data in change.auras.into_iter().flatten() {
                     let is_new = data.is_new;
-                    let aura = data.into_aura(caster);
+                    let aura = data.into_aura(caster, now);
                     if is_new {
                         self.active.push(aura);
                         continue;
@@ -61,6 +65,7 @@ impl Auras {
                     {
                         held.duration = aura.duration;
                         held.value = aura.value;
+                        held.expires = aura.expires;
                     }
                 }
             }
@@ -70,7 +75,7 @@ impl Auras {
                         .auras
                         .into_iter()
                         .flatten()
-                        .map(|data| data.into_aura(caster)),
+                        .map(|data| data.into_aura(caster, now)),
                 );
             }
             "aura-" | "aura--" => {
@@ -178,8 +183,13 @@ impl AuraChange {
 }
 
 impl AuraData {
-    fn into_aura(self, caster: Option<Caster>) -> Aura {
+    fn into_aura(self, caster: Option<Caster>, now: Instant) -> Aura {
+        let expires = Some(self.duration)
+            .filter(|secs| *secs > 0.0)
+            .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
+            .and_then(|lasts| now.checked_add(lasts));
         Aura {
+            expires,
             name: self.name,
             duration: self.duration,
             stacks: self.stacks.unwrap_or(1),
@@ -196,4 +206,35 @@ impl AuraData {
 struct AuraName {
     #[serde(rename = "nam")]
     name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refresh_moves_the_expiry() {
+        let change =
+            |json: serde_json::Value| -> AuraChange { serde_json::from_value(json).unwrap() };
+        let t0 = Instant::now();
+        let mut auras = Auras::default();
+        auras.apply(
+            change(serde_json::json!({"cmd": "aura+", "cInf": "m:1",
+                "auras": [{"nam": "Burn", "dur": 6, "isNew": true}]})),
+            t0,
+        );
+        assert_eq!(auras.active[0].expires, Some(t0 + Duration::from_secs(6)));
+        auras.apply(
+            change(serde_json::json!({"cmd": "aura+", "cInf": "m:1",
+                "auras": [{"nam": "Burn", "dur": 10}]})),
+            t0 + Duration::from_secs(1),
+        );
+        assert_eq!(auras.active[0].expires, Some(t0 + Duration::from_secs(11)));
+        auras.apply(
+            change(serde_json::json!({"cmd": "aura+", "cInf": "m:1",
+                "auras": [{"nam": "Burn", "dur": 1e300}]})),
+            t0,
+        );
+        assert_eq!(auras.active[0].expires, None);
+    }
 }

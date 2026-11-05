@@ -354,7 +354,7 @@ impl Combat {
 }
 
 fn scaled(ms: u32, me: &Me) -> Duration {
-    let haste = me.haste.clamp(-1.0, 0.5);
+    let haste = me.stats.haste.clamp(-1.0, 0.5);
     Duration::from_millis((f64::from(ms) * (1.0 - haste)).round() as u64)
 }
 
@@ -436,7 +436,10 @@ mod tests {
 
     fn fighter() -> Me {
         Me {
-            haste: 0.84,
+            stats: crate::player::Stats {
+                haste: 0.84,
+                ..Default::default()
+            },
             skills: vec![skill("aa", 2000), skill("a1", 4000), skill("a2", 1000)],
             ..Me::default()
         }

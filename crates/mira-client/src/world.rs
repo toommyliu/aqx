@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use mira_protocol::QuestId;
+use mira_protocol::{MonMapId, QuestId};
 
 use crate::faction::Faction;
 use crate::inventory::{DropOffer, Item, TempItem};
@@ -27,6 +27,7 @@ pub struct World {
     pub shop: Option<Arc<Shop>>,
     pub bank: Option<Arc<Vec<Item>>>,
     pub procs: Arc<HashMap<u32, String>>,
+    pub target: Option<MonMapId>,
 }
 
 impl World {
@@ -44,6 +45,7 @@ impl World {
             shop: None,
             bank: None,
             procs: Arc::default(),
+            target: None,
         }
     }
 

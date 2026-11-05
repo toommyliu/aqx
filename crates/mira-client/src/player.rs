@@ -13,6 +13,8 @@ use crate::room::{CombatState, Vitals};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Me {
+    pub id: EntityId,
+    pub name: String,
     pub level: u32,
     pub exp: u64,
     pub exp_to_level: u64,
@@ -33,7 +35,7 @@ pub struct Me {
     pub max_mp: u32,
     pub state: CombatState,
     pub away: bool,
-    pub haste: f64,
+    pub stats: Stats,
     #[serde(skip)]
     pub(crate) mana_rate: Option<f64>,
     pub skills: Vec<Skill>,
@@ -291,18 +293,72 @@ pub(crate) struct UserData {
     rest: serde_json::Map<String, Value>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Stats {
+    pub strength: f64,
+    pub endurance: f64,
+    pub dexterity: f64,
+    pub intellect: f64,
+    pub wisdom: f64,
+    pub luck: f64,
+    pub hit: f64,
+    pub evasion: f64,
+    pub crit: f64,
+    pub haste: f64,
+}
+
 #[derive(Deserialize)]
-pub(crate) struct Stats {
+pub(crate) struct StatUpdate {
     #[serde(default)]
-    pub(crate) sta: StatValues,
+    sta: StatValues,
 }
 
 #[derive(Deserialize, Default)]
-pub(crate) struct StatValues {
+struct StatValues {
+    #[serde(rename = "$STR")]
+    strength: Option<f64>,
+    #[serde(rename = "$END")]
+    endurance: Option<f64>,
+    #[serde(rename = "$DEX")]
+    dexterity: Option<f64>,
+    #[serde(rename = "$INT")]
+    intellect: Option<f64>,
+    #[serde(rename = "$WIS")]
+    wisdom: Option<f64>,
+    #[serde(rename = "$LCK")]
+    luck: Option<f64>,
+    #[serde(rename = "$thi")]
+    hit: Option<f64>,
+    #[serde(rename = "$tdo")]
+    evasion: Option<f64>,
+    #[serde(rename = "$tcr")]
+    crit: Option<f64>,
     #[serde(rename = "$tha")]
-    pub(crate) haste: Option<f64>,
+    haste: Option<f64>,
     #[serde(rename = "$cmc")]
-    pub(crate) mana_rate: Option<f64>,
+    mana_rate: Option<f64>,
+}
+
+impl Me {
+    pub(crate) fn apply_stats(&mut self, update: StatUpdate) {
+        let sta = update.sta;
+        let stats = &mut self.stats;
+        for (to, from) in [
+            (&mut stats.strength, sta.strength),
+            (&mut stats.endurance, sta.endurance),
+            (&mut stats.dexterity, sta.dexterity),
+            (&mut stats.intellect, sta.intellect),
+            (&mut stats.wisdom, sta.wisdom),
+            (&mut stats.luck, sta.luck),
+            (&mut stats.hit, sta.hit),
+            (&mut stats.evasion, sta.evasion),
+            (&mut stats.crit, sta.crit),
+            (&mut stats.haste, sta.haste),
+        ] {
+            *to = from.unwrap_or(*to);
+        }
+        self.mana_rate = sta.mana_rate.or(self.mana_rate);
+    }
 }
 
 #[derive(Deserialize)]
