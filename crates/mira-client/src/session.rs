@@ -1988,10 +1988,8 @@ impl Session {
             == (Phase::Loading {
                 step: Load::Joining,
             });
-        self.send_action(&packet::move_to_cell(room.area, &room.cell, &room.pad));
-        if first {
-            self.send(&packet::retrieve_user_data(room.area, me));
-        }
+        let move_to_cell = packet::move_to_cell(room.area, &room.cell, &room.pad);
+        let user_data = packet::retrieve_user_data(room.area, me);
         let joined = Event::Joined {
             map: room.name.clone(),
             cell: room.cell.clone(),
@@ -2001,14 +1999,18 @@ impl Session {
         self.room = Some(room);
         self.joins += 1;
         self.combat.disengage();
-        self.fetch_cellmates();
-        self.aggro_cell();
         self.emit(joined);
         if first {
             self.set_phase(Phase::Loading {
                 step: Load::Character,
             });
         }
+        self.send_action(&move_to_cell);
+        if first {
+            self.send(&user_data);
+        }
+        self.fetch_cellmates();
+        self.aggro_cell();
     }
 
     fn fetch_cellmates(&mut self) {

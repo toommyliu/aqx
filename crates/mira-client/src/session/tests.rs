@@ -374,6 +374,46 @@ fn a_retry_that_cannot_reconnect_ends_the_login() {
 }
 
 #[test]
+fn a_connection_reset_while_logging_in_closes_the_session() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut frames = 0;
+        let mut byte = [0u8; 1];
+        while frames < 2 {
+            stream.read_exact(&mut byte).unwrap();
+            if byte[0] == 0 {
+                frames += 1;
+                if frames == 1 {
+                    stream.write_all(API_OK.as_bytes()).unwrap();
+                    stream.write_all(&[0]).unwrap();
+                }
+            }
+        }
+        let area = move_to_area(42, "battleon-1");
+        let mut burst = Vec::new();
+        for text in std::iter::once(LOGIN_OK)
+            .chain(std::iter::repeat_n("%xt%notify%-1%hi%", 3000))
+            .chain([
+                area.as_str(),
+                JOIN_OK,
+                "%xt%server%-1%You joined \"battleon-1\"!%",
+            ])
+        {
+            burst.extend_from_slice(text.as_bytes());
+            burst.push(0);
+        }
+        stream.write_all(&burst).unwrap();
+    });
+    let started = Instant::now();
+    let phases = phases(&harness.finish());
+    let closed = phases
+        .iter()
+        .position(|phase| matches!(phase, Phase::Closed { .. }));
+    assert_eq!(closed, Some(phases.len() - 1), "{phases:?}");
+    assert!(started.elapsed() < READY_TIMEOUT / 2);
+}
+
+#[test]
 fn a_pinned_version_is_not_retried() {
     let options = Options {
         client_version: Some("5.20".into()),

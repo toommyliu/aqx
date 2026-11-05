@@ -32,8 +32,8 @@ impl Session {
         match xml.action.as_str() {
             "apiOK" if self.phase == Phase::Handshaking => {
                 let login = packet::login(&self.username, &self.version, self.token.as_str());
-                self.send(&login);
                 self.set_phase(Phase::LoggingIn);
+                self.send(&login);
             }
             "logout" => {
                 let why = self.closing.take().unwrap_or(Disconnect::Ended);
@@ -178,11 +178,11 @@ impl Session {
                     name: self.username.clone(),
                     ..Me::default()
                 });
-                self.send(&packet::first_join());
-                self.send(&packet::clear_ignore_list());
                 self.set_phase(Phase::Loading {
                     step: Load::Joining,
                 });
+                self.send(&packet::first_join());
+                self.send(&packet::clear_ignore_list());
             }
             _ => {
                 let message = xt.field(7).unwrap_or_default();
@@ -242,10 +242,10 @@ impl Session {
                     if let Some(character) = &mut self.character {
                         character.load(&user.data, Instant::now());
                     }
-                    self.send(&packet::retrieve_inventory(room, me));
                     self.set_phase(Phase::Loading {
                         step: Load::Inventory,
                     });
+                    self.send(&packet::retrieve_inventory(room, me));
                 }
             }
             "initUserDatas" => {
