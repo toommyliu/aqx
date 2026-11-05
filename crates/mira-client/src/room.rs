@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use mira_protocol::{AreaId, EntityId, MonId, MonMapId, XmlUser, flex};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::aura::{AuraChange, Auras};
+
 const SPAWN: (&str, &str) = ("Enter", "Spawn");
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Room {
     #[serde(skip)]
     pub(crate) area: AreaId,
@@ -26,7 +28,7 @@ pub struct Player {
     fetched: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Monster {
     pub id: MonMapId,
     pub name: String,
@@ -35,6 +37,7 @@ pub struct Monster {
     pub max_hp: u32,
     pub state: CombatState,
     pub aggressive: bool,
+    pub auras: Auras,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -140,11 +143,29 @@ impl Room {
     }
 
     pub(crate) fn patch_monster(&mut self, id: MonMapId, patch: &Vitals) {
-        if let Some(monster) = self.monsters.iter_mut().find(|m| m.id == id) {
-            monster.hp = patch.hp.unwrap_or(monster.hp);
-            monster.max_hp = patch.max_hp.unwrap_or(monster.max_hp);
-            monster.state = patch.state.unwrap_or(monster.state);
+        let Some(monster) = self.monsters.iter_mut().find(|m| m.id == id) else {
+            return;
+        };
+        monster.max_hp = patch.max_hp.unwrap_or(monster.max_hp);
+        if let Some(hp) = patch.hp {
+            monster.hp = hp;
+            if hp == 0 && monster.cell == self.cell {
+                monster.auras.clear();
+            }
         }
+        if let Some(state) = patch.state {
+            monster.state = state;
+            if state != CombatState::InCombat {
+                monster.auras.clear();
+            }
+        }
+    }
+
+    pub(crate) fn monster_auras(&mut self, id: MonMapId) -> Option<&mut Auras> {
+        self.monsters
+            .iter_mut()
+            .find(|m| m.id == id)
+            .map(|m| &mut m.auras)
     }
 }
 
@@ -167,6 +188,7 @@ fn monsters(
                 max_hp: m.max_hp,
                 state: m.state,
                 aggressive: spot.aggressive,
+                auras: Auras::default(),
             })
         })
         .collect()
@@ -265,4 +287,6 @@ pub(crate) struct Tick {
     pub(crate) monsters: HashMap<MonMapId, Vitals>,
     #[serde(rename = "p", default)]
     pub(crate) players: HashMap<String, Vitals>,
+    #[serde(rename = "a", default)]
+    pub(crate) auras: Vec<AuraChange>,
 }
