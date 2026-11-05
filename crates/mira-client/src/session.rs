@@ -1,9 +1,9 @@
-use std::convert::Infallible;
+use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use mio::net::TcpStream;
@@ -84,16 +84,6 @@ impl Serialize for Disconnect {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum LoginError {
-    #[error("can't reach {server}: {error}")]
-    Connect { server: String, error: io::Error },
-    #[error("{0}")]
-    Closed(Disconnect),
-    #[error("the character did not load within {} s", READY_TIMEOUT.as_secs())]
-    NotReady,
-}
-
-#[derive(Debug, thiserror::Error)]
 pub enum ActionError {
     #[error("the character has not loaded yet")]
     NotReady,
@@ -103,34 +93,181 @@ pub enum ActionError {
     NoReply,
     #[error("{0}")]
     Closed(Disconnect),
-}
-
-enum Halt {
-    Timeout,
-    Closed(Disconnect),
-}
-
-#[derive(Clone)]
-pub struct Control {
-    logout: Arc<AtomicBool>,
-    waker: Arc<Waker>,
-}
-
-impl Control {
-    pub fn logout(&self) {
-        self.logout.store(true, Ordering::SeqCst);
-        self.wake();
-    }
-
-    pub fn wake(&self) {
-        let _ = self.waker.wake();
-    }
+    #[error("the session stopped without closing")]
+    Stopped,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     pub client_version: Option<String>,
     pub trace_packets: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct World {
+    pub phase: Phase,
+    pub room: Option<Room>,
+}
+
+type Slot = Arc<Mutex<Arc<World>>>;
+type Reply = mpsc::SyncSender<Result<(), ActionError>>;
+
+fn latest(slot: &Slot) -> Arc<World> {
+    Arc::clone(&slot.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
+enum Request {
+    Act(Action, Reply),
+    Logout,
+}
+
+enum Action {
+    Ready,
+    Join { map: String },
+    MoveToCell { cell: String, pad: String },
+}
+
+enum Op {
+    Login {
+        server: Server,
+        version: String,
+        attempts: usize,
+        deadline: Instant,
+    },
+    Join {
+        reply: Reply,
+        stage: JoinStage,
+    },
+}
+
+enum JoinStage {
+    Cooling { map: String, until: Instant },
+    Sent { joins: u64, deadline: Instant },
+}
+
+#[derive(Clone)]
+pub struct Handle {
+    requests: mpsc::Sender<Request>,
+    waker: Arc<Waker>,
+    world: Slot,
+}
+
+impl Handle {
+    pub fn ready(&self) -> Pending {
+        self.act(Action::Ready)
+    }
+
+    pub fn join(&self, map: &str) -> Pending {
+        self.act(Action::Join {
+            map: map.to_owned(),
+        })
+    }
+
+    pub fn move_to_cell(&self, cell: &str, pad: &str) -> Pending {
+        self.act(Action::MoveToCell {
+            cell: cell.to_owned(),
+            pad: pad.to_owned(),
+        })
+    }
+
+    pub fn logout(&self) {
+        self.request(Request::Logout);
+    }
+
+    pub fn snapshot(&self) -> Arc<World> {
+        latest(&self.world)
+    }
+
+    fn act(&self, action: Action) -> Pending {
+        let (reply, result) = mpsc::sync_channel(1);
+        self.request(Request::Act(action, reply));
+        Pending {
+            result,
+            world: Arc::clone(&self.world),
+        }
+    }
+
+    fn request(&self, request: Request) {
+        if self.requests.send(request).is_ok() {
+            let _ = self.waker.wake();
+        }
+    }
+}
+
+pub struct Pending {
+    result: mpsc::Receiver<Result<(), ActionError>>,
+    world: Slot,
+}
+
+impl Pending {
+    pub fn wait(self) -> Result<(), ActionError> {
+        self.result
+            .recv()
+            .unwrap_or_else(|_| match &latest(&self.world).phase {
+                Phase::Closed { reason } => Err(ActionError::Closed(reason.clone())),
+                _ => Err(ActionError::Stopped),
+            })
+    }
+}
+
+pub fn spawn(
+    account: &Account,
+    server: Server,
+    options: Options,
+) -> io::Result<(Handle, mpsc::Receiver<Event>)> {
+    let poll = Poll::new()?;
+    let waker = Arc::new(Waker::new(poll.registry(), WAKER)?);
+    let (requests_out, requests) = mpsc::channel();
+    let (events, events_in) = mpsc::channel();
+    let version = options
+        .client_version
+        .clone()
+        .unwrap_or_else(|| DEFAULT_CLIENT_VERSION.to_owned());
+    let phase = Phase::Connecting {
+        server: server.name.clone(),
+        version: version.clone(),
+    };
+    let world = Arc::new(Mutex::new(Arc::new(World {
+        phase: phase.clone(),
+        room: None,
+    })));
+    let session = Session {
+        username: account.username.clone(),
+        token: account.token.clone(),
+        options,
+        version: String::new(),
+        poll,
+        ready: Events::with_capacity(16),
+        requests,
+        events,
+        world: Arc::clone(&world),
+        outgoing: Vec::new(),
+        replies: Vec::new(),
+        queue: VecDeque::new(),
+        current: None,
+        stream: None,
+        framer: Framer::default(),
+        outbox: Vec::new(),
+        phase,
+        me: None,
+        arriving: None,
+        room: None,
+        joins: 0,
+        transferred_at: None,
+        refusal: None,
+        character: None,
+        closing: None,
+        logout_deadline: None,
+    };
+    thread::Builder::new()
+        .name("mira-session".into())
+        .spawn(move || session.run(server, version))?;
+    let handle = Handle {
+        requests: requests_out,
+        waker,
+        world,
+    };
+    Ok((handle, events_in))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -159,15 +296,20 @@ struct Character {
     gold: u64,
 }
 
-pub struct Session {
+struct Session {
     username: String,
     token: Token,
     options: Options,
     version: String,
-    sink: Box<dyn FnMut(&Event)>,
     poll: Poll,
-    events: Events,
-    control: Control,
+    ready: Events,
+    requests: mpsc::Receiver<Request>,
+    events: mpsc::Sender<Event>,
+    world: Slot,
+    outgoing: Vec<Event>,
+    replies: Vec<(Reply, Result<(), ActionError>)>,
+    queue: VecDeque<(Action, Reply)>,
+    current: Option<Op>,
     stream: Option<TcpStream>,
     framer: Framer,
     outbox: Vec<u8>,
@@ -184,126 +326,210 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(
-        account: &Account,
-        options: Options,
-        sink: impl FnMut(&Event) + 'static,
-    ) -> io::Result<Self> {
-        let poll = Poll::new()?;
-        let waker = Arc::new(Waker::new(poll.registry(), WAKER)?);
-        Ok(Self {
-            username: account.username.clone(),
-            token: account.token.clone(),
-            options,
-            version: String::new(),
-            sink: Box::new(sink),
-            poll,
-            events: Events::with_capacity(16),
-            control: Control {
-                logout: Arc::new(AtomicBool::new(false)),
-                waker,
-            },
-            stream: None,
-            framer: Framer::default(),
-            outbox: Vec::new(),
-            phase: Phase::Closed {
-                reason: Disconnect::LoggedOut,
-            },
-            me: None,
-            arriving: None,
-            room: None,
-            joins: 0,
-            transferred_at: None,
-            refusal: None,
-            character: None,
-            closing: None,
-            logout_deadline: None,
-        })
-    }
-
-    pub fn control(&self) -> Control {
-        self.control.clone()
-    }
-
-    pub fn phase(&self) -> &Phase {
-        &self.phase
-    }
-
-    pub fn room(&self) -> Option<&Room> {
-        self.room.as_ref()
-    }
-
-    pub fn login(&mut self, server: &Server) -> Result<(), LoginError> {
-        let pinned = self.options.client_version.clone();
-        let mut version = pinned
-            .clone()
-            .unwrap_or_else(|| DEFAULT_CLIENT_VERSION.to_owned());
-        for _ in 0..VERSION_RETRIES {
-            self.open(server, &version)?;
-            let ready = self.pump_until(Some(Instant::now() + READY_TIMEOUT), |s| {
-                (s.phase == Phase::Ready).then_some(())
-            });
-            match ready {
-                Ok(()) => return Ok(()),
-                Err(Halt::Closed(Disconnect::ClientVersion(required)))
-                    if pinned.is_none() && required != version =>
-                {
-                    version = required;
+    fn run(mut self, server: Server, version: String) {
+        self.current = Some(self.start_login(server, version, 1));
+        loop {
+            self.take_requests();
+            self.advance(Instant::now());
+            if matches!(self.phase, Phase::Closed { .. }) && self.current.is_none() {
+                self.take_requests();
+                self.advance(Instant::now());
+                return self.publish();
+            }
+            self.publish();
+            let timeout = self
+                .next_deadline()
+                .map(|at| at.saturating_duration_since(Instant::now()));
+            match self.poll.poll(&mut self.ready, timeout) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    self.close(Disconnect::ConnectionLost(format!("poll failed: {e}")));
+                    continue;
                 }
-                Err(Halt::Closed(why)) => return Err(LoginError::Closed(why)),
-                Err(Halt::Timeout) => {
+            }
+            self.read_socket();
+            self.flush();
+        }
+    }
+
+    fn take_requests(&mut self) {
+        while let Ok(request) = self.requests.try_recv() {
+            match request {
+                Request::Logout => self.begin_logout(),
+                Request::Act(action, reply) => self.queue.push_back((action, reply)),
+            }
+        }
+    }
+
+    fn advance(&mut self, now: Instant) {
+        if self.logout_deadline.is_some_and(|d| now >= d) {
+            self.close(Disconnect::LoggedOut);
+        }
+        loop {
+            match self.current.take() {
+                Some(op) => {
+                    self.current = self.step(op, now);
+                    if self.current.is_some() {
+                        return;
+                    }
+                }
+                None => {
+                    let Some((action, reply)) = self.queue.pop_front() else {
+                        return;
+                    };
+                    self.current = self.start(action, reply, now);
+                }
+            }
+        }
+    }
+
+    fn start(&mut self, action: Action, reply: Reply, now: Instant) -> Option<Op> {
+        let result = match action {
+            Action::Ready => self.ensure_ready(),
+            Action::MoveToCell { cell, pad } => self.move_to_cell(&cell, &pad),
+            Action::Join { map } => match self.start_join(map, now) {
+                Ok(Some(stage)) => return Some(Op::Join { reply, stage }),
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            },
+        };
+        self.replies.push((reply, result));
+        None
+    }
+
+    fn step(&mut self, op: Op, now: Instant) -> Option<Op> {
+        match op {
+            Op::Login {
+                server,
+                version,
+                attempts,
+                deadline,
+            } => match &self.phase {
+                Phase::Ready => None,
+                Phase::Closed {
+                    reason: Disconnect::ClientVersion(required),
+                } if self.options.client_version.is_none()
+                    && *required != version
+                    && attempts < VERSION_RETRIES =>
+                {
+                    let required = required.clone();
+                    let retry = self.start_login(server, required, attempts + 1);
+                    self.step(retry, now)
+                }
+                Phase::Closed { .. } => None,
+                _ if now >= deadline => {
                     self.close(Disconnect::ConnectionLost(
                         "the character never loaded".into(),
                     ));
-                    return Err(LoginError::NotReady);
+                    None
                 }
+                _ => Some(Op::Login {
+                    server,
+                    version,
+                    attempts,
+                    deadline,
+                }),
+            },
+            Op::Join {
+                reply,
+                stage: JoinStage::Cooling { map, until },
+            } => {
+                if let Err(e) = self.ensure_ready() {
+                    self.replies.push((reply, Err(e)));
+                    return None;
+                }
+                if now < until {
+                    return Some(Op::Join {
+                        reply,
+                        stage: JoinStage::Cooling { map, until },
+                    });
+                }
+                let joins = self.joins;
+                self.refusal = None;
+                self.send(&packet::transfer(&self.username, &map));
+                self.transferred_at = Some(now);
+                Some(Op::Join {
+                    reply,
+                    stage: JoinStage::Sent {
+                        joins,
+                        deadline: now + JOIN_TIMEOUT,
+                    },
+                })
+            }
+            Op::Join {
+                reply,
+                stage: JoinStage::Sent { joins, deadline },
+            } => {
+                let result = if self.joins != joins {
+                    Ok(())
+                } else if let Some(why) = self.refusal.clone() {
+                    Err(ActionError::Refused(why))
+                } else if let Phase::Closed { reason } = &self.phase {
+                    Err(ActionError::Closed(reason.clone()))
+                } else if now >= deadline {
+                    Err(ActionError::NoReply)
+                } else {
+                    return Some(Op::Join {
+                        reply,
+                        stage: JoinStage::Sent { joins, deadline },
+                    });
+                };
+                self.replies.push((reply, result));
+                None
             }
         }
-        Err(LoginError::Closed(Disconnect::ClientVersion(version)))
     }
 
-    pub fn run(&mut self) -> Disconnect {
-        match self.run_until(|| None::<Infallible>) {
-            Ok(never) => match never {},
-            Err(why) => why,
-        }
+    fn next_deadline(&self) -> Option<Instant> {
+        let op = match &self.current {
+            Some(Op::Login { deadline, .. })
+            | Some(Op::Join {
+                stage: JoinStage::Sent { deadline, .. },
+                ..
+            }) => Some(*deadline),
+            Some(Op::Join {
+                stage: JoinStage::Cooling { until, .. },
+                ..
+            }) => Some(*until),
+            None => None,
+        };
+        op.into_iter().chain(self.logout_deadline).min()
     }
 
-    pub fn run_until<T>(&mut self, mut next: impl FnMut() -> Option<T>) -> Result<T, Disconnect> {
-        match self.pump_until(None, |_| next()) {
-            Ok(value) => Ok(value),
-            Err(Halt::Closed(why)) => Err(why),
-            Err(Halt::Timeout) => unreachable!("an unbounded pump only ends on close"),
-        }
-    }
-
-    pub fn join(&mut self, map: &str) -> Result<(), ActionError> {
-        self.ensure_ready()?;
-        if self.room.as_ref().is_some_and(|room| room.is_in(map)) {
-            return Ok(());
-        }
-        if let Some(at) = self.transferred_at {
-            self.idle_until(at + TRANSFER_COOLDOWN)?;
-        }
-        let joins = self.joins;
-        self.refusal = None;
-        self.send(&packet::transfer(&self.username, map));
-        self.transferred_at = Some(Instant::now());
-        let outcome = self.pump_until(Some(Instant::now() + JOIN_TIMEOUT), |s| {
-            if s.joins != joins {
-                Some(Ok(()))
-            } else {
-                s.refusal.clone().map(|why| Err(ActionError::Refused(why)))
-            }
+    fn publish(&mut self) {
+        *self.world.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(World {
+            phase: self.phase.clone(),
+            room: self.room.clone(),
         });
-        match outcome {
-            Ok(result) => result,
-            Err(Halt::Timeout) => Err(ActionError::NoReply),
-            Err(Halt::Closed(why)) => Err(ActionError::Closed(why)),
+        for event in self.outgoing.drain(..) {
+            let _ = self.events.send(event);
+        }
+        for (reply, result) in self.replies.drain(..) {
+            let _ = reply.send(result);
         }
     }
 
-    pub fn move_to_cell(&mut self, cell: &str, pad: &str) -> Result<(), ActionError> {
+    fn start_login(&mut self, server: Server, version: String, attempts: usize) -> Op {
+        self.open(&server, &version);
+        Op::Login {
+            server,
+            version,
+            attempts,
+            deadline: Instant::now() + READY_TIMEOUT,
+        }
+    }
+
+    fn start_join(&mut self, map: String, now: Instant) -> Result<Option<JoinStage>, ActionError> {
+        self.ensure_ready()?;
+        if self.room.as_ref().is_some_and(|room| room.is_in(&map)) {
+            return Ok(None);
+        }
+        let until = self.transferred_at.map_or(now, |at| at + TRANSFER_COOLDOWN);
+        Ok(Some(JoinStage::Cooling { map, until }))
+    }
+
+    fn move_to_cell(&mut self, cell: &str, pad: &str) -> Result<(), ActionError> {
         self.ensure_ready()?;
         let Some(room) = &mut self.room else {
             return Err(ActionError::NotReady);
@@ -322,6 +548,9 @@ impl Session {
     }
 
     fn ensure_ready(&self) -> Result<(), ActionError> {
+        if let Some(why) = &self.closing {
+            return Err(ActionError::Closed(why.clone()));
+        }
         match &self.phase {
             Phase::Ready => Ok(()),
             Phase::Closed { reason } => Err(ActionError::Closed(reason.clone())),
@@ -329,71 +558,28 @@ impl Session {
         }
     }
 
-    fn idle_until(&mut self, until: Instant) -> Result<(), ActionError> {
-        match self.pump_until(Some(until), |_| None::<Infallible>) {
-            Ok(never) => match never {},
-            Err(Halt::Timeout) => Ok(()),
-            Err(Halt::Closed(why)) => Err(ActionError::Closed(why)),
-        }
-    }
-
-    fn pump_until<T>(
-        &mut self,
-        deadline: Option<Instant>,
-        mut done: impl FnMut(&Self) -> Option<T>,
-    ) -> Result<T, Halt> {
-        loop {
-            if let Some(value) = done(self) {
-                return Ok(value);
-            }
-            if let Phase::Closed { reason } = &self.phase {
-                return Err(Halt::Closed(reason.clone()));
-            }
-            let now = Instant::now();
-            if self.logout_deadline.is_some_and(|d| now >= d) {
-                self.close(Disconnect::LoggedOut);
-                continue;
-            }
-            if deadline.is_some_and(|d| now >= d) {
-                return Err(Halt::Timeout);
-            }
-            let wake = deadline.into_iter().chain(self.logout_deadline).min();
-            match self.poll.poll(&mut self.events, wake.map(|w| w - now)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => {
-                    self.close(Disconnect::ConnectionLost(format!("poll failed: {e}")));
-                    continue;
-                }
-            }
-            if self.control.logout.swap(false, Ordering::SeqCst) {
-                self.begin_logout();
-            }
-            self.read_socket();
-            self.flush();
-        }
-    }
-
-    fn open(&mut self, server: &Server, version: &str) -> Result<(), LoginError> {
+    fn open(&mut self, server: &Server, version: &str) {
         self.set_phase(Phase::Connecting {
             server: server.name.clone(),
             version: version.to_owned(),
         });
-        let mut stream = connect(server).map_err(|error| {
-            let error = LoginError::Connect {
-                server: server.name.clone(),
-                error,
-            };
-            self.close(Disconnect::ConnectionLost(error.to_string()));
-            error
-        })?;
-        self.poll
-            .registry()
-            .register(&mut stream, SOCKET, Interest::READABLE | Interest::WRITABLE)
-            .map_err(|error| LoginError::Connect {
-                server: server.name.clone(),
-                error,
-            })?;
+        let connected = connect(server).and_then(|mut stream| {
+            self.poll.registry().register(
+                &mut stream,
+                SOCKET,
+                Interest::READABLE | Interest::WRITABLE,
+            )?;
+            Ok(stream)
+        });
+        let stream = match connected {
+            Ok(stream) => stream,
+            Err(error) => {
+                return self.close(Disconnect::ConnectionLost(format!(
+                    "can't reach {}: {error}",
+                    server.name
+                )));
+            }
+        };
         self.stream = Some(stream);
         self.framer = Framer::default();
         self.outbox.clear();
@@ -408,7 +594,6 @@ impl Session {
         self.version = version.to_owned();
         self.set_phase(Phase::Handshaking);
         self.send(&packet::version_check());
-        Ok(())
     }
 
     fn begin_logout(&mut self) {
@@ -439,7 +624,7 @@ impl Session {
     }
 
     fn emit(&mut self, event: Event) {
-        (self.sink)(&event);
+        self.outgoing.push(event);
     }
 
     fn send(&mut self, packet: &str) {
