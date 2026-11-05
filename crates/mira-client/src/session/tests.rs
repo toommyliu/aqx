@@ -3522,3 +3522,48 @@ fn aggroes_only_the_chosen_monsters_in_the_cell() {
     session.logout();
     harness.finish();
 }
+
+#[test]
+fn respawns_back_in_the_cell_where_it_died_when_asked() {
+    let (step, next) = mpsc::channel::<()>();
+    let (done, wait) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        let die_and_respawn = |peer: &mut Peer| {
+            for state in [0, 1] {
+                peer.send(&json_message(
+                    json!({"cmd": "uotls", "unm": "player1", "o": {"intState": state}}),
+                ));
+            }
+            peer.send("%xt%resTimed%-1%");
+            peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+            peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
+        };
+        let away = packet::move_to_cell(AreaId(43), "r2", "Left");
+        peer.expect(&away);
+        die_and_respawn(&mut peer);
+        peer.expect(&away);
+        for _ in 0..2 {
+            step.send(()).unwrap();
+            wait.recv().unwrap();
+            die_and_respawn(&mut peer);
+            peer.expect_silence(Duration::from_millis(500));
+        }
+        step.send(()).unwrap();
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    wait_for_farm(&harness);
+    session.set_respawn_where_died(true);
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    for on in [false, true] {
+        next.recv().unwrap();
+        session.set_respawn_where_died(on);
+        session.ready().wait().unwrap();
+        done.send(()).unwrap();
+    }
+    next.recv().unwrap();
+    session.logout();
+    harness.finish();
+}

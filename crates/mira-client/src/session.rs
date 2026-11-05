@@ -11,7 +11,7 @@ use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
 use mira_protocol::packet::Aim;
 use mira_protocol::{
-    EntityId, Framer, ItemId, JsonMessage, MapItemId, Message, MonMapId, QuestId, ShopId,
+    AreaId, EntityId, Framer, ItemId, JsonMessage, MapItemId, Message, MonMapId, QuestId, ShopId,
     ShopItemId, XmlMessage, XmlUser, XtMessage, packet,
 };
 use serde::de::DeserializeOwned;
@@ -237,6 +237,7 @@ enum Request {
     Act(Action, Reply),
     CounterHold(CounterHold),
     Aggro(Option<Aggro>),
+    RespawnWhereDied(bool),
     Logout,
 }
 
@@ -527,6 +528,10 @@ impl Handle {
         self.request(Request::Aggro(aggro));
     }
 
+    pub fn set_respawn_where_died(&self, on: bool) {
+        self.request(Request::RespawnWhereDied(on));
+    }
+
     pub fn logout(&self) {
         self.request(Request::Logout);
     }
@@ -626,6 +631,8 @@ pub fn spawn(
         requested_spot: None,
         counter_hold: CounterHold::Off,
         aggro: None,
+        respawn_where_died: false,
+        died_in: None,
         combat: Combat::default(),
         closing: None,
         logout_deadline: None,
@@ -681,6 +688,8 @@ struct Session {
     requested_spot: Option<Spot>,
     counter_hold: CounterHold,
     aggro: Option<(Aggro, Instant)>,
+    respawn_where_died: bool,
+    died_in: Option<(AreaId, String, String)>,
     combat: Combat,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -750,6 +759,7 @@ impl Session {
                 Request::Logout => self.begin_logout(),
                 Request::CounterHold(hold) => self.counter_hold = hold,
                 Request::Aggro(aggro) => self.aggro = aggro.map(|aggro| (aggro, Instant::now())),
+                Request::RespawnWhereDied(on) => self.respawn_where_died = on,
                 Request::Act(Action::ExitCombat, reply) => {
                     if matches!(self.current, Some(Op::Kill { .. } | Op::Cast { .. }))
                         && let Some(Op::Kill { reply, .. } | Op::Cast { reply, .. }) =
@@ -1850,6 +1860,15 @@ impl Session {
                     _ => (SPAWN.0.to_owned(), SPAWN.1.to_owned()),
                 };
                 let _ = self.move_to_cell(&cell, &pad);
+                if let Some((area, died_cell, died_pad)) = self.died_in.take()
+                    && self.respawn_where_died
+                    && self
+                        .room
+                        .as_ref()
+                        .is_some_and(|room| room.area == area && room.cell != died_cell)
+                {
+                    let _ = self.move_to_cell(&died_cell, &died_pad);
+                }
             }
             _ => {}
         }
@@ -2767,6 +2786,10 @@ impl Session {
             match (was, character.state) {
                 (CombatState::Dead, CombatState::Dead) => {}
                 (_, CombatState::Dead) => {
+                    self.died_in = self
+                        .room
+                        .as_ref()
+                        .map(|room| (room.area, room.cell.clone(), room.pad.clone()));
                     self.combat.died(Instant::now());
                     self.emit(Event::Died);
                 }
