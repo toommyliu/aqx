@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
@@ -7,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
-use mira_protocol::{AreaId, EntityId, Framer, JsonMessage, Message, XtMessage, flex, packet};
+use mira_protocol::{
+    AreaId, EntityId, Framer, JsonMessage, Message, XmlMessage, XmlUser, XtMessage, flex, packet,
+};
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
@@ -22,6 +25,8 @@ const WAKER: mio::Token = mio::Token(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(3);
+const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+const TRANSFER_COOLDOWN: Duration = Duration::from_millis(3000);
 const VERSION_RETRIES: usize = 3;
 const SPAWN: (&str, &str) = ("Enter", "Spawn");
 const REDACTED_KEYS: [&str; 2] = ["strEmail", "strIP"];
@@ -88,6 +93,18 @@ pub enum LoginError {
     NotReady,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ActionError {
+    #[error("the character has not loaded yet")]
+    NotReady,
+    #[error("the server refused: {0}")]
+    Refused(String),
+    #[error("the server did not answer within {} s", JOIN_TIMEOUT.as_secs())]
+    NoReply,
+    #[error("{0}")]
+    Closed(Disconnect),
+}
+
 enum Halt {
     Timeout,
     Closed(Disconnect),
@@ -102,6 +119,10 @@ pub struct Control {
 impl Control {
     pub fn logout(&self) {
         self.logout.store(true, Ordering::SeqCst);
+        self.wake();
+    }
+
+    pub fn wake(&self) {
         let _ = self.waker.wake();
     }
 }
@@ -112,10 +133,24 @@ pub struct Options {
     pub trace_packets: bool,
 }
 
-struct Map {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Room {
+    #[serde(skip)]
     area: AreaId,
-    name: String,
-    others: Vec<(EntityId, String)>,
+    pub name: String,
+    pub cell: String,
+    pub pad: String,
+    pub players: Vec<Player>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Player {
+    #[serde(skip)]
+    eid: EntityId,
+    pub name: String,
+    pub cell: Option<String>,
+    #[serde(skip)]
+    fetched: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -138,8 +173,11 @@ pub struct Session {
     outbox: Vec<u8>,
     phase: Phase,
     me: Option<EntityId>,
-    arriving: Option<Map>,
-    map: Option<Map>,
+    arriving: Option<Room>,
+    room: Option<Room>,
+    joins: u64,
+    transferred_at: Option<Instant>,
+    refusal: Option<String>,
     character: Option<Character>,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -173,7 +211,10 @@ impl Session {
             },
             me: None,
             arriving: None,
-            map: None,
+            room: None,
+            joins: 0,
+            transferred_at: None,
+            refusal: None,
             character: None,
             closing: None,
             logout_deadline: None,
@@ -186,6 +227,10 @@ impl Session {
 
     pub fn phase(&self) -> &Phase {
         &self.phase
+    }
+
+    pub fn room(&self) -> Option<&Room> {
+        self.room.as_ref()
     }
 
     pub fn login(&mut self, server: &Server) -> Result<(), LoginError> {
@@ -218,9 +263,77 @@ impl Session {
     }
 
     pub fn run(&mut self) -> Disconnect {
-        match self.pump_until(None, |_| None::<()>) {
-            Err(Halt::Closed(why)) => why,
-            Ok(()) | Err(Halt::Timeout) => unreachable!("an unbounded pump only ends on close"),
+        match self.run_until(|| None::<Infallible>) {
+            Ok(never) => match never {},
+            Err(why) => why,
+        }
+    }
+
+    pub fn run_until<T>(&mut self, mut next: impl FnMut() -> Option<T>) -> Result<T, Disconnect> {
+        match self.pump_until(None, |_| next()) {
+            Ok(value) => Ok(value),
+            Err(Halt::Closed(why)) => Err(why),
+            Err(Halt::Timeout) => unreachable!("an unbounded pump only ends on close"),
+        }
+    }
+
+    pub fn join(&mut self, map: &str) -> Result<(), ActionError> {
+        self.ensure_ready()?;
+        if self.room.as_ref().is_some_and(|room| room.is_in(map)) {
+            return Ok(());
+        }
+        if let Some(at) = self.transferred_at {
+            self.idle_until(at + TRANSFER_COOLDOWN)?;
+        }
+        let joins = self.joins;
+        self.refusal = None;
+        self.send(&packet::transfer(&self.username, map));
+        self.transferred_at = Some(Instant::now());
+        let outcome = self.pump_until(Some(Instant::now() + JOIN_TIMEOUT), |s| {
+            if s.joins != joins {
+                Some(Ok(()))
+            } else {
+                s.refusal.clone().map(|why| Err(ActionError::Refused(why)))
+            }
+        });
+        match outcome {
+            Ok(result) => result,
+            Err(Halt::Timeout) => Err(ActionError::NoReply),
+            Err(Halt::Closed(why)) => Err(ActionError::Closed(why)),
+        }
+    }
+
+    pub fn move_to_cell(&mut self, cell: &str, pad: &str) -> Result<(), ActionError> {
+        self.ensure_ready()?;
+        let Some(room) = &mut self.room else {
+            return Err(ActionError::NotReady);
+        };
+        room.cell = cell.to_owned();
+        room.pad = pad.to_owned();
+        let area = room.area;
+        self.send(&packet::move_to_cell(area, cell, pad));
+        self.fetch_cellmates();
+        self.ensure_ready()?;
+        self.emit(Event::Moved {
+            cell: cell.to_owned(),
+            pad: pad.to_owned(),
+        });
+        Ok(())
+    }
+
+    fn ensure_ready(&self) -> Result<(), ActionError> {
+        match &self.phase {
+            Phase::Ready => Ok(()),
+            Phase::Closed { reason } => Err(ActionError::Closed(reason.clone())),
+            _ => Err(ActionError::NotReady),
+        }
+    }
+
+    fn idle_until(&mut self, until: Instant) -> Result<(), ActionError> {
+        match self.pump_until(Some(until), |_| None::<Infallible>) {
+            Ok(never) => match never {},
+            Err(Halt::Timeout) => Ok(()),
+            Err(Halt::Closed(why)) => Err(ActionError::Closed(why)),
         }
     }
 
@@ -286,7 +399,9 @@ impl Session {
         self.outbox.clear();
         self.me = None;
         self.arriving = None;
-        self.map = None;
+        self.room = None;
+        self.transferred_at = None;
+        self.refusal = None;
         self.character = None;
         self.closing = None;
         self.logout_deadline = None;
@@ -410,7 +525,7 @@ impl Session {
         });
         let handled = match message {
             Ok(Message::Xml(xml)) => {
-                self.on_xml(&xml.action);
+                self.on_xml(&xml);
                 Ok(())
             }
             Ok(Message::Xt(xt)) => {
@@ -425,8 +540,8 @@ impl Session {
         }
     }
 
-    fn on_xml(&mut self, action: &str) {
-        match action {
+    fn on_xml(&mut self, xml: &XmlMessage) {
+        match xml.action.as_str() {
             "apiOK" if self.phase == Phase::Handshaking => {
                 let login = packet::login(&self.username, &self.version, self.token.as_str());
                 self.send(&login);
@@ -435,6 +550,16 @@ impl Session {
             "logout" => {
                 let why = self.closing.take().unwrap_or(Disconnect::Ended);
                 self.close(why);
+            }
+            "uER" => {
+                if let Some(user) = &xml.user {
+                    self.on_player_entered(user);
+                }
+            }
+            "userGone" => {
+                if let Some(user) = &xml.user {
+                    self.on_player_left(user.id);
+                }
             }
             _ => {}
         }
@@ -454,18 +579,22 @@ impl Session {
                     kind: NoticeKind::Server,
                     text,
                 });
-                if joined && let Some(map) = self.arriving.take() {
-                    self.enter(map);
+                if joined && let Some(room) = self.arriving.take() {
+                    self.enter(room);
                 }
             }
             "notify" => self.emit(Event::Notice {
                 kind: NoticeKind::Notify,
                 text: text(),
             }),
-            "warning" => self.emit(Event::Notice {
-                kind: NoticeKind::Warning,
-                text: text(),
-            }),
+            "warning" => {
+                let text = text();
+                self.refusal = Some(text.clone());
+                self.emit(Event::Notice {
+                    kind: NoticeKind::Warning,
+                    text,
+                });
+            }
             "chatm" => {
                 let raw = text();
                 let (channel, text) = raw.split_once('~').unwrap_or(("", &raw));
@@ -480,6 +609,16 @@ impl Session {
                 text: text(),
             }),
             "multiLoginWarning" => self.closing = Some(Disconnect::LoggedInElsewhere),
+            "exitArea" => {
+                if let Some(eid) = xt.field(4).and_then(|eid| eid.parse().ok()) {
+                    self.on_player_left(EntityId(eid));
+                }
+            }
+            "uotls" => {
+                if let (Some(name), Some(fields)) = (xt.field(4), xt.field(5)) {
+                    self.on_player_moved(name, fields);
+                }
+            }
             _ => {}
         }
     }
@@ -512,14 +651,22 @@ impl Session {
             "moveToArea" => {
                 let area: MoveToArea = serde_json::from_value(json.data).map_err(unreadable)?;
                 let me = self.me;
-                self.arriving = Some(Map {
+                let (cell, pad) = SPAWN;
+                self.arriving = Some(Room {
                     area: area.area,
                     name: area.name,
-                    others: area
+                    cell: cell.to_owned(),
+                    pad: pad.to_owned(),
+                    players: area
                         .players
                         .into_iter()
                         .filter(|p| Some(p.eid) != me)
-                        .map(|p| (p.eid, p.cell))
+                        .map(|p| Player {
+                            eid: p.eid,
+                            name: p.name,
+                            cell: Some(p.cell).filter(|cell| !cell.is_empty()),
+                            fetched: false,
+                        })
                         .collect(),
                 });
             }
@@ -530,11 +677,11 @@ impl Session {
                     }) =>
             {
                 let user: InitUserData = serde_json::from_value(json.data).map_err(unreadable)?;
-                let (Some(me), Some(map)) = (self.me, &self.map) else {
+                let (Some(me), Some(room)) = (self.me, &self.room) else {
                     return Ok(());
                 };
                 if user.uid == me {
-                    let room = map.area;
+                    let room = room.area;
                     self.character = Some(Character {
                         level: user.data.level,
                         gold: user.data.gold,
@@ -568,39 +715,103 @@ impl Session {
         Ok(())
     }
 
-    fn enter(&mut self, map: Map) {
+    fn enter(&mut self, room: Room) {
         let Some(me) = self.me else { return };
-        let (cell, pad) = SPAWN;
-        let room = map.area;
         let first = self.phase
             == (Phase::Loading {
                 step: Load::Joining,
             });
-        self.send(&packet::move_to_cell(room, cell, pad));
+        self.send(&packet::move_to_cell(room.area, &room.cell, &room.pad));
         if first {
-            self.send(&packet::retrieve_user_data(room, me));
+            self.send(&packet::retrieve_user_data(room.area, me));
         }
-        let beside: Vec<EntityId> = map
-            .others
-            .iter()
-            .filter(|(_, at)| at == cell)
-            .map(|(eid, _)| *eid)
-            .collect();
-        if !beside.is_empty() {
-            self.send(&packet::retrieve_user_datas(room, &beside));
-        }
-        self.emit(Event::Joined {
-            map: map.name.clone(),
-            cell: cell.to_owned(),
-            pad: pad.to_owned(),
-            players: map.others.len(),
-        });
-        self.map = Some(map);
+        let joined = Event::Joined {
+            map: room.name.clone(),
+            cell: room.cell.clone(),
+            pad: room.pad.clone(),
+            players: room.players.len(),
+        };
+        self.room = Some(room);
+        self.joins += 1;
+        self.fetch_cellmates();
+        self.emit(joined);
         if first {
             self.set_phase(Phase::Loading {
                 step: Load::Character,
             });
         }
+    }
+
+    fn fetch_cellmates(&mut self) {
+        let Some(room) = &mut self.room else { return };
+        let eids: Vec<EntityId> = room
+            .players
+            .iter_mut()
+            .filter(|p| !p.fetched && p.cell.as_ref() == Some(&room.cell))
+            .map(|p| {
+                p.fetched = true;
+                p.eid
+            })
+            .collect();
+        if !eids.is_empty() {
+            let area = room.area;
+            self.send(&packet::retrieve_user_datas(area, &eids));
+        }
+    }
+
+    fn on_player_entered(&mut self, user: &XmlUser) {
+        let (Some(me), Some(room), Some(name)) = (self.me, &mut self.room, &user.name) else {
+            return;
+        };
+        if user.id == me || room.players.iter().any(|p| p.eid == user.id) {
+            return;
+        }
+        room.players.push(Player {
+            eid: user.id,
+            name: name.clone(),
+            cell: None,
+            fetched: true,
+        });
+        let area = room.area;
+        self.send(&packet::retrieve_user_data(area, user.id));
+        self.emit(Event::PlayerEntered { name: name.clone() });
+    }
+
+    fn on_player_left(&mut self, eid: EntityId) {
+        let Some(room) = &mut self.room else { return };
+        let Some(at) = room.players.iter().position(|p| p.eid == eid) else {
+            return;
+        };
+        let name = room.players.remove(at).name;
+        self.emit(Event::PlayerLeft { name });
+    }
+
+    fn on_player_moved(&mut self, name: &str, fields: &str) {
+        let Some(room) = &mut self.room else { return };
+        let Some(player) = room
+            .players
+            .iter_mut()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+        else {
+            return;
+        };
+        let cell = fields
+            .split(',')
+            .filter_map(|pair| pair.split_once(':'))
+            .find_map(|(key, value)| (key == "strFrame").then_some(value));
+        if let Some(cell) = cell {
+            player.cell = Some(cell.to_owned());
+        }
+    }
+}
+
+impl Room {
+    fn is_in(&self, map: &str) -> bool {
+        let base = self
+            .name
+            .rsplit_once('-')
+            .map_or(self.name.as_str(), |(base, _)| base);
+        self.name.eq_ignore_ascii_case(map) || base.eq_ignore_ascii_case(map)
     }
 }
 
@@ -678,6 +889,8 @@ struct MoveToArea {
 struct AreaPlayer {
     #[serde(rename = "entID")]
     eid: EntityId,
+    #[serde(rename = "strUsername")]
+    name: String,
     #[serde(rename = "strFrame", default)]
     cell: String,
 }

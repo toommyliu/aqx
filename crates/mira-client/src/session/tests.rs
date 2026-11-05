@@ -313,6 +313,127 @@ fn later_joins_skip_own_data_and_chat_flows_until_logged_in_elsewhere() {
 }
 
 #[test]
+fn joins_a_map_then_moves_between_its_cells() {
+    let mut harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.send(&move_to_area(43, "yulgar-2"));
+        peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(8)]));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(9)]));
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect(&packet::logout());
+    });
+    harness.login().unwrap();
+    harness.session.join("yulgar").unwrap();
+    assert_eq!(harness.session.room().unwrap().name, "yulgar-2");
+    harness.session.join("yulgar").unwrap();
+    harness.session.move_to_cell("r2", "Left").unwrap();
+    harness.session.move_to_cell("Enter", "Spawn").unwrap();
+    harness.session.move_to_cell("r2", "Left").unwrap();
+    let room = harness.session.room().unwrap();
+    assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r2", "Left"));
+    harness.session.control().logout();
+    assert_eq!(harness.session.run(), Disconnect::LoggedOut);
+
+    assert!(harness.finish().contains(&Event::Moved {
+        cell: "r2".into(),
+        pad: "Left".into(),
+    }));
+}
+
+#[test]
+fn a_refused_join_reports_the_warning_and_the_next_join_waits_out_the_cooldown() {
+    let mut harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::transfer("player1", "doomvault"));
+        let refused_at = Instant::now();
+        peer.send("%xt%warning%-1%Cannot join that map.%");
+        peer.expect(&packet::transfer("player1", "yulgar"));
+        assert!(refused_at.elapsed() >= TRANSFER_COOLDOWN - Duration::from_millis(100));
+        peer.send(&move_to_area(43, "yulgar-2"));
+        peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
+        peer.wait_for_close();
+    });
+    harness.login().unwrap();
+    let refused = harness.session.join("doomvault").unwrap_err();
+    assert!(matches!(refused, ActionError::Refused(why) if why == "Cannot join that map."));
+    harness.session.join("yulgar").unwrap();
+    assert_eq!(harness.session.room().unwrap().name, "yulgar-2");
+    harness.finish();
+}
+
+#[test]
+fn a_move_on_a_dead_socket_reports_the_closed_session() {
+    let mut harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        thread::sleep(Duration::from_millis(100));
+    });
+    harness.login().unwrap();
+    thread::sleep(Duration::from_millis(300));
+    let _ = harness.session.move_to_cell("r2", "Left");
+    thread::sleep(Duration::from_millis(200));
+    let moved = harness.session.move_to_cell("r3", "Left");
+    assert!(matches!(moved, Err(ActionError::Closed(_))), "{moved:?}");
+    harness.finish();
+}
+
+#[test]
+fn tracks_players_entering_moving_and_leaving_the_room() {
+    let mut harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.send(
+            "<msg t='sys'><body action='uER' r='42'><u i='10' m='0' s='0' p='3'>\
+             <n><![CDATA[player4]]></n><vars></vars></u></body></msg>",
+        );
+        peer.expect(&packet::retrieve_user_data(AreaId(42), EntityId(10)));
+        peer.send("%xt%uotls%-1%player4%strFrame:r2,strPad:Left%");
+        peer.send("%xt%exitArea%-1%8%player2%");
+        peer.send("<msg t='sys'><body action='userGone' r='42'><user id='8' /></body></msg>");
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    harness.login().unwrap();
+    assert_eq!(harness.session.run(), Disconnect::LoggedInElsewhere);
+    let players: Vec<(String, Option<String>)> = harness
+        .session
+        .room()
+        .unwrap()
+        .players
+        .iter()
+        .map(|p| (p.name.clone(), p.cell.clone()))
+        .collect();
+    assert_eq!(
+        players,
+        [
+            ("player3".into(), Some("r2".into())),
+            ("player4".into(), Some("r2".into())),
+        ]
+    );
+
+    let events = harness.finish();
+    assert!(events.contains(&Event::PlayerEntered {
+        name: "player4".into()
+    }));
+    let left: Vec<&Event> = events
+        .iter()
+        .filter(|e| matches!(e, Event::PlayerLeft { .. }))
+        .collect();
+    assert_eq!(
+        left,
+        [&Event::PlayerLeft {
+            name: "player2".into()
+        }]
+    );
+}
+
+#[test]
 fn packet_trace_hides_the_token_and_personal_fields() {
     let options = Options {
         trace_packets: true,
