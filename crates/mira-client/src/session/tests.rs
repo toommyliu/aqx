@@ -581,6 +581,77 @@ fn tracks_players_entering_moving_and_leaving_the_room() {
 }
 
 #[test]
+fn tracks_the_rooms_monsters_through_combat_updates() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.send(&json_message(json!({
+            "cmd": "moveToArea",
+            "areaId": 43,
+            "areaName": "farm-1",
+            "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "Enter"}],
+            "mondef": [
+                {"MonID": 10, "strMonName": "Mosquito"},
+                {"MonID": 11, "strMonName": "Frogzard"},
+            ],
+            "monmap": [
+                {"MonMapID": 1, "MonID": 10, "strFrame": "Enter", "bRed": "1"},
+                {"MonMapID": 2, "MonID": 11, "strFrame": "r2", "bRed": 0},
+            ],
+            "monBranch": [
+                {"MonMapID": 1, "MonID": 10, "intHP": 540, "intHPMax": 540, "intState": 1},
+                {"MonMapID": 2, "MonID": 11, "intHP": "800", "intHPMax": "800", "intState": "1"},
+            ],
+        })));
+        peer.send("%xt%server%-1%You joined \"farm-1\"!%");
+        peer.send(&json_message(
+            json!({"cmd": "cb", "m": {"1": {"intState": 2}}}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "mtls", "id": 1, "o": {"intHP": "300"}}),
+        ));
+        peer.send(&json_message(json!({
+            "cmd": "ct",
+            "m": {"2": {"intHP": 0, "intState": 0}},
+            "p": {"player1": {"intHP": 1000}},
+        })));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
+        "{events:?}"
+    );
+    let world = session.snapshot();
+    let room = world.room.as_ref().unwrap();
+    assert_eq!(room.name, "farm-1");
+    assert_eq!(
+        room.monsters,
+        [
+            Monster {
+                id: MonMapId(1),
+                name: "Mosquito".into(),
+                cell: "Enter".into(),
+                hp: 300,
+                max_hp: 540,
+                state: CombatState::InCombat,
+                aggressive: true,
+            },
+            Monster {
+                id: MonMapId(2),
+                name: "Frogzard".into(),
+                cell: "r2".into(),
+                hp: 0,
+                max_hp: 800,
+                state: CombatState::Dead,
+                aggressive: false,
+            },
+        ]
+    );
+}
+
+#[test]
 fn packet_trace_hides_the_token_and_personal_fields() {
     let options = Options {
         trace_packets: true,

@@ -6,12 +6,12 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use mira_client::{
-    ActionError, DeviceId, Direction, Disconnect, Event, Handle, Load, NoticeKind, Options, Phase,
-    Room, Server, api,
+    ActionError, CombatState, DeviceId, Direction, Disconnect, Event, Handle, Load, Monster,
+    NoticeKind, Options, Phase, Room, Server, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
-const COMMANDS: &str = "join <map>, cell <cell> [pad], who, logout";
+const COMMANDS: &str = "join <map>, cell <cell> [pad], who, mons [all], logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -29,7 +29,7 @@ enum Command {
         json: bool,
     },
     /// Log in, then print what the account does and run commands read from stdin
-    /// (join <map>, cell <cell> [pad], who, logout) until it logs out.
+    /// (join <map>, cell <cell> [pad], who, mons [all], logout) until it logs out.
     Login {
         #[arg(long)]
         user: String,
@@ -198,6 +198,8 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
             Some(room) => print!("{}", describe_room(room)),
             None => return Err(CommandError::Action(ActionError::NotReady)),
         },
+        ["mons"] => list_monsters(session, json, false)?,
+        ["mons", "all"] => list_monsters(session, json, true)?,
         _ => {
             return Err(CommandError::Usage(format!(
                 "can't run {line:?}; commands are {COMMANDS}"
@@ -214,6 +216,47 @@ fn describe_room(room: &Room) -> String {
     for player in players {
         let cell = player.cell.as_deref().unwrap_or("?");
         text.push_str(&format!("  {cell:<12} {}\n", player.name));
+    }
+    text
+}
+
+fn list_monsters(session: &Handle, json: bool, all: bool) -> Result<(), CommandError> {
+    let world = session.snapshot();
+    let Some(room) = &world.room else {
+        return Err(CommandError::Action(ActionError::NotReady));
+    };
+    let monsters: Vec<&Monster> = room
+        .monsters
+        .iter()
+        .filter(|m| all || m.cell == room.cell)
+        .collect();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&monsters).expect("monsters serialize")
+        );
+    } else {
+        print!("{}", describe_monsters(&monsters));
+    }
+    Ok(())
+}
+
+fn describe_monsters(monsters: &[&Monster]) -> String {
+    if monsters.is_empty() {
+        return "no monsters\n".into();
+    }
+    let mut text = String::new();
+    for m in monsters {
+        let state = match m.state {
+            CombatState::Dead => "dead",
+            CombatState::Idle => "idle",
+            CombatState::InCombat => "in combat",
+        };
+        let aggressive = if m.aggressive { ", aggressive" } else { "" };
+        text.push_str(&format!(
+            "  {:<12} {} #{} {}/{} {state}{aggressive}\n",
+            m.cell, m.name, m.id, m.hp, m.max_hp
+        ));
     }
     text
 }

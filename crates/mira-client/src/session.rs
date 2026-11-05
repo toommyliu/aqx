@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
@@ -9,10 +9,11 @@ use std::time::{Duration, Instant};
 use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
 use mira_protocol::{
-    AreaId, EntityId, Framer, JsonMessage, Message, XmlMessage, XmlUser, XtMessage, flex, packet,
+    AreaId, EntityId, Framer, JsonMessage, Message, MonId, MonMapId, XmlMessage, XmlUser,
+    XtMessage, flex, packet,
 };
 use serde::de::IgnoredAny;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::api::{Account, Server, Token};
@@ -278,6 +279,47 @@ pub struct Room {
     pub cell: String,
     pub pad: String,
     pub players: Vec<Player>,
+    pub monsters: Vec<Monster>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Monster {
+    pub id: MonMapId,
+    pub name: String,
+    pub cell: String,
+    pub hp: u32,
+    pub max_hp: u32,
+    pub state: CombatState,
+    pub aggressive: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CombatState {
+    Dead,
+    Idle,
+    InCombat,
+}
+
+impl<'de> Deserialize<'de> for CombatState {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match flex::int::<_, i64>(d)? {
+            0 => Ok(CombatState::Dead),
+            1 => Ok(CombatState::Idle),
+            2 => Ok(CombatState::InCombat),
+            n => Err(serde::de::Error::custom(format!(
+                "unknown combat state {n}"
+            ))),
+        }
+    }
+}
+
+impl Monster {
+    fn apply(&mut self, patch: &MonsterPatch) {
+        self.hp = patch.hp.unwrap_or(self.hp);
+        self.max_hp = patch.max_hp.unwrap_or(self.max_hp);
+        self.state = patch.state.unwrap_or(self.state);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -842,6 +884,7 @@ impl Session {
                     name: area.name,
                     cell: cell.to_owned(),
                     pad: pad.to_owned(),
+                    monsters: room_monsters(area.monster_types, area.monster_spots, area.monsters),
                     players: area
                         .players
                         .into_iter()
@@ -875,6 +918,17 @@ impl Session {
                     self.set_phase(Phase::Loading {
                         step: Load::Inventory,
                     });
+                }
+            }
+            "mtls" => {
+                let update: MonsterUpdate =
+                    serde_json::from_value(json.data).map_err(unreadable)?;
+                self.patch_monster(update.id, &update.o);
+            }
+            "ct" | "cb" => {
+                let tick: Tick = serde_json::from_value(json.data).map_err(unreadable)?;
+                for (id, patch) in &tick.monsters {
+                    self.patch_monster(*id, patch);
                 }
             }
             "loadInventoryBig"
@@ -969,6 +1023,13 @@ impl Session {
         };
         let name = room.players.remove(at).name;
         self.emit(Event::PlayerLeft { name });
+    }
+
+    fn patch_monster(&mut self, id: MonMapId, patch: &MonsterPatch) {
+        let room = self.arriving.as_mut().or(self.room.as_mut());
+        if let Some(monster) = room.and_then(|room| room.monsters.iter_mut().find(|m| m.id == id)) {
+            monster.apply(patch);
+        }
     }
 
     fn on_player_moved(&mut self, name: &str, fields: &str) {
@@ -1068,6 +1129,90 @@ struct MoveToArea {
     name: String,
     #[serde(rename = "uoBranch", default)]
     players: Vec<AreaPlayer>,
+    #[serde(rename = "mondef", default)]
+    monster_types: Vec<MonsterType>,
+    #[serde(rename = "monmap", default)]
+    monster_spots: Vec<MonsterSpot>,
+    #[serde(rename = "monBranch", default)]
+    monsters: Vec<MonsterBranch>,
+}
+
+#[derive(Deserialize)]
+struct MonsterType {
+    #[serde(rename = "MonID")]
+    id: MonId,
+    #[serde(rename = "strMonName")]
+    name: String,
+}
+
+#[derive(Deserialize)]
+struct MonsterSpot {
+    #[serde(rename = "MonMapID")]
+    id: MonMapId,
+    #[serde(rename = "strFrame", default)]
+    cell: String,
+    #[serde(rename = "bRed", default, deserialize_with = "flex::bool")]
+    aggressive: bool,
+}
+
+#[derive(Deserialize)]
+struct MonsterBranch {
+    #[serde(rename = "MonMapID")]
+    id: MonMapId,
+    #[serde(rename = "MonID")]
+    kind: MonId,
+    #[serde(rename = "intHP", deserialize_with = "flex::int")]
+    hp: u32,
+    #[serde(rename = "intHPMax", deserialize_with = "flex::int")]
+    max_hp: u32,
+    #[serde(rename = "intState")]
+    state: CombatState,
+}
+
+#[derive(Deserialize)]
+struct MonsterPatch {
+    #[serde(rename = "intHP", default, deserialize_with = "flex::opt_int")]
+    hp: Option<u32>,
+    #[serde(rename = "intHPMax", default, deserialize_with = "flex::opt_int")]
+    max_hp: Option<u32>,
+    #[serde(rename = "intState", default)]
+    state: Option<CombatState>,
+}
+
+#[derive(Deserialize)]
+struct MonsterUpdate {
+    id: MonMapId,
+    o: MonsterPatch,
+}
+
+#[derive(Deserialize)]
+struct Tick {
+    #[serde(rename = "m", default)]
+    monsters: HashMap<MonMapId, MonsterPatch>,
+}
+
+fn room_monsters(
+    types: Vec<MonsterType>,
+    spots: Vec<MonsterSpot>,
+    monsters: Vec<MonsterBranch>,
+) -> Vec<Monster> {
+    let names: HashMap<MonId, String> = types.into_iter().map(|t| (t.id, t.name)).collect();
+    let spots: HashMap<MonMapId, MonsterSpot> = spots.into_iter().map(|s| (s.id, s)).collect();
+    monsters
+        .into_iter()
+        .filter_map(|m| {
+            let spot = spots.get(&m.id)?;
+            Some(Monster {
+                id: m.id,
+                name: names.get(&m.kind).cloned().unwrap_or_default(),
+                cell: spot.cell.clone(),
+                hp: m.hp,
+                max_hp: m.max_hp,
+                state: m.state,
+                aggressive: spot.aggressive,
+            })
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]

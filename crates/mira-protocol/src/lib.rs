@@ -11,7 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use flate2::read::{DeflateDecoder, ZlibDecoder};
 use quick_xml::events::{BytesStart, Event as XmlEvent};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
@@ -21,6 +21,12 @@ pub struct EntityId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AreaId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MonMapId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MonId(pub i64);
 
 macro_rules! flex_id {
     ($name:ident) => {
@@ -35,11 +41,19 @@ macro_rules! flex_id {
                 flex::int(d).map($name)
             }
         }
+
+        impl Serialize for $name {
+            fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_i64(self.0)
+            }
+        }
     };
 }
 
 flex_id!(EntityId);
 flex_id!(AreaId);
+flex_id!(MonMapId);
+flex_id!(MonId);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
