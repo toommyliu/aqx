@@ -12,7 +12,7 @@ use mira_client::{
 };
 
 const DEFAULT_PAD: &str = "Left";
-const COMMANDS: &str = "join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], \
+const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster], \
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
@@ -34,7 +34,7 @@ enum Command {
         json: bool,
     },
     /// Log in, then print what the account does and run commands read from stdin
-    /// (join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop,
+    /// (join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop,
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
     /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
@@ -200,6 +200,8 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
     match words.as_slice() {
         [] => {}
         ["join", map] => session.join(map).wait()?,
+        ["join", map, cell] => session.join_at(map, cell, DEFAULT_PAD).wait()?,
+        ["join", map, cell, pad] => session.join_at(map, cell, pad).wait()?,
         ["cell", cell] => session.move_to_cell(cell, DEFAULT_PAD).wait()?,
         ["cell", cell, pad] => session.move_to_cell(cell, pad).wait()?,
         ["attack", monster @ ..] if !monster.is_empty() => {

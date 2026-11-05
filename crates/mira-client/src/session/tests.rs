@@ -69,6 +69,15 @@ impl Peer {
         self.stream.write_all(&[0]).unwrap();
     }
 
+    fn send_together(&mut self, texts: &[&str]) {
+        let mut frames = Vec::new();
+        for text in texts {
+            frames.extend_from_slice(text.as_bytes());
+            frames.push(0);
+        }
+        self.stream.write_all(&frames).unwrap();
+    }
+
     fn expect_logout(&mut self) {
         while self.recv() != packet::logout() {}
     }
@@ -2953,6 +2962,96 @@ fn rests_until_full_at_the_clients_pace() {
         matches!(interrupted, Err(ActionError::InCombat)),
         "{interrupted:?}"
     );
+    session.logout();
+    harness.finish();
+}
+
+fn arrival(area: i64, name: &str, kind: &str, frame: &str, pad: &str) -> String {
+    json_message(json!({
+        "cmd": "moveToArea", "areaId": area, "areaName": name, "intType": kind,
+        "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": frame, "strPad": pad}],
+    }))
+}
+
+#[test]
+fn arrives_where_the_client_would_after_a_join() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        let locked = packet::transfer_to(AreaId(42), "player1", "tavern", "r7", "Left");
+        peer.expect(&locked);
+        peer.send("%xt%warning%-1%Cannot join that map.%");
+        thread::sleep(Duration::from_millis(100));
+        peer.send(&arrival(46, "tavern-1", "1", "r3", "Right"));
+        peer.send("%xt%server%-1%You joined \"tavern-1\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(46), "r3", "Right"));
+        peer.expect(&packet::transfer_to(
+            AreaId(46),
+            "player1",
+            "xantown",
+            "r7",
+            "Left",
+        ));
+        peer.send(&arrival(43, "xantown-1", "1", "Enter", "Spawn"));
+        peer.send("%xt%server%-1%You joined \"xantown-1\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "r7", "Left"));
+        peer.expect(&packet::transfer_to(
+            AreaId(43),
+            "player1",
+            "farm",
+            "Crop1",
+            "Left",
+        ));
+        peer.send(&arrival(44, "farm-1", "0", "Enter", "Spawn"));
+        peer.send("%xt%server%-1%You joined \"farm-1\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(44), "Enter", "Spawn"));
+        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.send(&arrival(45, "yulgar-1", "2", "r3", "Right"));
+        peer.send("%xt%server%-1%You joined \"yulgar-1\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(45), "r3", "Right"));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let locked = session.join_at("tavern", "r7", "Left").wait();
+    assert!(matches!(locked, Err(ActionError::Refused(_))), "{locked:?}");
+    harness
+        .events
+        .iter()
+        .find(|e| matches!(e, Event::Joined { map, .. } if map == "tavern-1"))
+        .unwrap();
+    session.join_at("xantown", "r7", "Left").wait().unwrap();
+    session.join_at("farm", "Crop1", "Left").wait().unwrap();
+    session.join("yulgar").wait().unwrap();
+    let room = session.snapshot().room.clone().unwrap();
+    assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r3", "Right"));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_refused_join_at_never_places_an_arrival_in_the_same_batch() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::transfer_to(
+            AreaId(42),
+            "player1",
+            "tavern",
+            "r7",
+            "Left",
+        ));
+        peer.send_together(&[
+            "%xt%warning%-1%Cannot join that map.%",
+            &arrival(46, "tavern-1", "1", "r3", "Right"),
+            "%xt%server%-1%You joined \"tavern-1\"!%",
+        ]);
+        peer.expect(&packet::move_to_cell(AreaId(46), "r3", "Right"));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let _ = session.join_at("tavern", "r7", "Left").wait();
     session.logout();
     harness.finish();
 }

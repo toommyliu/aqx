@@ -33,8 +33,8 @@ use crate::player::{
 };
 use crate::quest::{self, AchievementUpdate, Quest, QuestList, QuestUpdate};
 use crate::room::{
-    CombatState, Monster, MonsterUpdate, MoveToArea, PlayerUpdate, Room, SPAWN, Tick, UserEntry,
-    UserList, Vitals,
+    CombatState, Monster, MonsterUpdate, MoveToArea, PlayerUpdate, Room, SPAWN, Spot, Tick,
+    UserEntry, UserList, Vitals,
 };
 use crate::shop::{Bought, LoadedShop, Shop};
 use crate::world::World;
@@ -213,6 +213,7 @@ enum Action {
     Ready,
     Join {
         map: String,
+        spot: Option<(String, String)>,
     },
     MoveToCell {
         cell: String,
@@ -337,8 +338,15 @@ enum Prepared {
 }
 
 enum JoinStage {
-    Cooling { map: String, until: Instant },
-    Sent { joins: u64, deadline: Instant },
+    Cooling {
+        map: String,
+        spot: Option<(String, String)>,
+        until: Instant,
+    },
+    Sent {
+        joins: u64,
+        deadline: Instant,
+    },
 }
 
 #[derive(Clone)]
@@ -355,7 +363,15 @@ impl Handle {
 
     pub fn join(&self, map: &str) -> Pending {
         self.act(Action::Join {
+            spot: None,
             map: map.to_owned(),
+        })
+    }
+
+    pub fn join_at(&self, map: &str, cell: &str, pad: &str) -> Pending {
+        self.act(Action::Join {
+            map: map.to_owned(),
+            spot: Some((cell.to_owned(), pad.to_owned())),
         })
     }
 
@@ -541,6 +557,7 @@ pub fn spawn(
         accepted_quests: BTreeSet::new(),
         shop: None,
         shop_maps: HashMap::new(),
+        requested_spot: None,
         combat: Combat::default(),
         closing: None,
         logout_deadline: None,
@@ -593,6 +610,7 @@ struct Session {
     accepted_quests: BTreeSet<QuestId>,
     shop: Option<Arc<Shop>>,
     shop_maps: HashMap<ShopId, Vec<String>>,
+    requested_spot: Option<Spot>,
     combat: Combat,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -721,7 +739,7 @@ impl Session {
         let result = match action {
             Action::Ready => self.ensure_ready(),
             Action::MoveToCell { cell, pad } => self.move_to_cell(&cell, &pad),
-            Action::Join { map } => match self.start_join(map, now) {
+            Action::Join { map, spot } => match self.start_join(map, spot, now) {
                 Ok(Some(stage)) => return Some(Op::Join { reply, stage }),
                 Ok(None) => Ok(()),
                 Err(e) => Err(e),
@@ -860,7 +878,7 @@ impl Session {
             },
             Op::Join {
                 reply,
-                stage: JoinStage::Cooling { map, .. },
+                stage: JoinStage::Cooling { map, spot, .. },
             } => {
                 let state = self.character.as_ref().map(|me| me.state);
                 let refused = match (self.ensure_ready(), state) {
@@ -876,12 +894,24 @@ impl Session {
                 if let Some(until) = self.cooling(Limit::Transfer, now) {
                     return Some(Op::Join {
                         reply,
-                        stage: JoinStage::Cooling { map, until },
+                        stage: JoinStage::Cooling { map, spot, until },
                     });
                 }
                 let joins = self.joins;
                 self.refusal = None;
-                self.send(&packet::transfer(&self.username, &map));
+                let area = self.room.as_ref().map(|room| room.area);
+                let transfer = match (&spot, area) {
+                    (Some((cell, pad)), Some(area)) => {
+                        packet::transfer_to(area, &self.username, &map, cell, pad)
+                    }
+                    _ => packet::transfer(&self.username, &map),
+                };
+                self.requested_spot = spot.map(|(cell, pad)| Spot {
+                    map: map.clone(),
+                    cell,
+                    pad,
+                });
+                self.send(&transfer);
                 self.limits.used(Limit::Transfer, now);
                 Some(Op::Join {
                     reply,
@@ -909,6 +939,9 @@ impl Session {
                         stage: JoinStage::Sent { joins, deadline },
                     });
                 };
+                if result.is_err() {
+                    self.requested_spot = None;
+                }
                 self.replies.push((reply, result));
                 None
             }
@@ -1209,13 +1242,21 @@ impl Session {
         }
     }
 
-    fn start_join(&mut self, map: String, now: Instant) -> Result<Option<JoinStage>, ActionError> {
+    fn start_join(
+        &mut self,
+        map: String,
+        spot: Option<(String, String)>,
+        now: Instant,
+    ) -> Result<Option<JoinStage>, ActionError> {
         self.ensure_ready()?;
         if self.room.as_ref().is_some_and(|room| room.is_in(&map)) {
+            if let Some((cell, pad)) = spot {
+                self.move_to_cell(&cell, &pad)?;
+            }
             return Ok(None);
         }
         let until = self.cooling(Limit::Transfer, now).unwrap_or(now);
-        Ok(Some(JoinStage::Cooling { map, until }))
+        Ok(Some(JoinStage::Cooling { map, spot, until }))
     }
 
     fn cooling(&self, limit: Limit, now: Instant) -> Option<Instant> {
@@ -1478,6 +1519,15 @@ impl Session {
             }),
             "warning" => {
                 let text = text();
+                if matches!(
+                    self.current,
+                    Some(Op::Join {
+                        stage: JoinStage::Sent { .. },
+                        ..
+                    })
+                ) {
+                    self.requested_spot = None;
+                }
                 self.combat.warned(&text, Instant::now());
                 if combat::slow_down(&text) {
                     self.answer(Answer::SlowedDown);
@@ -1570,7 +1620,9 @@ impl Session {
         }
         match json.cmd.as_str() {
             "moveToArea" => {
-                let (room, mine) = Room::arriving(read::<MoveToArea>(&json)?, self.me);
+                let area: MoveToArea = read(&json)?;
+                let requested = self.requested_spot.take_if(|spot| area.is_for(&spot.map));
+                let (room, mine) = Room::arriving(area, self.me, requested);
                 if let (Some(mine), Some(character)) = (mine, &mut self.character) {
                     character.apply(&mine);
                 }

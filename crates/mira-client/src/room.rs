@@ -109,16 +109,46 @@ impl<'de> Deserialize<'de> for CombatState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct Spot {
+    pub(crate) map: String,
+    pub(crate) cell: String,
+    pub(crate) pad: String,
+}
+
+fn names_map(area: &str, map: &str) -> bool {
+    let base = area.rsplit_once('-').map_or(area, |(base, _)| base);
+    area.eq_ignore_ascii_case(map) || base.eq_ignore_ascii_case(map)
+}
+
+impl MoveToArea {
+    pub(crate) fn is_for(&self, map: &str) -> bool {
+        names_map(&self.name, map)
+    }
+}
+
 impl Room {
-    pub(crate) fn arriving(area: MoveToArea, me: Option<EntityId>) -> (Room, Option<Vitals>) {
+    pub(crate) fn arriving(
+        area: MoveToArea,
+        me: Option<EntityId>,
+        requested: Option<Spot>,
+    ) -> (Room, Option<Vitals>) {
         let (mine, others): (Vec<AreaPlayer>, Vec<AreaPlayer>) =
             area.players.into_iter().partition(|p| Some(p.eid) == me);
-        let (cell, pad) = SPAWN;
+        let placed = mine.first().filter(|p| !p.cell.is_empty()).map(|p| {
+            let pad = if p.pad.is_empty() { SPAWN.1 } else { &p.pad };
+            (p.cell.clone(), pad.to_owned())
+        });
+        let (cell, pad) = requested
+            .filter(|spot| area.kind != 0 && names_map(&area.name, &spot.map))
+            .map(|spot| (spot.cell, spot.pad))
+            .or(placed)
+            .unwrap_or_else(|| (SPAWN.0.to_owned(), SPAWN.1.to_owned()));
         let room = Room {
             area: area.area,
             name: area.name,
-            cell: cell.to_owned(),
-            pad: pad.to_owned(),
+            cell,
+            pad,
             players: others
                 .into_iter()
                 .map(|p| {
@@ -135,11 +165,7 @@ impl Room {
     }
 
     pub(crate) fn is_in(&self, map: &str) -> bool {
-        let base = self
-            .name
-            .rsplit_once('-')
-            .map_or(self.name.as_str(), |(base, _)| base);
-        self.name.eq_ignore_ascii_case(map) || base.eq_ignore_ascii_case(map)
+        names_map(&self.name, map)
     }
 
     pub(crate) fn unfetched_cellmates(&mut self) -> Vec<EntityId> {
@@ -268,6 +294,8 @@ pub(crate) struct MoveToArea {
     area: AreaId,
     #[serde(rename = "areaName")]
     name: String,
+    #[serde(rename = "intType", default, deserialize_with = "flex::int")]
+    kind: i64,
     #[serde(rename = "uoBranch", default)]
     players: Vec<AreaPlayer>,
     #[serde(rename = "mondef", default)]
@@ -286,6 +314,8 @@ struct AreaPlayer {
     name: String,
     #[serde(rename = "strFrame", default)]
     cell: String,
+    #[serde(rename = "strPad", default)]
+    pad: String,
     #[serde(rename = "intLevel", default, deserialize_with = "flex::opt_int")]
     level: Option<u32>,
     #[serde(flatten)]
@@ -367,4 +397,30 @@ pub(crate) struct Tick {
     pub(crate) auras: Vec<AuraChange>,
     #[serde(default)]
     pub(crate) sarsa: Vec<ActionResult>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_requested_cell_applies_only_to_its_own_map() {
+        let area = |name: &str| -> MoveToArea {
+            serde_json::from_value(serde_json::json!({
+                "areaId": 1, "areaName": name, "intType": "1",
+                "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "r3", "strPad": "Right"}],
+            }))
+            .unwrap()
+        };
+        let spot = || Spot {
+            map: "xantown".into(),
+            cell: "r7".into(),
+            pad: "Left".into(),
+        };
+        let me = Some(EntityId(7));
+        let (room, _) = Room::arriving(area("tavern-1"), me, Some(spot()));
+        assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r3", "Right"));
+        let (room, _) = Room::arriving(area("xantown-2"), me, Some(spot()));
+        assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r7", "Left"));
+    }
 }
