@@ -25,7 +25,7 @@ use crate::player::{
 };
 use crate::quest::{self, AchievementUpdate, Quest, QuestList, QuestUpdate};
 use crate::room::{
-    MonsterUpdate, MoveToArea, PlayerUpdate, Room, Tick, UserEntry, UserList, Vitals,
+    CombatState, MonsterUpdate, MoveToArea, PlayerUpdate, Room, Tick, UserEntry, UserList, Vitals,
 };
 use crate::world::World;
 
@@ -938,19 +938,33 @@ impl Session {
             }
             "addItems" => {
                 for (key, item) in read::<AddedItems>(&json)?.items {
-                    self.inventory.add(&key, item);
+                    if let Some(event) = self.inventory.add(&key, item) {
+                        self.emit(event);
+                    }
                 }
             }
             "dropItem" => {
                 for (key, item) in read::<AddedItems>(&json)?.items {
-                    self.inventory.offer(&key, item);
+                    if let Some(event) = self.inventory.offer(&key, item) {
+                        self.emit(event);
+                    }
                 }
             }
-            "getDrop" => self.inventory.pick(read::<Picked>(&json)?),
-            "turnIn" => self.inventory.turn_in(&read::<TurnIn>(&json)?),
+            "getDrop" => {
+                if let Some(event) = self.inventory.pick(read::<Picked>(&json)?) {
+                    self.emit(event);
+                }
+            }
+            "turnIn" => {
+                for event in self.inventory.turn_in(&read::<TurnIn>(&json)?) {
+                    self.emit(event);
+                }
+            }
             "sellItem" => {
                 let sold: Sold = read(&json)?;
-                self.inventory.sell(&sold);
+                if let Some(event) = self.inventory.sell(&sold) {
+                    self.emit(event);
+                }
                 if let Some(character) = &mut self.character {
                     character.receive(sold.amount, sold.coins);
                 }
@@ -969,11 +983,27 @@ impl Session {
                 if let Some(id) = reward.faction {
                     faction::add_rep(&mut self.factions, id, reward.rep);
                 }
+                if let (Some(id), "m") = (reward.id, reward.source.as_str()) {
+                    let name = self
+                        .arriving
+                        .as_ref()
+                        .or(self.room.as_ref())
+                        .and_then(|room| room.monsters.iter().find(|m| m.id == id))
+                        .map(|m| m.name.clone())
+                        .unwrap_or_default();
+                    self.emit(Event::Killed {
+                        id,
+                        name,
+                        gold: reward.gold,
+                        exp: reward.exp,
+                    });
+                }
             }
             "levelUp" => {
                 let level: LevelUp = read(&json)?;
                 if let Some(character) = &mut self.character {
-                    character.level_up(&level);
+                    let level = character.level_up(&level);
+                    self.emit(Event::LeveledUp { level });
                 }
             }
             "updateClass" => {
@@ -1109,8 +1139,16 @@ impl Session {
 
     fn patch_player(&mut self, name: &str, patch: &Vitals) {
         if name.eq_ignore_ascii_case(&self.username) {
-            if let Some(character) = &mut self.character {
-                character.apply(patch);
+            let Some(character) = &mut self.character else {
+                return;
+            };
+            let was = character.state;
+            character.apply(patch);
+            match (was, character.state) {
+                (CombatState::Dead, CombatState::Dead) => {}
+                (_, CombatState::Dead) => self.emit(Event::Died),
+                (CombatState::Dead, _) => self.emit(Event::Respawned),
+                _ => {}
             }
         } else if let Some(player) = self.room.as_mut().and_then(|r| r.player_named(name)) {
             player.apply(patch);
