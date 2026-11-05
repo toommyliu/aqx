@@ -828,6 +828,13 @@ fn describe(event: &Event) -> Option<String> {
             };
             format!("{name}: {qty} in {place}")
         }
+        Event::QuestAccepted { id } => format!("accepted quest {id}"),
+        Event::QuestCompleted { id } => format!("completed quest {id}"),
+        Event::CounterStarted { monster } => format!("monster #{monster} is countering"),
+        Event::CounterEnded { monster } => format!("monster #{monster} stopped countering"),
+        Event::AuraAdded { .. } | Event::AuraRemoved { .. } | Event::AwayChanged { .. } => {
+            return None;
+        }
         Event::Unreadable { error } => format!("unreadable message: {error}"),
         Event::Packet { direction, text } => {
             let arrow = match direction {

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use mira_protocol::{AreaId, EntityId, MonId, MonMapId, XmlUser, flex};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::aura::{AuraChange, Auras};
+use crate::aura::{AuraChange, AuraDelta, Auras};
 use crate::combat::ActionResult;
 
 pub(crate) const SPAWN: (&str, &str) = ("Enter", "Spawn");
@@ -119,7 +119,7 @@ impl Monster {
         }
     }
 
-    pub(crate) fn apply_aura(&mut self, change: AuraChange, now: Instant) {
+    pub(crate) fn apply_aura(&mut self, change: AuraChange, now: Instant) -> Vec<AuraDelta> {
         let counter = change.names().any(|name| name == COUNTER_AURA);
         let removed = change.removes();
         let until = change
@@ -128,13 +128,14 @@ impl Monster {
             .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
             .and_then(|lasts| now.checked_add(lasts))
             .unwrap_or(now + COUNTER_WINDOW);
-        self.auras.apply(change, now);
+        let deltas = self.auras.apply(change, now);
         let aura = self.auras.active.iter().any(|a| a.name == COUNTER_AURA);
         match (counter, removed, aura) {
             (true, true, _) => self.counter = None,
             (true, false, true) => self.counter = Some(Counter::Active { until }),
             _ => {}
         }
+        deltas
     }
 
     pub(crate) fn counter_deadline(&self) -> Option<Instant> {

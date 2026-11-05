@@ -13,12 +13,12 @@ use mira_protocol::{
 };
 
 use super::*;
-use crate::Place;
 use crate::quest::{QuestItem, QuestReward, QuestStatus, RewardKind};
 use crate::{
     Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Item, Monster, Skill, SkillTarget,
     StatEffect, Stats, TempItem,
 };
+use crate::{Holder, Place};
 
 const TOKEN: &str = "tok-abc123";
 const API_OK: &str = "<msg t='sys'><body action='apiOK' r='0'></body></msg>";
@@ -805,6 +805,11 @@ fn tracks_the_players_vitals_haste_and_skills() {
         !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
         "{events:?}"
     );
+    let away: Vec<&Event> = events
+        .iter()
+        .filter(|e| matches!(e, Event::AwayChanged { .. }))
+        .collect();
+    assert_eq!(away, [&Event::AwayChanged { away: true }]);
     assert_eq!(
         session.snapshot().me,
         Some(Me {
@@ -1444,6 +1449,43 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
         !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
         "{events:?}"
     );
+    let mine: Vec<(bool, &str)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::AuraAdded {
+                on: Holder::Me,
+                name,
+                ..
+            } => Some((true, name.as_str())),
+            Event::AuraRemoved {
+                on: Holder::Me,
+                name,
+            } => Some((false, name.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        mine,
+        [
+            (true, "Stun"),
+            (true, "Pact"),
+            (true, "Slow"),
+            (true, "Stun"),
+            (false, "Pact")
+        ]
+    );
+    assert!(events.contains(&Event::AuraAdded {
+        on: Holder::Monster(MonMapId(2)),
+        name: "Poison".into(),
+        stacks: 3,
+    }));
+    let removed = |name: &str| {
+        events.contains(&Event::AuraRemoved {
+            on: Holder::Me,
+            name: name.into(),
+        })
+    };
+    assert!(removed("Pact") && !removed("Slow"));
     let world = session.snapshot();
     let aura = |name: &str, duration: f64, value: Option<f64>, caster| Aura {
         name: name.into(),
@@ -2162,7 +2204,10 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
     assert!(matches!(refused, ActionError::Refused(why) if why == "Missing Turn In Item"));
     assert!(session.snapshot().accepted_quests.contains(&QuestId(30)));
     session.logout();
-    harness.finish();
+    let events = harness.finish();
+    let count = |wanted: &Event| events.iter().filter(|e| *e == wanted).count();
+    assert_eq!(count(&Event::QuestAccepted { id: QuestId(30) }), 2);
+    assert_eq!(count(&Event::QuestCompleted { id: QuestId(30) }), 1);
 }
 
 #[test]
@@ -3410,7 +3455,11 @@ fn holds_a_skill_that_would_hit_a_countering_monster() {
     countering.send(()).unwrap();
     cast.wait().unwrap();
     session.logout();
-    harness.finish();
+    let events = harness.finish();
+    let count = |wanted: &Event| events.iter().filter(|e| *e == wanted).count();
+    let monster = MonMapId(2);
+    assert_eq!(count(&Event::CounterStarted { monster }), 1);
+    assert_eq!(count(&Event::CounterEnded { monster }), 1);
 }
 
 #[test]
@@ -3732,7 +3781,12 @@ fn clears_the_away_mark_before_acting_only_when_asked() {
     thread::sleep(Duration::from_millis(600));
     session.rest().wait().unwrap();
     session.logout();
-    harness.finish();
+    let events = harness.finish();
+    let count = |away| {
+        let wanted = Event::AwayChanged { away };
+        events.iter().filter(|e| **e == wanted).count()
+    };
+    assert_eq!((count(true), count(false)), (2, 1));
 }
 
 fn reconnect_every(delay: Duration, attempts: u32) -> Options {

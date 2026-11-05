@@ -18,7 +18,7 @@ mod world;
 pub use api::{Account, ApiError, DeviceId, Server};
 pub use aura::{Aura, Auras, Caster, StatEffect};
 pub use enhancement::Enhancement;
-pub use event::{Direction, Event, NoticeKind, Place};
+pub use event::{Direction, Event, Holder, NoticeKind, Place};
 pub use faction::Faction;
 pub use inventory::{DropOffer, Item, Pool, TempItem};
 pub use mira_protocol::{ItemId, MapItemId, MonMapId, QuestId, ShopId, ShopItemId};

@@ -1,7 +1,14 @@
-use mira_protocol::{ItemId, MonMapId};
+use mira_protocol::{ItemId, MonMapId, QuestId};
 use serde::Serialize;
 
 use crate::session::Phase;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Holder {
+    Me,
+    Monster(MonMapId),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -62,6 +69,30 @@ pub enum Event {
         name: String,
         qty: u32,
         place: Place,
+    },
+    QuestAccepted {
+        id: QuestId,
+    },
+    QuestCompleted {
+        id: QuestId,
+    },
+    AuraAdded {
+        on: Holder,
+        name: String,
+        stacks: u32,
+    },
+    AuraRemoved {
+        on: Holder,
+        name: String,
+    },
+    CounterStarted {
+        monster: MonMapId,
+    },
+    CounterEnded {
+        monster: MonMapId,
+    },
+    AwayChanged {
+        away: bool,
     },
     Unreadable {
         error: String,

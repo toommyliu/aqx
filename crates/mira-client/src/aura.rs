@@ -47,14 +47,19 @@ pub(crate) enum Target {
 }
 
 impl Auras {
-    pub(crate) fn apply(&mut self, change: AuraChange, now: Instant) {
+    pub(crate) fn apply(&mut self, change: AuraChange, now: Instant) -> Vec<AuraDelta> {
         let caster = change.caster.as_deref().and_then(caster);
+        let mut deltas = Vec::new();
         match change.cmd.as_str() {
             "aura+" | "aura++" => {
                 for data in change.auras.into_iter().flatten() {
                     let is_new = data.is_new;
                     let aura = data.into_aura(caster, now);
                     if is_new {
+                        deltas.push(AuraDelta::Added {
+                            name: aura.name.clone(),
+                            stacks: aura.stacks,
+                        });
                         self.active.push(aura);
                         continue;
                     }
@@ -85,12 +90,15 @@ impl Auras {
                     (None, None) => Vec::new(),
                 };
                 for name in names {
-                    remove_first(&mut self.active, &name);
                     remove_first(&mut self.passive, &name);
+                    if remove_first(&mut self.active, &name) {
+                        deltas.push(AuraDelta::Removed { name });
+                    }
                 }
             }
             _ => {}
         }
+        deltas
     }
 
     pub(crate) fn clear_passives(&mut self) {
@@ -106,10 +114,14 @@ impl Auras {
     }
 }
 
-fn remove_first(auras: &mut Vec<Aura>, name: &str) {
-    if let Some(at) = auras.iter().position(|aura| aura.name == name) {
-        auras.remove(at);
-    }
+fn remove_first(auras: &mut Vec<Aura>, name: &str) -> bool {
+    let at = auras.iter().position(|aura| aura.name == name);
+    at.map(|at| auras.remove(at)).is_some()
+}
+
+pub(crate) enum AuraDelta {
+    Added { name: String, stacks: u32 },
+    Removed { name: String },
 }
 
 fn caster(info: &str) -> Option<Caster> {

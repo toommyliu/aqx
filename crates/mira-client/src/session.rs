@@ -21,9 +21,9 @@ use serde_json::Value;
 
 use crate::REPLY_TIMEOUT;
 use crate::api::{self, Account, ApiError, Server, Token};
-use crate::aura::{self, AuraChange, Target};
+use crate::aura::{self, AuraChange, AuraDelta, Target};
 use crate::combat::{self, AUTO_ATTACK, ActionResult, Combat, Gate, ITEM_SLOT, Outcome};
-use crate::event::{Direction, Event, NoticeKind};
+use crate::event::{Direction, Event, Holder, NoticeKind};
 use crate::faction::{self, AddedFaction, Faction, FactionData};
 use crate::inventory::{
     AddedItems, Inventory, Item, LoadInventory, Picked, Pool, Sold, TurnIn, Worn,
@@ -2181,8 +2181,11 @@ impl Session {
                 let (room, mine) = Room::arriving(area, self.me, requested);
                 if let (Some(mine), Some(character)) = (mine, &mut self.character) {
                     character.apply(&mine.vitals);
-                    character.away = mine.away;
                     character.name = mine.name;
+                    if character.away != mine.away {
+                        character.away = mine.away;
+                        self.emit(Event::AwayChanged { away: mine.away });
+                    }
                 }
                 self.arriving = Some(room);
             }
@@ -2249,7 +2252,12 @@ impl Session {
                         (telegraph, anim.caster.as_deref().and_then(aura::target))
                         && let Some(monster) = self.room.as_mut().and_then(|r| r.monster(id))
                     {
-                        monster.warn_counter(Instant::now());
+                        let now = Instant::now();
+                        let was = monster.countering(now);
+                        monster.warn_counter(now);
+                        if !was && monster.countering(now) {
+                            self.emit(Event::CounterStarted { monster: id });
+                        }
                     }
                 }
             }
@@ -2447,8 +2455,8 @@ impl Session {
             }
             "acceptQuest" => {
                 let verdict: Verdict = read(&json)?;
-                if verdict.ok {
-                    self.accepted_quests.insert(verdict.id);
+                if verdict.ok && self.accepted_quests.insert(verdict.id) {
+                    self.emit(Event::QuestAccepted { id: verdict.id });
                 }
                 self.answer(Answer::Accepted(verdict));
             }
@@ -2456,6 +2464,7 @@ impl Session {
                 let verdict: Verdict = read(&json)?;
                 if verdict.ok {
                     self.accepted_quests.remove(&verdict.id);
+                    self.emit(Event::QuestCompleted { id: verdict.id });
                 }
                 self.answer(Answer::TurnedIn(verdict));
             }
@@ -3025,8 +3034,10 @@ impl Session {
             .map(|value| value == "true");
         if let (Some(away), Some(me)) = (away, &mut self.character)
             && name.eq_ignore_ascii_case(&self.username)
+            && me.away != away
         {
             me.away = away;
+            self.emit(Event::AwayChanged { away });
         }
         if let Some(room) = &mut self.room {
             room.move_player(name, fields);
@@ -3049,19 +3060,38 @@ impl Session {
     }
 
     fn apply_aura(&mut self, change: AuraChange) {
-        match change.target.as_deref().and_then(aura::target) {
+        let now = Instant::now();
+        let (on, deltas, counter) = match change.target.as_deref().and_then(aura::target) {
             Some(Target::Player(eid)) if Some(eid) == self.me => {
-                if let Some(character) = &mut self.character {
-                    character.auras.apply(change, Instant::now());
-                }
+                let Some(character) = &mut self.character else {
+                    return;
+                };
+                (Holder::Me, character.auras.apply(change, now), None)
             }
             Some(Target::Monster(id)) => {
                 let room = self.arriving.as_mut().or(self.room.as_mut());
-                if let Some(monster) = room.and_then(|room| room.monster(id)) {
-                    monster.apply_aura(change, Instant::now());
-                }
+                let Some(monster) = room.and_then(|room| room.monster(id)) else {
+                    return;
+                };
+                let was = monster.countering(now);
+                let deltas = monster.apply_aura(change, now);
+                let counter = (was != monster.countering(now)).then_some((id, !was));
+                (Holder::Monster(id), deltas, counter)
             }
-            _ => {}
+            _ => return,
+        };
+        for delta in deltas {
+            self.emit(match delta {
+                AuraDelta::Added { name, stacks } => Event::AuraAdded { on, name, stacks },
+                AuraDelta::Removed { name } => Event::AuraRemoved { on, name },
+            });
+        }
+        if let Some((monster, started)) = counter {
+            self.emit(if started {
+                Event::CounterStarted { monster }
+            } else {
+                Event::CounterEnded { monster }
+            });
         }
     }
 
