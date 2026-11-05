@@ -11,7 +11,7 @@ use crate::player::Me;
 use crate::rank::rank;
 use crate::shop::{Bought, ShopItem};
 
-const KEPT_AT_ZERO: ItemId = ItemId(45739);
+const GEAR_OF_DOOM: ItemId = ItemId(45739);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "WireItem")]
@@ -416,11 +416,11 @@ impl Inventory {
             }
             let used_up =
                 held(cost.id).is_some_and(|item| item.slot == "ar" || u64::from(item.qty) <= need);
-            freed += usize::from(cost.id != KEPT_AT_ZERO && used_up);
+            freed += usize::from(cost.id != GEAR_OF_DOOM && used_up);
         }
         if let Some((id, need)) = token
             && !token_counted
-            && id != KEPT_AT_ZERO
+            && id != GEAR_OF_DOOM
             && held(id).is_some_and(|item| u64::from(item.qty) <= need)
         {
             freed += 1;
