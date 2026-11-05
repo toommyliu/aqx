@@ -461,12 +461,12 @@ impl Session {
                 reply,
                 stage: JoinStage::Sent { joins, deadline },
             } => {
-                let result = if self.joins != joins {
+                let result = if let Err(e) = self.ensure_ready() {
+                    Err(e)
+                } else if self.joins != joins {
                     Ok(())
                 } else if let Some(why) = self.refusal.clone() {
                     Err(ActionError::Refused(why))
-                } else if let Phase::Closed { reason } = &self.phase {
-                    Err(ActionError::Closed(reason.clone()))
                 } else if now >= deadline {
                     Err(ActionError::NoReply)
                 } else {
