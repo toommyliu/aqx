@@ -202,6 +202,14 @@ pub fn get_drop(room: AreaId, item: ItemId) -> String {
     zm("getDrop", room, &[item])
 }
 
+pub fn rest_request() -> String {
+    zm("restRequest", 1, &[""])
+}
+
+pub fn emote(name: &str) -> String {
+    zm("emotea", 1, &[name])
+}
+
 pub fn logout() -> String {
     zm("cmd", 1, &["logout"])
 }
@@ -241,6 +249,8 @@ mod tests {
             "%xt%zm%retrieveInventory%42%7%"
         );
         assert_eq!(logout(), "%xt%zm%cmd%1%logout%");
+        assert_eq!(rest_request(), "%xt%zm%restRequest%1%%");
+        assert_eq!(emote("rest"), "%xt%zm%emotea%1%rest%");
         assert_eq!(
             gar(
                 3,

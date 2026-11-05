@@ -16,7 +16,7 @@ const COMMANDS: &str = "join <map>, cell <cell> [pad], attack <monster>, skill <
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
-     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], logout";
+     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -38,7 +38,7 @@ enum Command {
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
     /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
-    /// unequip <item>, mapitem <id> [times], logout)
+    /// unequip <item>, mapitem <id> [times], rest, logout)
     /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
@@ -436,6 +436,7 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
             let id = |text: &str| number(text.trim_start_matches('#')).map(ItemId);
             session.swap(id(inventory)?, id(bank)?).wait()?;
         }
+        ["rest"] => session.rest().wait()?,
         ["mapitem", id, rest @ ..] if rest.len() <= 1 => {
             let id = MapItemId(number(id)?);
             let times = rest.first().map_or(Ok(1), |times| count(times))?;

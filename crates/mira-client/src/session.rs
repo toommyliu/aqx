@@ -163,10 +163,11 @@ enum Limit {
     EquipItem,
     UnequipItem,
     MapItem,
+    Rest,
 }
 
 impl Limit {
-    const COUNT: usize = 10;
+    const COUNT: usize = 11;
 
     fn gap(self) -> Duration {
         Duration::from_millis(match self {
@@ -178,6 +179,7 @@ impl Limit {
             Limit::BuyItem | Limit::SellItem => 1000,
             Limit::EquipItem | Limit::UnequipItem => 1500,
             Limit::MapItem => 1000,
+            Limit::Rest => 2000,
         })
     }
 }
@@ -237,6 +239,7 @@ enum Action {
         on: bool,
     },
     MapItem(MapItemId),
+    Rest,
 }
 
 enum Op {
@@ -302,6 +305,15 @@ enum Op {
         item: MapItemId,
         wake: Option<Instant>,
     },
+    Rest {
+        reply: Reply,
+        stage: RestStage,
+    },
+}
+
+enum RestStage {
+    Cooling { wake: Option<Instant> },
+    Sent { deadline: Instant },
 }
 
 type BankResult = Result<Vec<Value>, ApiError>;
@@ -395,6 +407,10 @@ impl Handle {
 
     pub fn load_bank(&self) -> Pending {
         self.act(Action::Bank(None))
+    }
+
+    pub fn rest(&self) -> Pending {
+        self.act(Action::Rest)
     }
 
     pub fn get_map_item(&self, item: MapItemId) -> Pending {
@@ -732,6 +748,10 @@ impl Session {
                 }
                 Err(e) => Err(e),
             },
+            Action::Rest => {
+                let stage = RestStage::Cooling { wake: None };
+                return self.step(Op::Rest { reply, stage }, now);
+            }
             Action::MapItem(item) => {
                 let op = Op::MapItem {
                     reply,
@@ -986,6 +1006,44 @@ impl Session {
                     None
                 }
             },
+            Op::Rest { reply, stage } => {
+                let vitals = self.character.as_ref().map(|me| {
+                    let hurt = me.hp < me.max_hp || me.mp < me.max_mp;
+                    (me.state, hurt)
+                });
+                let result = match (self.ensure_ready(), vitals, stage) {
+                    (Err(e), ..) => Err(e),
+                    (Ok(()), None, _) => Err(ActionError::NotReady),
+                    (Ok(()), Some((CombatState::Dead, _)), _) => Err(ActionError::Dead),
+                    (Ok(()), Some((CombatState::InCombat, _)), _) => Err(ActionError::InCombat),
+                    (Ok(()), Some((_, false)), _) => Ok(()),
+                    (Ok(()), _, RestStage::Sent { deadline }) if now >= deadline => {
+                        Err(ActionError::NoReply)
+                    }
+                    (Ok(()), _, stage @ RestStage::Sent { .. }) => {
+                        return Some(Op::Rest { reply, stage });
+                    }
+                    (Ok(()), _, RestStage::Cooling { .. }) => {
+                        if let Some(until) = self.cooling(Limit::Rest, now) {
+                            let stage = RestStage::Cooling { wake: Some(until) };
+                            return Some(Op::Rest { reply, stage });
+                        }
+                        self.limits.used(Limit::Rest, now);
+                        self.send(&packet::rest_request());
+                        self.send(&packet::emote("rest"));
+                        match self.ensure_ready() {
+                            Ok(()) => {
+                                let deadline = now + REPLY_TIMEOUT;
+                                let stage = RestStage::Sent { deadline };
+                                return Some(Op::Rest { reply, stage });
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                };
+                self.replies.push((reply, result));
+                None
+            }
             Op::MapItem { reply, item, .. } => {
                 let area = self.room.as_ref().map(|room| room.area);
                 let result = match (self.ensure_ready(), area) {
@@ -1085,7 +1143,15 @@ impl Session {
             }) => Some(*deadline),
             Some(Op::Bank { .. }) => None,
             Some(Op::Equip { stage, .. }) => stage.deadline(),
-            Some(Op::MapItem { wake, .. }) => *wake,
+            Some(Op::MapItem { wake, .. })
+            | Some(Op::Rest {
+                stage: RestStage::Cooling { wake },
+                ..
+            }) => *wake,
+            Some(Op::Rest {
+                stage: RestStage::Sent { deadline },
+                ..
+            }) => Some(*deadline),
             Some(Op::Shop {
                 stage: ShopStage::Waiting { wake },
                 ..

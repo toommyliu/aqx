@@ -2917,3 +2917,42 @@ fn picks_up_map_items_one_per_second() {
     session.logout();
     harness.finish();
 }
+
+#[test]
+fn rests_until_full_at_the_clients_pace() {
+    let (rested, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        let first = peer.expect_at(&packet::rest_request());
+        peer.expect(&packet::emote("rest"));
+        peer.send(&json_message(
+            json!({"cmd": "ct", "p": {"player1": {"intHP": 1000}}}),
+        ));
+        next.recv().unwrap();
+        peer.send(&json_message(
+            json!({"cmd": "ct", "p": {"player1": {"intHP": 400}}}),
+        ));
+        let second = peer.expect_at(&packet::rest_request());
+        assert!(second - first >= Limit::Rest.gap() - SLACK);
+        peer.expect(&packet::emote("rest"));
+        peer.send(&json_message(
+            json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}),
+        ));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    session.rest().wait().unwrap();
+    assert_eq!(session.snapshot().me.as_ref().unwrap().hp, 1000);
+    session.rest().wait().unwrap();
+    rested.send(()).unwrap();
+    wait_until(session, |me| me.hp == 400);
+    let interrupted = session.rest().wait();
+    assert!(
+        matches!(interrupted, Err(ActionError::InCombat)),
+        "{interrupted:?}"
+    );
+    session.logout();
+    harness.finish();
+}
