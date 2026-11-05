@@ -29,6 +29,17 @@ where
     T::try_from(n).map_err(|_| D::Error::custom(format!("{n} is out of range")))
 }
 
+pub fn float<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    match Scalar::deserialize(d)? {
+        Scalar::Int(n) => Ok(n as f64),
+        Scalar::Float(f) => Ok(f),
+        Scalar::Str(s) => s
+            .parse()
+            .map_err(|_| D::Error::custom(format!("expected a number, got {s:?}"))),
+        Scalar::Bool(b) => Err(D::Error::custom(format!("expected a number, got {b}"))),
+    }
+}
+
 pub fn opt_int<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -85,6 +96,20 @@ mod tests {
             parse(serde_json::from_str(r#"{"port": 5.588E3, "online": 1}"#).unwrap()).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn floats_parse_from_any_numeric_encoding() {
+        #[derive(Deserialize)]
+        struct Rate {
+            #[serde(deserialize_with = "super::float")]
+            rate: f64,
+        }
+        let rate = |value| serde_json::from_value::<Rate>(value).map(|r| r.rate).ok();
+        assert_eq!(rate(json!({"rate": 50})), Some(50.0));
+        assert_eq!(rate(json!({"rate": 12.5})), Some(12.5));
+        assert_eq!(rate(json!({"rate": "7.5"})), Some(7.5));
+        assert_eq!(rate(json!({"rate": "abc"})), None);
     }
 
     #[test]

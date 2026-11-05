@@ -9,6 +9,7 @@ use flate2::write::ZlibEncoder;
 use serde_json::json;
 
 use super::*;
+use crate::quest::{Quest, QuestItem, QuestReward, QuestStatus, RewardKind};
 
 const TOKEN: &str = "tok-abc123";
 const API_OK: &str = "<msg t='sys'><body action='apiOK' r='0'></body></msg>";
@@ -98,7 +99,8 @@ impl Peer {
             "uid": 7,
             "data": {
                 "intLevel": "50", "intGold": 1200, "intCoins": 30, "intExp": 400, "intExpToLevel": 2000,
-                "strQuests": format!("00A{}", "0".repeat(97)), "strQuests2": "1".repeat(100),
+                "strQuests": format!("00A{}", "0".repeat(97)), "strQuests2": "1".repeat(60),
+                "iUpgDays": -1, "iCP": 899,
                 "ia0": 5, "iw0": "8", "im0": 2.147483648E9,
                 "strEmail": "player1@example.com", "strIP": "192.0.2.1",
             },
@@ -738,6 +740,8 @@ fn tracks_the_players_vitals_haste_and_skills() {
             exp_to_level: 2000,
             gold: 1200,
             coins: 30,
+            member: false,
+            class_points: 899,
             hp: 700,
             max_hp: 1000,
             mp: 60,
@@ -1064,6 +1068,152 @@ fn tracks_quest_progress_and_achievements() {
             None,
             None
         ]
+    );
+}
+
+#[test]
+fn quest_status_follows_the_game_clients_checks() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        let quest = |id: i64, name: &str, extra: Value| {
+            let mut quest = json!({"QuestID": id, "sName": name});
+            quest
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            quest
+        };
+        let quests = json!({
+            "1": quest(1, "Once done", json!({"bOnce": 1, "iSlot": 2, "iValue": 10})),
+            "2": quest(2, "Once open", json!({
+                "bOnce": "1", "iSlot": 2, "iValue": 11, "iGold": 100, "iExp": 200,
+                "turnin": [{"ItemID": 101, "iQty": 3}],
+                "oItems": {"101": {"ItemID": 101, "sName": "Health Potion"}},
+                "reward": [
+                    {"ItemID": 500, "iQty": 1, "iRate": "100", "iType": 0},
+                    {"ItemID": "501", "iQty": 2, "iRate": 12.5, "iType": 1},
+                ],
+                "oRewards": {
+                    "itemsS": {"500": {"ItemID": 500, "sName": "Gold Bar"}},
+                    "itemsR": {"501": {"ItemID": "501", "sName": "Gem"}},
+                },
+            })),
+            "3": quest(3, "Weekly", json!({"sField": "iw0", "iIndex": 3})),
+            "4": quest(4, "Daily, field missing", json!({"sField": "id5", "iIndex": 0})),
+            "5": quest(5, "Members only", json!({"bUpg": 1})),
+            "6": quest(6, "Chain", json!({"iSlot": 1, "iValue": 2})),
+            "7": quest(7, "High level", json!({"iLvl": 60})),
+            "8": quest(8, "Class missing", json!({"iClass": 999, "iReqCP": 0})),
+            "9": quest(9, "Rep met", json!({"FactionID": 46, "iReqRep": 900})),
+            "10": quest(10, "Rep short", json!({"FactionID": 46, "iReqRep": 3600})),
+            "11": quest(11, "Holds item", json!({"reqd": [{"ItemID": 101, "iQty": 5}]})),
+            "12": quest(12, "Lacks item", json!({"reqd": [{"ItemID": 101, "iQty": 6}]})),
+            "13": quest(13, "No faction", json!({"FactionID": 1, "iReqRep": 99999})),
+            "14": quest(14, "Past string end", json!({"iSlot": 160, "iValue": 1})),
+            "15": quest(15, "String missing", json!({"iSlot": 250, "iValue": 1})),
+            "16": quest(16, "Broken", json!({"reward": [{"ItemID": 1, "iType": 9}]})),
+            "17": quest(17, "Class rank met", json!({"iClass": 700, "iReqCP": 900})),
+            "18": quest(18, "Class rank short", json!({"iClass": 700, "iReqCP": 901})),
+        });
+        peer.send(&json_message(json!({"cmd": "addItems", "items": {"700": {
+            "ItemID": 700, "CharItemID": 5700, "sName": "Rogue", "iQty": 899, "iStk": 1,
+            "sType": "Class", "sES": "ar",
+        }}})));
+        peer.send(&json_message(
+            json!({"cmd": "equipItem", "uid": 7, "ItemID": 700}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "updateClass", "uid": 8, "sClassName": "Healer", "iCP": 5}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "addGoldExp", "intGold": 0, "intExp": 0, "iCP": 1, "typ": "m", "id": 1}),
+        ));
+        peer.send(&json_message(json!({"cmd": "getQuests", "quests": quests})));
+        peer.send(&json_message(json!({"cmd": "getQuests", "quests": {
+            "2": {"QuestID": 2, "sName": "Changed"},
+        }})));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    let unreadable: Vec<&Event> = events
+        .iter()
+        .filter(|e| matches!(e, Event::Unreadable { .. }))
+        .collect();
+    assert!(
+        matches!(unreadable[..], [Event::Unreadable { error }] if error.starts_with("quest 16")),
+        "{unreadable:?}"
+    );
+    let world = session.snapshot();
+    let statuses: Vec<(i64, Option<QuestStatus>)> = (1..=18)
+        .map(|id| (id, world.quest_status(QuestId(id))))
+        .collect();
+    use QuestStatus::*;
+    assert_eq!(
+        statuses,
+        [
+            (1, Some(Done)),
+            (2, Some(Available)),
+            (3, Some(DoneThisPeriod)),
+            (4, Some(DoneThisPeriod)),
+            (5, Some(Locked)),
+            (6, Some(Locked)),
+            (7, Some(Locked)),
+            (8, Some(Locked)),
+            (9, Some(Available)),
+            (10, Some(Locked)),
+            (11, Some(Available)),
+            (12, Some(Locked)),
+            (13, Some(Available)),
+            (14, Some(Available)),
+            (15, Some(Locked)),
+            (16, None),
+            (17, Some(Available)),
+            (18, Some(Locked)),
+        ]
+    );
+    assert_eq!(world.me.as_ref().unwrap().class_points, 900);
+    assert_eq!(
+        world.quests[&QuestId(2)],
+        Quest {
+            id: QuestId(2),
+            name: "Once open".into(),
+            turn_in: vec![QuestItem {
+                id: ItemId(101),
+                name: "Health Potion".into(),
+                qty: 3,
+            }],
+            required: vec![],
+            rewards: vec![
+                QuestReward {
+                    id: ItemId(500),
+                    name: "Gold Bar".into(),
+                    qty: 1,
+                    chance: 100.0,
+                    kind: RewardKind::Always,
+                },
+                QuestReward {
+                    id: ItemId(501),
+                    name: "Gem".into(),
+                    qty: 2,
+                    chance: 12.5,
+                    kind: RewardKind::Rolled,
+                },
+            ],
+            once: true,
+            slot: 2,
+            value: 11,
+            period: None,
+            member: false,
+            level: 0,
+            class: None,
+            required_cp: 0,
+            faction: None,
+            required_rep: 0,
+            gold: 100,
+            exp: 200,
+        }
     );
 }
 
