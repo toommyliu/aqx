@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 pub mod api;
 mod aura;
 mod combat;
@@ -26,3 +28,5 @@ pub use session::{
     ActionError, DEFAULT_CLIENT_VERSION, Disconnect, Handle, Load, Options, Pending, Phase, spawn,
 };
 pub use world::World;
+
+const REPLY_TIMEOUT: Duration = Duration::from_secs(10);

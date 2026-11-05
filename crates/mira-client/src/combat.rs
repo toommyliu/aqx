@@ -6,6 +6,7 @@ use mira_protocol::packet::Aim;
 use mira_protocol::{EntityId, MonMapId, flex};
 use serde::Deserialize;
 
+use crate::REPLY_TIMEOUT;
 use crate::player::{Me, Skill, SkillTarget};
 use crate::room::{CombatState, Room};
 
@@ -18,7 +19,6 @@ const AUTO_GAP: Duration = Duration::from_millis(300);
 const MIN_ONE_WAY: Duration = Duration::from_millis(20);
 const AUTO_SLACK: Duration = Duration::from_millis(100);
 const DISABLED_RETRY: Duration = Duration::from_millis(500);
-const RESULT_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKOFF_STEP: Duration = Duration::from_millis(300);
 const MAX_BACKOFF: Duration = Duration::from_millis(2400);
 const BACKOFF_QUIET: Duration = Duration::from_secs(60);
@@ -227,7 +227,7 @@ impl Combat {
         let lost: Vec<String> = self
             .clocks
             .iter()
-            .filter(|(_, c)| c.flight.is_some_and(|f| now >= f.sent + RESULT_TIMEOUT))
+            .filter(|(_, c)| c.flight.is_some_and(|f| now >= f.sent + REPLY_TIMEOUT))
             .map(|(slot, _)| slot.clone())
             .collect();
         for slot in lost {
@@ -326,7 +326,7 @@ impl Combat {
         let expiries = self
             .clocks
             .values()
-            .filter_map(|c| c.flight.map(|f| f.sent + RESULT_TIMEOUT));
+            .filter_map(|c| c.flight.map(|f| f.sent + REPLY_TIMEOUT));
         expiries
             .chain(self.auto_due(now))
             .chain(self.respawn_at)

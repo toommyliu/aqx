@@ -18,6 +18,7 @@ use serde::de::DeserializeOwned;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
+use crate::REPLY_TIMEOUT;
 use crate::api::{Account, Server, Token};
 use crate::aura::{self, AuraChange, Target};
 use crate::combat::{self, AUTO_ATTACK, ActionResult, Combat, Gate, ITEM_SLOT, Outcome};
@@ -45,9 +46,7 @@ const WAKER: mio::Token = mio::Token(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(3);
-const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
-const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const CELL_PAD: &str = "Left";
 const VERSION_RETRIES: usize = 3;
 const REDACTED_KEYS: [&str; 2] = ["strEmail", "strIP"];
@@ -665,7 +664,7 @@ impl Session {
                     reply,
                     stage: JoinStage::Sent {
                         joins,
-                        deadline: now + JOIN_TIMEOUT,
+                        deadline: now + REPLY_TIMEOUT,
                     },
                 })
             }

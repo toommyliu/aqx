@@ -4,7 +4,8 @@ use std::time::Instant;
 use mira_protocol::{ItemId, QuestId, packet};
 use serde::Deserialize;
 
-use super::{ActionError, Limit, Op, REPLY_TIMEOUT, Session};
+use super::{ActionError, Limit, Op, Session};
+use crate::REPLY_TIMEOUT;
 use crate::quest::{self, Held, Quest, QuestStatus, RewardKind};
 
 const QUESTS_PER_REQUEST: usize = 14;
