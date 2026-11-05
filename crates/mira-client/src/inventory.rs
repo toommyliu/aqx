@@ -5,56 +5,77 @@ use mira_protocol::{CharItemId, EntityId, ItemId, flex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::enhancement::{Enhancement, EnhancementFields};
 use crate::event::{Event, Place};
 use crate::rank::rank;
 use crate::shop::{Bought, ShopItem};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "WireItem")]
 pub struct Item {
-    #[serde(rename(deserialize = "ItemID"))]
     pub id: ItemId,
-    #[serde(rename(deserialize = "CharItemID"))]
     pub char_item_id: CharItemId,
-    #[serde(rename(deserialize = "sName"))]
     pub name: String,
-    #[serde(rename(deserialize = "iQty"), deserialize_with = "flex::int")]
     pub qty: u32,
-    #[serde(rename(deserialize = "iStk"), default, deserialize_with = "flex::int")]
     pub max_stack: u32,
-    #[serde(rename(deserialize = "sType"), default)]
     pub kind: String,
-    #[serde(rename(deserialize = "sES"), default)]
     pub slot: String,
-    #[serde(
-        rename(deserialize = "bEquip"),
-        default,
-        deserialize_with = "flex::bool"
-    )]
     pub equipped: bool,
-    #[serde(
-        rename(deserialize = "bCoins"),
-        default,
-        deserialize_with = "flex::bool"
-    )]
     pub coins: bool,
-    #[serde(rename(deserialize = "bUpg"), default, deserialize_with = "flex::bool")]
     pub member: bool,
-    #[serde(rename(deserialize = "sMeta"), default)]
     pub meta: String,
-    #[serde(
-        rename(deserialize = "bHouse"),
-        default,
-        deserialize_with = "flex::bool"
-    )]
     pub house: bool,
-    #[serde(rename(deserialize = "EnhID"), default, deserialize_with = "flex::int")]
-    pub enhancement_id: i64,
-    #[serde(
-        rename(deserialize = "EnhLvl"),
-        default,
-        deserialize_with = "flex::int"
-    )]
-    pub enhancement_level: u32,
+    pub enhancement: Option<Enhancement>,
+}
+
+#[derive(Deserialize)]
+struct WireItem {
+    #[serde(rename = "ItemID")]
+    id: ItemId,
+    #[serde(rename = "CharItemID")]
+    char_item_id: CharItemId,
+    #[serde(rename = "sName")]
+    name: String,
+    #[serde(rename = "iQty", deserialize_with = "flex::int")]
+    qty: u32,
+    #[serde(rename = "iStk", default, deserialize_with = "flex::int")]
+    max_stack: u32,
+    #[serde(rename = "sType", default)]
+    kind: String,
+    #[serde(rename = "sES", default)]
+    slot: String,
+    #[serde(rename = "bEquip", default, deserialize_with = "flex::bool")]
+    equipped: bool,
+    #[serde(rename = "bCoins", default, deserialize_with = "flex::bool")]
+    coins: bool,
+    #[serde(rename = "bUpg", default, deserialize_with = "flex::bool")]
+    member: bool,
+    #[serde(rename = "sMeta", default)]
+    meta: String,
+    #[serde(rename = "bHouse", default, deserialize_with = "flex::bool")]
+    house: bool,
+    #[serde(flatten)]
+    enhancement: EnhancementFields,
+}
+
+impl From<WireItem> for Item {
+    fn from(wire: WireItem) -> Item {
+        Item {
+            id: wire.id,
+            char_item_id: wire.char_item_id,
+            name: wire.name,
+            qty: wire.qty,
+            max_stack: wire.max_stack,
+            kind: wire.kind,
+            slot: wire.slot,
+            equipped: wire.equipped,
+            coins: wire.coins,
+            member: wire.member,
+            meta: wire.meta,
+            house: wire.house,
+            enhancement: wire.enhancement.enhancement(),
+        }
+    }
 }
 
 impl Item {
@@ -109,13 +130,24 @@ pub struct DropOffer {
     pub member: bool,
     pub meta: String,
     pub house: bool,
-    pub enhancement_id: i64,
-    pub enhancement_level: u32,
+    #[serde(serialize_with = "computed_enhancement")]
+    pub(crate) enhancement: EnhancementFields,
+}
+
+fn computed_enhancement<S: serde::Serializer>(
+    fields: &EnhancementFields,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    fields.enhancement().serialize(s)
 }
 
 impl DropOffer {
     pub fn pool(&self) -> Pool {
         pool(&self.kind, &self.meta, self.house)
+    }
+
+    pub fn enhancement(&self) -> Option<Enhancement> {
+        self.enhancement.enhancement()
     }
 }
 
@@ -171,8 +203,7 @@ impl Inventory {
                             member: added.member,
                             meta: added.meta,
                             house: added.house,
-                            enhancement_id: added.enhancement_id,
-                            enhancement_level: added.enhancement_level,
+                            enhancement: added.enhancement.enhancement(),
                         });
                         (added.name, qty, Place::Inventory)
                     }
@@ -208,8 +239,7 @@ impl Inventory {
                 member: offered.member,
                 meta: offered.meta,
                 house: offered.house,
-                enhancement_id: offered.enhancement_id,
-                enhancement_level: offered.enhancement_level,
+                enhancement: offered.enhancement,
             }),
         }
         Some(event)
@@ -246,8 +276,7 @@ impl Inventory {
                 member: offer.member,
                 meta: offer.meta,
                 house: offer.house,
-                enhancement_id: picked.enhancement_id.unwrap_or(offer.enhancement_id),
-                enhancement_level: picked.enhancement_level.unwrap_or(offer.enhancement_level),
+                enhancement: picked.enhancement.or(offer.enhancement).enhancement(),
             });
             (offer.name, qty)
         } else {
@@ -310,8 +339,7 @@ impl Inventory {
                     member: listed.member,
                     meta: listed.meta.clone(),
                     house: listed.house,
-                    enhancement_id: listed.enhancement_id,
-                    enhancement_level: 0,
+                    enhancement: EnhancementFields::from_id(listed.enhancement_id).enhancement(),
                 });
                 bought.qty
             }
@@ -433,10 +461,8 @@ pub(crate) struct AddedItem {
     meta: String,
     #[serde(rename = "bHouse", default, deserialize_with = "flex::bool")]
     house: bool,
-    #[serde(rename = "EnhID", default, deserialize_with = "flex::int")]
-    enhancement_id: i64,
-    #[serde(rename = "EnhLvl", default, deserialize_with = "flex::int")]
-    enhancement_level: u32,
+    #[serde(flatten)]
+    enhancement: EnhancementFields,
     #[serde(rename = "bBank", default, deserialize_with = "flex::bool")]
     bank: bool,
     #[serde(rename = "bTemp", default, deserialize_with = "flex::bool")]
@@ -475,10 +501,8 @@ pub(crate) struct Picked {
     qty_now: Option<u32>,
     #[serde(rename = "bBank", default, deserialize_with = "flex::bool")]
     bank: bool,
-    #[serde(rename = "EnhID", default, deserialize_with = "flex::opt_int")]
-    enhancement_id: Option<i64>,
-    #[serde(rename = "EnhLvl", default, deserialize_with = "flex::opt_int")]
-    enhancement_level: Option<u32>,
+    #[serde(flatten)]
+    enhancement: EnhancementFields,
 }
 
 #[derive(Deserialize)]

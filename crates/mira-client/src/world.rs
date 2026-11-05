@@ -1,10 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use mira_protocol::QuestId;
 
 use crate::faction::Faction;
 use crate::inventory::{DropOffer, Item, TempItem};
+
+const ENHANCED_SLOTS: [&str; 4] = ["Weapon", "he", "ar", "ba"];
 use crate::player::Me;
 use crate::quest::Quest;
 use crate::room::Room;
@@ -24,6 +26,7 @@ pub struct World {
     pub accepted_quests: BTreeSet<QuestId>,
     pub shop: Option<Arc<Shop>>,
     pub bank: Option<Arc<Vec<Item>>>,
+    pub procs: Arc<HashMap<u32, String>>,
 }
 
 impl World {
@@ -40,6 +43,14 @@ impl World {
             accepted_quests: BTreeSet::new(),
             shop: None,
             bank: None,
+            procs: Arc::default(),
         }
+    }
+
+    pub fn enhancement_name(&self, item: &Item) -> Option<String> {
+        if !ENHANCED_SLOTS.contains(&item.slot.as_str()) {
+            return None;
+        }
+        item.enhancement.as_ref()?.name(&self.procs)
     }
 }

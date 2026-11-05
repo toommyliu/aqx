@@ -110,13 +110,11 @@ impl Session {
         if item.member && !me.member {
             return unusable(format!("{} is for members", item.name));
         }
-        if item.enhancement_level > me.level {
-            return unusable(format!(
-                "{} needs level {}",
-                item.name, item.enhancement_level
-            ));
+        let level = item.enhancement.as_ref().map_or(0, |e| e.level);
+        if level > me.level {
+            return unusable(format!("{} needs level {level}", item.name));
         }
-        if !ALWAYS_EQUIPPABLE.contains(&item.slot.as_str()) && item.enhancement_id <= 0 {
+        if !ALWAYS_EQUIPPABLE.contains(&item.slot.as_str()) && item.enhancement.is_none() {
             return unusable(format!("{} needs an enhancement first", item.name));
         }
         Ok(false)

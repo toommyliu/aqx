@@ -3,6 +3,7 @@ use std::time::Duration;
 pub mod api;
 mod aura;
 mod combat;
+mod enhancement;
 mod event;
 mod faction;
 mod inventory;
@@ -16,6 +17,7 @@ mod world;
 
 pub use api::{Account, ApiError, DeviceId, Server};
 pub use aura::{Aura, Auras, Caster, StatEffect};
+pub use enhancement::Enhancement;
 pub use event::{Direction, Event, NoticeKind, Place};
 pub use faction::Faction;
 pub use inventory::{DropOffer, Item, Pool, TempItem};

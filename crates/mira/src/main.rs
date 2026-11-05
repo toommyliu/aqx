@@ -551,6 +551,10 @@ fn describe_inventory(world: &World) -> String {
                 item.name, item.qty, item.max_stack, item.kind
             ),
         };
+        let line = match world.enhancement_name(item) {
+            Some(enhancement) => format!("{} [{enhancement}]\n", line.trim_end()),
+            None => line,
+        };
         text.push_str(&line);
     }
     for item in &world.temp {

@@ -870,8 +870,7 @@ fn tracks_inventory_and_temp_items() {
             member: false,
             meta: String::new(),
             house: false,
-            enhancement_id: 0,
-            enhancement_level: 0,
+            enhancement: None,
         };
     assert_eq!(
         *world.inventory,
@@ -994,8 +993,7 @@ fn tracks_gold_exp_levels_and_drops() {
             member: false,
             meta: String::new(),
             house: false,
-            enhancement_id: 0,
-            enhancement_level: 0,
+            enhancement: Default::default(),
         }]
     );
 }
@@ -2696,5 +2694,67 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
         Err(ActionError::InCombat)
     ));
     session.logout();
+    harness.finish();
+}
+
+#[test]
+fn names_enhancements_on_gear_with_the_servers_proc_names() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        let item = |id: i64, slot: &str, extra: Value| {
+            let mut item = json!({"ItemID": id, "CharItemID": 8000 + id, "sName": "Thing",
+                "iQty": 1, "iStk": 1, "sType": "Gear", "sES": slot, "EnhID": 5, "EnhLvl": 1,
+                "EnhPatternID": 9, "iRty": 12});
+            item.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            item
+        };
+        peer.serve_with_items(
+            "5.31",
+            json!([
+                item(1, "Weapon", json!({"ProcID": 2, "EnhRty": 3})),
+                item(2, "pe", json!({})),
+                item(3, "ba", json!({"EnhPatternID": 11})),
+                item(4, "he", json!({"EnhID": 0})),
+            ]),
+        );
+        peer.send(&json_message(json!({
+            "cmd": "sAct", "actions": {"active": []},
+            "procs": {"2": {"nam": "Spiral Carve II", "pct": 0.1}},
+        })));
+        peer.send(&json_message(json!({"cmd": "dropItem", "items": {"20": {
+            "ItemID": 20, "sName": "Dropped Axe", "iQty": 1, "iStk": 1, "sType": "Axe",
+            "sES": "Weapon", "EnhID": 7, "EnhLvl": 3, "EnhPatternID": 2,
+        }}})));
+        peer.send("%xt%server%-1%sent%");
+        peer.expect(&packet::logout());
+    });
+    harness
+        .events
+        .iter()
+        .find(|e| matches!(e, Event::Notice { text, .. } if text == "sent"))
+        .unwrap();
+    let world = harness.session.snapshot();
+    let offered = serde_json::to_value(&world.drops[0]).unwrap();
+    assert_eq!(
+        offered["enhancement"],
+        json!({"id": 7, "level": 3, "pattern": 2, "proc_id": 0, "plus": 0})
+    );
+    let names: Vec<Option<String>> = world
+        .inventory
+        .iter()
+        .map(|item| world.enhancement_name(item))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            Some("Lucky +2, Spiral Carve II".to_owned()),
+            None,
+            Some("Forge, Absolution".to_owned()),
+            None,
+        ]
+    );
+    harness.session.logout();
     harness.finish();
 }

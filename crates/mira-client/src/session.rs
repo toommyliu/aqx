@@ -482,6 +482,7 @@ pub fn spawn(
         bank_out,
         bank_results,
         bank: None,
+        procs: Arc::default(),
         username: account.username.clone(),
         token: account.token.clone(),
         options,
@@ -533,6 +534,7 @@ struct Session {
     bank_out: mpsc::Sender<BankResult>,
     bank_results: mpsc::Receiver<BankResult>,
     bank: Option<Arc<Vec<Item>>>,
+    procs: Arc<HashMap<u32, String>>,
     username: String,
     token: Token,
     options: Options,
@@ -1080,6 +1082,7 @@ impl Session {
             accepted_quests: self.accepted_quests.clone(),
             shop: self.shop.clone(),
             bank: self.bank.clone(),
+            procs: Arc::clone(&self.procs),
         });
         for event in self.outgoing.drain(..) {
             let _ = self.events.send(event);
@@ -1451,6 +1454,12 @@ impl Session {
     fn on_json(&mut self, json: JsonMessage) -> Result<(), String> {
         fn read<T: DeserializeOwned>(json: &JsonMessage) -> Result<T, String> {
             T::deserialize(&json.data).map_err(|e| format!("{}: {e}", json.cmd))
+        }
+        if let Some(Value::Object(procs)) = json.data.get("procs") {
+            let named = procs.iter().filter_map(|(id, proc)| {
+                Some((id.parse().ok()?, proc.get("nam")?.as_str()?.to_owned()))
+            });
+            Arc::make_mut(&mut self.procs).extend(named);
         }
         match json.cmd.as_str() {
             "moveToArea" => {
