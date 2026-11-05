@@ -24,6 +24,14 @@ where
     T::try_from(n).map_err(|_| D::Error::custom(format!("{n} is out of range")))
 }
 
+pub fn opt_int<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: TryFrom<i64>,
+{
+    int(d).map(Some)
+}
+
 pub fn bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     match Scalar::deserialize(d)? {
         Scalar::Bool(b) => Ok(b),
