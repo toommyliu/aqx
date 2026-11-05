@@ -7,11 +7,11 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use mira_client::{
     ActionError, CombatState, DeviceId, Direction, Disconnect, Event, Handle, Load, Me, Monster,
-    NoticeKind, Options, Phase, Room, Server, SkillTarget, api,
+    NoticeKind, Options, Phase, Room, Server, SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
-const COMMANDS: &str = "join <map>, cell <cell> [pad], who, mons [all], me, logout";
+const COMMANDS: &str = "join <map>, cell <cell> [pad], who, mons [all], me, inv, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -29,7 +29,7 @@ enum Command {
         json: bool,
     },
     /// Log in, then print what the account does and run commands read from stdin
-    /// (join <map>, cell <cell> [pad], who, mons [all], me, logout) until it logs out.
+    /// (join <map>, cell <cell> [pad], who, mons [all], me, inv, logout) until it logs out.
     Login {
         #[arg(long)]
         user: String,
@@ -200,6 +200,15 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
         },
         ["mons"] => list_monsters(session, json, false)?,
         ["mons", "all"] => list_monsters(session, json, true)?,
+        ["inv"] => {
+            let world = session.snapshot();
+            if json {
+                let inv = serde_json::json!({"inventory": *world.inventory, "temp": world.temp});
+                println!("{inv}");
+            } else {
+                print!("{}", describe_inventory(&world));
+            }
+        }
         ["me"] => match &session.snapshot().me {
             Some(me) if json => println!("{}", serde_json::to_string(me).expect("me serializes")),
             Some(me) => print!("{}", describe_me(me)),
@@ -244,6 +253,27 @@ fn list_monsters(session: &Handle, json: bool, all: bool) -> Result<(), CommandE
         print!("{}", describe_monsters(&monsters));
     }
     Ok(())
+}
+
+fn describe_inventory(world: &World) -> String {
+    let mut text = String::new();
+    for item in world.inventory.iter() {
+        let equipped = if item.equipped { ", equipped" } else { "" };
+        text.push_str(&format!(
+            "  {} x{}/{} ({}{equipped})\n",
+            item.name, item.qty, item.max_stack, item.kind
+        ));
+    }
+    for item in &world.temp {
+        text.push_str(&format!(
+            "  {} x{}/{} (temp)\n",
+            item.name, item.qty, item.max_stack
+        ));
+    }
+    if text.is_empty() {
+        text.push_str("no items\n");
+    }
+    text
 }
 
 fn describe_me(me: &Me) -> String {

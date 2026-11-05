@@ -69,6 +69,18 @@ impl Peer {
     }
 
     fn serve_to_ready(&mut self, version: &str) {
+        self.serve_with_items(
+            version,
+            json!([
+                {"ItemID": 100, "CharItemID": 5000, "sName": "Default Sword", "iQty": 1, "iStk": 1,
+                 "sType": "Sword", "sES": "Weapon", "bEquip": 1},
+                {"ItemID": "101", "CharItemID": "5001", "sName": "Health Potion", "iQty": "5",
+                 "iStk": 10, "sType": "Item", "sES": "None", "bEquip": false},
+            ]),
+        );
+    }
+
+    fn serve_with_items(&mut self, version: &str, items: Value) {
         self.expect(&packet::version_check());
         self.send(API_OK);
         self.expect(&packet::login("player1", version, TOKEN));
@@ -92,7 +104,7 @@ impl Peer {
         ]}})));
         self.send(&json_message(json!({"cmd": "stu", "sta": {"$tha": 0.05}})));
         let inventory =
-            json_message(json!({"cmd": "loadInventoryBig", "items": [{}, {}], "factions": []}));
+            json_message(json!({"cmd": "loadInventoryBig", "items": items, "factions": []}));
         self.send_bytes(&compress(&inventory));
     }
 }
@@ -751,6 +763,112 @@ fn tracks_the_players_vitals_haste_and_skills() {
                 },
             ],
         })
+    );
+}
+
+#[test]
+fn tracks_inventory_and_temp_items() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.send(&json_message(json!({"cmd": "addItems", "items": {
+            "101": {"CharItemID": 5001, "iQty": 2, "iQtyNow": 7, "bBank": 0},
+            "102": {"ItemID": 102, "CharItemID": 5002, "sName": "Iron Axe", "iQty": 1, "iStk": 1,
+                    "sType": "Axe", "sES": "Weapon"},
+            "103": {"ItemID": 103, "CharItemID": 5003, "sName": "Rogue", "iQty": 302500, "iStk": 1,
+                    "sType": "Class", "sES": "ar"},
+            "200": {"ItemID": 200, "sName": "Mosquito Wing", "iQty": 1, "iStk": 5,
+                    "sType": "Quest Item", "bTemp": true},
+            "201": {"ItemID": 201, "sName": "Frog Leg", "iQty": 1, "iStk": 5, "bTemp": true},
+            "300": {"CharItemID": 9000, "iQty": 1, "iQtyNow": 20, "bBank": 1},
+        }})));
+        peer.send(&json_message(
+            json!({"cmd": "addItems", "items": {"200": {"iQty": 2}}}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "equipItem", "uid": 7, "ItemID": 102}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "equipItem", "uid": 8, "ItemID": 100}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "turnIn", "sItems": "200:1,201:1"}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "sellItem", "CharItemID": 5.001E3, "iQty": 3, "intAmount": 30}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "sellItem", "CharItemID": 5003, "iQty": 1, "intAmount": 0}),
+        ));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
+        "{events:?}"
+    );
+    let world = session.snapshot();
+    let item =
+        |id, char_item_id, name: &str, qty, max_stack, kind: &str, slot: &str, equipped| Item {
+            id: ItemId(id),
+            char_item_id: CharItemId(char_item_id),
+            name: name.into(),
+            qty,
+            max_stack,
+            kind: kind.into(),
+            slot: slot.into(),
+            equipped,
+            coins: false,
+            member: false,
+        };
+    assert_eq!(
+        *world.inventory,
+        [
+            item(100, 5000, "Default Sword", 1, 1, "Sword", "Weapon", false),
+            item(101, 5001, "Health Potion", 4, 10, "Item", "None", false),
+            item(102, 5002, "Iron Axe", 1, 1, "Axe", "Weapon", true),
+        ]
+    );
+    assert_eq!(
+        world.temp,
+        [TempItem {
+            id: ItemId(200),
+            name: "Mosquito Wing".into(),
+            qty: 2,
+            max_stack: 5,
+        }]
+    );
+}
+
+#[test]
+fn a_malformed_inventory_item_is_skipped_without_blocking_login() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_with_items(
+            "5.31",
+            json!([
+                {"ItemID": 100, "sName": "Broken"},
+                {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5},
+            ]),
+        );
+        peer.expect_logout();
+    });
+    harness.session.ready().wait().unwrap();
+    let names: Vec<String> = harness
+        .session
+        .snapshot()
+        .inventory
+        .iter()
+        .map(|i| i.name.clone())
+        .collect();
+    assert_eq!(names, ["Health Potion"]);
+    harness.session.logout();
+    let events = harness.finish();
+    assert!(
+        events.iter().any(
+            |e| matches!(e, Event::Unreadable { error } if error.starts_with("inventory item"))
+        )
     );
 }
 

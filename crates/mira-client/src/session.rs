@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
 use mira_protocol::{
-    AreaId, EntityId, Framer, JsonMessage, Message, MonId, MonMapId, XmlMessage, XmlUser,
-    XtMessage, flex, packet,
+    AreaId, CharItemId, EntityId, Framer, ItemId, JsonMessage, Message, MonId, MonMapId,
+    XmlMessage, XmlUser, XtMessage, flex, packet,
 };
-use serde::de::IgnoredAny;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
@@ -109,6 +109,8 @@ pub struct World {
     pub phase: Phase,
     pub room: Option<Room>,
     pub me: Option<Me>,
+    pub inventory: Arc<Vec<Item>>,
+    pub temp: Vec<TempItem>,
 }
 
 type Slot = Arc<Mutex<Arc<World>>>;
@@ -233,6 +235,8 @@ pub fn spawn(
         phase: phase.clone(),
         room: None,
         me: None,
+        inventory: Arc::default(),
+        temp: Vec::new(),
     })));
     let session = Session {
         username: account.username.clone(),
@@ -259,6 +263,8 @@ pub fn spawn(
         transferred_at: None,
         refusal: None,
         character: None,
+        inventory: Arc::default(),
+        temp: Vec::new(),
         closing: None,
         logout_deadline: None,
     };
@@ -349,6 +355,46 @@ impl Me {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Item {
+    #[serde(rename(deserialize = "ItemID"))]
+    pub id: ItemId,
+    #[serde(rename(deserialize = "CharItemID"))]
+    pub char_item_id: CharItemId,
+    #[serde(rename(deserialize = "sName"))]
+    pub name: String,
+    #[serde(rename(deserialize = "iQty"), deserialize_with = "flex::int")]
+    pub qty: u32,
+    #[serde(rename(deserialize = "iStk"), default, deserialize_with = "flex::int")]
+    pub max_stack: u32,
+    #[serde(rename(deserialize = "sType"), default)]
+    pub kind: String,
+    #[serde(rename(deserialize = "sES"), default)]
+    pub slot: String,
+    #[serde(
+        rename(deserialize = "bEquip"),
+        default,
+        deserialize_with = "flex::bool"
+    )]
+    pub equipped: bool,
+    #[serde(
+        rename(deserialize = "bCoins"),
+        default,
+        deserialize_with = "flex::bool"
+    )]
+    pub coins: bool,
+    #[serde(rename(deserialize = "bUpg"), default, deserialize_with = "flex::bool")]
+    pub member: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TempItem {
+    pub id: ItemId,
+    pub name: String,
+    pub qty: u32,
+    pub max_stack: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skill {
     #[serde(rename(deserialize = "ref"))]
     pub slot: String,
@@ -433,6 +479,8 @@ struct Session {
     transferred_at: Option<Instant>,
     refusal: Option<String>,
     character: Option<Me>,
+    inventory: Arc<Vec<Item>>,
+    temp: Vec<TempItem>,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
 }
@@ -614,6 +662,8 @@ impl Session {
             phase: self.phase.clone(),
             room: self.room.clone(),
             me: self.character.clone(),
+            inventory: Arc::clone(&self.inventory),
+            temp: self.temp.clone(),
         });
         for event in self.outgoing.drain(..) {
             let _ = self.events.send(event);
@@ -702,6 +752,8 @@ impl Session {
         self.transferred_at = None;
         self.refusal = None;
         self.character = None;
+        self.inventory = Arc::default();
+        self.temp.clear();
         self.closing = None;
         self.logout_deadline = None;
         self.version = version.to_owned();
@@ -1040,12 +1092,56 @@ impl Session {
                     return Ok(());
                 };
                 let (level, gold) = (character.level, character.gold);
+                self.inventory = Arc::new(self.parse_each("inventory item", inventory.items));
                 self.set_phase(Phase::Ready);
                 self.emit(Event::Ready {
                     level,
                     gold,
-                    items: inventory.items.len(),
+                    items: self.inventory.len(),
                 });
+            }
+            "addItems" => {
+                let added: AddedItems = serde_json::from_value(json.data).map_err(unreadable)?;
+                for (key, item) in added.items {
+                    self.add_item(&key, item);
+                }
+            }
+            "turnIn" => {
+                let turned_in: TurnIn = serde_json::from_value(json.data).map_err(unreadable)?;
+                for (id, qty) in turned_in.items.split(',').filter_map(|pair| {
+                    let (id, qty) = pair.split_once(':')?;
+                    Some((ItemId(id.parse().ok()?), qty.parse().ok()?))
+                }) {
+                    self.consume(id, qty);
+                }
+            }
+            "sellItem" => {
+                let sold: Sold = serde_json::from_value(json.data).map_err(unreadable)?;
+                if let Some(at) = self
+                    .inventory
+                    .iter()
+                    .position(|i| i.char_item_id == sold.char_item_id)
+                {
+                    take(Arc::make_mut(&mut self.inventory), at, sold.qty);
+                }
+            }
+            "equipItem" | "unequipItem" => {
+                let worn: Worn = serde_json::from_value(json.data).map_err(unreadable)?;
+                if Some(worn.uid) == self.me {
+                    let on = json.cmd == "equipItem";
+                    let inventory = Arc::make_mut(&mut self.inventory);
+                    let slot = inventory
+                        .iter()
+                        .find(|i| i.id == worn.id)
+                        .map(|i| i.slot.clone());
+                    for item in inventory.iter_mut() {
+                        if item.id == worn.id {
+                            item.equipped = on;
+                        } else if on && Some(&item.slot) == slot.as_ref() {
+                            item.equipped = false;
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -1121,6 +1217,70 @@ impl Session {
         };
         let name = room.players.remove(at).name;
         self.emit(Event::PlayerLeft { name });
+    }
+
+    fn parse_each<T: DeserializeOwned>(&mut self, what: &str, values: Vec<Value>) -> Vec<T> {
+        values
+            .into_iter()
+            .filter_map(|value| match serde_json::from_value(value) {
+                Ok(parsed) => Some(parsed),
+                Err(e) => {
+                    self.emit(Event::Unreadable {
+                        error: format!("{what}: {e}"),
+                    });
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn add_item(&mut self, key: &str, added: AddedItem) {
+        let Some(id) = added.id.or_else(|| key.parse().ok().map(ItemId)) else {
+            return;
+        };
+        if added.bank {
+            return;
+        }
+        match added.char_item_id.filter(|_| !added.temp) {
+            None => match self.temp.iter_mut().find(|i| i.id == id) {
+                Some(held) => held.qty = added.qty_now.unwrap_or(held.qty + added.qty),
+                None => self.temp.push(TempItem {
+                    id,
+                    name: added.name,
+                    qty: added.qty_now.unwrap_or(added.qty),
+                    max_stack: added.max_stack,
+                }),
+            },
+            Some(char_item_id) => {
+                let inventory = Arc::make_mut(&mut self.inventory);
+                match inventory.iter_mut().find(|i| i.id == id) {
+                    Some(held) => held.qty = added.qty_now.unwrap_or(held.qty + added.qty),
+                    None => inventory.push(Item {
+                        id,
+                        char_item_id,
+                        name: added.name,
+                        qty: added.qty_now.unwrap_or(added.qty),
+                        max_stack: added.max_stack,
+                        kind: added.kind,
+                        slot: added.slot,
+                        equipped: false,
+                        coins: added.coins,
+                        member: added.member,
+                    }),
+                }
+            }
+        }
+    }
+
+    fn consume(&mut self, id: ItemId, qty: u32) {
+        if let Some(at) = self.inventory.iter().position(|i| i.id == id) {
+            take(Arc::make_mut(&mut self.inventory), at, qty);
+        } else if let Some(at) = self.temp.iter().position(|i| i.id == id) {
+            self.temp[at].qty = self.temp[at].qty.saturating_sub(qty);
+            if self.temp[at].qty == 0 {
+                self.temp.remove(at);
+            }
+        }
     }
 
     fn patch_player(&mut self, name: &str, patch: &Vitals) {
@@ -1386,7 +1546,68 @@ struct UserData {
 #[derive(Deserialize)]
 struct LoadInventory {
     #[serde(default)]
-    items: Vec<IgnoredAny>,
+    items: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+struct AddedItems {
+    items: BTreeMap<String, AddedItem>,
+}
+
+#[derive(Deserialize)]
+struct AddedItem {
+    #[serde(rename = "ItemID", default)]
+    id: Option<ItemId>,
+    #[serde(rename = "CharItemID", default)]
+    char_item_id: Option<CharItemId>,
+    #[serde(rename = "sName", default)]
+    name: String,
+    #[serde(rename = "iQty", default, deserialize_with = "flex::int")]
+    qty: u32,
+    #[serde(rename = "iQtyNow", default, deserialize_with = "flex::opt_int")]
+    qty_now: Option<u32>,
+    #[serde(rename = "iStk", default, deserialize_with = "flex::int")]
+    max_stack: u32,
+    #[serde(rename = "sType", default)]
+    kind: String,
+    #[serde(rename = "sES", default)]
+    slot: String,
+    #[serde(rename = "bCoins", default, deserialize_with = "flex::bool")]
+    coins: bool,
+    #[serde(rename = "bUpg", default, deserialize_with = "flex::bool")]
+    member: bool,
+    #[serde(rename = "bBank", default, deserialize_with = "flex::bool")]
+    bank: bool,
+    #[serde(rename = "bTemp", default, deserialize_with = "flex::bool")]
+    temp: bool,
+}
+
+#[derive(Deserialize)]
+struct TurnIn {
+    #[serde(rename = "sItems", default)]
+    items: String,
+}
+
+#[derive(Deserialize)]
+struct Sold {
+    #[serde(rename = "CharItemID")]
+    char_item_id: CharItemId,
+    #[serde(rename = "iQty", deserialize_with = "flex::int")]
+    qty: u32,
+}
+
+#[derive(Deserialize)]
+struct Worn {
+    uid: EntityId,
+    #[serde(rename = "ItemID")]
+    id: ItemId,
+}
+
+fn take(items: &mut Vec<Item>, at: usize, qty: u32) {
+    items[at].qty = items[at].qty.saturating_sub(qty);
+    if items[at].qty == 0 || items[at].kind == "Class" {
+        items.remove(at);
+    }
 }
 
 #[cfg(test)]
