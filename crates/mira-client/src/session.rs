@@ -319,6 +319,7 @@ enum Setting {
 enum Request {
     Act(Action, Reply, u64),
     Set(Setting, u64),
+    Subscribe(mpsc::Sender<Event>),
     Logout,
 }
 
@@ -649,6 +650,12 @@ impl Handle {
         self.request(Request::Set(setting, epoch));
     }
 
+    pub fn subscribe(&self) -> mpsc::Receiver<Event> {
+        let (subscriber, events) = mpsc::channel();
+        self.request(Request::Subscribe(subscriber));
+        events
+    }
+
     pub fn logout(&self) {
         self.request(Request::Logout);
     }
@@ -734,7 +741,7 @@ pub fn spawn(
         poll,
         ready: Events::with_capacity(16),
         requests,
-        events,
+        events: vec![events],
         world: Arc::clone(&world),
         outgoing: Vec::new(),
         replies: Vec::new(),
@@ -804,7 +811,7 @@ struct Session {
     poll: Poll,
     ready: Events,
     requests: mpsc::Receiver<Request>,
-    events: mpsc::Sender<Event>,
+    events: Vec<mpsc::Sender<Event>>,
     world: Slot,
     outgoing: Vec<Event>,
     replies: Vec<(Reply, Result<(), ActionError>)>,
@@ -923,6 +930,7 @@ impl Session {
                     let why = why.unwrap_or(Disconnect::Ended);
                     self.replies.push((reply, Err(ActionError::Closed(why))));
                 }
+                Request::Subscribe(subscriber) => self.events.push(subscriber),
                 Request::Logout => self.begin_logout(),
                 Request::Set(_, epoch) if self.stale_epoch(epoch) => {}
                 Request::Set(setting, _) => self.apply(setting),
@@ -1641,7 +1649,8 @@ impl Session {
             target: self.combat.auto_target(),
         });
         for event in self.outgoing.drain(..) {
-            let _ = self.events.send(event);
+            self.events
+                .retain(|subscriber| subscriber.send(event.clone()).is_ok());
         }
         for (reply, result) in self.replies.drain(..) {
             let _ = reply.send(result);

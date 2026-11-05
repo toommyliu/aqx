@@ -4044,3 +4044,37 @@ fn uses_server_use_items_and_ends_boosts_like_the_client() {
     session.logout();
     harness.finish();
 }
+
+#[test]
+fn delivers_events_to_every_subscriber() {
+    let (subscribed, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        next.recv().unwrap();
+        peer.send("%xt%server%-1%Hello there.%");
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    drop(session.subscribe());
+    let extra = session.subscribe();
+    session.ready().wait().unwrap();
+    subscribed.send(()).unwrap();
+    let hello = Event::Notice {
+        kind: NoticeKind::Server,
+        text: "Hello there.".into(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while extra.recv_timeout(Duration::from_millis(50)).ok() != Some(hello.clone()) {
+        assert!(
+            Instant::now() < deadline,
+            "the subscriber never got the notice"
+        );
+    }
+    session.logout();
+    let events = harness.finish();
+    assert!(events.contains(&hello));
+    let rest: Vec<Event> = extra.iter().collect();
+    assert_eq!(closed_with(&rest), Some(Disconnect::LoggedOut));
+}
