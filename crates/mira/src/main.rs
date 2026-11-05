@@ -11,7 +11,8 @@ use mira_client::{
 };
 
 const DEFAULT_PAD: &str = "Left";
-const COMMANDS: &str = "join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, logout";
+const COMMANDS: &str =
+    "join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, reps, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -29,7 +30,7 @@ enum Command {
         json: bool,
     },
     /// Log in, then print what the account does and run commands read from stdin
-    /// (join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, logout) until it logs out.
+    /// (join <map>, cell <cell> [pad], who, mons [all], me, inv, drops, reps, logout) until it logs out.
     Login {
         #[arg(long)]
         user: String,
@@ -207,6 +208,24 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                 println!("{inv}");
             } else {
                 print!("{}", describe_inventory(&world));
+            }
+        }
+        ["reps"] => {
+            let world = session.snapshot();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&world.factions).expect("factions serialize")
+                );
+            } else if world.factions.is_empty() {
+                println!("no factions");
+            } else {
+                for faction in &world.factions {
+                    println!(
+                        "  {} rank {} ({} rep)",
+                        faction.name, faction.rank, faction.rep
+                    );
+                }
             }
         }
         ["drops"] => {

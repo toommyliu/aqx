@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
 use mira_protocol::{
-    AreaId, CharItemId, EntityId, Framer, ItemId, JsonMessage, Message, MonId, MonMapId,
+    AreaId, CharItemId, EntityId, FactionId, Framer, ItemId, JsonMessage, Message, MonId, MonMapId,
     XmlMessage, XmlUser, XtMessage, flex, packet,
 };
 use serde::de::DeserializeOwned;
@@ -112,6 +112,7 @@ pub struct World {
     pub inventory: Arc<Vec<Item>>,
     pub temp: Vec<TempItem>,
     pub drops: Vec<DropOffer>,
+    pub factions: Vec<Faction>,
 }
 
 type Slot = Arc<Mutex<Arc<World>>>;
@@ -239,6 +240,7 @@ pub fn spawn(
         inventory: Arc::default(),
         temp: Vec::new(),
         drops: Vec::new(),
+        factions: Vec::new(),
     })));
     let session = Session {
         username: account.username.clone(),
@@ -268,6 +270,7 @@ pub fn spawn(
         inventory: Arc::default(),
         temp: Vec::new(),
         drops: Vec::new(),
+        factions: Vec::new(),
         closing: None,
         logout_deadline: None,
     };
@@ -393,6 +396,39 @@ pub struct Item {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Faction {
+    pub id: FactionId,
+    pub name: String,
+    pub rep: u32,
+    pub rank: u32,
+}
+
+const RANK_THRESHOLDS: [u32; 9] = [
+    900, 3600, 10000, 22500, 44100, 78400, 129600, 202500, 302500,
+];
+
+impl Faction {
+    fn new(id: FactionId, name: String, rep: u32) -> Faction {
+        let mut faction = Faction {
+            id,
+            name,
+            rep: 0,
+            rank: 1,
+        };
+        faction.set_rep(rep);
+        faction
+    }
+
+    fn set_rep(&mut self, rep: u32) {
+        self.rep = rep;
+        self.rank = 1 + RANK_THRESHOLDS
+            .iter()
+            .filter(|&&floor| rep >= floor)
+            .count() as u32;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DropOffer {
     pub id: ItemId,
     pub name: String,
@@ -500,6 +536,7 @@ struct Session {
     inventory: Arc<Vec<Item>>,
     temp: Vec<TempItem>,
     drops: Vec<DropOffer>,
+    factions: Vec<Faction>,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
 }
@@ -684,6 +721,7 @@ impl Session {
             inventory: Arc::clone(&self.inventory),
             temp: self.temp.clone(),
             drops: self.drops.clone(),
+            factions: self.factions.clone(),
         });
         for event in self.outgoing.drain(..) {
             let _ = self.events.send(event);
@@ -775,6 +813,7 @@ impl Session {
         self.inventory = Arc::default();
         self.temp.clear();
         self.drops.clear();
+        self.factions.clear();
         self.closing = None;
         self.logout_deadline = None;
         self.version = version.to_owned();
@@ -1117,6 +1156,11 @@ impl Session {
                 };
                 let (level, gold) = (character.level, character.gold);
                 self.inventory = Arc::new(self.parse_each("inventory item", inventory.items));
+                self.factions = self
+                    .parse_each::<FactionData>("faction", inventory.factions)
+                    .into_iter()
+                    .map(FactionData::into_faction)
+                    .collect();
                 self.set_phase(Phase::Ready);
                 self.emit(Event::Ready {
                     level,
@@ -1162,6 +1206,21 @@ impl Session {
                 if let Some(character) = &mut self.character {
                     character.gold += reward.gold;
                     character.exp += reward.exp;
+                }
+                if let Some(faction) = reward
+                    .faction
+                    .and_then(|id| self.factions.iter_mut().find(|f| f.id == id))
+                {
+                    let rep = (i64::from(faction.rep) + reward.rep).clamp(0, i64::from(u32::MAX));
+                    faction.set_rep(rep as u32);
+                }
+            }
+            "addFaction" => {
+                let added: AddedFaction = serde_json::from_value(json.data).map_err(unreadable)?;
+                let faction = added.faction.into_faction();
+                match self.factions.iter_mut().find(|f| f.id == faction.id) {
+                    Some(known) => *known = faction,
+                    None => self.factions.push(faction),
                 }
             }
             "levelUp" => {
@@ -1661,6 +1720,29 @@ struct UserData {
 struct LoadInventory {
     #[serde(default)]
     items: Vec<Value>,
+    #[serde(default)]
+    factions: Vec<Value>,
+}
+
+#[derive(Deserialize)]
+struct FactionData {
+    #[serde(rename = "FactionID")]
+    id: FactionId,
+    #[serde(rename = "sName")]
+    name: String,
+    #[serde(rename = "iRep", default, deserialize_with = "flex::int")]
+    rep: u32,
+}
+
+impl FactionData {
+    fn into_faction(self) -> Faction {
+        Faction::new(self.id, self.name, self.rep)
+    }
+}
+
+#[derive(Deserialize)]
+struct AddedFaction {
+    faction: FactionData,
 }
 
 #[derive(Deserialize)]
@@ -1720,6 +1802,10 @@ struct Reward {
     gold: u64,
     #[serde(rename = "intExp", default, deserialize_with = "flex::int")]
     exp: u64,
+    #[serde(rename = "FactionID", default)]
+    faction: Option<FactionId>,
+    #[serde(rename = "iRep", default, deserialize_with = "flex::int")]
+    rep: i64,
 }
 
 #[derive(Deserialize)]
