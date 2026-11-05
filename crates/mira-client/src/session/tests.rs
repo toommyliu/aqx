@@ -96,7 +96,12 @@ impl Peer {
         self.send(&json_message(json!({
             "cmd": "initUserData",
             "uid": 7,
-            "data": {"intLevel": "50", "intGold": 1200, "intCoins": 30, "intExp": 400, "intExpToLevel": 2000, "strEmail": "player1@example.com", "strIP": "192.0.2.1"},
+            "data": {
+                "intLevel": "50", "intGold": 1200, "intCoins": 30, "intExp": 400, "intExpToLevel": 2000,
+                "strQuests": format!("00A{}", "0".repeat(97)), "strQuests2": "1".repeat(100),
+                "ia0": 5, "iw0": "8", "im0": 2.147483648E9,
+                "strEmail": "player1@example.com", "strIP": "192.0.2.1",
+            },
         })));
         self.expect(&packet::retrieve_inventory(AreaId(42), EntityId(7)));
         self.send(&json_message(json!({"cmd": "sAct", "actions": {"active": [
@@ -739,6 +744,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
             max_mp: 100,
             state: CombatState::InCombat,
             haste: 0.12,
+            quests: session.snapshot().me.as_ref().unwrap().quests.clone(),
             skills: vec![
                 Skill {
                     slot: "aa".into(),
@@ -992,6 +998,71 @@ fn tracks_faction_reputation_and_rank() {
                 rep: 0,
                 rank: 1,
             },
+        ]
+    );
+}
+
+#[test]
+fn tracks_quest_progress_and_achievements() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        for (slot, value) in [(3, 35), (250, 1), (151, 40), (152, -1)] {
+            peer.send(&json_message(
+                json!({"cmd": "updateQuest", "iIndex": slot, "iValue": value}),
+            ));
+        }
+        peer.send(&json_message(
+            json!({"cmd": "setAchievement", "field": "ia0", "index": 2, "value": 0}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "setAchievement", "field": "ia1", "index": "4", "value": 1}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "setAchievement", "field": "id1", "index": 0, "value": 2}),
+        ));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
+        "{events:?}"
+    );
+    let world = session.snapshot();
+    let quests = &world.me.as_ref().unwrap().quests;
+    let values: Vec<Option<u32>> = [2, 3, 150, 151, 152, 250, 900]
+        .into_iter()
+        .map(|slot| quests.value(slot))
+        .collect();
+    assert_eq!(
+        values,
+        [Some(10), Some(35), Some(1), Some(0), Some(0), None, None]
+    );
+    let flags: Vec<Option<bool>> = [
+        ("ia0", 0),
+        ("ia0", 2),
+        ("iw0", 3),
+        ("im0", 31),
+        ("ia1", 4),
+        ("id0", 0),
+        ("id1", 0),
+        ("ia0", 32),
+    ]
+    .into_iter()
+    .map(|(field, bit)| quests.achievement(field, bit))
+    .collect();
+    assert_eq!(
+        flags,
+        [
+            Some(true),
+            Some(false),
+            Some(true),
+            Some(true),
+            Some(true),
+            None,
+            None,
+            None
         ]
     );
 }
