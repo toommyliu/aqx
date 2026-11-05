@@ -159,6 +159,16 @@ impl Session {
                 "item {item} isn't in the inventory"
             )));
         };
+        let decor = matches!(held.kind.as_str(), "Floor Item" | "Wall Item");
+        if held.equipped && (!decor || held.qty <= 1) {
+            return Err(ActionError::Unusable(format!("{} is equipped", held.name)));
+        }
+        if held.meta.contains("NoSell") {
+            return Err(ActionError::Unusable(format!(
+                "{} can't be sold",
+                held.name
+            )));
+        }
         let most = if held.slot == "ar" { 1 } else { held.qty };
         if !(1..=most).contains(&qty) {
             return Err(ActionError::Unusable(format!(

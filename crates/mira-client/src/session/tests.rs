@@ -2485,6 +2485,10 @@ fn buys_and_sells_within_the_clients_limits() {
                  "iStk": 10, "sType": "Item", "sES": "None"},
                 {"ItemID": 102, "CharItemID": 5002, "sName": "Spare Axe", "iQty": 1,
                  "iStk": 1, "sType": "Axe", "sES": "Weapon"},
+                {"ItemID": 103, "CharItemID": 5003, "sName": "Bound Gem", "iQty": 1,
+                 "iStk": 1, "sType": "Gem", "sES": "None", "sMeta": "NoSell"},
+                {"ItemID": 104, "CharItemID": 5004, "sName": "Placed Banner", "iQty": 1,
+                 "iStk": 1, "sType": "Wall Item", "sES": "hi", "bEquip": 1},
             ]),
         );
         peer.expect(&packet::load_shop(AreaId(42), ShopId(7)));
@@ -2560,6 +2564,9 @@ fn buys_and_sells_within_the_clients_limits() {
     let refused = session.buy(ShopItemId(71), 4).wait();
     assert!(matches!(refused, Err(ActionError::Refused(why)) if why == "Sold out"));
     assert!(unusable(session.sell(ItemId(101), 10)));
+    assert!(unusable(session.sell(ItemId(100), 1)));
+    assert!(unusable(session.sell(ItemId(103), 1)));
+    assert!(unusable(session.sell(ItemId(104), 1)));
     session.sell(ItemId(101), 2).wait().unwrap();
     let world = session.snapshot();
     assert_eq!((potions(&world), world.me.as_ref().unwrap().gold), (7, 850));
