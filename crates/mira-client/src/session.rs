@@ -1834,10 +1834,6 @@ impl Session {
         let Some(password) = self.options.reconnect.as_ref().map(|p| p.password.clone()) else {
             return;
         };
-        self.set_phase(Phase::Connecting {
-            server: self.server.name.clone(),
-            version: self.version.clone(),
-        });
         let (base, device) = (self.account.api.clone(), self.account.device.clone());
         let username = self.account.username.clone();
         let (results, waker) = (self.relogin_out.clone(), Arc::clone(&self.waker));
@@ -1849,7 +1845,7 @@ impl Session {
 
     fn take_relogin_results(&mut self) {
         while let Ok(result) = self.relogin_results.try_recv() {
-            if !matches!(self.phase, Phase::Connecting { .. }) || self.stream.is_some() {
+            if !matches!(self.phase, Phase::Reconnecting { .. }) || self.reconnect_at.is_some() {
                 continue;
             }
             let account = match result {
