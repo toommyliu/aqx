@@ -3131,3 +3131,56 @@ fn goes_to_players_the_way_the_client_does() {
     session.logout();
     harness.finish();
 }
+
+#[test]
+fn walks_within_a_cell_and_tracks_where_players_stand() {
+    let (checked, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        let first = peer.expect_at(&packet::walk(AreaId(42), 667, 453, 8));
+        let second = peer.expect_at(&packet::walk(AreaId(42), 120, 300, 8));
+        assert!(second - first >= Limit::Walk.gap() - SLACK);
+        peer.send("%xt%uotls%-1%player2%tx:500,ty:410,sp:8,strFrame:Enter%");
+        peer.send("%xt%server%-1%moved%");
+        next.recv().unwrap();
+        peer.send("%xt%uotls%-1%player2%strFrame:r2,strPad:Left%");
+        peer.send("%xt%server%-1%jumped%");
+        peer.expect(&packet::move_to_cell(AreaId(42), "r2", "Left"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(42), &[EntityId(9)]));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    session.walk(667, 453).wait().unwrap();
+    session.walk(120, 300).wait().unwrap();
+    let off = session.walk(961, 10).wait();
+    assert!(matches!(off, Err(ActionError::Unusable(_))), "{off:?}");
+    let room = session.snapshot().room.clone().unwrap();
+    assert_eq!((room.x, room.y), (120, 300));
+    harness
+        .events
+        .iter()
+        .find(|e| matches!(e, Event::Notice { text, .. } if text == "moved"))
+        .unwrap();
+    let room = session.snapshot().room.clone().unwrap();
+    let mover = room.players.iter().find(|p| p.name == "player2").unwrap();
+    assert_eq!((mover.x, mover.y), (500, 410));
+    checked.send(()).unwrap();
+    harness
+        .events
+        .iter()
+        .find(|e| matches!(e, Event::Notice { text, .. } if text == "jumped"))
+        .unwrap();
+    let room = session.snapshot().room.clone().unwrap();
+    let jumper = room.players.iter().find(|p| p.name == "player2").unwrap();
+    assert_eq!(
+        (jumper.cell.as_deref(), jumper.x, jumper.y),
+        (Some("r2"), 0, 0)
+    );
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    let room = session.snapshot().room.clone().unwrap();
+    assert_eq!((room.x, room.y), (0, 0));
+    session.logout();
+    harness.finish();
+}

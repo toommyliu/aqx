@@ -16,7 +16,7 @@ const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <mons
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
-     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, goto <player>, logout";
+     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -38,7 +38,7 @@ enum Command {
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
     /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
-    /// unequip <item>, mapitem <id> [times], rest, goto <player>, logout)
+    /// unequip <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, logout)
     /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
@@ -439,6 +439,13 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
             session.swap(id(inventory)?, id(bank)?).wait()?;
         }
         ["rest"] => session.rest().wait()?,
+        ["walk", x, y] => {
+            let at = |text: &str| {
+                text.parse()
+                    .map_err(|_| CommandError::Usage(format!("{text:?} isn't a coordinate")))
+            };
+            session.walk(at(x)?, at(y)?).wait()?;
+        }
         ["goto", name @ ..] if !name.is_empty() => session.goto(&name.join(" ")).wait()?,
         ["mapitem", id, rest @ ..] if rest.len() <= 1 => {
             let id = MapItemId(number(id)?);

@@ -363,7 +363,7 @@ fn affordable(me: &Me, skill: &Skill) -> bool {
         .is_none_or(|rate| (f64::from(skill.mana) * rate).round() <= f64::from(me.mp))
 }
 
-fn disabled(me: &Me) -> bool {
+pub(crate) fn disabled(me: &Me) -> bool {
     me.auras.active.iter().any(|aura| {
         aura.category.as_deref().is_some_and(|category| {
             let category: String = category.split_whitespace().collect();

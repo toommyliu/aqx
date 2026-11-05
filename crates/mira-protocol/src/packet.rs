@@ -35,6 +35,14 @@ pub fn transfer_to(room: AreaId, username: &str, map: &str, cell: &str, pad: &st
     zm("cmd", room, &["tfer", username, map, cell, pad])
 }
 
+pub fn walk(room: AreaId, x: i32, y: i32, speed: u32) -> String {
+    zm(
+        "mv",
+        room,
+        &[x.to_string(), y.to_string(), speed.to_string()],
+    )
+}
+
 pub fn goto(name: &str) -> String {
     zm("cmd", 1, &["goto", name])
 }
@@ -331,6 +339,7 @@ mod tests {
             "%xt%zm%cmd%1%tfer%player1%yulgar-2%"
         );
         assert_eq!(goto("player2"), "%xt%zm%cmd%1%goto%player2%");
+        assert_eq!(walk(room, 667, 453, 8), "%xt%zm%mv%42%667%453%8%");
         assert_eq!(
             transfer_to(room, "player1", "xantown", "r7", "Left"),
             "%xt%zm%cmd%42%tfer%player1%xantown%r7%Left%"

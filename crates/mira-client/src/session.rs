@@ -58,6 +58,9 @@ const LOGOUT_TIMEOUT: Duration = Duration::from_secs(3);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
 const CELL_PAD: &str = "Left";
 const VERSION_RETRIES: usize = 3;
+const WALK_SPEED: u32 = 8;
+const STAGE_WIDTH: i32 = 960;
+const STAGE_HEIGHT: i32 = 500;
 const REDACTED_KEYS: [&str; 2] = ["strEmail", "strIP"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -164,10 +167,11 @@ enum Limit {
     UnequipItem,
     MapItem,
     Rest,
+    Walk,
 }
 
 impl Limit {
-    const COUNT: usize = 11;
+    const COUNT: usize = 12;
 
     fn gap(self) -> Duration {
         Duration::from_millis(match self {
@@ -180,6 +184,7 @@ impl Limit {
             Limit::EquipItem | Limit::UnequipItem => 1500,
             Limit::MapItem => 1000,
             Limit::Rest => 2000,
+            Limit::Walk => 500,
         })
     }
 }
@@ -242,6 +247,10 @@ enum Action {
     MapItem(MapItemId),
     Rest,
     Goto(String),
+    Walk {
+        x: i32,
+        y: i32,
+    },
 }
 
 enum Op {
@@ -310,6 +319,12 @@ enum Op {
     Rest {
         reply: Reply,
         stage: RestStage,
+    },
+    Walk {
+        reply: Reply,
+        x: i32,
+        y: i32,
+        wake: Option<Instant>,
     },
 }
 
@@ -432,6 +447,10 @@ impl Handle {
 
     pub fn load_bank(&self) -> Pending {
         self.act(Action::Bank(None))
+    }
+
+    pub fn walk(&self, x: i32, y: i32) -> Pending {
+        self.act(Action::Walk { x, y })
     }
 
     pub fn goto(&self, player: &str) -> Pending {
@@ -752,6 +771,15 @@ impl Session {
         let result = match action {
             Action::Ready => self.ensure_ready(),
             Action::MoveToCell { cell, pad } => self.move_to_cell(&cell, &pad),
+            Action::Walk { x, y } => {
+                let op = Op::Walk {
+                    reply,
+                    x,
+                    y,
+                    wake: None,
+                };
+                return self.step(op, now);
+            }
             Action::Goto(name) => match self.start_goto(name, now) {
                 Ok(Some(stage)) => return Some(Op::Join { reply, stage }),
                 Ok(None) => Ok(()),
@@ -1081,6 +1109,22 @@ impl Session {
                     None
                 }
             },
+            Op::Walk { reply, x, y, .. } => match self.step_walk(x, y, now) {
+                Ok(Some(wake)) => Some(Op::Walk {
+                    reply,
+                    x,
+                    y,
+                    wake: Some(wake),
+                }),
+                Ok(None) => {
+                    self.replies.push((reply, Ok(())));
+                    None
+                }
+                Err(e) => {
+                    self.replies.push((reply, Err(e)));
+                    None
+                }
+            },
             Op::Rest { reply, stage } => {
                 let vitals = self.character.as_ref().map(|me| {
                     let hurt = me.hp < me.max_hp || me.mp < me.max_mp;
@@ -1219,6 +1263,7 @@ impl Session {
             Some(Op::Bank { .. }) => None,
             Some(Op::Equip { stage, .. }) => stage.deadline(),
             Some(Op::MapItem { wake, .. })
+            | Some(Op::Walk { wake, .. })
             | Some(Op::Rest {
                 stage: RestStage::Cooling { wake },
                 ..
@@ -1320,6 +1365,37 @@ impl Session {
         Ok(Some(JoinStage::Cooling { to, until }))
     }
 
+    fn step_walk(&mut self, x: i32, y: i32, now: Instant) -> Result<Option<Instant>, ActionError> {
+        self.ensure_ready()?;
+        let Some(me) = &self.character else {
+            return Err(ActionError::NotReady);
+        };
+        if me.state == CombatState::Dead {
+            return Err(ActionError::Dead);
+        }
+        if combat::disabled(me) {
+            return Err(ActionError::Unusable(
+                "the player can't move right now".into(),
+            ));
+        }
+        if !(0..=STAGE_WIDTH).contains(&x) || !(0..=STAGE_HEIGHT).contains(&y) {
+            return Err(ActionError::Unusable(format!(
+                "({x}, {y}) is off the {STAGE_WIDTH}x{STAGE_HEIGHT} stage"
+            )));
+        }
+        if let Some(until) = self.cooling(Limit::Walk, now) {
+            return Ok(Some(until));
+        }
+        let Some(room) = &mut self.room else {
+            return Err(ActionError::NotReady);
+        };
+        (room.x, room.y) = (x, y);
+        let area = room.area;
+        self.limits.used(Limit::Walk, now);
+        self.send(&packet::walk(area, x, y, WALK_SPEED));
+        self.ensure_ready().map(|()| None)
+    }
+
     fn goto_in_room(&mut self, name: &str) -> Option<Result<(), ActionError>> {
         let room = self.room.as_ref()?;
         let player = room
@@ -1351,6 +1427,7 @@ impl Session {
         };
         room.cell = cell.to_owned();
         room.pad = pad.to_owned();
+        (room.x, room.y) = (0, 0);
         let area = room.area;
         self.combat.disengage();
         self.send(&packet::move_to_cell(area, cell, pad));

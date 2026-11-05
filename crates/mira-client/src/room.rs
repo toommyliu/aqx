@@ -15,6 +15,8 @@ pub struct Room {
     pub name: String,
     pub cell: String,
     pub pad: String,
+    pub x: i32,
+    pub y: i32,
     pub players: Vec<Player>,
     pub monsters: Vec<Monster>,
 }
@@ -26,6 +28,8 @@ pub struct Player {
     pub name: String,
     pub cell: Option<String>,
     pub pad: Option<String>,
+    pub x: i32,
+    pub y: i32,
     pub level: Option<u32>,
     pub class_name: Option<String>,
     pub hp: u32,
@@ -44,6 +48,8 @@ impl Player {
             name,
             cell,
             pad: None,
+            x: 0,
+            y: 0,
             level: None,
             class_name: None,
             hp: 0,
@@ -137,6 +143,7 @@ impl Room {
     ) -> (Room, Option<Vitals>) {
         let (mine, others): (Vec<AreaPlayer>, Vec<AreaPlayer>) =
             area.players.into_iter().partition(|p| Some(p.eid) == me);
+        let (x, y) = mine.first().map_or((0, 0), |p| (p.tx, p.ty));
         let placed = mine.first().filter(|p| !p.cell.is_empty()).map(|p| {
             let pad = if p.pad.is_empty() { SPAWN.1 } else { &p.pad };
             (p.cell.clone(), pad.to_owned())
@@ -151,12 +158,15 @@ impl Room {
             name: area.name,
             cell,
             pad,
+            x,
+            y,
             players: others
                 .into_iter()
                 .map(|p| {
                     let cell = Some(p.cell).filter(|cell| !cell.is_empty());
                     let mut player = Player::new(p.eid, p.name, cell, false);
                     player.pad = Some(p.pad).filter(|pad| !pad.is_empty());
+                    (player.x, player.y) = (p.tx, p.ty);
                     player.level = p.level;
                     player.apply(&p.vitals);
                     player
@@ -216,6 +226,15 @@ impl Room {
                 .find_map(|(key, value)| (key == wanted).then(|| value.to_owned()))
         };
         self.place_player(name, field("strFrame"), field("strPad"));
+        let at = |key| field(key).and_then(|value| value.parse().ok());
+        if let (Some(x), Some(y)) = (at("tx"), at("ty"))
+            && let Some(player) = self
+                .players
+                .iter_mut()
+                .find(|p| p.name.eq_ignore_ascii_case(name))
+        {
+            (player.x, player.y) = (x, y);
+        }
     }
 
     pub(crate) fn place_player(&mut self, name: &str, cell: Option<String>, pad: Option<String>) {
@@ -228,6 +247,7 @@ impl Room {
         };
         if cell.is_some() {
             player.cell = cell;
+            (player.x, player.y) = (0, 0);
         }
         if pad.is_some() {
             player.pad = pad;
@@ -328,6 +348,10 @@ struct AreaPlayer {
     cell: String,
     #[serde(rename = "strPad", default)]
     pad: String,
+    #[serde(default, deserialize_with = "flex::int")]
+    tx: i32,
+    #[serde(default, deserialize_with = "flex::int")]
+    ty: i32,
     #[serde(rename = "intLevel", default, deserialize_with = "flex::opt_int")]
     level: Option<u32>,
     #[serde(flatten)]
