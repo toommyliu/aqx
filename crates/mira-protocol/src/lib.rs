@@ -40,6 +40,12 @@ pub struct FactionId(pub i64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct QuestId(pub i64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShopId(pub i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShopItemId(pub i64);
+
 macro_rules! flex_id {
     ($name:ident) => {
         impl fmt::Display for $name {
@@ -70,6 +76,8 @@ flex_id!(ItemId);
 flex_id!(CharItemId);
 flex_id!(FactionId);
 flex_id!(QuestId);
+flex_id!(ShopId);
+flex_id!(ShopItemId);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {

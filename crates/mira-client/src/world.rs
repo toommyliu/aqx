@@ -9,6 +9,7 @@ use crate::player::Me;
 use crate::quest::Quest;
 use crate::room::Room;
 use crate::session::Phase;
+use crate::shop::Shop;
 
 #[derive(Debug, Clone)]
 pub struct World {
@@ -21,6 +22,7 @@ pub struct World {
     pub factions: Vec<Faction>,
     pub quests: Arc<BTreeMap<QuestId, Quest>>,
     pub accepted_quests: BTreeSet<QuestId>,
+    pub shop: Option<Arc<Shop>>,
 }
 
 impl World {
@@ -35,6 +37,7 @@ impl World {
             factions: Vec::new(),
             quests: Arc::default(),
             accepted_quests: BTreeSet::new(),
+            shop: None,
         }
     }
 }

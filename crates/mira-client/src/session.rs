@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
@@ -11,7 +11,7 @@ use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
 use mira_protocol::packet::Aim;
 use mira_protocol::{
-    EntityId, Framer, ItemId, JsonMessage, Message, MonMapId, QuestId, XmlMessage, XmlUser,
+    EntityId, Framer, ItemId, JsonMessage, Message, MonMapId, QuestId, ShopId, XmlMessage, XmlUser,
     XtMessage, packet,
 };
 use serde::de::DeserializeOwned;
@@ -34,6 +34,7 @@ use crate::room::{
     CombatState, Monster, MonsterUpdate, MoveToArea, PlayerUpdate, Room, SPAWN, Tick, UserEntry,
     UserList, Vitals,
 };
+use crate::shop::{LoadedShop, Shop};
 use crate::world::World;
 use quests::{Answer, QuestAction, QuestCall, Verdict};
 
@@ -76,6 +77,7 @@ pub enum Disconnect {
     Rejected(String),
     LoggedOut,
     LoggedInElsewhere,
+    Kicked { secs: u64 },
     InvalidSession,
     Ended,
     ConnectionLost(String),
@@ -89,6 +91,10 @@ impl fmt::Display for Disconnect {
             Disconnect::Rejected(text) => write!(f, "login rejected: {text}"),
             Disconnect::LoggedOut => f.write_str("logged out"),
             Disconnect::LoggedInElsewhere => f.write_str("this account logged in somewhere else"),
+            Disconnect::Kicked { secs } => write!(
+                f,
+                "the server kicked the account; it can log in again in {secs} s"
+            ),
             Disconnect::InvalidSession => f.write_str("the server says the session is invalid"),
             Disconnect::Ended => f.write_str("the server ended the session"),
             Disconnect::ConnectionLost(e) => write!(f, "connection lost: {e}"),
@@ -141,10 +147,11 @@ enum Limit {
     LoadQuests,
     AcceptQuest,
     TurnIn,
+    LoadShop,
 }
 
 impl Limit {
-    const COUNT: usize = 4;
+    const COUNT: usize = 5;
 
     fn gap(self) -> Duration {
         Duration::from_millis(match self {
@@ -152,6 +159,7 @@ impl Limit {
             Limit::LoadQuests => 1000,
             Limit::AcceptQuest => 1000,
             Limit::TurnIn => 1250,
+            Limit::LoadShop => 3000,
         })
     }
 }
@@ -203,6 +211,7 @@ enum Action {
     ExitCombat,
     Quest(QuestAction),
     PickDrop(ItemId),
+    LoadShop(ShopId),
 }
 
 enum Op {
@@ -242,6 +251,16 @@ enum Op {
         item: ItemId,
         deadline: Instant,
     },
+    Shop {
+        reply: Reply,
+        id: ShopId,
+        stage: ShopStage,
+    },
+}
+
+enum ShopStage {
+    Waiting { wake: Option<Instant> },
+    Sent { deadline: Instant },
 }
 
 enum CastStage {
@@ -312,6 +331,10 @@ impl Handle {
 
     pub fn accept_quest(&self, id: QuestId) -> Pending {
         self.act(Action::Quest(QuestAction::Accept(id)))
+    }
+
+    pub fn load_shop(&self, id: ShopId) -> Pending {
+        self.act(Action::LoadShop(id))
     }
 
     pub fn pick_drop(&self, item: ItemId) -> Pending {
@@ -409,6 +432,8 @@ pub fn spawn(
         factions: Vec::new(),
         quests: Arc::default(),
         accepted_quests: BTreeSet::new(),
+        shop: None,
+        shop_maps: HashMap::new(),
         combat: Combat::default(),
         closing: None,
         logout_deadline: None,
@@ -453,6 +478,8 @@ struct Session {
     factions: Vec<Faction>,
     quests: Arc<BTreeMap<QuestId, Quest>>,
     accepted_quests: BTreeSet<QuestId>,
+    shop: Option<Arc<Shop>>,
+    shop_maps: HashMap<ShopId, Vec<String>>,
     combat: Combat,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -578,6 +605,11 @@ impl Session {
                 }
                 Err(e) => Err(e),
             },
+            Action::LoadShop(id) => {
+                let stage = ShopStage::Waiting { wake: None };
+                let op = Op::Shop { reply, id, stage };
+                return self.step(op, now);
+            }
             Action::Quest(action) => {
                 let call = self.start_quest(action);
                 return self.step(Op::Quest { reply, call }, now);
@@ -781,6 +813,17 @@ impl Session {
                 self.replies.push((reply, result));
                 None
             }
+            Op::Shop {
+                reply,
+                id,
+                mut stage,
+            } => match self.step_shop(id, &mut stage, now) {
+                task::Poll::Pending => Some(Op::Shop { reply, id, stage }),
+                task::Poll::Ready(result) => {
+                    self.replies.push((reply, result));
+                    None
+                }
+            },
             Op::Quest { reply, mut call } => match self.step_quest(&mut call, now) {
                 task::Poll::Pending => Some(Op::Quest { reply, call }),
                 task::Poll::Ready(result) => {
@@ -810,6 +853,14 @@ impl Session {
             })
             | Some(Op::Kill { wake, .. }) => *wake,
             Some(Op::Quest { call, .. }) => call.stage.deadline(),
+            Some(Op::Shop {
+                stage: ShopStage::Waiting { wake },
+                ..
+            }) => *wake,
+            Some(Op::Shop {
+                stage: ShopStage::Sent { deadline },
+                ..
+            }) => Some(*deadline),
             Some(Op::Cast {
                 stage: CastStage::Sent { .. },
                 ..
@@ -837,6 +888,7 @@ impl Session {
             factions: self.factions.clone(),
             quests: Arc::clone(&self.quests),
             accepted_quests: self.accepted_quests.clone(),
+            shop: self.shop.clone(),
         });
         for event in self.outgoing.drain(..) {
             let _ = self.events.send(event);
@@ -936,6 +988,7 @@ impl Session {
         self.factions.clear();
         self.quests = Arc::default();
         self.accepted_quests.clear();
+        self.shop = None;
         self.combat = Combat::default();
         self.closing = None;
         self.logout_deadline = None;
@@ -1147,6 +1200,10 @@ impl Session {
                 text: text(),
             }),
             "multiLoginWarning" => self.closing = Some(Disconnect::LoggedInElsewhere),
+            "logoutWarning" => {
+                let secs = xt.field(5).and_then(|secs| secs.parse().ok()).unwrap_or(0);
+                self.closing = Some(Disconnect::Kicked { secs });
+            }
             "zm" if xt.field(3) == Some("tryQuestComplete") => self.answer(Answer::TurnInEchoed),
             "exitArea" => {
                 if let Some(eid) = xt.field(4).and_then(|eid| eid.parse().ok()) {
@@ -1424,6 +1481,17 @@ impl Session {
                 }
                 self.answer(Answer::Quests);
             }
+            "loadShop" => {
+                let shop = Arc::new(read::<LoadedShop>(&json)?.shopinfo);
+                let id = shop.id;
+                self.shop_maps.insert(id, shop.maps.clone());
+                self.shop = Some(shop);
+                if matches!(self.current, Some(Op::Shop { id: wanted, stage: ShopStage::Sent { .. }, .. }) if wanted == id)
+                    && let Some(Op::Shop { reply, .. }) = self.current.take()
+                {
+                    self.replies.push((reply, Ok(())));
+                }
+            }
             "acceptQuest" => {
                 let verdict: Verdict = read(&json)?;
                 if verdict.ok {
@@ -1526,6 +1594,55 @@ impl Session {
         let target = self.pick_target(Some(target))?;
         self.combat.engage(target, now);
         Ok(())
+    }
+
+    fn step_shop(
+        &mut self,
+        id: ShopId,
+        stage: &mut ShopStage,
+        now: Instant,
+    ) -> task::Poll<Result<(), ActionError>> {
+        use task::Poll::{Pending, Ready};
+        if let Err(e) = self.ensure_ready() {
+            return Ready(Err(e));
+        }
+        if let ShopStage::Sent { deadline } = *stage {
+            return if now >= deadline {
+                Ready(Err(ActionError::NoReply))
+            } else {
+                Pending
+            };
+        }
+        if self
+            .shop
+            .as_ref()
+            .is_some_and(|shop| shop.id == id && !shop.limited)
+        {
+            return Ready(Ok(()));
+        }
+        let Some(room) = &self.room else {
+            return Ready(Err(ActionError::NotReady));
+        };
+        if let Some(maps) = self.shop_maps.get(&id)
+            && !maps.iter().any(|map| room.is_in(map))
+        {
+            return Ready(Err(ActionError::Unusable(format!(
+                "shop {id} isn't available in this map"
+            ))));
+        }
+        if let Some(until) = self.cooling(Limit::LoadShop, now) {
+            *stage = ShopStage::Waiting { wake: Some(until) };
+            return Pending;
+        }
+        let Some(area) = self.room.as_ref().map(|room| room.area) else {
+            return Ready(Err(ActionError::NotReady));
+        };
+        self.limits.used(Limit::LoadShop, now);
+        self.send(&packet::load_shop(area, id));
+        *stage = ShopStage::Sent {
+            deadline: now + REPLY_TIMEOUT,
+        };
+        Pending
     }
 
     fn start_pick(&mut self, item: ItemId, now: Instant) -> Result<Instant, ActionError> {

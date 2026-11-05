@@ -8,13 +8,13 @@ use clap::{Parser, Subcommand};
 use mira_client::{
     ActionError, Auras, BoostKind, CombatState, DeviceId, Direction, Disconnect, Event, Handle,
     ItemId, Load, Me, MonMapId, Monster, NoticeKind, Options, Pending, Phase, Place, QuestId,
-    QuestStatus, Room, Server, SkillTarget, World, api,
+    QuestStatus, Room, Server, ShopId, SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str = "join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], \
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
-     load <quest>..., accept <quest>, complete <quest> [times] [reward], logout";
+     load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -34,7 +34,7 @@ enum Command {
     /// Log in, then print what the account does and run commands read from stdin
     /// (join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop,
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
-    /// complete <quest> [times] [reward], logout) until it logs out. A monster or a dropped item is
+    /// complete <quest> [times] [reward], shop <id>, logout) until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
         #[arg(long)]
@@ -326,6 +326,25 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                     .ok_or_else(|| CommandError::Usage(format!("no {wanted} on offer")))?,
             };
             session.pick_drop(id).wait()?;
+        }
+        ["shop", id] => {
+            session.load_shop(ShopId(number(id)?)).wait()?;
+            let world = session.snapshot();
+            let Some(shop) = &world.shop else {
+                return Err(CommandError::Action(ActionError::NoReply));
+            };
+            if json {
+                println!("{}", serde_json::to_string(&**shop).expect("shops serialize"));
+            } else {
+                println!("{} (shop {})", shop.name, shop.id);
+                for item in &shop.items {
+                    let currency = if item.coins { "AC" } else { "gold" };
+                    println!(
+                        "  #{} {} x{} for {} {currency}",
+                        item.listing, item.name, item.qty, item.cost
+                    );
+                }
+            }
         }
         ["me"] => match &session.snapshot().me {
             Some(me) if json => println!("{}", serde_json::to_string(me).expect("me serializes")),

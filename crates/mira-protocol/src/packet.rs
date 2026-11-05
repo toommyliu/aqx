@@ -1,6 +1,6 @@
 use std::fmt::{self, Display};
 
-use crate::{AreaId, EntityId, ItemId, MonMapId, QuestId};
+use crate::{AreaId, EntityId, ItemId, MonMapId, QuestId, ShopId};
 
 const CLIENT_TOKEN: &str = "SPIDER#0001";
 const SMARTFOX_VERSION: &str = "157";
@@ -103,6 +103,10 @@ pub fn try_quest_complete(room: AreaId, id: QuestId, reward: Option<ItemId>, tim
     )
 }
 
+pub fn load_shop(room: AreaId, shop: ShopId) -> String {
+    zm("loadShop", room, &[shop])
+}
+
 pub fn get_drop(room: AreaId, item: ItemId) -> String {
     zm("getDrop", room, &[item])
 }
@@ -170,6 +174,7 @@ mod tests {
         );
         assert_eq!(accept_quest(room, QuestId(3)), "%xt%zm%acceptQuest%42%3%");
         assert_eq!(get_drop(room, ItemId(1027)), "%xt%zm%getDrop%42%1027%");
+        assert_eq!(load_shop(room, ShopId(5)), "%xt%zm%loadShop%42%5%");
         assert_eq!(
             try_quest_complete(room, QuestId(3), None, 1),
             "%xt%zm%tryQuestComplete%42%3%-1%false%1%wvz%"

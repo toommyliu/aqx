@@ -8,7 +8,7 @@ use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use serde_json::json;
 
-use mira_protocol::{AreaId, CharItemId, FactionId, ItemId, MonMapId};
+use mira_protocol::{AreaId, CharItemId, FactionId, ItemId, MonMapId, ShopId};
 
 use super::*;
 use crate::Place;
@@ -2225,4 +2225,74 @@ fn a_join_refuses_in_combat_and_when_dead_without_sending() {
     thread::sleep(Duration::from_millis(100));
     session.logout();
     harness.finish();
+}
+
+fn shop_reply(id: i64, location: &str) -> String {
+    json_message(json!({"cmd": "loadShop", "shopinfo": {
+        "ShopID": id, "sName": format!("Shop {id}"), "bLimited": false, "Location": location,
+        "items": [{"ItemID": 900, "ShopItemID": 4000 + id, "sName": "Sword", "iCost": "250",
+                   "bCoins": 0, "iStk": 1, "iQty": 1, "FactionID": 1, "sType": "Sword"}],
+    }}))
+}
+
+#[test]
+fn loads_shops_once_each_and_refuses_one_known_to_open_elsewhere() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        let first = peer.expect_at(&packet::load_shop(AreaId(42), ShopId(6)));
+        peer.send(&shop_reply(6, "faraway"));
+        let second = peer.expect_at(&packet::load_shop(AreaId(42), ShopId(5)));
+        assert!(second - first >= Limit::LoadShop.gap() - SLACK);
+        peer.send(&shop_reply(5, "yulgar, battleon"));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    session.load_shop(ShopId(6)).wait().unwrap();
+    session.load_shop(ShopId(6)).wait().unwrap();
+    session.load_shop(ShopId(5)).wait().unwrap();
+    let off_map = session.load_shop(ShopId(6)).wait();
+    assert!(
+        matches!(off_map, Err(ActionError::Unusable(_))),
+        "{off_map:?}"
+    );
+    session.load_shop(ShopId(5)).wait().unwrap();
+    let shop = session.snapshot().shop.clone().unwrap();
+    assert_eq!(
+        (shop.id, shop.maps.clone()),
+        (ShopId(5), vec!["yulgar".to_owned(), "battleon".to_owned()])
+    );
+    assert_eq!(
+        shop.items[0],
+        crate::ShopItem {
+            listing: mira_protocol::ShopItemId(4005),
+            id: ItemId(900),
+            name: "Sword".into(),
+            cost: 250,
+            coins: false,
+            member: false,
+            max_stack: 1,
+            qty: 1,
+            faction: None,
+            required_rep: 0,
+            kind: "Sword".into(),
+            slot: String::new(),
+        }
+    );
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_kick_reports_how_long_until_the_account_can_log_in() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.send("%xt%logoutWarning%-1%%30%");
+        peer.send("<msg t='sys'><body action='logout' r='0'></body></msg>");
+        peer.wait_for_close();
+    });
+    let events = harness.finish();
+    assert_eq!(closed_with(&events), Some(Disconnect::Kicked { secs: 30 }));
 }
