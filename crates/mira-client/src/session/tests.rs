@@ -13,8 +13,8 @@ use mira_protocol::{AreaId, CharItemId, FactionId, ItemId, MonMapId};
 use super::*;
 use crate::quest::{QuestItem, QuestReward, QuestStatus, RewardKind};
 use crate::{
-    Aura, Auras, Caster, CombatState, DropOffer, Item, Monster, Skill, SkillTarget, StatEffect,
-    TempItem,
+    Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Item, Monster, Skill, SkillTarget,
+    StatEffect, TempItem,
 };
 
 const TOKEN: &str = "tok-abc123";
@@ -106,7 +106,7 @@ impl Peer {
             "data": {
                 "intLevel": "50", "intGold": 1200, "intCoins": 30, "intExp": 400, "intExpToLevel": 2000,
                 "strQuests": format!("00A{}", "0".repeat(97)), "strQuests2": "1".repeat(60),
-                "iUpgDays": -1, "iCP": 899,
+                "iUpgDays": -1, "iCP": 899, "iBoostRep": 120,
                 "ia0": 5, "iw0": "8", "im0": 2.147483648E9,
                 "strEmail": "player1@example.com", "strIP": "192.0.2.1",
             },
@@ -145,7 +145,7 @@ fn move_to_area(area: i64, name: &str) -> String {
         "uoBranch": [
             {"entID": 7, "strUsername": "player1", "strFrame": "Enter", "intHP": 950, "intHPMax": 1000},
             {"entID": 8, "strUsername": "player2", "strFrame": "Enter"},
-            {"entID": 9, "strUsername": "player3", "strFrame": "r2"},
+            {"entID": 9, "strUsername": "player3", "strFrame": "r2", "intLevel": 10},
         ],
     }))
 }
@@ -749,7 +749,9 @@ fn tracks_the_players_vitals_haste_and_skills() {
             gold: 1200,
             coins: 30,
             member: false,
+            class_name: String::new(),
             class_points: 899,
+            boosts: session.snapshot().me.as_ref().unwrap().boosts.clone(),
             hp: 700,
             max_hp: 1000,
             mp: 60,
@@ -1401,6 +1403,107 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
             caster: Some(Caster::Player(EntityId(7))),
             ..aura("Late", 5.0, None, None)
         }]
+    );
+}
+
+#[test]
+fn tracks_boosts_class_names_and_other_players() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.send(&json_message(json!({"cmd": "initUserDatas", "a": [
+            {"uid": 8, "data": {"strUsername": "player2", "intLevel": 30, "strClassName": "Healer"}},
+        ]})));
+        peer.send(&json_message(
+            json!({"cmd": "initUserData", "uid": 9, "data": {
+                "strUsername": "player3", "intLevel": "45", "strClassName": "Rogue",
+            }}),
+        ));
+        for (uid, class, points) in [(8, "Warrior", 5), (7, "Mage", 41107)] {
+            peer.send(&json_message(json!({
+                "cmd": "updateClass", "uid": uid, "sClassName": class, "iCP": points,
+            })));
+        }
+        peer.send(&json_message(json!({
+            "cmd": "uotls", "unm": "Player2", "o": {"intHP": 500, "intHPMax": 1000, "intState": 2},
+        })));
+        peer.send(&json_message(
+            json!({"cmd": "ct", "p": {"player3": {"intMP": 20}}}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "xpboost", "op": "+", "iSecsLeft": 3600, "bShowShop": false}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "gboost", "op": "+", "iSecsLeft": "60", "bShowShop": true}),
+        ));
+        peer.send(&json_message(json!({"cmd": "gboost", "op": "-"})));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
+        "{events:?}"
+    );
+    let world = session.snapshot();
+    let players: Vec<_> = world
+        .room
+        .as_ref()
+        .unwrap()
+        .players
+        .iter()
+        .map(|p| {
+            (
+                p.name.as_str(),
+                p.level,
+                p.class_name.as_deref(),
+                p.hp,
+                p.max_hp,
+                p.mp,
+                p.state,
+            )
+        })
+        .collect();
+    assert_eq!(
+        players,
+        [
+            (
+                "player2",
+                Some(30),
+                Some("Warrior"),
+                500,
+                1000,
+                0,
+                CombatState::InCombat
+            ),
+            (
+                "player3",
+                Some(45),
+                Some("Rogue"),
+                0,
+                0,
+                20,
+                CombatState::Idle
+            ),
+        ]
+    );
+    let me = world.me.as_ref().unwrap();
+    assert_eq!((me.class_name.as_str(), me.class_points), ("Mage", 41107));
+    let now = Instant::now();
+    let left = |kind| me.boosts.remaining(kind, now).as_secs();
+    assert!(
+        (3590..=3600).contains(&left(BoostKind::Xp)),
+        "{}",
+        left(BoostKind::Xp)
+    );
+    assert!(
+        (110..=120).contains(&left(BoostKind::Rep)),
+        "{}",
+        left(BoostKind::Rep)
+    );
+    assert_eq!(
+        (left(BoostKind::Gold), left(BoostKind::ClassPoints)),
+        (0, 0)
     );
 }
 

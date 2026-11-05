@@ -1,5 +1,8 @@
+use std::time::{Duration, Instant};
+
 use mira_protocol::{EntityId, FactionId, flex};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::aura::Auras;
@@ -15,7 +18,9 @@ pub struct Me {
     pub gold: u64,
     pub coins: u64,
     pub member: bool,
+    pub class_name: String,
     pub class_points: u32,
+    pub boosts: Boosts,
     pub hp: u32,
     pub max_hp: u32,
     pub mp: u32,
@@ -40,7 +45,15 @@ impl Me {
         self.state = patch.state.unwrap_or(self.state);
     }
 
-    pub(crate) fn load(&mut self, data: &UserData) {
+    pub(crate) fn load(&mut self, data: &UserData, now: Instant) {
+        for (kind, secs) in [
+            (BoostKind::Xp, data.boost_xp),
+            (BoostKind::Gold, data.boost_gold),
+            (BoostKind::Rep, data.boost_rep),
+            (BoostKind::ClassPoints, data.boost_class_points),
+        ] {
+            self.boosts.set(kind, secs, now);
+        }
         self.level = data.level;
         self.gold = data.gold;
         self.coins = data.coins;
@@ -73,6 +86,79 @@ impl Me {
         };
         *purse += amount;
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoostKind {
+    Xp = 0,
+    Gold = 1,
+    Rep = 2,
+    ClassPoints = 3,
+}
+
+impl BoostKind {
+    const ALL: [BoostKind; 4] = [
+        BoostKind::Xp,
+        BoostKind::Gold,
+        BoostKind::Rep,
+        BoostKind::ClassPoints,
+    ];
+
+    fn from_cmd(cmd: &str) -> Option<BoostKind> {
+        match cmd {
+            "xpboost" => Some(BoostKind::Xp),
+            "gboost" => Some(BoostKind::Gold),
+            "repboost" => Some(BoostKind::Rep),
+            "cpboost" => Some(BoostKind::ClassPoints),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Boosts {
+    ends: [Option<Instant>; 4],
+}
+
+impl Boosts {
+    pub fn remaining(&self, kind: BoostKind, now: Instant) -> Duration {
+        self.ends[kind as usize].map_or(Duration::ZERO, |end| end.saturating_duration_since(now))
+    }
+
+    fn set(&mut self, kind: BoostKind, secs: u64, now: Instant) {
+        self.ends[kind as usize] = (secs > 0).then(|| now + Duration::from_secs(secs));
+    }
+
+    pub(crate) fn apply(&mut self, cmd: &str, update: &BoostUpdate, now: Instant) {
+        let Some(kind) = BoostKind::from_cmd(cmd) else {
+            return;
+        };
+        let secs = if update.op == "+" { update.secs } else { 0 };
+        self.set(kind, secs, now);
+    }
+}
+
+impl Serialize for Boosts {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let now = Instant::now();
+        let mut map = s.serialize_map(None)?;
+        for kind in BoostKind::ALL {
+            let left = self.remaining(kind, now);
+            if !left.is_zero() {
+                map.serialize_entry(&kind, &left.as_secs())?;
+            }
+        }
+        map.end()
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct BoostUpdate {
+    #[serde(default)]
+    op: String,
+    #[serde(rename = "iSecsLeft", default, deserialize_with = "flex::int")]
+    secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +233,14 @@ pub(crate) struct UserData {
     member_days: i64,
     #[serde(rename = "iCP", default, deserialize_with = "flex::int")]
     class_points: u32,
+    #[serde(rename = "iBoostXP", default, deserialize_with = "flex::int")]
+    boost_xp: u64,
+    #[serde(rename = "iBoostG", default, deserialize_with = "flex::int")]
+    boost_gold: u64,
+    #[serde(rename = "iBoostRep", default, deserialize_with = "flex::int")]
+    boost_rep: u64,
+    #[serde(rename = "iBoostCP", default, deserialize_with = "flex::int")]
+    boost_class_points: u64,
     #[serde(flatten)]
     rest: serde_json::Map<String, Value>,
 }
@@ -174,6 +268,7 @@ impl Me {
     }
 
     pub(crate) fn change_class(&mut self, class: &ClassChange) {
+        self.class_name.clone_from(&class.class_name);
         self.class_points = class.class_points;
         self.auras.clear_passives();
     }
@@ -202,6 +297,8 @@ pub(crate) struct Reward {
 #[derive(Deserialize)]
 pub(crate) struct ClassChange {
     pub(crate) uid: EntityId,
+    #[serde(rename = "sClassName", default)]
+    pub(crate) class_name: String,
     #[serde(rename = "iCP", deserialize_with = "flex::int")]
     pub(crate) class_points: u32,
 }

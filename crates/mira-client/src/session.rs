@@ -20,9 +20,13 @@ use crate::aura::{self, AuraChange, Target};
 use crate::event::{Direction, Event, NoticeKind};
 use crate::faction::{self, AddedFaction, Faction, FactionData};
 use crate::inventory::{AddedItems, Inventory, LoadInventory, Picked, Sold, TurnIn, Worn};
-use crate::player::{ClassChange, InitUserData, LevelUp, Me, Reward, SkillList, Stats};
+use crate::player::{
+    BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, SkillList, Stats,
+};
 use crate::quest::{self, AchievementUpdate, Quest, QuestList, QuestUpdate};
-use crate::room::{MonsterUpdate, MoveToArea, PlayerUpdate, Room, Tick, Vitals};
+use crate::room::{
+    MonsterUpdate, MoveToArea, PlayerUpdate, Room, Tick, UserEntry, UserList, Vitals,
+};
 use crate::world::World;
 
 pub const DEFAULT_CLIENT_VERSION: &str = "5.31";
@@ -829,12 +833,19 @@ impl Session {
                 }
                 self.arriving = Some(room);
             }
-            "initUserData"
+            "initUserData" => {
+                let entry: UserEntry = read(&json)?;
+                if Some(entry.uid) != self.me {
+                    self.learn_player(&entry);
+                    return Ok(());
+                }
                 if self.phase
-                    == (Phase::Loading {
+                    != (Phase::Loading {
                         step: Load::Character,
-                    }) =>
-            {
+                    })
+                {
+                    return Ok(());
+                }
                 let user: InitUserData = read(&json)?;
                 let (Some(me), Some(room)) = (self.me, &self.room) else {
                     return Ok(());
@@ -842,12 +853,23 @@ impl Session {
                 if user.uid == me {
                     let room = room.area;
                     if let Some(character) = &mut self.character {
-                        character.load(&user.data);
+                        character.load(&user.data, Instant::now());
                     }
                     self.send(&packet::retrieve_inventory(room, me));
                     self.set_phase(Phase::Loading {
                         step: Load::Inventory,
                     });
+                }
+            }
+            "initUserDatas" => {
+                for entry in read::<UserList>(&json)?.a {
+                    self.learn_player(&entry);
+                }
+            }
+            "xpboost" | "gboost" | "repboost" | "cpboost" => {
+                let update: BoostUpdate = read(&json)?;
+                if let Some(character) = &mut self.character {
+                    character.boosts.apply(&json.cmd, &update, Instant::now());
                 }
             }
             "mtls" => {
@@ -956,12 +978,12 @@ impl Session {
             }
             "updateClass" => {
                 let class: ClassChange = read(&json)?;
-                if let Some(character) = self
-                    .character
-                    .as_mut()
-                    .filter(|_| Some(class.uid) == self.me)
-                {
-                    character.change_class(&class);
+                if Some(class.uid) == self.me {
+                    if let Some(character) = &mut self.character {
+                        character.change_class(&class);
+                    }
+                } else if let Some(player) = self.room.as_mut().and_then(|r| r.player(class.uid)) {
+                    player.class_name = Some(class.class_name);
                 }
             }
             "addFaction" => {
@@ -1086,10 +1108,18 @@ impl Session {
     }
 
     fn patch_player(&mut self, name: &str, patch: &Vitals) {
-        if let Some(character) = &mut self.character
-            && name.eq_ignore_ascii_case(&self.username)
-        {
-            character.apply(patch);
+        if name.eq_ignore_ascii_case(&self.username) {
+            if let Some(character) = &mut self.character {
+                character.apply(patch);
+            }
+        } else if let Some(player) = self.room.as_mut().and_then(|r| r.player_named(name)) {
+            player.apply(patch);
+        }
+    }
+
+    fn learn_player(&mut self, entry: &UserEntry) {
+        if let Some(player) = self.room.as_mut().and_then(|r| r.player(entry.uid)) {
+            player.learn(&entry.data);
         }
     }
 

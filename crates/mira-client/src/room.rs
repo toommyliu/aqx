@@ -24,8 +24,48 @@ pub struct Player {
     eid: EntityId,
     pub name: String,
     pub cell: Option<String>,
+    pub level: Option<u32>,
+    pub class_name: Option<String>,
+    pub hp: u32,
+    pub max_hp: u32,
+    pub mp: u32,
+    pub max_mp: u32,
+    pub state: CombatState,
     #[serde(skip)]
     fetched: bool,
+}
+
+impl Player {
+    fn new(eid: EntityId, name: String, cell: Option<String>, fetched: bool) -> Player {
+        Player {
+            eid,
+            name,
+            cell,
+            level: None,
+            class_name: None,
+            hp: 0,
+            max_hp: 0,
+            mp: 0,
+            max_mp: 0,
+            state: CombatState::default(),
+            fetched,
+        }
+    }
+
+    pub(crate) fn apply(&mut self, patch: &Vitals) {
+        self.hp = patch.hp.unwrap_or(self.hp);
+        self.max_hp = patch.max_hp.unwrap_or(self.max_hp);
+        self.mp = patch.mp.unwrap_or(self.mp);
+        self.max_mp = patch.max_mp.unwrap_or(self.max_mp);
+        self.state = patch.state.unwrap_or(self.state);
+    }
+
+    pub(crate) fn learn(&mut self, data: &PlayerData) {
+        self.level = data.level.or(self.level);
+        if let Some(class) = &data.class_name {
+            self.class_name = Some(class.clone());
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -74,11 +114,12 @@ impl Room {
             pad: pad.to_owned(),
             players: others
                 .into_iter()
-                .map(|p| Player {
-                    eid: p.eid,
-                    name: p.name,
-                    cell: Some(p.cell).filter(|cell| !cell.is_empty()),
-                    fetched: false,
+                .map(|p| {
+                    let cell = Some(p.cell).filter(|cell| !cell.is_empty());
+                    let mut player = Player::new(p.eid, p.name, cell, false);
+                    player.level = p.level;
+                    player.apply(&p.vitals);
+                    player
                 })
                 .collect(),
             monsters: monsters(area.monster_types, area.monster_spots, area.monsters),
@@ -111,13 +152,19 @@ impl Room {
         if self.players.iter().any(|p| p.eid == user.id) {
             return None;
         }
-        self.players.push(Player {
-            eid: user.id,
-            name: name.clone(),
-            cell: None,
-            fetched: true,
-        });
+        self.players
+            .push(Player::new(user.id, name.clone(), None, true));
         Some(name.clone())
+    }
+
+    pub(crate) fn player(&mut self, eid: EntityId) -> Option<&mut Player> {
+        self.players.iter_mut().find(|p| p.eid == eid)
+    }
+
+    pub(crate) fn player_named(&mut self, name: &str) -> Option<&mut Player> {
+        self.players
+            .iter_mut()
+            .find(|p| p.name.eq_ignore_ascii_case(name))
     }
 
     pub(crate) fn remove_player(&mut self, eid: EntityId) -> Option<String> {
@@ -232,8 +279,30 @@ struct AreaPlayer {
     name: String,
     #[serde(rename = "strFrame", default)]
     cell: String,
+    #[serde(rename = "intLevel", default, deserialize_with = "flex::opt_int")]
+    level: Option<u32>,
     #[serde(flatten)]
     vitals: Vitals,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PlayerData {
+    #[serde(rename = "intLevel", default, deserialize_with = "flex::opt_int")]
+    level: Option<u32>,
+    #[serde(rename = "strClassName", default)]
+    class_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct UserEntry {
+    pub(crate) uid: EntityId,
+    pub(crate) data: PlayerData,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct UserList {
+    #[serde(default)]
+    pub(crate) a: Vec<UserEntry>,
 }
 
 #[derive(Deserialize)]

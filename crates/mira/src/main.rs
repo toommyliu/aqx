@@ -6,8 +6,9 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use mira_client::{
-    ActionError, Auras, CombatState, DeviceId, Direction, Disconnect, Event, Handle, Load, Me,
-    Monster, NoticeKind, Options, Phase, QuestStatus, Room, Server, SkillTarget, World, api,
+    ActionError, Auras, BoostKind, CombatState, DeviceId, Direction, Disconnect, Event, Handle,
+    Load, Me, Monster, NoticeKind, Options, Phase, QuestStatus, Room, Server, SkillTarget, World,
+    api,
 };
 
 const DEFAULT_PAD: &str = "Left";
@@ -287,7 +288,17 @@ fn describe_room(room: &Room) -> String {
     players.sort_by_key(|p| (p.cell.as_ref() != Some(&room.cell), p.cell.clone()));
     for player in players {
         let cell = player.cell.as_deref().unwrap_or("?");
-        text.push_str(&format!("  {cell:<12} {}\n", player.name));
+        let level = player
+            .level
+            .map_or_else(|| "?".to_owned(), |l| l.to_string());
+        let class = player.class_name.as_deref().unwrap_or("?");
+        text.push_str(&format!(
+            "  {cell:<12} {} (level {level} {class}, {}/{} HP, {})\n",
+            player.name,
+            player.hp,
+            player.max_hp,
+            state_name(player.state)
+        ));
     }
     text
 }
@@ -343,10 +354,11 @@ fn describe_inventory(world: &World) -> String {
 
 fn describe_me(me: &Me) -> String {
     let mut text = format!(
-        "level {} ({}/{} xp), class rank {} ({} CP), {} gold, {} AC, {}/{} HP, {}/{} MP, {}, haste {}\n",
+        "level {} ({}/{} xp), {} rank {} ({} CP), {} gold, {} AC, {}/{} HP, {}/{} MP, {}, haste {}\n",
         me.level,
         me.exp,
         me.exp_to_level,
+        me.class_name,
         me.class_rank(),
         me.class_points,
         me.gold,
@@ -358,6 +370,22 @@ fn describe_me(me: &Me) -> String {
         state_name(me.state),
         me.haste
     );
+    let now = std::time::Instant::now();
+    let boosts: Vec<String> = [
+        (BoostKind::Xp, "xp"),
+        (BoostKind::Gold, "gold"),
+        (BoostKind::Rep, "rep"),
+        (BoostKind::ClassPoints, "class points"),
+    ]
+    .into_iter()
+    .filter_map(|(kind, name)| {
+        let left = me.boosts.remaining(kind, now).as_secs();
+        (left > 0).then(|| format!("{name} {}m", left.div_ceil(60)))
+    })
+    .collect();
+    if !boosts.is_empty() {
+        text.push_str(&format!("  boosts: {}\n", boosts.join(", ")));
+    }
     let auras = aura_names(&me.auras);
     if !auras.is_empty() {
         text.push_str(&format!("  auras{auras}\n"));
