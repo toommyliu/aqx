@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use mira_client::{
-    ActionError, CombatState, DeviceId, Direction, Disconnect, Event, Handle, Load, Me, Monster,
-    NoticeKind, Options, Phase, QuestStatus, Room, Server, SkillTarget, World, api,
+    ActionError, Auras, CombatState, DeviceId, Direction, Disconnect, Event, Handle, Load, Me,
+    Monster, NoticeKind, Options, Phase, QuestStatus, Room, Server, SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
@@ -349,6 +349,10 @@ fn describe_me(me: &Me) -> String {
         state_name(me.state),
         me.haste
     );
+    let auras = aura_names(&me.auras);
+    if !auras.is_empty() {
+        text.push_str(&format!("  auras{auras}\n"));
+    }
     for skill in &me.skills {
         let target = match skill.target {
             SkillTarget::Hostile => "hostile",
@@ -362,6 +366,20 @@ fn describe_me(me: &Me) -> String {
         ));
     }
     text
+}
+
+fn aura_names(auras: &Auras) -> String {
+    let names: Vec<&str> = auras
+        .active
+        .iter()
+        .chain(&auras.passive)
+        .map(|aura| aura.name.as_str())
+        .collect();
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", names.join(", "))
+    }
 }
 
 fn state_name(state: CombatState) -> &'static str {
@@ -380,8 +398,9 @@ fn describe_monsters(monsters: &[&Monster]) -> String {
     for m in monsters {
         let state = state_name(m.state);
         let aggressive = if m.aggressive { ", aggressive" } else { "" };
+        let auras = aura_names(&m.auras);
         text.push_str(&format!(
-            "  {:<12} {} #{} {}/{} {state}{aggressive}\n",
+            "  {:<12} {} #{} {}/{} {state}{aggressive}{auras}\n",
             m.cell, m.name, m.id, m.hp, m.max_hp
         ));
     }

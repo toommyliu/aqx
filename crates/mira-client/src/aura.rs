@@ -1,0 +1,176 @@
+use mira_protocol::{EntityId, MonMapId, flex};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Aura {
+    pub name: String,
+    pub duration: f64,
+    pub stacks: u32,
+    pub value: Option<f64>,
+    pub category: Option<String>,
+    pub persist: bool,
+    pub caster: Option<Caster>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Caster {
+    Monster(MonMapId),
+    Player(EntityId),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Auras {
+    pub active: Vec<Aura>,
+    pub passive: Vec<Aura>,
+}
+
+pub(crate) enum Target {
+    Monster(MonMapId),
+    Player(EntityId),
+}
+
+impl Auras {
+    pub(crate) fn apply(&mut self, change: AuraChange) {
+        let caster = change.caster.as_deref().and_then(caster);
+        match change.cmd.as_str() {
+            "aura+" | "aura++" => {
+                for data in change.auras.into_iter().flatten() {
+                    let is_new = data.is_new;
+                    let aura = data.into_aura(caster);
+                    if is_new {
+                        self.active.push(aura);
+                        continue;
+                    }
+                    for held in self
+                        .active
+                        .iter_mut()
+                        .filter(|held| held.name == aura.name && held.caster == aura.caster)
+                    {
+                        held.duration = aura.duration;
+                        held.value = aura.value;
+                    }
+                }
+            }
+            "aura+p" => {
+                self.passive.extend(
+                    change
+                        .auras
+                        .into_iter()
+                        .flatten()
+                        .map(|data| data.into_aura(caster)),
+                );
+            }
+            "aura-" | "aura--" => {
+                let names: Vec<String> = match (change.auras, change.aura) {
+                    (Some(auras), _) => auras.into_iter().map(|a| a.name).collect(),
+                    (None, Some(removed)) => vec![removed.name],
+                    (None, None) => Vec::new(),
+                };
+                for name in names {
+                    remove_first(&mut self.active, &name);
+                    remove_first(&mut self.passive, &name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn replace_passives(&mut self, skills: Vec<PassiveSkill>) {
+        self.passive = skills
+            .into_iter()
+            .flat_map(|skill| skill.auras.into_iter().flatten())
+            .map(|data| data.into_aura(None))
+            .collect();
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.active.clear();
+    }
+
+    pub(crate) fn clear_unless_persistent(&mut self) {
+        self.active.retain(|aura| aura.persist);
+    }
+}
+
+fn remove_first(auras: &mut Vec<Aura>, name: &str) {
+    if let Some(at) = auras.iter().position(|aura| aura.name == name) {
+        auras.remove(at);
+    }
+}
+
+fn caster(info: &str) -> Option<Caster> {
+    match target(info)? {
+        Target::Monster(id) => Some(Caster::Monster(id)),
+        Target::Player(eid) => Some(Caster::Player(eid)),
+    }
+}
+
+pub(crate) fn target(info: &str) -> Option<Target> {
+    let (kind, id) = info.split_once(':')?;
+    let id = id.parse().ok()?;
+    match kind {
+        "m" => Some(Target::Monster(MonMapId(id))),
+        "p" => Some(Target::Player(EntityId(id))),
+        _ => None,
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AuraChange {
+    #[serde(default)]
+    cmd: String,
+    #[serde(rename = "cInf", default)]
+    caster: Option<String>,
+    #[serde(rename = "tInf", default)]
+    pub(crate) target: Option<String>,
+    #[serde(default)]
+    auras: Option<Vec<AuraData>>,
+    #[serde(default)]
+    aura: Option<AuraName>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PassiveSkill {
+    #[serde(default)]
+    auras: Option<Vec<AuraData>>,
+}
+
+#[derive(Deserialize)]
+struct AuraData {
+    #[serde(rename = "nam", default)]
+    name: String,
+    #[serde(rename = "dur", default, deserialize_with = "flex::float")]
+    duration: f64,
+    #[serde(rename = "stk", default, deserialize_with = "flex::opt_int")]
+    stacks: Option<u32>,
+    #[serde(rename = "val", default)]
+    value: Option<Value>,
+    #[serde(rename = "cat", default)]
+    category: Option<String>,
+    #[serde(rename = "isNew", default, deserialize_with = "flex::bool")]
+    is_new: bool,
+    #[serde(default, deserialize_with = "flex::bool")]
+    persist: bool,
+}
+
+impl AuraData {
+    fn into_aura(self, caster: Option<Caster>) -> Aura {
+        Aura {
+            name: self.name,
+            duration: self.duration,
+            stacks: self.stacks.unwrap_or(1),
+            value: self.value.and_then(|v| flex::float(v).ok()),
+            category: self.category,
+            persist: self.persist,
+            caster,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AuraName {
+    #[serde(rename = "nam")]
+    name: String,
+}

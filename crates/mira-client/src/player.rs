@@ -2,6 +2,7 @@ use mira_protocol::{EntityId, FactionId, flex};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::aura::{Auras, PassiveSkill};
 use crate::quest::QuestProgress;
 use crate::room::{CombatState, Vitals};
 
@@ -22,6 +23,7 @@ pub struct Me {
     pub haste: f64,
     pub skills: Vec<Skill>,
     pub quests: QuestProgress,
+    pub auras: Auras,
 }
 
 impl Me {
@@ -161,9 +163,10 @@ pub(crate) struct SkillList {
     actions: Actions,
 }
 
-impl SkillList {
-    pub(crate) fn into_skills(self) -> Vec<Skill> {
-        self.actions.active
+impl Me {
+    pub(crate) fn learn_skills(&mut self, list: SkillList) {
+        self.skills = list.actions.active;
+        self.auras.replace_passives(list.actions.passive);
     }
 }
 
@@ -171,6 +174,8 @@ impl SkillList {
 struct Actions {
     #[serde(default)]
     active: Vec<Skill>,
+    #[serde(default)]
+    passive: Vec<PassiveSkill>,
 }
 
 #[derive(Deserialize)]

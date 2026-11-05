@@ -12,7 +12,9 @@ use mira_protocol::{AreaId, CharItemId, FactionId, ItemId, MonMapId};
 
 use super::*;
 use crate::quest::{QuestItem, QuestReward, QuestStatus, RewardKind};
-use crate::{CombatState, DropOffer, Item, Monster, Skill, SkillTarget, TempItem};
+use crate::{
+    Aura, Auras, Caster, CombatState, DropOffer, Item, Monster, Skill, SkillTarget, TempItem,
+};
 
 const TOKEN: &str = "tok-abc123";
 const API_OK: &str = "<msg t='sys'><body action='apiOK' r='0'></body></msg>";
@@ -679,6 +681,7 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
                 max_hp: 540,
                 state: CombatState::InCombat,
                 aggressive: true,
+                auras: Auras::default(),
             },
             Monster {
                 id: MonMapId(2),
@@ -688,6 +691,7 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
                 max_hp: 800,
                 state: CombatState::Dead,
                 aggressive: false,
+                auras: Auras::default(),
             },
         ]
     );
@@ -752,6 +756,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
             state: CombatState::InCombat,
             haste: 0.12,
             quests: session.snapshot().me.as_ref().unwrap().quests.clone(),
+            auras: Auras::default(),
             skills: vec![
                 Skill {
                     slot: "aa".into(),
@@ -1217,6 +1222,142 @@ fn quest_status_follows_the_game_clients_checks() {
             gold: 100,
             exp: 200,
         }
+    );
+}
+
+#[test]
+fn tracks_auras_the_way_the_game_client_stores_them() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        let monster = |id: i64, cell: &str| {
+            (
+                json!({"MonMapID": id, "MonID": 10, "strFrame": cell}),
+                json!({"MonMapID": id, "MonID": 10, "intHP": 100, "intHPMax": 100, "intState": 1}),
+            )
+        };
+        let monsters = [monster(1, "Enter"), monster(2, "r2"), monster(3, "Enter")];
+        peer.send(&json_message(json!({
+            "cmd": "moveToArea", "areaId": 43, "areaName": "farm-1",
+            "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "Enter"}],
+            "mondef": [{"MonID": 10, "strMonName": "Frogzard"}],
+            "monmap": monsters.iter().map(|m| m.0.clone()).collect::<Vec<_>>(),
+            "monBranch": monsters.iter().map(|m| m.1.clone()).collect::<Vec<_>>(),
+        })));
+        peer.send("%xt%server%-1%You joined \"farm-1\"!%");
+        let add = |caster: &str, target: &str, auras: Value| json!({"cmd": "aura+", "cInf": caster, "tInf": target, "auras": auras});
+        peer.send(&json_message(json!({
+            "cmd": "ct",
+            "m": {"1": {"intState": 2}},
+            "a": [
+                add("p:7", "m:1", json!([{"nam": "Bleed", "dur": 5, "isNew": true}])),
+                add("p:7", "m:2", json!([{"nam": "Poison", "dur": 5, "stk": "3", "val": "12.5", "cat": "dot", "isNew": 1}])),
+                add("p:7", "m:3", json!([{"nam": "Mark", "dur": 5, "isNew": true}])),
+            ],
+        })));
+        let mut me = add(
+            "m:1",
+            "p:7",
+            json!([
+                {"nam": "Stun", "dur": 2, "isNew": true, "persist": true},
+                {"nam": "Pact", "dur": 0, "isNew": true, "persist": true},
+                {"nam": "Slow", "dur": 3, "isNew": true, "persist": true},
+            ]),
+        );
+        peer.send(&json_message(me.clone()));
+        me["auras"] = json!([{"nam": "Stun", "dur": 4, "val": 3, "isNew": false}]);
+        peer.send(&json_message(me.clone()));
+        me["auras"] = json!([{"nam": "Stun", "dur": 1, "isNew": true, "persist": true}]);
+        peer.send(&json_message(me.clone()));
+        me["auras"] = json!([{"nam": "Stun", "dur": 6, "val": 2, "isNew": false}]);
+        peer.send(&json_message(me.clone()));
+        me["cInf"] = json!("m:2");
+        me["auras"] = json!([{"nam": "Stun", "dur": 9, "isNew": false}]);
+        peer.send(&json_message(me));
+        peer.send(&json_message(
+            json!({"cmd": "aura+p", "cInf": "p:7", "tInf": "p:7", "auras": [{"nam": "Insight"}]}),
+        ));
+        peer.send(&json_message(json!({"cmd": "sAct", "actions": {
+            "active": [],
+            "passive": [{"ref": "p1", "auras": [{"nam": "Class Passive", "val": 0.1}]}, {"ref": "p2"}],
+        }})));
+        peer.send(&json_message(
+            json!({"cmd": "aura-", "tInf": "p:7", "auras": [{"nam": "Pact"}]}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "aura-", "tInf": "p:7", "auras": [], "aura": {"nam": "Slow"}}),
+        ));
+        peer.send(&json_message(json!({"cmd": "clearAuras"})));
+        peer.send(&json_message(add(
+            "p:7",
+            "p:8",
+            json!([{"nam": "Elsewhere", "isNew": true}]),
+        )));
+        peer.send(&json_message(
+            json!({"cmd": "ct", "m": {"1": {"intHP": 0}, "2": {"intHP": 0}}}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "mtls", "id": 3, "o": {"intState": 1}}),
+        ));
+        peer.send(&json_message(json!({
+            "cmd": "cb",
+            "m": {"3": {"intState": 2}},
+            "a": [add("p:7", "m:3", json!([{"nam": "Late", "dur": 5, "isNew": true}]))],
+        })));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
+        "{events:?}"
+    );
+    let world = session.snapshot();
+    let aura = |name: &str, duration: f64, value: Option<f64>, caster| Aura {
+        name: name.into(),
+        duration,
+        stacks: 1,
+        value,
+        category: None,
+        persist: true,
+        caster,
+    };
+    let from_monster = Some(Caster::Monster(MonMapId(1)));
+    assert_eq!(
+        world.me.as_ref().unwrap().auras,
+        Auras {
+            active: vec![
+                aura("Stun", 6.0, Some(2.0), from_monster),
+                aura("Slow", 3.0, None, from_monster),
+                aura("Stun", 6.0, Some(2.0), from_monster),
+            ],
+            passive: vec![Aura {
+                persist: false,
+                ..aura("Class Passive", 0.0, Some(0.1), None)
+            }],
+        }
+    );
+    let monsters = &world.room.as_ref().unwrap().monsters;
+    assert!(monsters[0].auras.active.is_empty());
+    assert_eq!(
+        monsters[1].auras.active,
+        [Aura {
+            name: "Poison".into(),
+            duration: 5.0,
+            stacks: 3,
+            value: Some(12.5),
+            category: Some("dot".into()),
+            persist: false,
+            caster: Some(Caster::Player(EntityId(7))),
+        }]
+    );
+    assert_eq!(
+        monsters[2].auras.active,
+        [Aura {
+            persist: false,
+            caster: Some(Caster::Player(EntityId(7))),
+            ..aura("Late", 5.0, None, None)
+        }]
     );
 }
 

@@ -16,6 +16,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::api::{Account, Server, Token};
+use crate::aura::{self, AuraChange, Target};
 use crate::event::{Direction, Event, NoticeKind};
 use crate::faction::{self, AddedFaction, Faction, FactionData};
 use crate::inventory::{AddedItems, Inventory, LoadInventory, Picked, Sold, TurnIn, Worn};
@@ -861,6 +862,17 @@ impl Session {
                 for (name, patch) in &tick.players {
                     self.patch_player(name, patch);
                 }
+                for change in tick.auras {
+                    self.apply_aura(change);
+                }
+            }
+            "aura+" | "aura++" | "aura+p" | "aura-" | "aura--" => {
+                self.apply_aura(read(&json)?);
+            }
+            "clearAuras" => {
+                if let Some(character) = &mut self.character {
+                    character.auras.clear_unless_persistent();
+                }
             }
             "uotls" => {
                 let update: PlayerUpdate = read(&json)?;
@@ -875,7 +887,7 @@ impl Session {
             "sAct" => {
                 let skills: SkillList = read(&json)?;
                 if let Some(character) = &mut self.character {
-                    character.skills = skills.into_skills();
+                    character.learn_skills(skills);
                 }
             }
             "loadInventoryBig"
@@ -1054,6 +1066,23 @@ impl Session {
                 }
             })
             .collect()
+    }
+
+    fn apply_aura(&mut self, change: AuraChange) {
+        let auras = match change.target.as_deref().and_then(aura::target) {
+            Some(Target::Player(eid)) if Some(eid) == self.me => {
+                self.character.as_mut().map(|c| &mut c.auras)
+            }
+            Some(Target::Monster(id)) => self
+                .arriving
+                .as_mut()
+                .or(self.room.as_mut())
+                .and_then(|room| room.monster_auras(id)),
+            _ => None,
+        };
+        if let Some(auras) = auras {
+            auras.apply(change);
+        }
     }
 
     fn patch_player(&mut self, name: &str, patch: &Vitals) {
