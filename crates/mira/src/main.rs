@@ -1,11 +1,18 @@
+use std::io::BufRead;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use mira_client::{
-    DeviceId, Direction, Disconnect, Event, Load, NoticeKind, Options, Phase, Server, Session, api,
+    ActionError, DeviceId, Direction, Disconnect, Event, Load, NoticeKind, Options, Phase, Room,
+    Server, Session, api,
 };
+
+const DEFAULT_PAD: &str = "Left";
+const COMMANDS: &str = "join <map>, cell <cell> [pad], who, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -22,7 +29,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Log in, then print what the account does until Ctrl-C logs it out.
+    /// Log in, then print what the account does and run commands read from stdin
+    /// (join <map>, cell <cell> [pad], who, logout) until it logs out.
     Login {
         #[arg(long)]
         user: String,
@@ -135,7 +143,7 @@ fn login(
     })?;
 
     let why = match session.login(&server) {
-        Ok(()) => session.run(),
+        Ok(()) => serve_stdin(&mut session, json),
         Err(_) => match session.phase() {
             Phase::Closed { reason } => reason.clone(),
             _ => unreachable!("a failed login always closes the session"),
@@ -146,6 +154,81 @@ fn login(
     } else {
         ExitCode::FAILURE
     })
+}
+
+fn serve_stdin(session: &mut Session, json: bool) -> Disconnect {
+    let (send, lines) = mpsc::channel();
+    let control = session.control();
+    thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if send.send(line).is_err() {
+                break;
+            }
+            control.wake();
+        }
+    });
+    loop {
+        let line = match session.run_until(|| lines.try_recv().ok()) {
+            Ok(line) => line,
+            Err(why) => return why,
+        };
+        if line.trim() == "logout" {
+            session.control().logout();
+            return session.run();
+        }
+        match run_command(session, &line, json) {
+            Ok(()) => {}
+            Err(CommandError::Usage(e)) => eprintln!("mira: {e}"),
+            Err(CommandError::Action(ActionError::Closed(why))) => return why,
+            Err(CommandError::Action(e)) => eprintln!("mira: {e}"),
+        }
+    }
+}
+
+enum CommandError {
+    Usage(String),
+    Action(ActionError),
+}
+
+impl From<ActionError> for CommandError {
+    fn from(e: ActionError) -> Self {
+        CommandError::Action(e)
+    }
+}
+
+fn run_command(session: &mut Session, line: &str, json: bool) -> Result<(), CommandError> {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    match words.as_slice() {
+        [] => {}
+        ["join", map] => session.join(map)?,
+        ["cell", cell] => session.move_to_cell(cell, DEFAULT_PAD)?,
+        ["cell", cell, pad] => session.move_to_cell(cell, pad)?,
+        ["who"] => match session.room() {
+            Some(room) if json => {
+                println!("{}", serde_json::to_string(room).expect("rooms serialize"))
+            }
+            Some(room) => print!("{}", describe_room(room)),
+            None => return Err(CommandError::Action(ActionError::NotReady)),
+        },
+        _ => {
+            return Err(CommandError::Usage(format!(
+                "can't run {line:?}; commands are {COMMANDS}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn describe_room(room: &Room) -> String {
+    let mut text = format!("{} at {}/{}\n", room.name, room.cell, room.pad);
+    let mut players: Vec<_> = room.players.iter().collect();
+    players.sort_by_key(|p| (p.cell.as_ref() != Some(&room.cell), p.cell.clone()));
+    for player in players {
+        let cell = player.cell.as_deref().unwrap_or("?");
+        text.push_str(&format!("  {cell:<12} {}\n", player.name));
+    }
+    text
 }
 
 fn stamp(started: Instant) -> String {
@@ -180,6 +263,9 @@ fn describe(event: &Event) -> Option<String> {
         } => {
             format!("joined {map} at {cell}/{pad}, {players} other players")
         }
+        Event::Moved { cell, pad } => format!("moved to {cell}/{pad}"),
+        Event::PlayerEntered { name } => format!("{name} entered"),
+        Event::PlayerLeft { name } => format!("{name} left"),
         Event::Ready { level, gold, items } => {
             format!("ready: level {level}, {gold} gold, {items} items")
         }

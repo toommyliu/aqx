@@ -10,7 +10,7 @@ use std::io::Read;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use flate2::read::{DeflateDecoder, ZlibDecoder};
-use quick_xml::events::Event as XmlEvent;
+use quick_xml::events::{BytesStart, Event as XmlEvent};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
@@ -51,6 +51,13 @@ pub enum Message {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmlMessage {
     pub action: String,
+    pub user: Option<XmlUser>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XmlUser {
+    pub id: EntityId,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -138,24 +145,67 @@ fn inflate(compressed: &[u8]) -> Result<String, DecodeError> {
 }
 
 fn decode_xml(text: &str) -> Result<XmlMessage, DecodeError> {
+    let malformed = |e: &dyn fmt::Display| DecodeError::Xml(e.to_string());
+    let attr = |tag: &BytesStart, key: &str| -> Result<Option<String>, DecodeError> {
+        tag.try_get_attribute(key)
+            .map_err(|e| malformed(&e))?
+            .map(|a| {
+                a.unescape_value()
+                    .map(|v| v.into_owned())
+                    .map_err(|e| malformed(&e))
+            })
+            .transpose()
+    };
     let mut reader = quick_xml::Reader::from_str(text);
+    let mut action = None;
+    let mut user: Option<XmlUser> = None;
+    let mut in_name = false;
     loop {
-        match reader.read_event() {
-            Ok(XmlEvent::Start(tag) | XmlEvent::Empty(tag)) if tag.name().as_ref() == b"body" => {
-                let action = tag
-                    .try_get_attribute("action")
-                    .map_err(|e| DecodeError::Xml(e.to_string()))?
-                    .ok_or(DecodeError::NoAction)?
-                    .unescape_value()
-                    .map_err(|e| DecodeError::Xml(e.to_string()))?;
-                return Ok(XmlMessage {
-                    action: action.into_owned(),
-                });
+        match reader.read_event().map_err(|e| malformed(&e))? {
+            XmlEvent::Start(tag) | XmlEvent::Empty(tag) if tag.name().as_ref() == b"body" => {
+                if action.is_none() {
+                    action = Some(attr(&tag, "action")?.ok_or(DecodeError::NoAction)?);
+                }
             }
-            Ok(XmlEvent::Eof) => return Err(DecodeError::NoAction),
-            Ok(_) => {}
-            Err(e) => return Err(DecodeError::Xml(e.to_string())),
+            XmlEvent::Start(tag) | XmlEvent::Empty(tag) if user.is_none() => {
+                let key = match tag.name().as_ref() {
+                    b"u" => "i",
+                    b"user" => "id",
+                    _ => continue,
+                };
+                if let Some(id) = attr(&tag, key)?.and_then(|id| id.parse().ok()) {
+                    user = Some(XmlUser {
+                        id: EntityId(id),
+                        name: None,
+                    });
+                }
+            }
+            XmlEvent::Start(tag) if tag.name().as_ref() == b"n" => {
+                in_name = user.as_ref().is_some_and(|u| u.name.is_none());
+            }
+            XmlEvent::End(tag) if tag.name().as_ref() == b"n" => in_name = false,
+            XmlEvent::Text(t) if in_name => {
+                name_into(&mut user, &t.decode().map_err(|e| malformed(&e))?)
+            }
+            XmlEvent::CData(t) if in_name => {
+                name_into(&mut user, &t.decode().map_err(|e| malformed(&e))?)
+            }
+            XmlEvent::Eof => break,
+            _ => {}
         }
+    }
+    Ok(XmlMessage {
+        action: action.ok_or(DecodeError::NoAction)?,
+        user,
+    })
+}
+
+fn name_into(user: &mut Option<XmlUser>, text: &str) {
+    let text = text.trim();
+    if let Some(user) = user
+        && !text.is_empty()
+    {
+        user.name = Some(text.to_owned());
     }
 }
 
@@ -218,7 +268,40 @@ mod tests {
         assert_eq!(
             message,
             Message::Xml(XmlMessage {
-                action: "apiOK".into()
+                action: "apiOK".into(),
+                user: None,
+            })
+        );
+    }
+
+    #[test]
+    fn xml_message_exposes_the_user_it_names() {
+        let entered = decode(
+            b"<msg t='sys'><body action='uER' r='42'><u i='10' m='0' s='0' p='3'>\
+              <n><![CDATA[player4]]></n><vars></vars></u></body></msg>",
+        )
+        .unwrap();
+        let gone =
+            decode(b"<msg t='sys'><body action='userGone' r='42'><user id='10' /></body></msg>")
+                .unwrap();
+        assert_eq!(
+            entered,
+            Message::Xml(XmlMessage {
+                action: "uER".into(),
+                user: Some(XmlUser {
+                    id: EntityId(10),
+                    name: Some("player4".into()),
+                }),
+            })
+        );
+        assert_eq!(
+            gone,
+            Message::Xml(XmlMessage {
+                action: "userGone".into(),
+                user: Some(XmlUser {
+                    id: EntityId(10),
+                    name: None,
+                }),
             })
         );
     }

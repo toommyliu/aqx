@@ -25,6 +25,10 @@ pub fn clear_ignore_list() -> String {
     zm("cmd", 1, &["ignoreList", "$clearAll"])
 }
 
+pub fn transfer(username: &str, map: &str) -> String {
+    zm("cmd", 1, &["tfer", username, map])
+}
+
 pub fn move_to_cell(room: AreaId, cell: &str, pad: &str) -> String {
     zm("moveToCell", room, &[cell, pad])
 }
@@ -80,6 +84,10 @@ mod tests {
             "%xt%zm%retrieveInventory%42%7%"
         );
         assert_eq!(logout(), "%xt%zm%cmd%1%logout%");
+        assert_eq!(
+            transfer("player1", "yulgar-2"),
+            "%xt%zm%cmd%1%tfer%player1%yulgar-2%"
+        );
     }
 
     #[test]

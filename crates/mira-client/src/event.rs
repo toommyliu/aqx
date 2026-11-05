@@ -12,6 +12,16 @@ pub enum Event {
         pad: String,
         players: usize,
     },
+    Moved {
+        cell: String,
+        pad: String,
+    },
+    PlayerEntered {
+        name: String,
+    },
+    PlayerLeft {
+        name: String,
+    },
     Ready {
         level: u32,
         gold: u64,
