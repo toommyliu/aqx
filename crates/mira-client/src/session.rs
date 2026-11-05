@@ -2203,29 +2203,33 @@ impl Session {
 
     fn patch_player(&mut self, name: &str, patch: &Vitals) {
         if name.eq_ignore_ascii_case(&self.username) {
-            let Some(character) = &mut self.character else {
-                return;
-            };
-            let was = character.state;
-            character.apply(patch);
-            match (was, character.state) {
-                (CombatState::Dead, CombatState::Dead) => {}
-                (_, CombatState::Dead) => {
-                    self.died_in = self
-                        .room
-                        .as_ref()
-                        .map(|room| (room.area, room.cell.clone(), room.pad.clone()));
-                    self.combat.died(Instant::now());
-                    self.emit(Event::Died);
-                }
-                (CombatState::Dead, _) => {
-                    self.combat.revived();
-                    self.emit(Event::Respawned);
-                }
-                _ => {}
-            }
+            self.patch_me(patch);
         } else if let Some(player) = self.room.as_mut().and_then(|r| r.player_named(name)) {
             player.apply(patch);
+        }
+    }
+
+    fn patch_me(&mut self, patch: &Vitals) {
+        let Some(character) = &mut self.character else {
+            return;
+        };
+        let was = character.state;
+        character.apply(patch);
+        match (was, character.state) {
+            (CombatState::Dead, CombatState::Dead) => {}
+            (_, CombatState::Dead) => {
+                self.died_in = self
+                    .room
+                    .as_ref()
+                    .map(|room| (room.area, room.cell.clone(), room.pad.clone()));
+                self.combat.died(Instant::now());
+                self.emit(Event::Died);
+            }
+            (CombatState::Dead, _) => {
+                self.combat.revived();
+                self.emit(Event::Respawned);
+            }
+            _ => {}
         }
     }
 

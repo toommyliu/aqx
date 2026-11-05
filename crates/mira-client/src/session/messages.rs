@@ -210,8 +210,10 @@ impl Session {
                 let area: MoveToArea = read(&json)?;
                 let requested = self.requested_spot.take_if(|spot| area.is_for(&spot.map));
                 let (room, mine) = Room::arriving(area, self.me, requested);
+                if let Some(mine) = &mine {
+                    self.patch_me(&mine.vitals);
+                }
                 if let (Some(mine), Some(character)) = (mine, &mut self.character) {
-                    character.apply(&mine.vitals);
                     character.name = mine.name;
                     if character.away != mine.away {
                         character.away = mine.away;

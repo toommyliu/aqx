@@ -1771,6 +1771,16 @@ fn reports_kills_deaths_levels_drops_and_item_changes() {
         );
         send(
             &mut peer,
+            json!({"cmd": "ct", "p": {"player1": {"intState": 0}}}),
+        );
+        send(
+            &mut peer,
+            json!({"cmd": "moveToArea", "areaId": 43, "areaName": "yulgar-2", "uoBranch": [
+                {"entID": 7, "strUsername": "player1", "strFrame": "Enter", "intState": 1},
+            ]}),
+        );
+        send(
+            &mut peer,
             json!({"cmd": "levelUp", "intLevel": 51, "intExpToLevel": 2500, "xp": 0}),
         );
         peer.send("%xt%multiLoginWarning%-1%");
@@ -1815,6 +1825,8 @@ fn reports_kills_deaths_levels_drops_and_item_changes() {
             changed(200, "Wing", 2, Place::Temp),
             changed(200, "Wing", 0, Place::Temp),
             changed(101, "Health Potion", 0, Place::Inventory),
+            Event::Died,
+            Event::Respawned,
             Event::Died,
             Event::Respawned,
             Event::LeveledUp { level: 51 },
