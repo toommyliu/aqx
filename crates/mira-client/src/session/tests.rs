@@ -3720,15 +3720,23 @@ fn respawns_back_in_the_cell_where_it_died_when_asked() {
             peer.expect_silence(Duration::from_millis(500));
         }
         step.send(()).unwrap();
+        wait.recv().unwrap();
+        die_and_respawn(&mut peer);
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Right"));
+        step.send(()).unwrap();
         peer.expect_logout();
     });
     let session = &harness.session;
     wait_for_farm(&harness);
-    session.set_respawn_where_died(true);
+    session.set_respawn(Respawn::WhereDied);
     session.move_to_cell("r2", "Left").wait().unwrap();
-    for on in [false, true] {
+    let at = Respawn::At {
+        cell: "r2".into(),
+        pad: "Right".into(),
+    };
+    for respawn in [Respawn::Spawn, Respawn::WhereDied, at] {
         next.recv().unwrap();
-        session.set_respawn_where_died(on);
+        session.set_respawn(respawn);
         session.ready().wait().unwrap();
         done.send(()).unwrap();
     }

@@ -301,6 +301,17 @@ impl Aggro {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Respawn {
+    #[default]
+    Spawn,
+    WhereDied,
+    At {
+        cell: String,
+        pad: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CounterHold {
     #[default]
@@ -312,7 +323,7 @@ pub enum CounterHold {
 enum Setting {
     CounterHold(CounterHold),
     Aggro(Option<Aggro>),
-    RespawnWhereDied(bool),
+    Respawn(Respawn),
     AntiAfk(bool),
 }
 
@@ -637,8 +648,8 @@ impl Handle {
         self.set(Setting::Aggro(aggro));
     }
 
-    pub fn set_respawn_where_died(&self, on: bool) {
-        self.set(Setting::RespawnWhereDied(on));
+    pub fn set_respawn(&self, respawn: Respawn) {
+        self.set(Setting::Respawn(respawn));
     }
 
     pub fn set_anti_afk(&self, on: bool) {
@@ -767,7 +778,7 @@ pub fn spawn(
         requested_spot: None,
         counter_hold: CounterHold::Off,
         aggro: None,
-        respawn_where_died: false,
+        respawn: Respawn::Spawn,
         died_in: None,
         anti_afk: false,
         afk_cleared: None,
@@ -837,7 +848,7 @@ struct Session {
     requested_spot: Option<Spot>,
     counter_hold: CounterHold,
     aggro: Option<(Aggro, Instant)>,
-    respawn_where_died: bool,
+    respawn: Respawn,
     died_in: Option<(AreaId, String, String)>,
     anti_afk: bool,
     afk_cleared: Option<Instant>,
@@ -917,7 +928,7 @@ impl Session {
         match setting {
             Setting::CounterHold(hold) => self.counter_hold = hold,
             Setting::Aggro(aggro) => self.aggro = aggro.map(|aggro| (aggro, Instant::now())),
-            Setting::RespawnWhereDied(on) => self.respawn_where_died = on,
+            Setting::Respawn(respawn) => self.respawn = respawn,
             Setting::AntiAfk(on) => self.anti_afk = on,
         }
     }
@@ -1889,7 +1900,7 @@ impl Session {
     fn forget_session(&mut self) {
         self.counter_hold = CounterHold::Off;
         self.aggro = None;
-        self.respawn_where_died = false;
+        self.respawn = Respawn::Spawn;
         self.died_in = None;
         self.anti_afk = false;
         self.afk_cleared = None;
@@ -2190,14 +2201,19 @@ impl Session {
                     _ => (SPAWN.0.to_owned(), SPAWN.1.to_owned()),
                 };
                 let _ = self.move_to_cell(&cell, &pad);
-                if let Some((area, died_cell, died_pad)) = self.died_in.take()
-                    && self.respawn_where_died
-                    && self
-                        .room
-                        .as_ref()
-                        .is_some_and(|room| room.area == area && room.cell != died_cell)
+                let died_in = self.died_in.take();
+                let room = self.room.as_ref();
+                let back = match &self.respawn {
+                    Respawn::Spawn => None,
+                    Respawn::WhereDied => died_in
+                        .filter(|(area, ..)| room.is_some_and(|room| room.area == *area))
+                        .map(|(_, cell, pad)| (cell, pad)),
+                    Respawn::At { cell, pad } => Some((cell.clone(), pad.clone())),
+                };
+                if let Some((cell, pad)) =
+                    back.filter(|(cell, _)| room.is_some_and(|room| room.cell != *cell))
                 {
-                    let _ = self.move_to_cell(&died_cell, &died_pad);
+                    let _ = self.move_to_cell(&cell, &pad);
                 }
             }
             _ => {}
