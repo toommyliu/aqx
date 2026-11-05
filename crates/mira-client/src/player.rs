@@ -23,6 +23,7 @@ pub struct Me {
     pub class_points: u32,
     pub char_id: i64,
     pub bag_slots: u32,
+    pub house_slots: u32,
     pub bank_slots: u32,
     pub bank_count: u32,
     pub boosts: Boosts,
@@ -69,6 +70,7 @@ impl Me {
         self.class_points = data.class_points;
         self.char_id = data.char_id;
         self.bag_slots = data.bag_slots;
+        self.house_slots = data.house_slots;
         self.bank_slots = data.bank_slots;
         self.exp = data.exp;
         self.exp_to_level = data.exp_to_level;
@@ -272,6 +274,8 @@ pub(crate) struct UserData {
     char_id: i64,
     #[serde(rename = "iBagSlots", default, deserialize_with = "flex::int")]
     bag_slots: u32,
+    #[serde(rename = "iHouseSlots", default, deserialize_with = "flex::int")]
+    house_slots: u32,
     #[serde(rename = "iBankSlots", default, deserialize_with = "flex::int")]
     bank_slots: u32,
     #[serde(rename = "iBoostXP", default, deserialize_with = "flex::int")]

@@ -163,7 +163,7 @@ impl Session {
             }
             BankMove::Withdraw(id) => {
                 let item = banked(id)?;
-                if item.pool() != Pool::House && self.inventory.full_for_item(item, me.bag_slots) {
+                if self.inventory.full_for_item(item, me) {
                     return unusable(format!("the inventory has no room for {}", item.name));
                 }
                 Ok(packet::bank_to_inv(room.area, id, item.char_item_id))
@@ -182,7 +182,7 @@ impl Session {
                 let outgrows = |pool: Pool| {
                     banked.pool() == pool
                         && carried.pool() != pool
-                        && self.inventory.full_for_item(banked, me.bag_slots)
+                        && self.inventory.full_for_item(banked, me)
                 };
                 if outgrows(Pool::Misc) || outgrows(Pool::Bag) {
                     return unusable(format!("the inventory has no room for {}", banked.name));

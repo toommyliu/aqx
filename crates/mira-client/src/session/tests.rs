@@ -123,6 +123,10 @@ impl Peer {
     }
 
     fn serve_with_items(&mut self, version: &str, items: Value) {
+        self.serve_with_inventory(version, items, json!([]));
+    }
+
+    fn serve_with_inventory(&mut self, version: &str, items: Value, hitems: Value) {
         self.expect(&packet::version_check());
         self.send(API_OK);
         self.expect(&packet::login("player1", version, TOKEN));
@@ -142,7 +146,7 @@ impl Peer {
                 "intLevel": "50", "intGold": 1200, "intCoins": 30, "intExp": 400, "intExpToLevel": 2000,
                 "strQuests": format!("00A{}", "0".repeat(97)), "strQuests2": "1".repeat(60),
                 "iUpgDays": -1, "iCP": 899, "iBoostRep": 120, "iBagSlots": 2,
-                "CharID": "4242", "iBankSlots": 3,
+                "CharID": "4242", "iBankSlots": 3, "iHouseSlots": 1,
                 "ia0": 5, "iw0": "8", "im0": 2.147483648E9,
                 "strEmail": "player1@example.com", "strIP": "192.0.2.1",
             },
@@ -153,7 +157,7 @@ impl Peer {
         ]}})));
         self.send(&json_message(json!({"cmd": "stu", "sta": {"$tha": 0.05}})));
         let inventory = json_message(
-            json!({"cmd": "loadInventoryBig", "items": items, "bankCount": 1, "factions": [
+            json!({"cmd": "loadInventoryBig", "items": items, "hitems": hitems, "bankCount": 1, "factions": [
                 {"FactionID": "46", "CharFactionID": "900", "sName": "Good", "iRep": "1000"},
             ]}),
         );
@@ -804,6 +808,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
             class_points: 899,
             char_id: 4242,
             bag_slots: 2,
+            house_slots: 1,
             bank_slots: 3,
             bank_count: 1,
             item_slot: None,
@@ -936,11 +941,16 @@ fn tracks_inventory_and_temp_items() {
 fn a_malformed_inventory_item_is_skipped_without_blocking_login() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_with_items(
+        peer.serve_with_inventory(
             "5.31",
             json!([
                 {"ItemID": 100, "sName": "Broken"},
                 {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5},
+            ]),
+            json!([
+                {"ItemID": 200, "sName": "Broken Chair"},
+                {"ItemID": 201, "CharItemID": 5101, "sName": "Painting", "sType": "Wall Item",
+                 "bHouse": true, "iQty": 1},
             ]),
         );
         peer.expect_logout();
@@ -953,14 +963,16 @@ fn a_malformed_inventory_item_is_skipped_without_blocking_login() {
         .iter()
         .map(|i| i.name.clone())
         .collect();
-    assert_eq!(names, ["Health Potion"]);
+    assert_eq!(names, ["Health Potion", "Painting"]);
     harness.session.logout();
     let events = harness.finish();
-    assert!(
-        events.iter().any(
-            |e| matches!(e, Event::Unreadable { error } if error.starts_with("inventory item"))
-        )
-    );
+    for kind in ["inventory item", "house item"] {
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Unreadable { error } if error.starts_with(kind)))
+        );
+    }
 }
 
 #[test]
@@ -2200,6 +2212,8 @@ fn picks_up_drops_while_the_bag_has_room() {
         peer.send(&offer(1030, "Scroll", "Item", json!({"sMeta": " 12 "})));
         peer.send(&offer(1031, "Ore", "Resource", json!({})));
         peer.send(&offer(1032, "Warrior", "Class", json!({})));
+        peer.send(&offer(1033, "Rug", "Floor Item", json!({"iStk": 5})));
+        peer.send(&offer(1034, "Lamp", "Floor Item", json!({})));
         peer.expect(&packet::get_drop(AreaId(42), ItemId(1027)));
         peer.send(&json_message(json!({
             "cmd": "getDrop", "bSuccess": 1, "ItemID": 1027, "CharItemID": 7027,
@@ -2213,11 +2227,16 @@ fn picks_up_drops_while_the_bag_has_room() {
         peer.send(&json_message(
             json!({"cmd": "getDrop", "bSuccess": 0, "ItemID": 1032}),
         ));
+        peer.expect(&packet::get_drop(AreaId(42), ItemId(1033)));
+        peer.send(&json_message(json!({
+            "cmd": "getDrop", "bSuccess": 1, "ItemID": 1033, "CharItemID": 7033, "iQty": 1,
+        })));
+        peer.send(&offer(1033, "Rug", "Floor Item", json!({"iStk": 5})));
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
     session.ready().wait().unwrap();
-    while session.snapshot().drops.len() < 6 {
+    while session.snapshot().drops.len() < 8 {
         thread::sleep(Duration::from_millis(5));
     }
     session.pick_drop(ItemId(1027)).wait().unwrap();
@@ -2240,6 +2259,17 @@ fn picks_up_drops_while_the_bag_has_room() {
             .iter()
             .any(|d| d.id == ItemId(1032))
     );
+    session.pick_drop(ItemId(1033)).wait().unwrap();
+    assert!(full(session.pick_drop(ItemId(1034))));
+    while session
+        .snapshot()
+        .drops
+        .iter()
+        .all(|d| d.id != ItemId(1033))
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(full(session.pick_drop(ItemId(1033))));
     session.logout();
     harness.finish();
 }
@@ -2516,6 +2546,8 @@ fn moves_items_between_the_bank_and_inventory_after_the_clients_checks() {
     let (base, http) = serve_bank(json!([
         banked(301, "Banked Axe", "Axe"),
         banked(302, "Banked Bow", "Bow"),
+        banked(303, "Banked Rug", "Floor Item"),
+        banked(304, "Banked Lamp", "Floor Item"),
     ]));
     let harness = Harness::start_with_api(Options::default(), base, |listener| {
         let mut peer = Peer::accept(&listener);
@@ -2544,6 +2576,12 @@ fn moves_items_between_the_bank_and_inventory_after_the_clients_checks() {
         peer.send(&json_message(
             json!({"cmd": "bankSwapInv", "invItemID": 301, "bankItemID": "302"}),
         ));
+        peer.expect(&packet::bank_to_inv(
+            AreaId(42),
+            ItemId(303),
+            CharItemId(9303),
+        ));
+        peer.send(&json_message(json!({"cmd": "bankToInv", "ItemID": "303"})));
         peer.expect(&packet::bank_from_inv(
             AreaId(42),
             ItemId(302),
@@ -2572,7 +2610,7 @@ fn moves_items_between_the_bank_and_inventory_after_the_clients_checks() {
         (held, stored),
         (
             vec![ItemId(100), ItemId(301)],
-            vec![ItemId(302), ItemId(101)]
+            vec![ItemId(302), ItemId(303), ItemId(304), ItemId(101)]
         )
     );
     assert_eq!(world.me.as_ref().unwrap().bank_count, 1);
@@ -2587,6 +2625,8 @@ fn moves_items_between_the_bank_and_inventory_after_the_clients_checks() {
             .iter()
             .any(|i| i.id == ItemId(301))
     );
+    session.withdraw(ItemId(303)).wait().unwrap();
+    assert!(unusable(session.withdraw(ItemId(304))));
     let refused = session.deposit(ItemId(302)).wait();
     assert!(matches!(refused, Err(ActionError::Refused(why)) if why == "Bank is full"));
     wait_until(session, |me| me.state == CombatState::InCombat);

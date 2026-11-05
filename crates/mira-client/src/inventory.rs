@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::enhancement::{Enhancement, EnhancementFields};
 use crate::event::{Event, Place};
+use crate::player::Me;
 use crate::rank::rank;
 use crate::shop::{Bought, ShopItem};
 
@@ -369,25 +370,24 @@ impl Inventory {
         }
     }
 
-    pub(crate) fn full_for(&self, offer: &DropOffer, slots: u32) -> bool {
-        self.no_room(offer.id, offer.pool(), slots)
+    pub(crate) fn full_for(&self, offer: &DropOffer, me: &Me) -> bool {
+        self.no_room(offer.id, offer.pool(), me)
     }
 
-    pub(crate) fn full_for_item(&self, item: &Item, slots: u32) -> bool {
-        self.no_room(item.id, item.pool(), slots)
+    pub(crate) fn full_for_item(&self, item: &Item, me: &Me) -> bool {
+        self.no_room(item.id, item.pool(), me)
     }
 
-    fn no_room(&self, id: ItemId, pool: Pool, slots: u32) -> bool {
-        let owned = self.items.iter().find(|i| i.id == id);
-        if owned.is_some_and(|i| i.qty < i.max_stack) {
-            return false;
-        }
+    fn no_room(&self, id: ItemId, pool: Pool, me: &Me) -> bool {
         let used = |pool| self.items.iter().filter(|i| i.pool() == pool).count();
-        let slots = slots as usize;
+        let owned = self.items.iter().find(|i| i.id == id);
+        let stacks = owned.is_some_and(|i| i.qty < i.max_stack);
+        let bag = me.bag_slots as usize;
         match pool {
-            Pool::Class | Pool::House => false,
-            Pool::Misc => owned.is_none() && used(Pool::Misc) >= slots,
-            Pool::Bag => used(Pool::Bag) >= slots,
+            Pool::Class => false,
+            Pool::House => used(Pool::House) >= me.house_slots as usize,
+            Pool::Misc => owned.is_none() && used(Pool::Misc) >= bag,
+            Pool::Bag => !stacks && used(Pool::Bag) >= bag,
         }
     }
 
@@ -441,6 +441,8 @@ fn take(items: &mut Vec<Item>, at: usize, qty: u32) -> Event {
 pub(crate) struct LoadInventory {
     #[serde(default)]
     pub(crate) items: Vec<Value>,
+    #[serde(default)]
+    pub(crate) hitems: Vec<Value>,
     #[serde(rename = "bankCount", default, deserialize_with = "flex::int")]
     pub(crate) bank_count: u32,
     #[serde(default)]

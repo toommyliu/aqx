@@ -2030,7 +2030,9 @@ impl Session {
                 if let Some(character) = &mut self.character {
                     character.bank_count = loaded.bank_count;
                 }
-                self.inventory.items = Arc::new(self.parse_each("inventory item", loaded.items));
+                let mut items = self.parse_each("inventory item", loaded.items);
+                items.extend(self.parse_each("house item", loaded.hitems));
+                self.inventory.items = Arc::new(items);
                 self.factions = self
                     .parse_each::<FactionData>("faction", loaded.factions)
                     .into_iter()
@@ -2327,9 +2329,10 @@ impl Session {
         let Some(offer) = self.inventory.drops.iter().find(|d| d.id == item) else {
             return Err(ActionError::NoTarget(format!("item {item} isn't on offer")));
         };
-        if self.inventory.full_for(offer, me.bag_slots) {
+        if self.inventory.full_for(offer, me) {
             let pool = match offer.pool() {
                 Pool::Misc => "misc inventory",
+                Pool::House => "house inventory",
                 _ => "inventory",
             };
             return Err(ActionError::Unusable(format!(
