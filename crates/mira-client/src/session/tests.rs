@@ -13,7 +13,8 @@ use mira_protocol::{AreaId, CharItemId, FactionId, ItemId, MonMapId};
 use super::*;
 use crate::quest::{QuestItem, QuestReward, QuestStatus, RewardKind};
 use crate::{
-    Aura, Auras, Caster, CombatState, DropOffer, Item, Monster, Skill, SkillTarget, TempItem,
+    Aura, Auras, Caster, CombatState, DropOffer, Item, Monster, Skill, SkillTarget, StatEffect,
+    TempItem,
 };
 
 const TOKEN: &str = "tok-abc123";
@@ -1182,6 +1183,15 @@ fn quest_status_follows_the_game_clients_checks() {
         ]
     );
     assert_eq!(world.me.as_ref().unwrap().class_points, 900);
+    let class = world
+        .inventory
+        .iter()
+        .find(|i| i.id == ItemId(700))
+        .unwrap();
+    assert_eq!(
+        (class.class_rank(), world.inventory[0].class_rank()),
+        (Some(2), None)
+    );
     assert_eq!(
         world.quests[&QuestId(2)],
         Quest {
@@ -1277,9 +1287,26 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
         peer.send(&json_message(
             json!({"cmd": "aura+p", "cInf": "p:7", "tInf": "p:7", "auras": [{"nam": "Insight"}]}),
         ));
+        peer.send(&json_message(
+            json!({"cmd": "updateClass", "uid": 8, "sClassName": "Healer", "iCP": 5}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "aura+p", "tInf": "p:7", "auras": [{"nam": "Kept"}]}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "updateClass", "uid": 7, "sClassName": "Mage", "iCP": 41107}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "aura+p", "tInf": "p:7", "auras": [
+                {"nam": "Hot Headed", "e": [
+                    {"id": 83, "typ": "+", "sta": "cmo", "val": 0.1},
+                    {"id": 19, "typ": "+", "sta": "thi", "val": "0.1"},
+                ]},
+            ]}),
+        ));
         peer.send(&json_message(json!({"cmd": "sAct", "actions": {
             "active": [],
-            "passive": [{"ref": "p1", "auras": [{"nam": "Class Passive", "val": 0.1}]}, {"ref": "p2"}],
+            "passive": [{"ref": "p1", "nam": "Hot Headed", "auras": [{}]}],
         }})));
         peer.send(&json_message(
             json!({"cmd": "aura-", "tInf": "p:7", "auras": [{"nam": "Pact"}]}),
@@ -1321,8 +1348,11 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
         category: None,
         persist: true,
         caster,
+        effects: Vec::new(),
     };
     let from_monster = Some(Caster::Monster(MonMapId(1)));
+    assert_eq!(world.me.as_ref().unwrap().class_points, 41107);
+    assert_eq!(world.me.as_ref().unwrap().class_rank(), 5);
     assert_eq!(
         world.me.as_ref().unwrap().auras,
         Auras {
@@ -1333,7 +1363,19 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
             ],
             passive: vec![Aura {
                 persist: false,
-                ..aura("Class Passive", 0.0, Some(0.1), None)
+                effects: vec![
+                    StatEffect {
+                        stat: "cmo".into(),
+                        op: "+".into(),
+                        value: 0.1,
+                    },
+                    StatEffect {
+                        stat: "thi".into(),
+                        op: "+".into(),
+                        value: 0.1,
+                    },
+                ],
+                ..aura("Hot Headed", 0.0, None, None)
             }],
         }
     );
@@ -1349,6 +1391,7 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
             category: Some("dot".into()),
             persist: false,
             caster: Some(Caster::Player(EntityId(7))),
+            effects: Vec::new(),
         }]
     );
     assert_eq!(

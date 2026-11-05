@@ -2,8 +2,9 @@ use mira_protocol::{EntityId, FactionId, flex};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::aura::{Auras, PassiveSkill};
+use crate::aura::Auras;
 use crate::quest::QuestProgress;
+use crate::rank::rank;
 use crate::room::{CombatState, Vitals};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -27,6 +28,10 @@ pub struct Me {
 }
 
 impl Me {
+    pub fn class_rank(&self) -> u32 {
+        rank(self.class_points)
+    }
+
     pub(crate) fn apply(&mut self, patch: &Vitals) {
         self.hp = patch.hp.unwrap_or(self.hp);
         self.max_hp = patch.max_hp.unwrap_or(self.max_hp);
@@ -166,7 +171,11 @@ pub(crate) struct SkillList {
 impl Me {
     pub(crate) fn learn_skills(&mut self, list: SkillList) {
         self.skills = list.actions.active;
-        self.auras.replace_passives(list.actions.passive);
+    }
+
+    pub(crate) fn change_class(&mut self, class: &ClassChange) {
+        self.class_points = class.class_points;
+        self.auras.clear_passives();
     }
 }
 
@@ -174,8 +183,6 @@ impl Me {
 struct Actions {
     #[serde(default)]
     active: Vec<Skill>,
-    #[serde(default)]
-    passive: Vec<PassiveSkill>,
 }
 
 #[derive(Deserialize)]

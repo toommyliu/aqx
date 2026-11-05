@@ -5,12 +5,13 @@ mod faction;
 mod inventory;
 mod player;
 mod quest;
+mod rank;
 mod room;
 mod session;
 mod world;
 
 pub use api::{Account, ApiError, DeviceId, Server};
-pub use aura::{Aura, Auras, Caster};
+pub use aura::{Aura, Auras, Caster, StatEffect};
 pub use event::{Direction, Event, NoticeKind};
 pub use faction::Faction;
 pub use inventory::{DropOffer, Item, TempItem};

@@ -961,7 +961,7 @@ impl Session {
                     .as_mut()
                     .filter(|_| Some(class.uid) == self.me)
                 {
-                    character.class_points = class.class_points;
+                    character.change_class(&class);
                 }
             }
             "addFaction" => {
