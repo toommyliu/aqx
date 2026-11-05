@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use mira_protocol::{FactionId, ItemId, QuestId, flex};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::session::World;
+use crate::world::World;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Quest {
@@ -122,13 +123,130 @@ impl World {
     }
 }
 
+const QUEST_STRINGS: usize = 8;
+const ACHIEVEMENT_FIELDS: [&str; 13] = [
+    "ia0", "ia1", "iq0", "id0", "id1", "id2", "id3", "id4", "id5", "id6", "id7", "iw0", "im0",
+];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct QuestProgress {
+    strings: [Option<String>; QUEST_STRINGS],
+    achievements: BTreeMap<String, i64>,
+}
+
+impl QuestProgress {
+    pub fn value(&self, slot: u32) -> Option<u32> {
+        let string = self.strings.get((slot / 100) as usize)?.as_ref()?;
+        string.chars().nth((slot % 100) as usize)?.to_digit(36)
+    }
+
+    pub(crate) fn client_value(&self, slot: i64) -> f64 {
+        let Ok(slot) = usize::try_from(slot) else {
+            return -1.0;
+        };
+        match self.strings.get(slot / 100) {
+            Some(Some(string)) => string
+                .chars()
+                .nth(slot % 100)
+                .and_then(|c| c.to_digit(36))
+                .map_or(f64::NAN, f64::from),
+            _ => -1.0,
+        }
+    }
+
+    pub fn achievement(&self, field: &str, bit: u32) -> Option<bool> {
+        if bit > 31 {
+            return None;
+        }
+        Some(self.achievements.get(field)? & (1 << bit) != 0)
+    }
+
+    pub(crate) fn from_user_data(data: &serde_json::Map<String, Value>) -> QuestProgress {
+        let int = |value: &Value| flex::int::<_, i64>(value.clone()).ok();
+        QuestProgress {
+            strings: std::array::from_fn(|i| {
+                let key = match i {
+                    0 => "strQuests".to_owned(),
+                    n => format!("strQuests{}", n + 1),
+                };
+                data.get(&key).and_then(Value::as_str).map(str::to_owned)
+            }),
+            achievements: ACHIEVEMENT_FIELDS
+                .iter()
+                .filter_map(|&field| Some((field.to_owned(), int(data.get(field)?)?)))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn update(&mut self, update: &QuestUpdate) {
+        let Some(Some(string)) = self.strings.get_mut((update.slot / 100) as usize) else {
+            return;
+        };
+        let digit = u32::try_from(update.value)
+            .ok()
+            .and_then(|value| char::from_digit(value, 36))
+            .map_or('0', |c| c.to_ascii_uppercase());
+        let at = (update.slot % 100) as usize;
+        let mut chars: Vec<char> = string.chars().collect();
+        match chars.get_mut(at) {
+            Some(c) => *c = digit,
+            None => chars.push(digit),
+        }
+        *string = chars.into_iter().collect();
+    }
+
+    pub(crate) fn set_achievement(&mut self, update: &AchievementUpdate) {
+        let (bit, value) = (update.index, update.value);
+        if bit > 31 || value > 1 {
+            return;
+        }
+        let flags = self.achievements.entry(update.field.clone()).or_insert(0);
+        if value == 1 {
+            *flags |= 1 << bit;
+        } else {
+            *flags &= !(1 << bit);
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct QuestUpdate {
+    #[serde(rename = "iIndex", deserialize_with = "flex::int")]
+    slot: u32,
+    #[serde(rename = "iValue", deserialize_with = "flex::int")]
+    value: i64,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AchievementUpdate {
+    field: String,
+    #[serde(deserialize_with = "flex::int")]
+    index: u32,
+    #[serde(deserialize_with = "flex::int")]
+    value: u8,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct QuestList {
     #[serde(default)]
-    pub(crate) quests: std::collections::BTreeMap<String, Value>,
+    quests: BTreeMap<String, Value>,
 }
 
-pub(crate) fn parse(key: &str, value: Value) -> Result<Quest, serde_json::Error> {
+pub(crate) fn learn(quests: &mut Arc<BTreeMap<QuestId, Quest>>, list: QuestList) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (key, value) in list.quests {
+        match parse(&key, value) {
+            Ok(quest) if !quests.contains_key(&quest.id) => {
+                Arc::make_mut(quests).insert(quest.id, quest);
+            }
+            Ok(_) => {}
+            Err(e) => errors.push(format!("quest {key}: {e}")),
+        }
+    }
+    errors
+}
+
+fn parse(key: &str, value: Value) -> Result<Quest, serde_json::Error> {
     let data: QuestData = serde_json::from_value(value)?;
     let id = match data.id {
         Some(id) => id,

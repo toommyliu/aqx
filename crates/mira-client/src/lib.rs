@@ -1,13 +1,23 @@
 pub mod api;
 mod event;
+mod faction;
+mod inventory;
+mod player;
 mod quest;
+mod room;
 mod session;
+mod world;
 
 pub use api::{Account, ApiError, DeviceId, Server};
 pub use event::{Direction, Event, NoticeKind};
-pub use quest::{Quest, QuestItem, QuestPeriod, QuestReward, QuestStatus, RewardKind};
-pub use session::{
-    ActionError, CombatState, DEFAULT_CLIENT_VERSION, Disconnect, DropOffer, Faction, Handle, Item,
-    Load, Me, Monster, Options, Pending, Phase, Player, QuestProgress, Room, Skill, SkillTarget,
-    TempItem, World, spawn,
+pub use faction::Faction;
+pub use inventory::{DropOffer, Item, TempItem};
+pub use player::{Me, Skill, SkillTarget};
+pub use quest::{
+    Quest, QuestItem, QuestPeriod, QuestProgress, QuestReward, QuestStatus, RewardKind,
 };
+pub use room::{CombatState, Monster, Player, Room};
+pub use session::{
+    ActionError, DEFAULT_CLIENT_VERSION, Disconnect, Handle, Load, Options, Pending, Phase, spawn,
+};
+pub use world::World;
