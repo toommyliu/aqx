@@ -18,7 +18,7 @@ use crate::{
     Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Item, Monster, Skill, SkillTarget,
     StatEffect, Stats, TempItem,
 };
-use crate::{Holder, Place};
+use crate::{Holder, NoticeKind, Place};
 
 const TOKEN: &str = "tok-abc123";
 const API_OK: &str = "<msg t='sys'><body action='apiOK' r='0'></body></msg>";
