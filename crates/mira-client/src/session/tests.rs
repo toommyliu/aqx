@@ -8,7 +8,7 @@ use flate2::Compression;
 use flate2::write::ZlibEncoder;
 use serde_json::json;
 
-use mira_protocol::{AreaId, CharItemId, FactionId, ItemId, MonMapId, ShopId};
+use mira_protocol::{AreaId, CharItemId, FactionId, ItemId, MonMapId, ShopId, ShopItemId};
 
 use super::*;
 use crate::Place;
@@ -2278,6 +2278,13 @@ fn loads_shops_once_each_and_refuses_one_known_to_open_elsewhere() {
             required_rep: 0,
             kind: "Sword".into(),
             slot: String::new(),
+            meta: String::new(),
+            house: false,
+            merge: vec![],
+            token: 0,
+            token_qty: 0,
+            quest_slot: -1,
+            quest_value: 0,
         }
     );
     session.logout();
@@ -2295,4 +2302,86 @@ fn a_kick_reports_how_long_until_the_account_can_log_in() {
     });
     let events = harness.finish();
     assert_eq!(closed_with(&events), Some(Disconnect::Kicked { secs: 30 }));
+}
+
+#[test]
+fn buys_and_sells_within_the_clients_limits() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::load_shop(AreaId(42), ShopId(7)));
+        peer.send(&json_message(json!({"cmd": "loadShop", "shopinfo": {
+            "ShopID": 7, "sName": "Mixed", "Location": "battleon", "items": [
+                {"ItemID": 101, "ShopItemID": 70, "sName": "Health Potion", "iCost": 100,
+                 "bCoins": 0, "iStk": 10, "iQty": 1, "sType": "Item"},
+                {"ItemID": 902, "ShopItemID": 71, "sName": "Ore", "iCost": 0, "iStk": 50,
+                 "iQty": 2, "sType": "Resource",
+                 "turnin": [{"ItemID": 101, "sName": "Health Potion", "iQty": 3}]},
+                {"ItemID": 903, "ShopItemID": 72, "sName": "Locked", "iCost": 1, "iStk": 1,
+                 "iQty": 1, "iQSindex": 2, "iQSvalue": 11},
+                {"ItemID": 904, "ShopItemID": 73, "sName": "Pricey", "iCost": 5000, "iStk": 1,
+                 "iQty": 1},
+                {"ItemID": 905, "ShopItemID": 74, "sName": "Token Buy", "iCost": 0, "iStk": 10,
+                 "iQty": 1, "TokID": 101, "TokQty": 2},
+            ],
+        }})));
+        let bought = peer.expect_at(&packet::buy_item(
+            AreaId(42),
+            ItemId(101),
+            ShopId(7),
+            ShopItemId(70),
+            4,
+        ));
+        peer.send(&json_message(json!({
+            "cmd": "buyItem", "bitSuccess": 1, "ItemID": 101, "CharItemID": 5001, "iQty": 4,
+            "bBank": 0,
+        })));
+        let merged = peer.expect_at(&packet::buy_item(
+            AreaId(42),
+            ItemId(902),
+            ShopId(7),
+            ShopItemId(71),
+            4,
+        ));
+        assert!(merged - bought >= Limit::BuyItem.gap() - SLACK);
+        peer.send(&json_message(json!({
+            "cmd": "buyItem", "bitSuccess": 0, "strMessage": "Sold out",
+        })));
+        peer.expect(&packet::sell_item(
+            AreaId(42),
+            ItemId(101),
+            2,
+            CharItemId(5001),
+        ));
+        peer.send(&json_message(json!({
+            "cmd": "sellItem", "CharItemID": 5001, "iQty": 2, "iQtyNow": 7, "intAmount": 50,
+            "bCoins": 0,
+        })));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let unusable = |pending: Pending| matches!(pending.wait(), Err(ActionError::Unusable(_)));
+    assert!(unusable(session.buy(ShopItemId(70), 1)));
+    session.load_shop(ShopId(7)).wait().unwrap();
+    assert!(unusable(session.buy(ShopItemId(70), 6)));
+    assert!(unusable(session.buy(ShopItemId(72), 1)));
+    assert!(unusable(session.buy(ShopItemId(73), 1)));
+    assert!(unusable(session.buy(ShopItemId(74), u32::MAX)));
+    assert!(matches!(
+        session.buy(ShopItemId(99), 1).wait(),
+        Err(ActionError::NoTarget(_))
+    ));
+    session.buy(ShopItemId(70), 4).wait().unwrap();
+    let world = session.snapshot();
+    assert_eq!((potions(&world), world.me.as_ref().unwrap().gold), (9, 800));
+    assert!(unusable(session.buy(ShopItemId(71), 7)));
+    let refused = session.buy(ShopItemId(71), 4).wait();
+    assert!(matches!(refused, Err(ActionError::Refused(why)) if why == "Sold out"));
+    assert!(unusable(session.sell(ItemId(101), 10)));
+    session.sell(ItemId(101), 2).wait().unwrap();
+    let world = session.snapshot();
+    assert_eq!((potions(&world), world.me.as_ref().unwrap().gold), (7, 850));
+    session.logout();
+    harness.finish();
 }

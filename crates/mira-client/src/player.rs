@@ -91,6 +91,15 @@ impl Me {
         };
         *purse += amount;
     }
+
+    pub(crate) fn spend(&mut self, amount: u64, coins: bool) {
+        let purse = if coins {
+            &mut self.coins
+        } else {
+            &mut self.gold
+        };
+        *purse = purse.saturating_sub(amount);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

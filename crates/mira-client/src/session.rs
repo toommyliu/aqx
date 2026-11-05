@@ -11,8 +11,8 @@ use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
 use mira_protocol::packet::Aim;
 use mira_protocol::{
-    EntityId, Framer, ItemId, JsonMessage, Message, MonMapId, QuestId, ShopId, XmlMessage, XmlUser,
-    XtMessage, packet,
+    EntityId, Framer, ItemId, JsonMessage, Message, MonMapId, QuestId, ShopId, ShopItemId,
+    XmlMessage, XmlUser, XtMessage, packet,
 };
 use serde::de::DeserializeOwned;
 use serde::{Serialize, Serializer};
@@ -34,11 +34,13 @@ use crate::room::{
     CombatState, Monster, MonsterUpdate, MoveToArea, PlayerUpdate, Room, SPAWN, Tick, UserEntry,
     UserList, Vitals,
 };
-use crate::shop::{LoadedShop, Shop};
+use crate::shop::{Bought, LoadedShop, Shop};
 use crate::world::World;
 use quests::{Answer, QuestAction, QuestCall, Verdict};
+use shops::{Trade, TradeStage};
 
 mod quests;
+mod shops;
 
 pub const DEFAULT_CLIENT_VERSION: &str = "5.31";
 
@@ -148,10 +150,12 @@ enum Limit {
     AcceptQuest,
     TurnIn,
     LoadShop,
+    BuyItem,
+    SellItem,
 }
 
 impl Limit {
-    const COUNT: usize = 5;
+    const COUNT: usize = 7;
 
     fn gap(self) -> Duration {
         Duration::from_millis(match self {
@@ -160,6 +164,7 @@ impl Limit {
             Limit::AcceptQuest => 1000,
             Limit::TurnIn => 1250,
             Limit::LoadShop => 3000,
+            Limit::BuyItem | Limit::SellItem => 1000,
         })
     }
 }
@@ -212,6 +217,7 @@ enum Action {
     Quest(QuestAction),
     PickDrop(ItemId),
     LoadShop(ShopId),
+    Trade(Trade),
 }
 
 enum Op {
@@ -255,6 +261,11 @@ enum Op {
         reply: Reply,
         id: ShopId,
         stage: ShopStage,
+    },
+    Trade {
+        reply: Reply,
+        trade: Trade,
+        stage: TradeStage,
     },
 }
 
@@ -335,6 +346,14 @@ impl Handle {
 
     pub fn load_shop(&self, id: ShopId) -> Pending {
         self.act(Action::LoadShop(id))
+    }
+
+    pub fn buy(&self, listing: ShopItemId, qty: u32) -> Pending {
+        self.act(Action::Trade(Trade::Buy { listing, qty }))
+    }
+
+    pub fn sell(&self, item: ItemId, qty: u32) -> Pending {
+        self.act(Action::Trade(Trade::Sell { item, qty }))
     }
 
     pub fn pick_drop(&self, item: ItemId) -> Pending {
@@ -605,6 +624,17 @@ impl Session {
                 }
                 Err(e) => Err(e),
             },
+            Action::Trade(trade) => {
+                let stage = TradeStage::Waiting { wake: None };
+                return self.step(
+                    Op::Trade {
+                        reply,
+                        trade,
+                        stage,
+                    },
+                    now,
+                );
+            }
             Action::LoadShop(id) => {
                 let stage = ShopStage::Waiting { wake: None };
                 let op = Op::Shop { reply, id, stage };
@@ -824,6 +854,21 @@ impl Session {
                     None
                 }
             },
+            Op::Trade {
+                reply,
+                trade,
+                mut stage,
+            } => match self.step_trade(&trade, &mut stage, now) {
+                task::Poll::Pending => Some(Op::Trade {
+                    reply,
+                    trade,
+                    stage,
+                }),
+                task::Poll::Ready(result) => {
+                    self.replies.push((reply, result));
+                    None
+                }
+            },
             Op::Quest { reply, mut call } => match self.step_quest(&mut call, now) {
                 task::Poll::Pending => Some(Op::Quest { reply, call }),
                 task::Poll::Ready(result) => {
@@ -853,6 +898,7 @@ impl Session {
             })
             | Some(Op::Kill { wake, .. }) => *wake,
             Some(Op::Quest { call, .. }) => call.stage.deadline(),
+            Some(Op::Trade { stage, .. }) => stage.deadline(),
             Some(Op::Shop {
                 stage: ShopStage::Waiting { wake },
                 ..
@@ -1411,7 +1457,9 @@ impl Session {
                 if let Some(character) = &mut self.character {
                     character.receive(sold.amount, sold.coins);
                 }
+                self.on_sold(sold.char_item_id);
             }
+            "buyItem" => self.on_bought(read::<Bought>(&json)?),
             "equipItem" | "unequipItem" => {
                 let worn: Worn = read(&json)?;
                 if Some(worn.uid) == self.me {

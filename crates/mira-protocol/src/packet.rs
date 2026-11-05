@@ -1,6 +1,6 @@
 use std::fmt::{self, Display};
 
-use crate::{AreaId, EntityId, ItemId, MonMapId, QuestId, ShopId};
+use crate::{AreaId, CharItemId, EntityId, ItemId, MonMapId, QuestId, ShopId, ShopItemId};
 
 const CLIENT_TOKEN: &str = "SPIDER#0001";
 const SMARTFOX_VERSION: &str = "157";
@@ -107,6 +107,27 @@ pub fn load_shop(room: AreaId, shop: ShopId) -> String {
     zm("loadShop", room, &[shop])
 }
 
+pub fn buy_item(room: AreaId, item: ItemId, shop: ShopId, listing: ShopItemId, qty: u32) -> String {
+    zm(
+        "buyItem",
+        room,
+        &[
+            item.to_string(),
+            shop.to_string(),
+            listing.to_string(),
+            qty.to_string(),
+        ],
+    )
+}
+
+pub fn sell_item(room: AreaId, item: ItemId, qty: u32, char_item: CharItemId) -> String {
+    zm(
+        "sellItem",
+        room,
+        &[item.to_string(), qty.to_string(), char_item.to_string()],
+    )
+}
+
 pub fn get_drop(room: AreaId, item: ItemId) -> String {
     zm("getDrop", room, &[item])
 }
@@ -175,6 +196,14 @@ mod tests {
         assert_eq!(accept_quest(room, QuestId(3)), "%xt%zm%acceptQuest%42%3%");
         assert_eq!(get_drop(room, ItemId(1027)), "%xt%zm%getDrop%42%1027%");
         assert_eq!(load_shop(room, ShopId(5)), "%xt%zm%loadShop%42%5%");
+        assert_eq!(
+            buy_item(room, ItemId(900), ShopId(5), ShopItemId(4005), 3),
+            "%xt%zm%buyItem%42%900%5%4005%3%"
+        );
+        assert_eq!(
+            sell_item(room, ItemId(101), 2, CharItemId(5001)),
+            "%xt%zm%sellItem%42%101%2%5001%"
+        );
         assert_eq!(
             try_quest_complete(room, QuestId(3), None, 1),
             "%xt%zm%tryQuestComplete%42%3%-1%false%1%wvz%"

@@ -8,13 +8,14 @@ use clap::{Parser, Subcommand};
 use mira_client::{
     ActionError, Auras, BoostKind, CombatState, DeviceId, Direction, Disconnect, Event, Handle,
     ItemId, Load, Me, MonMapId, Monster, NoticeKind, Options, Pending, Phase, Place, QuestId,
-    QuestStatus, Room, Server, ShopId, SkillTarget, World, api,
+    QuestStatus, Room, Server, ShopId, ShopItemId, SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str = "join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], \
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
-     load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, logout";
+     load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
+     buy <#listing> [qty], sell <item> [qty], logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -34,7 +35,8 @@ enum Command {
     /// Log in, then print what the account does and run commands read from stdin
     /// (join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop,
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
-    /// complete <quest> [times] [reward], shop <id>, logout) until it logs out. A monster or a dropped item is
+    /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], logout)
+    /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
         #[arg(long)]
@@ -334,7 +336,10 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                 return Err(CommandError::Action(ActionError::NoReply));
             };
             if json {
-                println!("{}", serde_json::to_string(&**shop).expect("shops serialize"));
+                println!(
+                    "{}",
+                    serde_json::to_string(&**shop).expect("shops serialize")
+                );
             } else {
                 println!("{} (shop {})", shop.name, shop.id);
                 for item in &shop.items {
@@ -345,6 +350,45 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                     );
                 }
             }
+        }
+        ["buy", listing, rest @ ..] if rest.len() <= 1 => {
+            let listing = ShopItemId(number(listing.trim_start_matches('#'))?);
+            let qty = match rest.first() {
+                Some(qty) => count(qty)?,
+                None => session
+                    .snapshot()
+                    .shop
+                    .as_ref()
+                    .and_then(|shop| shop.items.iter().find(|i| i.listing == listing))
+                    .map_or(1, |i| i.qty),
+            };
+            session.buy(listing, qty).wait()?;
+        }
+        ["sell", item @ ..] if !item.is_empty() => {
+            let world = session.snapshot();
+            let named = |name: &str| match name.strip_prefix('#').map(str::parse) {
+                Some(Ok(id)) => Some(ItemId(id)),
+                _ => world
+                    .inventory
+                    .iter()
+                    .find(|i| i.name.eq_ignore_ascii_case(name))
+                    .map(|i| i.id),
+            };
+            let whole = item.join(" ");
+            let (id, qty) = match (named(&whole), item) {
+                (Some(id), _) => (id, 1),
+                (None, [name @ .., qty]) if !name.is_empty() => {
+                    let name = name.join(" ");
+                    let id = named(&name).ok_or_else(|| {
+                        CommandError::Usage(format!("no {whole} in the inventory"))
+                    })?;
+                    (id, count(qty)?)
+                }
+                (None, _) => {
+                    return Err(CommandError::Usage(format!("no {whole} in the inventory")));
+                }
+            };
+            session.sell(id, qty).wait()?;
         }
         ["me"] => match &session.snapshot().me {
             Some(me) if json => println!("{}", serde_json::to_string(me).expect("me serializes")),
@@ -363,6 +407,11 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
 fn number(text: &str) -> Result<i64, CommandError> {
     text.parse()
         .map_err(|_| CommandError::Usage(format!("{text:?} isn't a number")))
+}
+
+fn count(text: &str) -> Result<u32, CommandError> {
+    text.parse()
+        .map_err(|_| CommandError::Usage(format!("{text:?} isn't a count")))
 }
 
 fn in_background(what: &'static str, pending: Pending) {

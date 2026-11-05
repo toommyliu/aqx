@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::event::{Event, Place};
 use crate::rank::rank;
+use crate::shop::{Bought, ShopItem};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
@@ -269,6 +270,42 @@ impl Inventory {
         events
     }
 
+    pub(crate) fn buy(&mut self, listed: &ShopItem, bought: &Bought) -> Option<Event> {
+        if bought.bank {
+            return None;
+        }
+        let items = Arc::make_mut(&mut self.items);
+        let qty = match items.iter_mut().find(|i| i.id == listed.id) {
+            Some(held) => {
+                held.qty += bought.qty;
+                held.qty
+            }
+            None => {
+                items.push(Item {
+                    id: listed.id,
+                    char_item_id: bought.char_item_id?,
+                    name: listed.name.clone(),
+                    qty: bought.qty,
+                    max_stack: listed.max_stack,
+                    kind: listed.kind.clone(),
+                    slot: listed.slot.clone(),
+                    equipped: false,
+                    coins: listed.coins,
+                    member: listed.member,
+                    meta: listed.meta.clone(),
+                    house: listed.house,
+                });
+                bought.qty
+            }
+        };
+        Some(Event::ItemChanged {
+            id: listed.id,
+            name: listed.name.clone(),
+            qty,
+            place: Place::Inventory,
+        })
+    }
+
     pub(crate) fn full_for(&self, offer: &DropOffer, slots: u32) -> bool {
         let owned = self.items.iter().find(|i| i.id == offer.id);
         if owned.is_some_and(|i| i.qty < i.max_stack) {
@@ -383,7 +420,7 @@ pub(crate) struct TurnIn {
 #[derive(Deserialize)]
 pub(crate) struct Sold {
     #[serde(rename = "CharItemID")]
-    char_item_id: CharItemId,
+    pub(crate) char_item_id: CharItemId,
     #[serde(rename = "iQty", deserialize_with = "flex::int")]
     qty: u32,
     #[serde(rename = "intAmount", default, deserialize_with = "flex::int")]

@@ -106,7 +106,7 @@ pub(crate) struct Held<'a> {
 }
 
 impl Held<'_> {
-    fn qty(self, id: ItemId) -> Option<u32> {
+    pub(crate) fn qty(self, id: ItemId) -> Option<u32> {
         self.items
             .iter()
             .find(|i| i.id == id)

@@ -28,7 +28,7 @@ pub use room::{CombatState, Monster, Player, Room};
 pub use session::{
     ActionError, DEFAULT_CLIENT_VERSION, Disconnect, Handle, Load, Options, Pending, Phase, spawn,
 };
-pub use shop::{Shop, ShopItem};
+pub use shop::{MergeCost, Shop, ShopItem};
 pub use world::World;
 
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
