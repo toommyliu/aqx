@@ -473,6 +473,27 @@ fn a_logout_cancels_a_join_waiting_out_the_cooldown() {
 }
 
 #[test]
+fn a_logout_cancels_a_sent_join_even_if_the_server_confirms_it() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::logout());
+        peer.send(&move_to_area(43, "yulgar-2"));
+        peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
+    });
+    let sent = harness.session.join("yulgar");
+    thread::sleep(Duration::from_millis(100));
+    harness.session.logout();
+    let joined = sent.wait();
+    assert!(
+        matches!(joined, Err(ActionError::Closed(Disconnect::LoggedOut))),
+        "{joined:?}"
+    );
+    harness.finish();
+}
+
+#[test]
 fn a_pending_join_reports_the_closed_session_when_the_server_drops() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
