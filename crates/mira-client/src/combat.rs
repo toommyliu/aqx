@@ -26,6 +26,11 @@ const LAST_ACT: u8 = 250;
 const DISABLING: [&str; 5] = ["stun", "stone", "paralyze", "disable", "disabled"];
 const SLOW_DOWN: [&str; 3] = ["slow down", "too soon", "spamming"];
 
+pub(crate) fn slow_down(warning: &str) -> bool {
+    let warning = warning.to_ascii_lowercase();
+    SLOW_DOWN.iter().any(|phrase| warning.contains(phrase))
+}
+
 #[derive(Default)]
 pub(crate) struct Combat {
     next_act: u8,
@@ -312,8 +317,7 @@ impl Combat {
     }
 
     pub(crate) fn warned(&mut self, text: &str, now: Instant) {
-        let text = text.to_ascii_lowercase();
-        if SLOW_DOWN.iter().any(|phrase| text.contains(phrase)) {
+        if slow_down(text) {
             self.backoff.bump(now);
         }
     }

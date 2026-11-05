@@ -5,6 +5,9 @@ use mira_protocol::{FactionId, ItemId, QuestId, flex};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
+use crate::faction::Faction;
+use crate::inventory::{Item, TempItem};
+use crate::player::Me;
 use crate::world::World;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -83,45 +86,91 @@ pub enum QuestStatus {
 
 impl World {
     pub fn quest_status(&self, id: QuestId) -> Option<QuestStatus> {
-        let quest = self.quests.get(&id)?;
-        let me = self.me.as_ref()?;
-        let value = |slot| me.quests.client_value(slot);
-        if quest.once && (quest.slot < 0 || value(quest.slot) >= quest.value as f64) {
-            return Some(QuestStatus::Done);
-        }
-        let period_used = quest.period.as_ref().is_some_and(|period| {
-            let bit = u32::try_from(period.index).ok();
-            bit.and_then(|bit| me.quests.achievement(&period.field, bit)) != Some(false)
-        });
-        if period_used {
-            return Some(QuestStatus::DoneThisPeriod);
-        }
-        let held = |id: ItemId| self.inventory.iter().find(|i| i.id == id).map(|i| i.qty);
-        let locked = (quest.member && !me.member)
-            || (quest.slot >= 0 && value(quest.slot) < (quest.value - 1) as f64)
-            || quest.level > i64::from(me.level)
-            || quest
-                .class
-                .is_some_and(|class| held(class).map_or(-1, i64::from) < quest.required_cp)
-            || quest.faction.is_some_and(|faction| {
-                let rep = self
-                    .factions
-                    .iter()
-                    .find(|f| f.id == faction)
-                    .map_or(0, |f| f.rep);
-                i64::from(rep) < quest.required_rep
-            })
-            || quest
-                .required
-                .iter()
-                .any(|need| held(need.id).is_none_or(|qty| qty < need.qty));
-        Some(if locked {
-            QuestStatus::Locked
-        } else {
-            QuestStatus::Available
-        })
+        let held = Held {
+            items: &self.inventory,
+            temp: &self.temp,
+        };
+        Some(status(
+            self.quests.get(&id)?,
+            self.me.as_ref()?,
+            held,
+            &self.factions,
+        ))
     }
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct Held<'a> {
+    pub(crate) items: &'a [Item],
+    pub(crate) temp: &'a [TempItem],
+}
+
+impl Held<'_> {
+    fn qty(self, id: ItemId) -> Option<u32> {
+        self.items
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.qty)
+            .or_else(|| self.temp.iter().find(|i| i.id == id).map(|i| i.qty))
+    }
+}
+
+pub(crate) fn status(quest: &Quest, me: &Me, held: Held, factions: &[Faction]) -> QuestStatus {
+    let value = |slot| me.quests.client_value(slot);
+    if quest.once && (quest.slot < 0 || value(quest.slot) >= quest.value as f64) {
+        return QuestStatus::Done;
+    }
+    let period_used = quest.period.as_ref().is_some_and(|period| {
+        let bit = u32::try_from(period.index).ok();
+        bit.and_then(|bit| me.quests.achievement(&period.field, bit)) != Some(false)
+    });
+    if period_used {
+        return QuestStatus::DoneThisPeriod;
+    }
+    let locked = (quest.member && !me.member)
+        || (quest.slot >= 0 && value(quest.slot) < (quest.value - 1) as f64)
+        || quest.level > i64::from(me.level)
+        || quest
+            .class
+            .is_some_and(|class| held.qty(class).map_or(-1, i64::from) < quest.required_cp)
+        || quest.faction.is_some_and(|faction| {
+            let rep = factions
+                .iter()
+                .find(|f| f.id == faction)
+                .map_or(0, |f| f.rep);
+            i64::from(rep) < quest.required_rep
+        })
+        || quest
+            .required
+            .iter()
+            .any(|need| held.qty(need.id).is_none_or(|qty| qty < need.qty));
+    if locked {
+        QuestStatus::Locked
+    } else {
+        QuestStatus::Available
+    }
+}
+
+pub(crate) fn turn_in_limit(quest: &Quest, held: Held) -> Result<u32, String> {
+    let mut most = MAX_TURN_INS;
+    for need in &quest.turn_in {
+        let qty = held.qty(need.id).unwrap_or(0);
+        if qty < need.qty {
+            return Err(format!(
+                "{} needs {} {}, and {qty} are held",
+                quest.name, need.qty, need.name
+            ));
+        }
+        if held.items.iter().any(|i| i.id == need.id && i.equipped) {
+            return Err(format!("{} is equipped and can't be turned in", need.name));
+        }
+        most = most.min(qty / need.qty.max(1));
+    }
+    let repeatable = !quest.once && quest.period.is_none() && !quest.turn_in.is_empty();
+    Ok(if repeatable { most } else { 1 })
+}
+
+const MAX_TURN_INS: u32 = 250;
 
 const QUEST_STRINGS: usize = 8;
 const ACHIEVEMENT_FIELDS: [&str; 13] = [

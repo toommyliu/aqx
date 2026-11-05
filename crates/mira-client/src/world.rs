@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use mira_protocol::QuestId;
@@ -20,6 +20,7 @@ pub struct World {
     pub drops: Vec<DropOffer>,
     pub factions: Vec<Faction>,
     pub quests: Arc<BTreeMap<QuestId, Quest>>,
+    pub accepted_quests: BTreeSet<QuestId>,
 }
 
 impl World {
@@ -33,6 +34,7 @@ impl World {
             drops: Vec::new(),
             factions: Vec::new(),
             quests: Arc::default(),
+            accepted_quests: BTreeSet::new(),
         }
     }
 }

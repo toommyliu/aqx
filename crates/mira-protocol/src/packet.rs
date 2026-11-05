@@ -1,6 +1,6 @@
 use std::fmt::{self, Display};
 
-use crate::{AreaId, EntityId, MonMapId};
+use crate::{AreaId, EntityId, ItemId, MonMapId, QuestId};
 
 const CLIENT_TOKEN: &str = "SPIDER#0001";
 const SMARTFOX_VERSION: &str = "157";
@@ -80,6 +80,29 @@ pub fn res_player_timed(room: AreaId, eid: EntityId) -> String {
     zm("resPlayerTimed", room, &[eid])
 }
 
+pub fn get_quests(room: AreaId, ids: &[QuestId]) -> String {
+    zm("getQuests", room, ids)
+}
+
+pub fn accept_quest(room: AreaId, id: QuestId) -> String {
+    zm("acceptQuest", room, &[id])
+}
+
+pub fn try_quest_complete(room: AreaId, id: QuestId, reward: Option<ItemId>, times: u32) -> String {
+    let reward = reward.map_or(-1, |item| item.0);
+    zm(
+        "tryQuestComplete",
+        room,
+        &[
+            id.to_string(),
+            reward.to_string(),
+            "false".into(),
+            times.to_string(),
+            "wvz".into(),
+        ],
+    )
+}
+
 pub fn logout() -> String {
     zm("cmd", 1, &["logout"])
 }
@@ -137,6 +160,19 @@ mod tests {
             "%xt%zm%aggroMon%42%1%2%"
         );
         assert_eq!(res_player_timed(room, eid), "%xt%zm%resPlayerTimed%42%7%");
+        assert_eq!(
+            get_quests(room, &[QuestId(1), QuestId(2)]),
+            "%xt%zm%getQuests%42%1%2%"
+        );
+        assert_eq!(accept_quest(room, QuestId(3)), "%xt%zm%acceptQuest%42%3%");
+        assert_eq!(
+            try_quest_complete(room, QuestId(3), None, 1),
+            "%xt%zm%tryQuestComplete%42%3%-1%false%1%wvz%"
+        );
+        assert_eq!(
+            try_quest_complete(room, QuestId(3), Some(ItemId(900)), 5),
+            "%xt%zm%tryQuestComplete%42%3%900%false%5%wvz%"
+        );
         assert_eq!(
             transfer("player1", "yulgar-2"),
             "%xt%zm%cmd%1%tfer%player1%yulgar-2%"

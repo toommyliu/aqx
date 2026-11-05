@@ -7,13 +7,14 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use mira_client::{
     ActionError, Auras, BoostKind, CombatState, DeviceId, Direction, Disconnect, Event, Handle,
-    Load, Me, MonMapId, Monster, NoticeKind, Options, Pending, Phase, Place, QuestStatus, Room,
-    Server, SkillTarget, World, api,
+    ItemId, Load, Me, MonMapId, Monster, NoticeKind, Options, Pending, Phase, Place, QuestId,
+    QuestStatus, Room, Server, SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str = "join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], \
-     kill <monster>, stop, who, mons [all], me, inv, drops, reps, quests, logout";
+     kill <monster>, stop, who, mons [all], me, inv, drops, reps, quests, load <quest>..., \
+     accept <quest>, complete <quest> [times] [reward], logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -32,8 +33,9 @@ enum Command {
     },
     /// Log in, then print what the account does and run commands read from stdin
     /// (join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop,
-    /// who, mons [all], me, inv, drops, reps, quests, logout) until it logs out. A monster is its
-    /// #id or its name.
+    /// who, mons [all], me, inv, drops, reps, quests, load <quest>..., accept <quest>,
+    /// complete <quest> [times] [reward], logout) until it logs out. A monster is its #id or its
+    /// name. Quests and rewards are ids.
     Login {
         #[arg(long)]
         user: String,
@@ -209,6 +211,22 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
             in_background("skill", session.use_skill(slot, Some(target)));
         }
         ["stop"] => session.exit_combat().wait()?,
+        ["load", ids @ ..] if !ids.is_empty() => {
+            let ids = ids.iter().map(|id| number(id).map(QuestId));
+            session
+                .load_quests(&ids.collect::<Result<Vec<_>, _>>()?)
+                .wait()?;
+        }
+        ["accept", id] => session.accept_quest(QuestId(number(id)?)).wait()?,
+        ["complete", id, rest @ ..] if rest.len() <= 2 => {
+            let times = rest.first().map_or(Ok(1), |times| number(times))?;
+            let reward = rest.get(1).map(|id| number(id).map(ItemId)).transpose()?;
+            let times = u32::try_from(times)
+                .map_err(|_| CommandError::Usage(format!("{times} isn't a turn-in count")))?;
+            session
+                .complete_quest(QuestId(number(id)?), reward, times)
+                .wait()?;
+        }
         ["who"] => match &session.snapshot().room {
             Some(room) if json => {
                 println!("{}", serde_json::to_string(room).expect("rooms serialize"))
@@ -233,7 +251,13 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                 let quests: Vec<_> = world
                     .quests
                     .values()
-                    .map(|quest| serde_json::json!({"quest": quest, "status": world.quest_status(quest.id)}))
+                    .map(|quest| {
+                        serde_json::json!({
+                            "quest": quest,
+                            "status": world.quest_status(quest.id),
+                            "accepted": world.accepted_quests.contains(&quest.id),
+                        })
+                    })
                     .collect();
                 println!("{}", serde_json::Value::Array(quests));
             } else if world.quests.is_empty() {
@@ -247,7 +271,12 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                         Some(QuestStatus::Available) => "available",
                         None => "unknown",
                     };
-                    println!("  {} {} ({status})", quest.id, quest.name);
+                    let accepted = if world.accepted_quests.contains(&quest.id) {
+                        ", accepted"
+                    } else {
+                        ""
+                    };
+                    println!("  {} {} ({status}{accepted})", quest.id, quest.name);
                 }
             }
         }
@@ -296,6 +325,11 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
         }
     }
     Ok(())
+}
+
+fn number(text: &str) -> Result<i64, CommandError> {
+    text.parse()
+        .map_err(|_| CommandError::Usage(format!("{text:?} isn't a number")))
 }
 
 fn in_background(what: &'static str, pending: Pending) {

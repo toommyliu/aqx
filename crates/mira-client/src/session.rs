@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
+use std::task;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -10,8 +11,8 @@ use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
 use mira_protocol::packet::Aim;
 use mira_protocol::{
-    EntityId, Framer, JsonMessage, Message, MonMapId, QuestId, XmlMessage, XmlUser, XtMessage,
-    packet,
+    EntityId, Framer, ItemId, JsonMessage, Message, MonMapId, QuestId, XmlMessage, XmlUser,
+    XtMessage, packet,
 };
 use serde::de::DeserializeOwned;
 use serde::{Serialize, Serializer};
@@ -33,6 +34,9 @@ use crate::room::{
     UserList, Vitals,
 };
 use crate::world::World;
+use quests::{Answer, QuestAction, QuestCall, Verdict};
+
+mod quests;
 
 pub const DEFAULT_CLIENT_VERSION: &str = "5.31";
 
@@ -42,7 +46,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(3);
 const JOIN_TIMEOUT: Duration = Duration::from_secs(10);
-const TRANSFER_COOLDOWN: Duration = Duration::from_millis(3000);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
 const CELL_PAD: &str = "Left";
 const VERSION_RETRIES: usize = 3;
@@ -130,6 +133,40 @@ pub struct Options {
     pub trace_packets: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum Limit {
+    Transfer,
+    LoadQuests,
+    AcceptQuest,
+    TurnIn,
+}
+
+impl Limit {
+    const COUNT: usize = 4;
+
+    fn gap(self) -> Duration {
+        Duration::from_millis(match self {
+            Limit::Transfer => 3000,
+            Limit::LoadQuests => 1000,
+            Limit::AcceptQuest => 1000,
+            Limit::TurnIn => 1250,
+        })
+    }
+}
+
+#[derive(Default)]
+struct Limits([Option<Instant>; Limit::COUNT]);
+
+impl Limits {
+    fn until(&self, limit: Limit) -> Option<Instant> {
+        self.0[limit as usize].map(|at| at + limit.gap())
+    }
+
+    fn used(&mut self, limit: Limit, now: Instant) {
+        self.0[limit as usize] = Some(now);
+    }
+}
+
 type Slot = Arc<Mutex<Arc<World>>>;
 type Reply = mpsc::SyncSender<Result<(), ActionError>>;
 
@@ -162,6 +199,7 @@ enum Action {
         target: MonMapId,
     },
     ExitCombat,
+    Quest(QuestAction),
 }
 
 enum Op {
@@ -191,6 +229,10 @@ enum Op {
         reply: Reply,
         cell: String,
         deadline: Instant,
+    },
+    Quest {
+        reply: Reply,
+        call: QuestCall,
     },
 }
 
@@ -254,6 +296,18 @@ impl Handle {
 
     pub fn exit_combat(&self) -> Pending {
         self.act(Action::ExitCombat)
+    }
+
+    pub fn load_quests(&self, ids: &[QuestId]) -> Pending {
+        self.act(Action::Quest(QuestAction::Load(ids.to_vec())))
+    }
+
+    pub fn accept_quest(&self, id: QuestId) -> Pending {
+        self.act(Action::Quest(QuestAction::Accept(id)))
+    }
+
+    pub fn complete_quest(&self, id: QuestId, reward: Option<ItemId>, times: u32) -> Pending {
+        self.act(Action::Quest(QuestAction::TurnIn { id, reward, times }))
     }
 
     pub fn logout(&self) {
@@ -336,12 +390,13 @@ pub fn spawn(
         arriving: None,
         room: None,
         joins: 0,
-        transferred_at: None,
+        limits: Limits::default(),
         refusal: None,
         character: None,
         inventory: Inventory::default(),
         factions: Vec::new(),
         quests: Arc::default(),
+        accepted_quests: BTreeSet::new(),
         combat: Combat::default(),
         closing: None,
         logout_deadline: None,
@@ -379,12 +434,13 @@ struct Session {
     arriving: Option<Room>,
     room: Option<Room>,
     joins: u64,
-    transferred_at: Option<Instant>,
+    limits: Limits,
     refusal: Option<String>,
     character: Option<Me>,
     inventory: Inventory,
     factions: Vec<Faction>,
     quests: Arc<BTreeMap<QuestId, Quest>>,
+    accepted_quests: BTreeSet<QuestId>,
     combat: Combat,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -500,6 +556,10 @@ impl Session {
                 Ok(None) => Ok(()),
                 Err(e) => Err(e),
             },
+            Action::Quest(action) => {
+                let call = self.start_quest(action);
+                return self.step(Op::Quest { reply, call }, now);
+            }
             Action::UseSkill { slot, target } => {
                 let stage = CastStage::Waiting { wake: None };
                 return self.step(
@@ -579,7 +639,7 @@ impl Session {
                 let joins = self.joins;
                 self.refusal = None;
                 self.send(&packet::transfer(&self.username, &map));
-                self.transferred_at = Some(now);
+                self.limits.used(Limit::Transfer, now);
                 Some(Op::Join {
                     reply,
                     stage: JoinStage::Sent {
@@ -673,6 +733,13 @@ impl Session {
                 self.replies.push((reply, result));
                 None
             }
+            Op::Quest { reply, mut call } => match self.step_quest(&mut call, now) {
+                task::Poll::Pending => Some(Op::Quest { reply, call }),
+                task::Poll::Ready(result) => {
+                    self.replies.push((reply, result));
+                    None
+                }
+            },
         }
     }
 
@@ -693,6 +760,7 @@ impl Session {
                 ..
             })
             | Some(Op::Kill { wake, .. }) => *wake,
+            Some(Op::Quest { call, .. }) => call.stage.deadline(),
             Some(Op::Cast {
                 stage: CastStage::Sent { .. },
                 ..
@@ -719,6 +787,7 @@ impl Session {
             drops: self.inventory.drops.clone(),
             factions: self.factions.clone(),
             quests: Arc::clone(&self.quests),
+            accepted_quests: self.accepted_quests.clone(),
         });
         for event in self.outgoing.drain(..) {
             let _ = self.events.send(event);
@@ -743,7 +812,7 @@ impl Session {
         if self.room.as_ref().is_some_and(|room| room.is_in(&map)) {
             return Ok(None);
         }
-        let until = self.transferred_at.map_or(now, |at| at + TRANSFER_COOLDOWN);
+        let until = self.limits.until(Limit::Transfer).unwrap_or(now);
         Ok(Some(JoinStage::Cooling { map, until }))
     }
 
@@ -806,12 +875,13 @@ impl Session {
         self.me = None;
         self.arriving = None;
         self.room = None;
-        self.transferred_at = None;
+        self.limits = Limits::default();
         self.refusal = None;
         self.character = None;
         self.inventory = Inventory::default();
         self.factions.clear();
         self.quests = Arc::default();
+        self.accepted_quests.clear();
         self.combat = Combat::default();
         self.closing = None;
         self.logout_deadline = None;
@@ -1000,6 +1070,9 @@ impl Session {
             "warning" => {
                 let text = text();
                 self.combat.warned(&text, Instant::now());
+                if combat::slow_down(&text) {
+                    self.answer(Answer::SlowedDown);
+                }
                 self.refusal = Some(text.clone());
                 self.emit(Event::Notice {
                     kind: NoticeKind::Warning,
@@ -1020,6 +1093,7 @@ impl Session {
                 text: text(),
             }),
             "multiLoginWarning" => self.closing = Some(Disconnect::LoggedInElsewhere),
+            "zm" if xt.field(3) == Some("tryQuestComplete") => self.answer(Answer::TurnInEchoed),
             "exitArea" => {
                 if let Some(eid) = xt.field(4).and_then(|eid| eid.parse().ok()) {
                     self.on_player_left(EntityId(eid));
@@ -1291,6 +1365,21 @@ impl Session {
                 for error in quest::learn(&mut self.quests, read::<QuestList>(&json)?) {
                     self.emit(Event::Unreadable { error });
                 }
+                self.answer(Answer::Quests);
+            }
+            "acceptQuest" => {
+                let verdict: Verdict = read(&json)?;
+                if verdict.ok {
+                    self.accepted_quests.insert(verdict.id);
+                }
+                self.answer(Answer::Accepted(verdict));
+            }
+            "ccqr" => {
+                let verdict: Verdict = read(&json)?;
+                if verdict.ok {
+                    self.accepted_quests.remove(&verdict.id);
+                }
+                self.answer(Answer::TurnedIn(verdict));
             }
             _ => {}
         }

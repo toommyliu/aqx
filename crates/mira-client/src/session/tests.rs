@@ -479,7 +479,7 @@ fn a_refused_join_reports_the_warning_and_the_next_join_waits_out_the_cooldown()
         let refused_at = Instant::now();
         peer.send("%xt%warning%-1%Cannot join that map.%");
         peer.expect(&packet::transfer("player1", "yulgar"));
-        assert!(refused_at.elapsed() >= TRANSFER_COOLDOWN - Duration::from_millis(100));
+        assert!(refused_at.elapsed() >= Limit::Transfer.gap() - Duration::from_millis(100));
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
         peer.expect_logout();
@@ -514,7 +514,7 @@ fn a_logout_cancels_a_join_waiting_out_the_cooldown() {
         matches!(joined, Err(ActionError::Closed(Disconnect::LoggedOut))),
         "{joined:?}"
     );
-    assert!(started.elapsed() < TRANSFER_COOLDOWN / 2);
+    assert!(started.elapsed() < Limit::Transfer.gap() / 2);
     harness.finish();
 }
 
@@ -1128,7 +1128,11 @@ fn quest_status_follows_the_game_clients_checks() {
             "16": quest(16, "Broken", json!({"reward": [{"ItemID": 1, "iType": 9}]})),
             "17": quest(17, "Class rank met", json!({"iClass": 700, "iReqCP": 900})),
             "18": quest(18, "Class rank short", json!({"iClass": 700, "iReqCP": 901})),
+            "19": quest(19, "Holds temp item", json!({"reqd": [{"ItemID": 800, "iQty": 2}]})),
         });
+        peer.send(&json_message(json!({"cmd": "addItems", "items": {"800": {
+            "ItemID": 800, "sName": "Quest Token", "iQty": 2, "iStk": 10, "bTemp": true,
+        }}})));
         peer.send(&json_message(json!({"cmd": "addItems", "items": {"700": {
             "ItemID": 700, "CharItemID": 5700, "sName": "Rogue", "iQty": 899, "iStk": 1,
             "sType": "Class", "sES": "ar",
@@ -1159,7 +1163,7 @@ fn quest_status_follows_the_game_clients_checks() {
         "{unreadable:?}"
     );
     let world = session.snapshot();
-    let statuses: Vec<(i64, Option<QuestStatus>)> = (1..=18)
+    let statuses: Vec<(i64, Option<QuestStatus>)> = (1..=19)
         .map(|id| (id, world.quest_status(QuestId(id))))
         .collect();
     use QuestStatus::*;
@@ -1184,6 +1188,7 @@ fn quest_status_follows_the_game_clients_checks() {
             (16, None),
             (17, Some(Available)),
             (18, Some(Locked)),
+            (19, Some(Available)),
         ]
     );
     assert_eq!(world.me.as_ref().unwrap().class_points, 900);
@@ -1960,6 +1965,152 @@ fn leaving_combat_cancels_fights_queued_behind_another_action() {
     leaving.wait().unwrap();
     assert!(matches!(killing.wait(), Err(ActionError::Interrupted)));
     joined.wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+fn potions(world: &World) -> u32 {
+    world
+        .inventory
+        .iter()
+        .find(|i| i.id == ItemId(101))
+        .map_or(0, |i| i.qty)
+}
+
+#[test]
+fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        let ids: Vec<QuestId> = (1..=15).map(QuestId).collect();
+        let first = peer.expect_at(&packet::get_quests(AreaId(42), &ids[..14]));
+        peer.send(&json_message(json!({"cmd": "getQuests", "quests": {}})));
+        let second = peer.expect_at(&packet::get_quests(AreaId(42), &ids[14..]));
+        assert!(second - first >= Limit::LoadQuests.gap() - SLACK);
+        peer.send(&json_message(
+            json!({"cmd": "getQuests", "quests": {"15": {"QuestID": 15, "sName": "Fifteen"}}}),
+        ));
+        let third = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(30)]));
+        assert!(third - second >= Limit::LoadQuests.gap() - SLACK);
+        peer.send(&json_message(json!({"cmd": "getQuests", "quests": {"30": {
+            "QuestID": 30, "sName": "Potion Run",
+            "turnin": [{"ItemID": 101, "iQty": 2}],
+            "oItems": {"101": {"ItemID": 101, "sName": "Health Potion"}},
+            "reward": [
+                {"ItemID": 600, "iQty": 1, "iRate": 100, "iType": 2},
+                {"ItemID": 601, "iQty": 1, "iRate": 100, "iType": 2},
+            ],
+        }}})));
+        let accepted = peer.expect_at(&packet::accept_quest(AreaId(42), QuestId(30)));
+        peer.send(&json_message(
+            json!({"cmd": "acceptQuest", "QuestID": 30, "bSuccess": 1, "msg": "success"}),
+        ));
+        let turn_in = packet::try_quest_complete(AreaId(42), QuestId(30), Some(ItemId(600)), 2);
+        let turned_in = peer.expect_at(&turn_in);
+        peer.send(&json_message(json!({"cmd": "turnIn", "sItems": "101:4"})));
+        peer.send(&json_message(
+            json!({"cmd": "ccqr", "QuestID": 30, "bSuccess": 1, "sName": "Potion Run"}),
+        ));
+        let again = peer.expect_at(&packet::accept_quest(AreaId(42), QuestId(30)));
+        assert!(again - accepted >= Limit::AcceptQuest.gap() - SLACK);
+        peer.send(&json_message(json!({"cmd": "addItems", "items": {"101": {
+            "CharItemID": 5001, "iQty": 2, "iQtyNow": 3,
+        }}})));
+        peer.send(&json_message(
+            json!({"cmd": "acceptQuest", "QuestID": "30", "bSuccess": "1"}),
+        ));
+        let turn_in = packet::try_quest_complete(AreaId(42), QuestId(30), Some(ItemId(601)), 1);
+        let retried = peer.expect_at(&turn_in);
+        assert!(retried - turned_in >= Limit::TurnIn.gap() - SLACK);
+        peer.send(&json_message(
+            json!({"cmd": "ccqr", "QuestID": 30, "bSuccess": 0, "msg": "Missing Turn In Item"}),
+        ));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let ids: Vec<QuestId> = (1..=15).map(QuestId).collect();
+    let loaded = session.load_quests(&ids).wait();
+    assert!(matches!(loaded, Err(ActionError::NoTarget(_))));
+    session.accept_quest(QuestId(30)).wait().unwrap();
+    assert!(session.snapshot().accepted_quests.contains(&QuestId(30)));
+    session.accept_quest(QuestId(30)).wait().unwrap();
+    session
+        .complete_quest(QuestId(30), Some(ItemId(600)), 2)
+        .wait()
+        .unwrap();
+    let world = session.snapshot();
+    assert!(!world.accepted_quests.contains(&QuestId(30)));
+    assert_eq!(potions(&world), 1);
+    session.accept_quest(QuestId(30)).wait().unwrap();
+    assert_eq!(potions(&session.snapshot()), 3);
+    let refused = session
+        .complete_quest(QuestId(30), Some(ItemId(601)), 1)
+        .wait()
+        .unwrap_err();
+    assert!(matches!(refused, ActionError::Refused(why) if why == "Missing Turn In Item"));
+    assert!(session.snapshot().accepted_quests.contains(&QuestId(30)));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn quest_actions_make_the_clients_checks_before_sending() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.send(&json_message(json!({"cmd": "getQuests", "quests": {
+            "40": {"QuestID": 40, "sName": "Too High", "iLvl": 99},
+            "41": {"QuestID": 41, "sName": "Choice",
+                   "reward": [{"ItemID": 600, "iQty": 1, "iRate": 100, "iType": 2}]},
+            "42": {"QuestID": 42, "sName": "Sword", "turnin": [{"ItemID": 100, "iQty": 1}]},
+            "43": {"QuestID": 43, "sName": "Once", "bOnce": 1,
+                   "turnin": [{"ItemID": 101, "iQty": 1}]},
+            "44": {"QuestID": 44, "sName": "Echoed"},
+        }})));
+        for id in [41, 42, 43, 44] {
+            peer.send(&json_message(
+                json!({"cmd": "acceptQuest", "QuestID": id, "bSuccess": 1}),
+            ));
+        }
+        let dropped = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(45), QuestId(46)]));
+        peer.send("%xt%warning%-1%Please slow down. Last action was too soon!%");
+        let resent = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(45), QuestId(46)]));
+        assert!(resent - dropped >= Limit::LoadQuests.gap() - SLACK);
+        peer.send(&json_message(json!({"cmd": "getQuests", "quests": {
+            "45": {"QuestID": 45, "sName": "Real"},
+        }})));
+        peer.expect(&packet::try_quest_complete(
+            AreaId(42),
+            QuestId(44),
+            None,
+            1,
+        ));
+        peer.send("%xt%zm%tryQuestComplete%42%44%-1%false%1%wvz%");
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    while !session.snapshot().accepted_quests.contains(&QuestId(44)) {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let unusable = |pending: Pending| matches!(pending.wait(), Err(ActionError::Unusable(_)));
+    assert!(unusable(session.accept_quest(QuestId(40))));
+    assert!(unusable(session.complete_quest(QuestId(40), None, 1)));
+    assert!(unusable(session.complete_quest(QuestId(41), None, 1)));
+    assert!(unusable(session.complete_quest(
+        QuestId(41),
+        Some(ItemId(601)),
+        1
+    )));
+    assert!(unusable(session.complete_quest(QuestId(42), None, 1)));
+    assert!(unusable(session.complete_quest(QuestId(43), None, 2)));
+    assert!(unusable(session.complete_quest(QuestId(43), None, 0)));
+    let missing = session.load_quests(&[QuestId(46), QuestId(45), QuestId(44)]);
+    assert!(matches!(missing.wait(), Err(ActionError::NoTarget(_))));
+    assert!(session.snapshot().quests.contains_key(&QuestId(45)));
+    let echoed = session.complete_quest(QuestId(44), None, 1).wait();
+    assert!(matches!(echoed, Err(ActionError::Refused(_))));
     session.logout();
     harness.finish();
 }
