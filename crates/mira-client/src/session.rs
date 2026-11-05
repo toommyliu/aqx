@@ -117,6 +117,8 @@ pub enum ActionError {
     Unusable(String),
     #[error("the player is dead")]
     Dead,
+    #[error("the server ignores this during combat; leave combat first")]
+    InCombat,
     #[error("stopped to leave combat")]
     Interrupted,
     #[error("still in combat {secs} s after moving to {0}", secs = EXIT_TIMEOUT.as_secs())]
@@ -646,7 +648,14 @@ impl Session {
                 reply,
                 stage: JoinStage::Cooling { map, .. },
             } => {
-                if let Err(e) = self.ensure_ready() {
+                let state = self.character.as_ref().map(|me| me.state);
+                let refused = match (self.ensure_ready(), state) {
+                    (Err(e), _) => Some(e),
+                    (Ok(()), Some(CombatState::Dead)) => Some(ActionError::Dead),
+                    (Ok(()), Some(CombatState::InCombat)) => Some(ActionError::InCombat),
+                    (Ok(()), _) => None,
+                };
+                if let Some(e) = refused {
                     self.replies.push((reply, Err(e)));
                     return None;
                 }

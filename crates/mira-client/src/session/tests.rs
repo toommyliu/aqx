@@ -2185,3 +2185,44 @@ fn picks_up_drops_while_the_bag_has_room() {
     session.logout();
     harness.finish();
 }
+
+#[test]
+fn a_join_refuses_in_combat_and_when_dead_without_sending() {
+    let (step, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.send(&json_message(
+            json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}),
+        ));
+        next.recv().unwrap();
+        peer.send(&json_message(
+            json!({"cmd": "ct", "p": {"player1": {"intHP": 0, "intState": 0}}}),
+        ));
+        next.recv().unwrap();
+        peer.send(&json_message(
+            json!({"cmd": "uotls", "unm": "player1", "o": {"intHP": 1000, "intState": 1}}),
+        ));
+        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    wait_until(session, |me| me.state == CombatState::InCombat);
+    let in_combat = session.join("yulgar").wait();
+    assert!(
+        matches!(in_combat, Err(ActionError::InCombat)),
+        "{in_combat:?}"
+    );
+    step.send(()).unwrap();
+    wait_until(session, |me| me.state == CombatState::Dead);
+    assert!(matches!(
+        session.join("yulgar").wait(),
+        Err(ActionError::Dead)
+    ));
+    step.send(()).unwrap();
+    wait_until(session, |me| me.state == CombatState::Idle);
+    let _joining = session.join("yulgar");
+    thread::sleep(Duration::from_millis(100));
+    session.logout();
+    harness.finish();
+}
