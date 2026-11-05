@@ -105,8 +105,9 @@ impl Session {
             };
             let (account, char_id) = (self.account.clone(), me.char_id);
             let (results, waker) = (self.bank_out.clone(), Arc::clone(&self.waker));
+            let epoch = self.epoch.load(std::sync::atomic::Ordering::SeqCst);
             thread::spawn(move || {
-                let _ = results.send(api::bank(&account, char_id));
+                let _ = results.send((epoch, api::bank(&account, char_id)));
                 let _ = waker.wake();
             });
             *stage = BankStage::Fetching;

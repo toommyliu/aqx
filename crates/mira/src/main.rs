@@ -3,14 +3,14 @@ use std::io::BufRead;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use mira_client::{
-    ActionError, Aggro, Auras, BoostKind, CombatState, CounterHold, DeviceId, Direction,
-    Disconnect, Event, Handle, Item, ItemId, Load, MapItemId, Me, MonMapId, Monster, NoticeKind,
-    Options, Pending, Phase, Place, QuestId, QuestStatus, Room, Server, ShopId, ShopItemId,
-    SkillTarget, World, api,
+    ActionError, Aggro, Auras, BoostKind, CombatState, CounterHold, DEFAULT_RECONNECT_ATTEMPTS,
+    DeviceId, Direction, Disconnect, Event, Handle, Item, ItemId, Load, MapItemId, Me, MonMapId,
+    Monster, NoticeKind, Options, Pending, Phase, Place, QuestId, QuestStatus, Reconnect, Room,
+    Server, ShopId, ShopItemId, SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
@@ -61,6 +61,13 @@ enum Command {
         /// Also print every packet sent and received, with the token and personal fields redacted.
         #[arg(long)]
         packets: bool,
+        /// After a lost connection or a kick, log in again after this many seconds, doubling
+        /// between attempts. Off unless given.
+        #[arg(long, value_name = "SECS")]
+        reconnect: Option<u64>,
+        /// How many times in a row to try reconnecting before giving up.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_RECONNECT_ATTEMPTS, requires = "reconnect")]
+        reconnect_attempts: u32,
     },
 }
 
@@ -74,7 +81,23 @@ fn main() -> ExitCode {
             client_version,
             json,
             packets,
-        } => login(&user, &pass, &server, client_version, json, packets),
+            reconnect,
+            reconnect_attempts,
+        } => {
+            let reconnect = reconnect.map(|secs| Reconnect {
+                attempts: reconnect_attempts,
+                ..Reconnect::new(pass.clone(), Duration::from_secs(secs))
+            });
+            login(
+                &user,
+                &pass,
+                &server,
+                client_version,
+                json,
+                packets,
+                reconnect,
+            )
+        }
     };
     result.unwrap_or_else(|e| {
         eprintln!("mira: {e:#}");
@@ -124,6 +147,7 @@ fn login(
     client_version: Option<String>,
     json: bool,
     packets: bool,
+    reconnect: Option<Reconnect>,
 ) -> anyhow::Result<ExitCode> {
     let started = Instant::now();
     if !json {
@@ -134,6 +158,7 @@ fn login(
     let options = Options {
         client_version,
         trace_packets: packets,
+        reconnect,
     };
     let (session, events) = mira_client::spawn(&account, server, options)?;
 
@@ -181,7 +206,11 @@ fn serve_stdin(session: &Handle, json: bool) {
         match run_command(session, &line, json) {
             Ok(()) => {}
             Err(CommandError::Usage(e)) => eprintln!("mira: {e}"),
-            Err(CommandError::Action(ActionError::Closed(_))) => return,
+            Err(CommandError::Action(ActionError::Closed(_)))
+                if matches!(session.snapshot().phase, Phase::Closed { .. }) =>
+            {
+                return;
+            }
             Err(CommandError::Action(e)) => eprintln!("mira: {e}"),
         }
     }
@@ -744,6 +773,14 @@ fn describe(event: &Event) -> Option<String> {
                 step: Load::Inventory,
             } => "loading the inventory".into(),
             Phase::Ready => return None,
+            Phase::Reconnecting {
+                reason,
+                attempt,
+                wait_ms,
+            } => format!(
+                "disconnected: {reason}; reconnecting in {:.0} s (attempt {attempt})",
+                Duration::from_millis(*wait_ms).as_secs_f64()
+            ),
             Phase::Closed { reason } => format!("disconnected: {reason}"),
         },
         Event::Joined {

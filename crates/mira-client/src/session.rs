@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::task;
 use std::thread;
@@ -19,7 +20,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::REPLY_TIMEOUT;
-use crate::api::{Account, ApiError, Server, Token};
+use crate::api::{self, Account, ApiError, Server, Token};
 use crate::aura::{self, AuraChange, Target};
 use crate::combat::{self, AUTO_ATTACK, ActionResult, Combat, Gate, ITEM_SLOT, Outcome};
 use crate::event::{Direction, Event, NoticeKind};
@@ -61,6 +62,8 @@ const VERSION_RETRIES: usize = 3;
 const WALK_SPEED: u32 = 8;
 const AGGRO_EVERY: Duration = Duration::from_millis(500);
 const AFK_EVERY: Duration = Duration::from_millis(500);
+pub const DEFAULT_RECONNECT_ATTEMPTS: u32 = 5;
+const MAX_RECONNECT_WAIT: Duration = Duration::from_secs(300);
 const STAGE_WIDTH: i32 = 960;
 const STAGE_HEIGHT: i32 = 500;
 const REDACTED_KEYS: [&str; 2] = ["strEmail", "strIP"];
@@ -68,12 +71,24 @@ const REDACTED_KEYS: [&str; 2] = ["strEmail", "strIP"];
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum Phase {
-    Connecting { server: String, version: String },
+    Connecting {
+        server: String,
+        version: String,
+    },
     Handshaking,
     LoggingIn,
-    Loading { step: Load },
+    Loading {
+        step: Load,
+    },
     Ready,
-    Closed { reason: Disconnect },
+    Reconnecting {
+        reason: Disconnect,
+        attempt: u32,
+        wait_ms: u64,
+    },
+    Closed {
+        reason: Disconnect,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -116,6 +131,25 @@ impl fmt::Display for Disconnect {
     }
 }
 
+impl Disconnect {
+    fn retryable(&self) -> bool {
+        matches!(
+            self,
+            Disconnect::ConnectionLost(_)
+                | Disconnect::Ended
+                | Disconnect::InvalidSession
+                | Disconnect::Kicked { .. }
+        )
+    }
+
+    fn lockout(&self) -> Duration {
+        match self {
+            Disconnect::Kicked { secs } => Duration::from_secs(*secs),
+            _ => Duration::ZERO,
+        }
+    }
+}
+
 impl Serialize for Disconnect {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(self)
@@ -154,6 +188,46 @@ pub enum ActionError {
 pub struct Options {
     pub client_version: Option<String>,
     pub trace_packets: bool,
+    pub reconnect: Option<Reconnect>,
+}
+
+#[derive(Clone)]
+pub struct Reconnect {
+    pub password: String,
+    pub delay: Duration,
+    pub attempts: u32,
+}
+
+impl Reconnect {
+    pub fn new(password: String, delay: Duration) -> Reconnect {
+        Reconnect {
+            password,
+            delay,
+            attempts: DEFAULT_RECONNECT_ATTEMPTS,
+        }
+    }
+
+    fn wait(&self, made: u32, lockout: Duration) -> Duration {
+        let doubled = self.delay.saturating_mul(2u32.saturating_pow(made));
+        let capped = doubled.min(MAX_RECONNECT_WAIT.max(self.delay));
+        jitter(capped).max(lockout)
+    }
+}
+
+impl fmt::Debug for Reconnect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Reconnect")
+            .field("delay", &self.delay)
+            .field("attempts", &self.attempts)
+            .finish_non_exhaustive()
+    }
+}
+
+fn jitter(wait: Duration) -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    wait.mul_f64(0.8 + f64::from(nanos % 1000) / 1000.0 * 0.4)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -234,12 +308,16 @@ pub enum CounterHold {
     Attacks,
 }
 
-enum Request {
-    Act(Action, Reply),
+enum Setting {
     CounterHold(CounterHold),
     Aggro(Option<Aggro>),
     RespawnWhereDied(bool),
     AntiAfk(bool),
+}
+
+enum Request {
+    Act(Action, Reply, u64),
+    Set(Setting, u64),
     Logout,
 }
 
@@ -357,12 +435,33 @@ enum Op {
     },
 }
 
+impl Op {
+    fn into_reply(self) -> Option<Reply> {
+        match self {
+            Op::Login { .. } => None,
+            Op::Join { reply, .. }
+            | Op::Cast { reply, .. }
+            | Op::Kill { reply, .. }
+            | Op::Leave { reply, .. }
+            | Op::Quest { reply, .. }
+            | Op::Pick { reply, .. }
+            | Op::Shop { reply, .. }
+            | Op::Trade { reply, .. }
+            | Op::Bank { reply, .. }
+            | Op::Equip { reply, .. }
+            | Op::MapItem { reply, .. }
+            | Op::Rest { reply, .. }
+            | Op::Walk { reply, .. } => Some(reply),
+        }
+    }
+}
+
 enum RestStage {
     Cooling { wake: Option<Instant> },
     Sent { deadline: Instant },
 }
 
-type BankResult = Result<Vec<Value>, ApiError>;
+type BankResult = (u64, Result<Vec<Value>, ApiError>);
 
 enum ShopStage {
     Waiting { wake: Option<Instant> },
@@ -407,6 +506,7 @@ pub struct Handle {
     requests: mpsc::Sender<Request>,
     waker: Arc<Waker>,
     world: Slot,
+    epoch: Arc<AtomicU64>,
 }
 
 impl Handle {
@@ -523,19 +623,24 @@ impl Handle {
     }
 
     pub fn set_counter_hold(&self, hold: CounterHold) {
-        self.request(Request::CounterHold(hold));
+        self.set(Setting::CounterHold(hold));
     }
 
     pub fn set_aggro(&self, aggro: Option<Aggro>) {
-        self.request(Request::Aggro(aggro));
+        self.set(Setting::Aggro(aggro));
     }
 
     pub fn set_respawn_where_died(&self, on: bool) {
-        self.request(Request::RespawnWhereDied(on));
+        self.set(Setting::RespawnWhereDied(on));
     }
 
     pub fn set_anti_afk(&self, on: bool) {
-        self.request(Request::AntiAfk(on));
+        self.set(Setting::AntiAfk(on));
+    }
+
+    fn set(&self, setting: Setting) {
+        let epoch = self.epoch.load(Ordering::SeqCst);
+        self.request(Request::Set(setting, epoch));
     }
 
     pub fn logout(&self) {
@@ -548,7 +653,8 @@ impl Handle {
 
     fn act(&self, action: Action) -> Pending {
         let (reply, result) = mpsc::sync_channel(1);
-        self.request(Request::Act(action, reply));
+        let epoch = self.epoch.load(Ordering::SeqCst);
+        self.request(Request::Act(action, reply, epoch));
         Pending {
             result,
             world: Arc::clone(&self.world),
@@ -586,6 +692,7 @@ pub fn spawn(
     let poll = Poll::new()?;
     let waker = Arc::new(Waker::new(poll.registry(), WAKER)?);
     let (requests_out, requests) = mpsc::channel();
+    let epoch = Arc::new(AtomicU64::new(0));
     let (events, events_in) = mpsc::channel();
     let version = options
         .client_version
@@ -597,11 +704,21 @@ pub fn spawn(
     };
     let world = Arc::new(Mutex::new(Arc::new(World::connecting(phase.clone()))));
     let (bank_out, bank_results) = mpsc::channel();
+    let (relogin_out, relogin_results) = mpsc::channel();
     let session = Session {
         account: account.clone(),
         waker: Arc::clone(&waker),
         bank_out,
         bank_results,
+        relogin_out,
+        relogin_results,
+        server: server.clone(),
+        epoch: Arc::clone(&epoch),
+        stale: None,
+        ready_once: false,
+        reconnects: 0,
+        reconnect_at: None,
+        lost: None,
         bank: None,
         procs: Arc::default(),
         username: account.username.clone(),
@@ -652,6 +769,7 @@ pub fn spawn(
         requests: requests_out,
         waker,
         world,
+        epoch,
     };
     Ok((handle, events_in))
 }
@@ -661,6 +779,15 @@ struct Session {
     waker: Arc<Waker>,
     bank_out: mpsc::Sender<BankResult>,
     bank_results: mpsc::Receiver<BankResult>,
+    relogin_out: mpsc::Sender<Result<Account, ApiError>>,
+    relogin_results: mpsc::Receiver<Result<Account, ApiError>>,
+    server: Server,
+    epoch: Arc<AtomicU64>,
+    stale: Option<Disconnect>,
+    ready_once: bool,
+    reconnects: u32,
+    reconnect_at: Option<Instant>,
+    lost: Option<Disconnect>,
     bank: Option<Arc<Vec<Item>>>,
     procs: Arc<HashMap<u32, String>>,
     username: String,
@@ -711,6 +838,7 @@ impl Session {
         loop {
             self.take_requests();
             self.take_bank_results();
+            self.take_relogin_results();
             self.advance(Instant::now());
             if matches!(self.phase, Phase::Closed { .. }) && self.current.is_none() {
                 self.take_requests();
@@ -735,7 +863,10 @@ impl Session {
     }
 
     fn take_bank_results(&mut self) {
-        while let Ok(result) = self.bank_results.try_recv() {
+        while let Ok((epoch, result)) = self.bank_results.try_recv() {
+            if epoch != self.epoch.load(Ordering::SeqCst) {
+                continue;
+            }
             let fetching = matches!(
                 self.current,
                 Some(Op::Bank {
@@ -763,15 +894,31 @@ impl Session {
         }
     }
 
+    fn stale_epoch(&self, epoch: u64) -> bool {
+        self.lost.is_some() || epoch != self.epoch.load(Ordering::SeqCst)
+    }
+
+    fn apply(&mut self, setting: Setting) {
+        match setting {
+            Setting::CounterHold(hold) => self.counter_hold = hold,
+            Setting::Aggro(aggro) => self.aggro = aggro.map(|aggro| (aggro, Instant::now())),
+            Setting::RespawnWhereDied(on) => self.respawn_where_died = on,
+            Setting::AntiAfk(on) => self.anti_afk = on,
+        }
+    }
+
     fn take_requests(&mut self) {
         while let Ok(request) = self.requests.try_recv() {
             match request {
+                Request::Act(_, reply, epoch) if self.stale_epoch(epoch) => {
+                    let why = self.lost.clone().or_else(|| self.stale.clone());
+                    let why = why.unwrap_or(Disconnect::Ended);
+                    self.replies.push((reply, Err(ActionError::Closed(why))));
+                }
                 Request::Logout => self.begin_logout(),
-                Request::CounterHold(hold) => self.counter_hold = hold,
-                Request::Aggro(aggro) => self.aggro = aggro.map(|aggro| (aggro, Instant::now())),
-                Request::RespawnWhereDied(on) => self.respawn_where_died = on,
-                Request::AntiAfk(on) => self.anti_afk = on,
-                Request::Act(Action::ExitCombat, reply) => {
+                Request::Set(_, epoch) if self.stale_epoch(epoch) => {}
+                Request::Set(setting, _) => self.apply(setting),
+                Request::Act(Action::ExitCombat, reply, _) => {
                     if matches!(self.current, Some(Op::Kill { .. } | Op::Cast { .. }))
                         && let Some(Op::Kill { reply, .. } | Op::Cast { reply, .. }) =
                             self.current.take()
@@ -793,7 +940,7 @@ impl Session {
                     self.queue = rest.into();
                     self.queue.push_front((Action::ExitCombat, reply));
                 }
-                Request::Act(action, reply) => self.queue.push_back((action, reply)),
+                Request::Act(action, reply, _) => self.queue.push_back((action, reply)),
             }
         }
     }
@@ -801,6 +948,10 @@ impl Session {
     fn advance(&mut self, now: Instant) {
         if self.logout_deadline.is_some_and(|d| now >= d) {
             self.close(Disconnect::LoggedOut);
+        }
+        if self.reconnect_at.is_some_and(|at| now >= at) {
+            self.reconnect_at = None;
+            self.relogin();
         }
         if let Some(me) = &self.character {
             self.combat.expire(me, now);
@@ -1008,7 +1159,7 @@ impl Session {
                     let retry = self.start_login(server, required, attempts + 1);
                     self.step(retry, now)
                 }
-                Phase::Closed { .. } => None,
+                Phase::Closed { .. } | Phase::Reconnecting { .. } => None,
                 _ if now >= deadline => {
                     self.close(Disconnect::ConnectionLost(
                         "the character never loaded".into(),
@@ -1397,6 +1548,7 @@ impl Session {
         op.into_iter()
             .chain(counters)
             .chain(self.logout_deadline)
+            .chain(self.reconnect_at)
             .chain(self.aggro.as_ref().map(|(_, due)| *due))
             .chain(self.ensure_ready().ok().and_then(|()| {
                 let now = Instant::now();
@@ -1565,7 +1717,9 @@ impl Session {
         }
         match &self.phase {
             Phase::Ready => Ok(()),
-            Phase::Closed { reason } => Err(ActionError::Closed(reason.clone())),
+            Phase::Closed { reason } | Phase::Reconnecting { reason, .. } => {
+                Err(ActionError::Closed(reason.clone()))
+            }
             _ => Err(ActionError::NotReady),
         }
     }
@@ -1632,8 +1786,94 @@ impl Session {
         }
         self.outbox.clear();
         self.logout_deadline = None;
-        if !matches!(self.phase, Phase::Closed { .. }) {
-            self.set_phase(Phase::Closed { reason: why });
+        if matches!(self.phase, Phase::Closed { .. }) {
+            return;
+        }
+        let why = self.closing.take().unwrap_or(why);
+        let plan =
+            self.options.reconnect.as_ref().filter(|plan| {
+                self.ready_once && why.retryable() && self.reconnects < plan.attempts
+            });
+        let Some(wait) = plan.map(|plan| plan.wait(self.reconnects, why.lockout())) else {
+            self.reconnect_at = None;
+            self.lost = None;
+            return self.set_phase(Phase::Closed { reason: why });
+        };
+        self.reconnects += 1;
+        self.reconnect_at = Some(Instant::now() + wait);
+        let dropped = self.current.take().and_then(Op::into_reply);
+        for reply in dropped
+            .into_iter()
+            .chain(self.queue.drain(..).map(|(_, r)| r))
+        {
+            self.replies
+                .push((reply, Err(ActionError::Closed(why.clone()))));
+        }
+        self.lost = Some(why.clone());
+        self.forget_session();
+        self.set_phase(Phase::Reconnecting {
+            reason: why,
+            attempt: self.reconnects,
+            wait_ms: u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+        });
+    }
+
+    fn forget_session(&mut self) {
+        self.counter_hold = CounterHold::Off;
+        self.aggro = None;
+        self.respawn_where_died = false;
+        self.died_in = None;
+        self.anti_afk = false;
+        self.afk_cleared = None;
+        self.requested_spot = None;
+        self.shop_maps.clear();
+        self.procs = Arc::default();
+    }
+
+    fn relogin(&mut self) {
+        let Some(password) = self.options.reconnect.as_ref().map(|p| p.password.clone()) else {
+            return;
+        };
+        self.set_phase(Phase::Connecting {
+            server: self.server.name.clone(),
+            version: self.version.clone(),
+        });
+        let (base, device) = (self.account.api.clone(), self.account.device.clone());
+        let username = self.account.username.clone();
+        let (results, waker) = (self.relogin_out.clone(), Arc::clone(&self.waker));
+        thread::spawn(move || {
+            let _ = results.send(api::login_at(&base, &device, &username, &password));
+            let _ = waker.wake();
+        });
+    }
+
+    fn take_relogin_results(&mut self) {
+        while let Ok(result) = self.relogin_results.try_recv() {
+            if !matches!(self.phase, Phase::Connecting { .. }) || self.stream.is_some() {
+                continue;
+            }
+            let account = match result {
+                Ok(account) => account,
+                Err(ApiError::Rejected(why)) => {
+                    self.close(Disconnect::Rejected(why));
+                    continue;
+                }
+                Err(e) => {
+                    self.close(Disconnect::ConnectionLost(e.to_string()));
+                    continue;
+                }
+            };
+            let server = match account.pick_server(&self.server.name) {
+                Ok(server) => server.clone(),
+                Err(e) => {
+                    self.close(Disconnect::ConnectionLost(e.to_string()));
+                    continue;
+                }
+            };
+            self.token = account.token.clone();
+            self.account = account;
+            let version = self.version.clone();
+            self.current = Some(self.start_login(server, version, 1));
         }
     }
 
@@ -2065,6 +2305,12 @@ impl Session {
                     .into_iter()
                     .map(Faction::from)
                     .collect();
+                self.ready_once = true;
+                self.reconnects = 0;
+                if let Some(why) = self.lost.take() {
+                    self.epoch.fetch_add(1, Ordering::SeqCst);
+                    self.stale = Some(why);
+                }
                 self.set_phase(Phase::Ready);
                 self.emit(Event::Ready {
                     level,

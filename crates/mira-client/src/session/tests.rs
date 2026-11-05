@@ -111,25 +111,31 @@ impl Peer {
     }
 
     fn serve_to_ready(&mut self, version: &str) {
-        self.serve_with_items(
-            version,
-            json!([
-                {"ItemID": 100, "CharItemID": 5000, "sName": "Default Sword", "iQty": 1, "iStk": 1,
-                 "sType": "Sword", "sES": "Weapon", "bEquip": 1},
-                {"ItemID": "101", "CharItemID": "5001", "sName": "Health Potion", "iQty": "5",
-                 "iStk": 10, "sType": "Item", "sES": "None", "bEquip": false},
-            ]),
-        );
+        self.serve_to_ready_with_token(version, TOKEN);
+    }
+
+    fn serve_to_ready_with_token(&mut self, version: &str, token: &str) {
+        let items = json!([
+            {"ItemID": 100, "CharItemID": 5000, "sName": "Default Sword", "iQty": 1, "iStk": 1,
+             "sType": "Sword", "sES": "Weapon", "bEquip": 1},
+            {"ItemID": "101", "CharItemID": "5001", "sName": "Health Potion", "iQty": "5",
+             "iStk": 10, "sType": "Item", "sES": "None", "bEquip": false},
+        ]);
+        self.serve(version, token, items, json!([]));
     }
 
     fn serve_with_items(&mut self, version: &str, items: Value) {
-        self.serve_with_inventory(version, items, json!([]));
+        self.serve(version, TOKEN, items, json!([]));
     }
 
     fn serve_with_inventory(&mut self, version: &str, items: Value, hitems: Value) {
+        self.serve(version, TOKEN, items, hitems);
+    }
+
+    fn serve(&mut self, version: &str, token: &str, items: Value, hitems: Value) {
         self.expect(&packet::version_check());
         self.send(API_OK);
-        self.expect(&packet::login("player1", version, TOKEN));
+        self.expect(&packet::login("player1", version, token));
         self.send(LOGIN_OK);
         self.expect(&packet::first_join());
         self.expect(&packet::clear_ignore_list());
@@ -2479,29 +2485,74 @@ fn buys_and_sells_within_the_clients_limits() {
     harness.finish();
 }
 
-fn serve_bank(items: Value) -> (String, JoinHandle<(Vec<String>, String)>) {
+fn read_request(stream: &TcpStream) -> (Vec<String>, String) {
     use std::io::{BufRead, BufReader};
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut head = Vec::new();
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let line = line.trim().to_owned();
+        if line.is_empty() {
+            break;
+        }
+        if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length: ") {
+            length = n.parse().unwrap();
+        }
+        head.push(line);
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    (head, String::from_utf8(body).unwrap())
+}
+
+fn serve_api(
+    replies: mpsc::Receiver<String>,
+    stop: mpsc::Receiver<()>,
+) -> (String, JoinHandle<Vec<(Instant, String)>>) {
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    api.set_nonblocking(true).unwrap();
+    let base = format!("http://{}", api.local_addr().unwrap());
+    let http = thread::spawn(move || {
+        let mut requests = Vec::new();
+        while matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+            let Ok((mut stream, _)) = api.accept() else {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            stream.set_nonblocking(false).unwrap();
+            let (_, body) = read_request(&stream);
+            requests.push((Instant::now(), body));
+            let reply = replies
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_default();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+        }
+        requests
+    });
+    (base, http)
+}
+
+fn login_reply(token: &str, port: u16) -> String {
+    json!({
+        "login": {"bSuccess": 1, "sToken": token, "iUpg": 0},
+        "servers": [{"sName": "Test", "sIP": "127.0.0.1", "iPort": port, "bOnline": 1}],
+    })
+    .to_string()
+}
+
+fn serve_bank(items: Value) -> (String, JoinHandle<(Vec<String>, String)>) {
     let api = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", api.local_addr().unwrap());
     let http = thread::spawn(move || {
         let (mut stream, _) = api.accept().unwrap();
-        let mut reader = BufReader::new(stream.try_clone().unwrap());
-        let mut head = Vec::new();
-        let mut length = 0;
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            let line = line.trim().to_owned();
-            if line.is_empty() {
-                break;
-            }
-            if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length: ") {
-                length = n.parse().unwrap();
-            }
-            head.push(line);
-        }
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).unwrap();
+        let (head, body) = read_request(&stream);
         let bank = items.to_string();
         write!(
             stream,
@@ -2509,7 +2560,7 @@ fn serve_bank(items: Value) -> (String, JoinHandle<(Vec<String>, String)>) {
             bank.len()
         )
         .unwrap();
-        (head, String::from_utf8(body).unwrap())
+        (head, body)
     });
     (base, http)
 }
@@ -3656,4 +3707,207 @@ fn clears_the_away_mark_before_acting_only_when_asked() {
     session.rest().wait().unwrap();
     session.logout();
     harness.finish();
+}
+
+fn reconnect_every(delay: Duration, attempts: u32) -> Options {
+    Options {
+        reconnect: Some(Reconnect {
+            attempts,
+            ..Reconnect::new("pass1".into(), delay)
+        }),
+        ..Options::default()
+    }
+}
+
+#[test]
+fn reconnects_after_a_lost_connection_when_asked() {
+    let (replies_in, replies) = mpsc::channel();
+    let (stop_in, stop) = mpsc::channel();
+    let (base, api) = serve_api(replies, stop);
+    let (dropped_in, dropped) = mpsc::channel();
+    let (attempting_in, attempting) = mpsc::channel();
+    let (go_in, go) = mpsc::channel::<()>();
+    let options = reconnect_every(Duration::from_millis(400), 5);
+    let harness = Harness::start_with_api(options, base, move |listener| {
+        let port = listener.local_addr().unwrap().port();
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::transfer("player1", "yulgar"));
+        drop(peer);
+        dropped_in.send(Instant::now()).unwrap();
+        replies_in.send(login_reply("tok2", port)).unwrap();
+        let mut peer = Peer::accept(&listener);
+        attempting_in.send(()).unwrap();
+        go.recv().unwrap();
+        peer.serve_to_ready_with_token("5.31", "tok2");
+        peer.send("%xt%uotls%-1%player1%afk:true%");
+        peer.expect(&packet::move_to_cell(AreaId(42), "r2", "Left"));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    session.set_anti_afk(true);
+    let lost = |result: Result<(), ActionError>| {
+        matches!(
+            result,
+            Err(ActionError::Closed(Disconnect::ConnectionLost(_)))
+        )
+    };
+    assert!(lost(session.join("yulgar").wait()));
+    assert!(lost(session.ready().wait()));
+    session.set_anti_afk(true);
+    attempting.recv().unwrap();
+    let early = session.ready();
+    go_in.send(()).unwrap();
+    assert!(lost(early.wait()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while session.snapshot().phase != Phase::Ready {
+        assert!(Instant::now() < deadline, "never reconnected");
+        thread::sleep(Duration::from_millis(5));
+    }
+    session.ready().wait().unwrap();
+    wait_until(session, |me| me.away);
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    session.logout();
+    let events = harness.finish();
+    stop_in.send(()).unwrap();
+    let requests = api.join().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].1.contains("user=player1") && requests[0].1.contains("pass=pass1"));
+    let waited = requests[0].0 - dropped.recv().unwrap();
+    assert!(waited >= Duration::from_millis(320) - SLACK, "{waited:?}");
+    assert!(
+        waited <= Duration::from_millis(480) + Duration::from_millis(200),
+        "{waited:?}"
+    );
+    assert!(phases(&events).iter().any(|p| matches!(
+        p,
+        Phase::Reconnecting {
+            reason: Disconnect::ConnectionLost(_),
+            attempt: 1,
+            ..
+        }
+    )));
+    assert_eq!(closed_with(&events), Some(Disconnect::LoggedOut));
+}
+
+#[test]
+fn waits_out_a_kick_and_gives_up_after_the_configured_attempts() {
+    let (replies_in, replies) = mpsc::channel();
+    let (stop_in, stop) = mpsc::channel();
+    let (base, api) = serve_api(replies, stop);
+    let (kicked_in, kicked) = mpsc::channel();
+    let options = reconnect_every(Duration::from_millis(100), 2);
+    let harness = Harness::start_with_api(options, base, move |listener| {
+        let port = listener.local_addr().unwrap().port();
+        let kick = |peer: &mut Peer| {
+            peer.send("%xt%logoutWarning%-1%%1%");
+            peer.send("<msg t='sys'><body action='logout' r='0'></body></msg>");
+            peer.wait_for_close();
+            kicked_in.send(Instant::now()).unwrap();
+        };
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        kick(&mut peer);
+        replies_in.send(login_reply(TOKEN, port)).unwrap();
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        kick(&mut peer);
+        let full = json!({
+            "login": {"bSuccess": 1, "sToken": TOKEN, "iUpg": 0},
+            "servers": [{"sName": "Test", "sIP": "127.0.0.1", "iPort": port, "bOnline": 1,
+                         "iCount": 10, "iMax": 10}],
+        });
+        replies_in.send(full.to_string()).unwrap();
+        replies_in.send(String::new()).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until {
+            assert!(listener.accept().is_err(), "logged in to a full server");
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let events = harness.finish();
+    stop_in.send(()).unwrap();
+    let requests = api.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    let first = kicked.recv().unwrap();
+    let second = kicked.recv().unwrap();
+    assert!(requests[0].0 - first >= Duration::from_secs(1) - SLACK);
+    assert!(requests[1].0 - second >= Duration::from_secs(1) - SLACK);
+    assert!(requests[2].0 - requests[1].0 >= Duration::from_millis(160) - SLACK);
+    assert!(matches!(
+        closed_with(&events),
+        Some(Disconnect::ConnectionLost(_))
+    ));
+}
+
+#[test]
+fn reconnects_only_when_asked_and_only_after_a_retryable_disconnect() {
+    type Case = (bool, fn(TcpListener), Disconnect);
+    let cases: [Case; 4] = [
+        (
+            false,
+            |listener| {
+                let mut peer = Peer::accept(&listener);
+                peer.serve_to_ready("5.31");
+            },
+            Disconnect::ConnectionLost(String::new()),
+        ),
+        (
+            true,
+            |listener| {
+                let mut peer = Peer::accept(&listener);
+                peer.serve_to_ready("5.31");
+                peer.send("%xt%multiLoginWarning%-1%");
+            },
+            Disconnect::LoggedInElsewhere,
+        ),
+        (
+            true,
+            |listener| {
+                let mut peer = Peer::accept(&listener);
+                peer.serve_to_ready("5.31");
+                peer.expect_logout();
+            },
+            Disconnect::LoggedOut,
+        ),
+        (
+            true,
+            |listener| {
+                let mut peer = Peer::accept(&listener);
+                peer.expect(&packet::version_check());
+            },
+            Disconnect::ConnectionLost(String::new()),
+        ),
+    ];
+    for (asked, script, expected) in cases {
+        let (_replies_in, replies) = mpsc::channel();
+        let (stop_in, stop) = mpsc::channel();
+        let (base, api) = serve_api(replies, stop);
+        let options = if asked {
+            reconnect_every(Duration::from_millis(50), 5)
+        } else {
+            Options::default()
+        };
+        let harness = Harness::start_with_api(options, base, script);
+        if harness.session.ready().wait().is_ok() && expected == Disconnect::LoggedOut {
+            harness.session.logout();
+        }
+        let events = harness.finish();
+        thread::sleep(Duration::from_millis(150));
+        stop_in.send(()).unwrap();
+        assert!(api.join().unwrap().is_empty(), "{expected:?}");
+        let closed = closed_with(&events);
+        assert!(
+            matches!(
+                (&closed, &expected),
+                (
+                    Some(Disconnect::ConnectionLost(_)),
+                    Disconnect::ConnectionLost(_)
+                )
+            ) || closed.as_ref() == Some(&expected),
+            "{closed:?} for {expected:?}"
+        );
+    }
 }
