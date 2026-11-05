@@ -51,7 +51,7 @@ impl Stage {
 }
 
 pub(super) enum Answer {
-    Quests,
+    Quests(Vec<QuestId>),
     SlowedDown,
     Accepted(Verdict),
     TurnedIn(Verdict),
@@ -178,7 +178,9 @@ impl Session {
             return;
         };
         let result = match (&mut call.stage, &call.action, answer) {
-            (Stage::Fetching { .. }, _, Answer::Quests) => {
+            (Stage::Fetching { batch, .. }, _, Answer::Quests(ids))
+                if ids.iter().all(|id| batch.contains(id)) =>
+            {
                 call.slowed = 0;
                 call.stage = Stage::Ready { wake: None };
                 return;

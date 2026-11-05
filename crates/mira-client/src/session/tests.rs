@@ -2185,6 +2185,10 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
         ));
         let third = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(30)]));
         assert!(third - second >= Limit::LoadQuests.gap() - SLACK);
+        peer.send(&json_message(
+            json!({"cmd": "getQuests", "quests": {"16": {"QuestID": 16, "sName": "Sixteen"}}}),
+        ));
+        peer.expect_silence(Duration::from_millis(100));
         peer.send(&json_message(json!({"cmd": "getQuests", "quests": {"30": {
             "QuestID": 30, "sName": "Potion Run",
             "turnin": [{"ItemID": 101, "iQty": 2}],

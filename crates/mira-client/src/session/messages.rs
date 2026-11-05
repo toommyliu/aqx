@@ -469,10 +469,12 @@ impl Session {
                 }
             }
             "getQuests" => {
-                for error in quest::learn(&mut self.quests, read::<QuestList>(&json)?) {
+                let list: QuestList = read(&json)?;
+                let ids = list.ids();
+                for error in quest::learn(&mut self.quests, list) {
                     self.emit(Event::Unreadable { error });
                 }
-                self.answer(Answer::Quests);
+                self.answer(Answer::Quests(ids));
             }
             "loadShop" => {
                 let shop = Arc::new(read::<LoadedShop>(&json)?.shopinfo);

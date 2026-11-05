@@ -281,6 +281,16 @@ pub(crate) struct QuestList {
     quests: BTreeMap<String, Value>,
 }
 
+impl QuestList {
+    pub(crate) fn ids(&self) -> Vec<QuestId> {
+        self.quests
+            .keys()
+            .filter_map(|key| key.parse().ok())
+            .map(QuestId)
+            .collect()
+    }
+}
+
 pub(crate) fn learn(quests: &mut Arc<BTreeMap<QuestId, Quest>>, list: QuestList) -> Vec<String> {
     let mut errors = Vec::new();
     for (key, value) in list.quests {
