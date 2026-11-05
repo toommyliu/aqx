@@ -39,10 +39,12 @@ use crate::room::{
 use crate::shop::{Bought, LoadedShop, Shop};
 use crate::world::World;
 use bank::{BankMove, BankStage};
+use equip::EquipStage;
 use quests::{Answer, QuestAction, QuestCall, Verdict};
 use shops::{Trade, TradeStage};
 
 mod bank;
+mod equip;
 mod quests;
 mod shops;
 
@@ -158,10 +160,12 @@ enum Limit {
     LoadShop,
     BuyItem,
     SellItem,
+    EquipItem,
+    UnequipItem,
 }
 
 impl Limit {
-    const COUNT: usize = 7;
+    const COUNT: usize = 9;
 
     fn gap(self) -> Duration {
         Duration::from_millis(match self {
@@ -171,6 +175,7 @@ impl Limit {
             Limit::TurnIn => 1250,
             Limit::LoadShop => 3000,
             Limit::BuyItem | Limit::SellItem => 1000,
+            Limit::EquipItem | Limit::UnequipItem => 1500,
         })
     }
 }
@@ -225,6 +230,10 @@ enum Action {
     LoadShop(ShopId),
     Trade(Trade),
     Bank(Option<BankMove>),
+    Equip {
+        item: ItemId,
+        on: bool,
+    },
 }
 
 enum Op {
@@ -278,6 +287,12 @@ enum Op {
         reply: Reply,
         mv: Option<BankMove>,
         stage: BankStage,
+    },
+    Equip {
+        reply: Reply,
+        item: ItemId,
+        on: bool,
+        stage: EquipStage,
     },
 }
 
@@ -372,6 +387,14 @@ impl Handle {
 
     pub fn load_bank(&self) -> Pending {
         self.act(Action::Bank(None))
+    }
+
+    pub fn equip(&self, item: ItemId) -> Pending {
+        self.act(Action::Equip { item, on: true })
+    }
+
+    pub fn unequip(&self, item: ItemId) -> Pending {
+        self.act(Action::Equip { item, on: false })
     }
 
     pub fn deposit(&self, item: ItemId) -> Pending {
@@ -695,6 +718,18 @@ impl Session {
                 }
                 Err(e) => Err(e),
             },
+            Action::Equip { item, on } => {
+                let stage = EquipStage::Waiting { wake: None };
+                return self.step(
+                    Op::Equip {
+                        reply,
+                        item,
+                        on,
+                        stage,
+                    },
+                    now,
+                );
+            }
             Action::Bank(mv) => {
                 let stage = BankStage::Idle;
                 return self.step(Op::Bank { reply, mv, stage }, now);
@@ -929,6 +964,23 @@ impl Session {
                     None
                 }
             },
+            Op::Equip {
+                reply,
+                item,
+                on,
+                mut stage,
+            } => match self.step_equip(item, on, &mut stage, now) {
+                task::Poll::Pending => Some(Op::Equip {
+                    reply,
+                    item,
+                    on,
+                    stage,
+                }),
+                task::Poll::Ready(result) => {
+                    self.replies.push((reply, result));
+                    None
+                }
+            },
             Op::Bank {
                 reply,
                 mv,
@@ -990,6 +1042,7 @@ impl Session {
                 ..
             }) => Some(*deadline),
             Some(Op::Bank { .. }) => None,
+            Some(Op::Equip { stage, .. }) => stage.deadline(),
             Some(Op::Shop {
                 stage: ShopStage::Waiting { wake },
                 ..
@@ -1562,7 +1615,9 @@ impl Session {
             "equipItem" | "unequipItem" => {
                 let worn: Worn = read(&json)?;
                 if Some(worn.uid) == self.me {
-                    self.inventory.wear(worn.id, json.cmd == "equipItem");
+                    let on = json.cmd == "equipItem";
+                    self.inventory.wear(worn.id, on);
+                    self.on_worn(worn.id, on);
                 }
             }
             "addGoldExp" => {

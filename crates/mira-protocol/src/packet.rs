@@ -163,6 +163,14 @@ pub fn bank_swap_inv(
     )
 }
 
+pub fn equip_item(room: AreaId, item: ItemId) -> String {
+    zm("equipItem", room, &[item])
+}
+
+pub fn unequip_item(room: AreaId, item: ItemId) -> String {
+    zm("unequipItem", room, &[item])
+}
+
 pub fn get_drop(room: AreaId, item: ItemId) -> String {
     zm("getDrop", room, &[item])
 }
@@ -231,6 +239,8 @@ mod tests {
         assert_eq!(accept_quest(room, QuestId(3)), "%xt%zm%acceptQuest%42%3%");
         assert_eq!(get_drop(room, ItemId(1027)), "%xt%zm%getDrop%42%1027%");
         assert_eq!(load_shop(room, ShopId(5)), "%xt%zm%loadShop%42%5%");
+        assert_eq!(equip_item(room, ItemId(9)), "%xt%zm%equipItem%42%9%");
+        assert_eq!(unequip_item(room, ItemId(9)), "%xt%zm%unequipItem%42%9%");
         assert_eq!(
             bank_from_inv(room, ItemId(1), CharItemId(2)),
             "%xt%zm%bankFromInv%42%1%2%"

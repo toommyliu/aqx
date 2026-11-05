@@ -16,7 +16,7 @@ const COMMANDS: &str = "join <map>, cell <cell> [pad], attack <monster>, skill <
      kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
-     swap <#inventory item> <#bank item>, logout";
+     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -37,7 +37,8 @@ enum Command {
     /// (join <map>, cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop,
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
-    /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, logout)
+    /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
+    /// unequip <item>, logout)
     /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
@@ -408,6 +409,16 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                     );
                 }
             }
+        }
+        [verb @ ("equip" | "unequip"), item @ ..] if !item.is_empty() => {
+            let world = session.snapshot();
+            let id = item_id(&item.join(" "), &world.inventory, "inventory")?;
+            let pending = if *verb == "equip" {
+                session.equip(id)
+            } else {
+                session.unequip(id)
+            };
+            pending.wait()?;
         }
         ["deposit", item @ ..] if !item.is_empty() => {
             let world = session.snapshot();

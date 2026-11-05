@@ -870,6 +870,8 @@ fn tracks_inventory_and_temp_items() {
             member: false,
             meta: String::new(),
             house: false,
+            enhancement_id: 0,
+            enhancement_level: 0,
         };
     assert_eq!(
         *world.inventory,
@@ -992,6 +994,8 @@ fn tracks_gold_exp_levels_and_drops() {
             member: false,
             meta: String::new(),
             house: false,
+            enhancement_id: 0,
+            enhancement_level: 0,
         }]
     );
 }
@@ -2299,6 +2303,7 @@ fn loads_shops_once_each_and_refuses_one_known_to_open_elsewhere() {
             token_qty: 0,
             quest_slot: -1,
             quest_value: 0,
+            enhancement_id: 0,
         }
     );
     session.logout();
@@ -2595,5 +2600,101 @@ fn a_bank_load_interrupted_by_logout_reports_the_logout() {
         "{result:?}"
     );
     http.join().unwrap();
+    harness.finish();
+}
+
+#[test]
+fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        let gear = |id: i64, name: &str, slot: &str, extra: Value| {
+            let mut item = json!({"ItemID": id, "CharItemID": 8000 + id, "sName": name,
+                "iQty": 1, "iStk": 1, "sType": "Gear", "sES": slot, "EnhID": 5, "EnhLvl": 1});
+            item.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            item
+        };
+        peer.serve_with_items(
+            "5.31",
+            json!([
+                gear(1, "Old Sword", "Weapon", json!({"bEquip": 1})),
+                gear(2, "New Sword", "Weapon", json!({"EnhLvl": 10})),
+                gear(3, "Helm", "he", json!({"bEquip": 1})),
+                gear(4, "Bare Cape", "ba", json!({"EnhID": 0})),
+                gear(5, "Big Sword", "Weapon", json!({"EnhLvl": 99})),
+                gear(6, "Pet", "pe", json!({"EnhID": 0})),
+                gear(7, "Member Helm", "he", json!({"bUpg": 1})),
+            ]),
+        );
+        let worn = |cmd: &str, id: i64| json_message(json!({"cmd": cmd, "uid": 7, "ItemID": id}));
+        let first = peer.expect_at(&packet::equip_item(AreaId(42), ItemId(2)));
+        peer.send(&worn("equipItem", 2));
+        peer.expect(&packet::unequip_item(AreaId(42), ItemId(3)));
+        peer.send(&worn("unequipItem", 3));
+        let second = peer.expect_at(&packet::equip_item(AreaId(42), ItemId(6)));
+        assert!(second - first >= Limit::EquipItem.gap() - SLACK);
+        peer.send(&worn("equipItem", 6));
+        peer.send(&json_message(json!({"cmd": "addItems", "items": {"8": {
+            "ItemID": 8, "CharItemID": 8008, "sName": "Given Sword", "iQty": 1, "iStk": 1,
+            "sType": "Sword", "sES": "Weapon", "EnhID": 5, "EnhLvl": 1,
+        }}})));
+        peer.expect(&packet::equip_item(AreaId(42), ItemId(8)));
+        peer.send(&worn("equipItem", 8));
+        peer.send(&json_message(json!({"cmd": "dropItem", "items": {"9": {
+            "ItemID": 9, "sName": "Dropped Class", "iQty": 1, "iStk": 1, "sType": "Class",
+            "sES": "ar",
+        }}})));
+        peer.expect(&packet::get_drop(AreaId(42), ItemId(9)));
+        peer.send(&json_message(json!({
+            "cmd": "getDrop", "bSuccess": 1, "ItemID": 9, "CharItemID": 8009, "iQty": 1,
+            "EnhID": 5, "EnhLvl": 1,
+        })));
+        peer.expect(&packet::equip_item(AreaId(42), ItemId(9)));
+        peer.send(&worn("equipItem", 9));
+        peer.send(&json_message(
+            json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}),
+        ));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let unusable = |pending: Pending| matches!(pending.wait(), Err(ActionError::Unusable(_)));
+    assert!(unusable(session.equip(ItemId(5))));
+    assert!(unusable(session.equip(ItemId(4))));
+    assert!(unusable(session.equip(ItemId(7))));
+    assert!(unusable(session.unequip(ItemId(1))));
+    session.equip(ItemId(1)).wait().unwrap();
+    session.equip(ItemId(2)).wait().unwrap();
+    session.unequip(ItemId(3)).wait().unwrap();
+    session.equip(ItemId(6)).wait().unwrap();
+    let world = session.snapshot();
+    let worn: Vec<ItemId> = world
+        .inventory
+        .iter()
+        .filter(|i| i.equipped)
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(worn, [ItemId(2), ItemId(6)]);
+    while !session
+        .snapshot()
+        .inventory
+        .iter()
+        .any(|i| i.id == ItemId(8))
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    session.equip(ItemId(8)).wait().unwrap();
+    while session.snapshot().drops.is_empty() {
+        thread::sleep(Duration::from_millis(5));
+    }
+    session.pick_drop(ItemId(9)).wait().unwrap();
+    session.equip(ItemId(9)).wait().unwrap();
+    wait_until(session, |me| me.state == CombatState::InCombat);
+    assert!(matches!(
+        session.equip(ItemId(3)).wait(),
+        Err(ActionError::InCombat)
+    ));
+    session.logout();
     harness.finish();
 }

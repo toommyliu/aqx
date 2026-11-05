@@ -76,6 +76,8 @@ pub struct ShopItem {
     pub house: bool,
     #[serde(rename(deserialize = "turnin"), default)]
     pub merge: Vec<MergeCost>,
+    #[serde(rename(deserialize = "EnhID"), default, deserialize_with = "flex::int")]
+    pub enhancement_id: i64,
     #[serde(rename(deserialize = "TokID"), default, deserialize_with = "flex::int")]
     pub token: i64,
     #[serde(

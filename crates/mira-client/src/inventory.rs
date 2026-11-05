@@ -47,6 +47,14 @@ pub struct Item {
         deserialize_with = "flex::bool"
     )]
     pub house: bool,
+    #[serde(rename(deserialize = "EnhID"), default, deserialize_with = "flex::int")]
+    pub enhancement_id: i64,
+    #[serde(
+        rename(deserialize = "EnhLvl"),
+        default,
+        deserialize_with = "flex::int"
+    )]
+    pub enhancement_level: u32,
 }
 
 impl Item {
@@ -101,6 +109,8 @@ pub struct DropOffer {
     pub member: bool,
     pub meta: String,
     pub house: bool,
+    pub enhancement_id: i64,
+    pub enhancement_level: u32,
 }
 
 impl DropOffer {
@@ -161,6 +171,8 @@ impl Inventory {
                             member: added.member,
                             meta: added.meta,
                             house: added.house,
+                            enhancement_id: added.enhancement_id,
+                            enhancement_level: added.enhancement_level,
                         });
                         (added.name, qty, Place::Inventory)
                     }
@@ -196,6 +208,8 @@ impl Inventory {
                 member: offered.member,
                 meta: offered.meta,
                 house: offered.house,
+                enhancement_id: offered.enhancement_id,
+                enhancement_level: offered.enhancement_level,
             }),
         }
         Some(event)
@@ -232,6 +246,8 @@ impl Inventory {
                 member: offer.member,
                 meta: offer.meta,
                 house: offer.house,
+                enhancement_id: picked.enhancement_id.unwrap_or(offer.enhancement_id),
+                enhancement_level: picked.enhancement_level.unwrap_or(offer.enhancement_level),
             });
             (offer.name, qty)
         } else {
@@ -294,6 +310,8 @@ impl Inventory {
                     member: listed.member,
                     meta: listed.meta.clone(),
                     house: listed.house,
+                    enhancement_id: listed.enhancement_id,
+                    enhancement_level: 0,
                 });
                 bought.qty
             }
@@ -415,6 +433,10 @@ pub(crate) struct AddedItem {
     meta: String,
     #[serde(rename = "bHouse", default, deserialize_with = "flex::bool")]
     house: bool,
+    #[serde(rename = "EnhID", default, deserialize_with = "flex::int")]
+    enhancement_id: i64,
+    #[serde(rename = "EnhLvl", default, deserialize_with = "flex::int")]
+    enhancement_level: u32,
     #[serde(rename = "bBank", default, deserialize_with = "flex::bool")]
     bank: bool,
     #[serde(rename = "bTemp", default, deserialize_with = "flex::bool")]
@@ -453,6 +475,10 @@ pub(crate) struct Picked {
     qty_now: Option<u32>,
     #[serde(rename = "bBank", default, deserialize_with = "flex::bool")]
     bank: bool,
+    #[serde(rename = "EnhID", default, deserialize_with = "flex::opt_int")]
+    enhancement_id: Option<i64>,
+    #[serde(rename = "EnhLvl", default, deserialize_with = "flex::opt_int")]
+    enhancement_level: Option<u32>,
 }
 
 #[derive(Deserialize)]
