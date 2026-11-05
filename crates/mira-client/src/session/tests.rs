@@ -11,6 +11,7 @@ use serde_json::json;
 use mira_protocol::{AreaId, CharItemId, FactionId, ItemId, MonMapId};
 
 use super::*;
+use crate::Place;
 use crate::quest::{QuestItem, QuestReward, QuestStatus, RewardKind};
 use crate::{
     Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Item, Monster, Skill, SkillTarget,
@@ -1504,6 +1505,121 @@ fn tracks_boosts_class_names_and_other_players() {
     assert_eq!(
         (left(BoostKind::Gold), left(BoostKind::ClassPoints)),
         (0, 0)
+    );
+}
+
+#[test]
+fn reports_kills_deaths_levels_drops_and_item_changes() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.send(&json_message(json!({
+            "cmd": "moveToArea", "areaId": 43, "areaName": "farm-1",
+            "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "Enter"}],
+            "mondef": [{"MonID": 10, "strMonName": "Mosquito"}],
+            "monmap": [{"MonMapID": 1, "MonID": 10, "strFrame": "Enter"}],
+            "monBranch": [{"MonMapID": 1, "MonID": 10, "intHP": 540, "intHPMax": 540, "intState": 1}],
+        })));
+        peer.send("%xt%server%-1%You joined \"farm-1\"!%");
+        let send = |peer: &mut Peer, o: Value| peer.send(&json_message(o));
+        send(
+            &mut peer,
+            json!({"cmd": "addGoldExp", "intGold": 5, "intExp": 10, "typ": "m", "id": 1}),
+        );
+        send(
+            &mut peer,
+            json!({"cmd": "addGoldExp", "intGold": 50, "intExp": 0, "typ": "q"}),
+        );
+        send(
+            &mut peer,
+            json!({"cmd": "dropItem", "items": {
+                "300": {"ItemID": 300, "sName": "Branch", "iQty": 1, "iStk": 50},
+            }}),
+        );
+        send(
+            &mut peer,
+            json!({
+                "cmd": "getDrop", "bSuccess": 1, "ItemID": 300, "CharItemID": 6000,
+                "iQty": 1, "iQtyNow": 1, "bBank": 0,
+            }),
+        );
+        send(
+            &mut peer,
+            json!({"cmd": "addItems", "items": {
+                "200": {"ItemID": 200, "sName": "Wing", "iQty": 2, "bTemp": true},
+            }}),
+        );
+        send(&mut peer, json!({"cmd": "turnIn", "sItems": "200:2"}));
+        send(
+            &mut peer,
+            json!({"cmd": "sellItem", "CharItemID": 5001, "iQty": 5, "intAmount": 5}),
+        );
+        send(
+            &mut peer,
+            json!({"cmd": "uotls", "unm": "player1", "o": {"intHP": 0}}),
+        );
+        send(
+            &mut peer,
+            json!({"cmd": "ct", "p": {"player1": {"intState": 0}}}),
+        );
+        send(
+            &mut peer,
+            json!({"cmd": "ct", "p": {"player1": {"intState": 0}}}),
+        );
+        send(
+            &mut peer,
+            json!({"cmd": "uotls", "unm": "player1", "o": {"intHP": 1000, "intState": 1}}),
+        );
+        send(
+            &mut peer,
+            json!({"cmd": "levelUp", "intLevel": 51, "intExpToLevel": 2500, "xp": 0}),
+        );
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let events: Vec<Event> = harness
+        .finish()
+        .into_iter()
+        .filter(|e| {
+            matches!(
+                e,
+                Event::Killed { .. }
+                    | Event::Died
+                    | Event::Respawned
+                    | Event::LeveledUp { .. }
+                    | Event::DropOffered { .. }
+                    | Event::ItemChanged { .. }
+                    | Event::Unreadable { .. }
+            )
+        })
+        .collect();
+    let changed = |id, name: &str, qty, place| Event::ItemChanged {
+        id: ItemId(id),
+        name: name.into(),
+        qty,
+        place,
+    };
+    assert_eq!(
+        events,
+        [
+            Event::Killed {
+                id: MonMapId(1),
+                name: "Mosquito".into(),
+                gold: 5,
+                exp: 10,
+            },
+            Event::DropOffered {
+                id: ItemId(300),
+                name: "Branch".into(),
+                qty: 1,
+            },
+            changed(300, "Branch", 1, Place::Inventory),
+            changed(200, "Wing", 2, Place::Temp),
+            changed(200, "Wing", 0, Place::Temp),
+            changed(101, "Health Potion", 0, Place::Inventory),
+            Event::Died,
+            Event::Respawned,
+            Event::LeveledUp { level: 51 },
+        ]
     );
 }
 

@@ -5,6 +5,7 @@ use mira_protocol::{CharItemId, EntityId, ItemId, flex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::event::{Event, Place};
 use crate::rank::rank;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,49 +74,70 @@ pub(crate) struct Inventory {
 }
 
 impl Inventory {
-    pub(crate) fn add(&mut self, key: &str, added: AddedItem) {
-        let Some(id) = added.id.or_else(|| key.parse().ok().map(ItemId)) else {
-            return;
-        };
+    pub(crate) fn add(&mut self, key: &str, added: AddedItem) -> Option<Event> {
+        let id = added.id.or_else(|| key.parse().ok().map(ItemId))?;
         if added.bank {
-            return;
+            return None;
         }
-        match added.char_item_id.filter(|_| !added.temp) {
+        let (name, qty, place) = match added.char_item_id.filter(|_| !added.temp) {
             None => match self.temp.iter_mut().find(|i| i.id == id) {
-                Some(held) => held.qty = added.qty_now.unwrap_or(held.qty + added.qty),
-                None => self.temp.push(TempItem {
-                    id,
-                    name: added.name,
-                    qty: added.qty_now.unwrap_or(added.qty),
-                    max_stack: added.max_stack,
-                }),
+                Some(held) => {
+                    held.qty = added.qty_now.unwrap_or(held.qty + added.qty);
+                    (held.name.clone(), held.qty, Place::Temp)
+                }
+                None => {
+                    let qty = added.qty_now.unwrap_or(added.qty);
+                    self.temp.push(TempItem {
+                        id,
+                        name: added.name.clone(),
+                        qty,
+                        max_stack: added.max_stack,
+                    });
+                    (added.name, qty, Place::Temp)
+                }
             },
             Some(char_item_id) => {
                 let items = Arc::make_mut(&mut self.items);
                 match items.iter_mut().find(|i| i.id == id) {
-                    Some(held) => held.qty = added.qty_now.unwrap_or(held.qty + added.qty),
-                    None => items.push(Item {
-                        id,
-                        char_item_id,
-                        name: added.name,
-                        qty: added.qty_now.unwrap_or(added.qty),
-                        max_stack: added.max_stack,
-                        kind: added.kind,
-                        slot: added.slot,
-                        equipped: false,
-                        coins: added.coins,
-                        member: added.member,
-                    }),
+                    Some(held) => {
+                        held.qty = added.qty_now.unwrap_or(held.qty + added.qty);
+                        (held.name.clone(), held.qty, Place::Inventory)
+                    }
+                    None => {
+                        let qty = added.qty_now.unwrap_or(added.qty);
+                        items.push(Item {
+                            id,
+                            char_item_id,
+                            name: added.name.clone(),
+                            qty,
+                            max_stack: added.max_stack,
+                            kind: added.kind,
+                            slot: added.slot,
+                            equipped: false,
+                            coins: added.coins,
+                            member: added.member,
+                        });
+                        (added.name, qty, Place::Inventory)
+                    }
                 }
             }
-        }
+        };
+        Some(Event::ItemChanged {
+            id,
+            name,
+            qty,
+            place,
+        })
     }
 
-    pub(crate) fn offer(&mut self, key: &str, offered: AddedItem) {
-        let Some(id) = offered.id.or_else(|| key.parse().ok().map(ItemId)) else {
-            return;
-        };
+    pub(crate) fn offer(&mut self, key: &str, offered: AddedItem) -> Option<Event> {
+        let id = offered.id.or_else(|| key.parse().ok().map(ItemId))?;
         let qty = offered.qty.max(1);
+        let event = Event::DropOffered {
+            id,
+            name: offered.name.clone(),
+            qty,
+        };
         match self.drops.iter_mut().find(|d| d.id == id) {
             Some(offer) => offer.qty += qty,
             None => self.drops.push(DropOffer {
@@ -129,11 +151,12 @@ impl Inventory {
                 member: offered.member,
             }),
         }
+        Some(event)
     }
 
-    pub(crate) fn pick(&mut self, picked: Picked) {
+    pub(crate) fn pick(&mut self, picked: Picked) -> Option<Event> {
         if !picked.ok {
-            return;
+            return None;
         }
         let offer = self
             .drops
@@ -141,17 +164,19 @@ impl Inventory {
             .position(|d| d.id == picked.id)
             .map(|at| self.drops.remove(at));
         if picked.bank {
-            return;
+            return None;
         }
         let items = Arc::make_mut(&mut self.items);
-        if let Some(held) = items.iter_mut().find(|i| i.id == picked.id) {
+        let (name, qty) = if let Some(held) = items.iter_mut().find(|i| i.id == picked.id) {
             held.qty = picked.qty_now.unwrap_or(held.qty + picked.qty);
+            (held.name.clone(), held.qty)
         } else if let (Some(offer), Some(char_item_id)) = (offer, picked.char_item_id) {
+            let qty = picked.qty_now.unwrap_or(picked.qty);
             items.push(Item {
                 id: offer.id,
                 char_item_id,
-                name: offer.name,
-                qty: picked.qty_now.unwrap_or(picked.qty),
+                name: offer.name.clone(),
+                qty,
                 max_stack: offer.max_stack,
                 kind: offer.kind,
                 slot: offer.slot,
@@ -159,33 +184,49 @@ impl Inventory {
                 coins: offer.coins,
                 member: offer.member,
             });
-        }
+            (offer.name, qty)
+        } else {
+            return None;
+        };
+        Some(Event::ItemChanged {
+            id: picked.id,
+            name,
+            qty,
+            place: Place::Inventory,
+        })
     }
 
-    pub(crate) fn turn_in(&mut self, turned_in: &TurnIn) {
+    pub(crate) fn turn_in(&mut self, turned_in: &TurnIn) -> Vec<Event> {
+        let mut events = Vec::new();
         for (id, qty) in turned_in.items.split(',').filter_map(|pair| {
             let (id, qty) = pair.split_once(':')?;
             Some((ItemId(id.parse().ok()?), qty.parse().ok()?))
         }) {
             if let Some(at) = self.items.iter().position(|i| i.id == id) {
-                take(Arc::make_mut(&mut self.items), at, qty);
+                events.push(take(Arc::make_mut(&mut self.items), at, qty));
             } else if let Some(at) = self.temp.iter().position(|i| i.id == id) {
-                self.temp[at].qty = self.temp[at].qty.saturating_sub(qty);
-                if self.temp[at].qty == 0 {
+                let held = &mut self.temp[at];
+                held.qty = held.qty.saturating_sub(qty);
+                events.push(Event::ItemChanged {
+                    id,
+                    name: held.name.clone(),
+                    qty: held.qty,
+                    place: Place::Temp,
+                });
+                if held.qty == 0 {
                     self.temp.remove(at);
                 }
             }
         }
+        events
     }
 
-    pub(crate) fn sell(&mut self, sold: &Sold) {
-        if let Some(at) = self
+    pub(crate) fn sell(&mut self, sold: &Sold) -> Option<Event> {
+        let at = self
             .items
             .iter()
-            .position(|i| i.char_item_id == sold.char_item_id)
-        {
-            take(Arc::make_mut(&mut self.items), at, sold.qty);
-        }
+            .position(|i| i.char_item_id == sold.char_item_id)?;
+        Some(take(Arc::make_mut(&mut self.items), at, sold.qty))
     }
 
     pub(crate) fn wear(&mut self, id: ItemId, on: bool) {
@@ -210,11 +251,20 @@ impl Inventory {
     }
 }
 
-fn take(items: &mut Vec<Item>, at: usize, qty: u32) {
-    items[at].qty = items[at].qty.saturating_sub(qty);
-    if items[at].qty == 0 || items[at].kind == "Class" {
+fn take(items: &mut Vec<Item>, at: usize, qty: u32) -> Event {
+    let item = &mut items[at];
+    item.qty = item.qty.saturating_sub(qty);
+    let gone = item.qty == 0 || item.kind == "Class";
+    let event = Event::ItemChanged {
+        id: item.id,
+        name: item.name.clone(),
+        qty: if gone { 0 } else { item.qty },
+        place: Place::Inventory,
+    };
+    if gone {
         items.remove(at);
     }
+    event
 }
 
 #[derive(Deserialize)]

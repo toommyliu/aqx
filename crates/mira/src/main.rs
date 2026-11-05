@@ -7,8 +7,8 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use mira_client::{
     ActionError, Auras, BoostKind, CombatState, DeviceId, Direction, Disconnect, Event, Handle,
-    Load, Me, Monster, NoticeKind, Options, Phase, QuestStatus, Room, Server, SkillTarget, World,
-    api,
+    Load, Me, Monster, NoticeKind, Options, Phase, Place, QuestStatus, Room, Server, SkillTarget,
+    World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
@@ -495,6 +495,22 @@ fn describe(event: &Event) -> Option<String> {
                 NoticeKind::Warning => "warning",
             };
             format!("{kind}: {text}")
+        }
+        Event::Killed {
+            name, gold, exp, ..
+        } => format!("killed {name}, +{gold} gold, +{exp} xp"),
+        Event::Died => "died".into(),
+        Event::Respawned => "respawned".into(),
+        Event::LeveledUp { level } => format!("reached level {level}"),
+        Event::DropOffered { name, qty, .. } => format!("drop offered: {name} x{qty}"),
+        Event::ItemChanged {
+            name, qty, place, ..
+        } => {
+            let place = match place {
+                Place::Inventory => "inventory",
+                Place::Temp => "temp",
+            };
+            format!("{name}: {qty} in {place}")
         }
         Event::Unreadable { error } => format!("unreadable message: {error}"),
         Event::Packet { direction, text } => {

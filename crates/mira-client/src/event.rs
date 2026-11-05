@@ -1,3 +1,4 @@
+use mira_protocol::{ItemId, MonMapId};
 use serde::Serialize;
 
 use crate::session::Phase;
@@ -40,6 +41,28 @@ pub enum Event {
         kind: NoticeKind,
         text: String,
     },
+    Killed {
+        id: MonMapId,
+        name: String,
+        gold: u64,
+        exp: u64,
+    },
+    Died,
+    Respawned,
+    LeveledUp {
+        level: u32,
+    },
+    DropOffered {
+        id: ItemId,
+        name: String,
+        qty: u32,
+    },
+    ItemChanged {
+        id: ItemId,
+        name: String,
+        qty: u32,
+        place: Place,
+    },
     Unreadable {
         error: String,
     },
@@ -62,4 +85,11 @@ pub enum NoticeKind {
 pub enum Direction {
     In,
     Out,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Place {
+    Inventory,
+    Temp,
 }

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use mira_protocol::{EntityId, FactionId, flex};
+use mira_protocol::{EntityId, FactionId, MonMapId, flex};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -72,10 +72,11 @@ impl Me {
         Some(self.class_points)
     }
 
-    pub(crate) fn level_up(&mut self, level: &LevelUp) {
+    pub(crate) fn level_up(&mut self, level: &LevelUp) -> u32 {
         self.level = level.level;
         self.exp = level.exp;
         self.exp_to_level = level.exp_to_level;
+        self.level
     }
 
     pub(crate) fn receive(&mut self, amount: u64, coins: bool) {
@@ -283,9 +284,13 @@ struct Actions {
 #[derive(Deserialize)]
 pub(crate) struct Reward {
     #[serde(rename = "intGold", default, deserialize_with = "flex::int")]
-    gold: u64,
+    pub(crate) gold: u64,
     #[serde(rename = "intExp", default, deserialize_with = "flex::int")]
-    exp: u64,
+    pub(crate) exp: u64,
+    #[serde(rename = "typ", default)]
+    pub(crate) source: String,
+    #[serde(default)]
+    pub(crate) id: Option<MonMapId>,
     #[serde(rename = "FactionID", default)]
     pub(crate) faction: Option<FactionId>,
     #[serde(rename = "iRep", default, deserialize_with = "flex::int")]
