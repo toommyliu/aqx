@@ -15,7 +15,7 @@ use mira_client::{
 
 const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster], \
-     kill <monster>, stop, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
+     kill <monster>, stop, cancel, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
      swap <#inventory item> <#bank item>, equip <item>, unequip <item>, use <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, respawn spawn|back|<cell> [pad], antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout";
@@ -36,7 +36,7 @@ enum Command {
         json: bool,
     },
     /// Log in, then print what the account does and run commands read from stdin
-    /// (join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop,
+    /// (join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, stop, cancel,
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
     /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
@@ -250,6 +250,7 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
             in_background("skill", session.use_skill(slot, Some(target)));
         }
         ["stop"] => session.exit_combat().wait()?,
+        ["cancel"] => session.cancel_all(),
         ["load", ids @ ..] if !ids.is_empty() => {
             let ids = ids.iter().map(|id| number(id).map(QuestId));
             session
