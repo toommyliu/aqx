@@ -9,20 +9,15 @@ pub struct Faction {
     pub name: String,
     pub rep: u32,
     pub rank: u32,
+    pub rank_progress: u32,
+    pub rank_progress_max: Option<u32>,
 }
 
 impl Faction {
-    pub fn rep_in_rank(&self) -> u32 {
-        progress(self.rep).0
-    }
-
-    pub fn rep_for_next_rank(&self) -> u32 {
-        progress(self.rep).1
-    }
-
     fn set_rep(&mut self, rep: u32) {
         self.rep = rep;
         self.rank = rank(rep);
+        (self.rank_progress, self.rank_progress_max) = progress(rep);
     }
 }
 
@@ -57,6 +52,8 @@ impl From<FactionData> for Faction {
             name: data.name,
             rep: 0,
             rank: 1,
+            rank_progress: 0,
+            rank_progress_max: None,
         };
         faction.set_rep(data.rep);
         faction

@@ -1189,12 +1189,16 @@ fn tracks_faction_reputation_and_rank() {
                 name: "Good".into(),
                 rep: 3600,
                 rank: 3,
+                rank_progress: 0,
+                rank_progress_max: Some(6400),
             },
             Faction {
                 id: FactionId(23),
                 name: "Evil".into(),
                 rep: 0,
                 rank: 1,
+                rank_progress: 0,
+                rank_progress_max: Some(900),
             },
         ]
     );
