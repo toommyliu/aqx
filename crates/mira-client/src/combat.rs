@@ -86,10 +86,12 @@ struct Auto {
     due: Instant,
 }
 
-pub(crate) enum Gate {
-    Open,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readiness {
+    Ready,
     At(Instant),
-    Held,
+    Casting,
+    Disabled,
     Locked,
     NoMana,
 }
@@ -140,24 +142,27 @@ impl Combat {
         self.last_packet = Some(now);
     }
 
-    pub(crate) fn gate(&self, me: &Me, skill: &Skill, now: Instant) -> Gate {
+    pub(crate) fn gate(&self, me: &Me, skill: &Skill, now: Instant) -> Readiness {
         self.gate_paced(me, skill, now, true)
     }
 
-    pub(crate) fn ready_but_for_gap(&self, me: &Me, skill: &Skill, now: Instant) -> bool {
-        matches!(self.gate_paced(me, skill, now, false), Gate::Open)
+    pub(crate) fn readiness(&self, me: &Me, skill: &Skill, now: Instant) -> Readiness {
+        self.gate_paced(me, skill, now, false)
     }
 
-    fn gate_paced(&self, me: &Me, skill: &Skill, now: Instant, paced: bool) -> Gate {
+    fn gate_paced(&self, me: &Me, skill: &Skill, now: Instant, paced: bool) -> Readiness {
         if !skill.unlocked {
-            return Gate::Locked;
+            return Readiness::Locked;
         }
         if !affordable(me, skill) {
-            return Gate::NoMana;
+            return Readiness::NoMana;
+        }
+        if disabled(me) {
+            return Readiness::Disabled;
         }
         let clock = self.clocks.get(&skill.slot);
-        if disabled(me) || clock.is_some_and(|c| c.sent().is_some()) {
-            return Gate::Held;
+        if clock.is_some_and(|c| c.sent().is_some()) {
+            return Readiness::Casting;
         }
         let own = clock
             .and_then(|c| c.from)
@@ -167,8 +172,8 @@ impl Combat {
             .map(|from| from + scaled(GLOBAL_COOLDOWN_MS, me));
         let gap = self.gap(SKILL_GAP, now).filter(|_| paced);
         match [own, global, gap].into_iter().flatten().max() {
-            Some(at) if at > now => Gate::At(at),
-            _ => Gate::Open,
+            Some(at) if at > now => Readiness::At(at),
+            _ => Readiness::Ready,
         }
     }
 
@@ -480,8 +485,8 @@ mod tests {
     fn gate_at(combat: &Combat, me: &Me, slot: &str, now: Instant) -> Option<Instant> {
         let skill = me.skills.iter().find(|s| s.slot == slot).unwrap();
         match combat.gate(me, skill, now) {
-            Gate::Open => Some(now),
-            Gate::At(at) => Some(at),
+            Readiness::Ready => Some(now),
+            Readiness::At(at) => Some(at),
             _ => None,
         }
     }

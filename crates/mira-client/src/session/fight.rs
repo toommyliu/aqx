@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use mira_protocol::packet::{self, Aim};
@@ -7,7 +8,7 @@ use super::{
     AGGRO_EVERY, ActionError, CELL_PAD, CastStage, CounterHold, EXIT_TIMEOUT, JoinStage, Op,
     Prepared, Reply, Session,
 };
-use crate::combat::{self, AUTO_ATTACK, ActionResult, Gate, ITEM_SLOT, Outcome};
+use crate::combat::{self, AUTO_ATTACK, ActionResult, ITEM_SLOT, Outcome, Readiness};
 use crate::player::{Skill, SkillTarget};
 use crate::room::{CombatState, Monster, SPAWN};
 
@@ -19,6 +20,16 @@ pub(super) struct Fight {
 }
 
 impl Session {
+    pub(super) fn readiness(&self, now: Instant) -> BTreeMap<String, Readiness> {
+        let Some(me) = &self.character else {
+            return BTreeMap::new();
+        };
+        me.skills
+            .iter()
+            .map(|s| (s.slot.clone(), self.combat.readiness(me, s, now)))
+            .collect()
+    }
+
     pub(super) fn step_fight(&mut self, now: Instant) {
         let Some(fight) = self.fight.take() else {
             return;
@@ -271,17 +282,17 @@ impl Session {
             return Ok(Prepared::Wait(Some(until)));
         }
         match self.combat.gate(me, skill, now) {
-            Gate::Locked => Err(ActionError::Unusable(format!(
+            Readiness::Locked => Err(ActionError::Unusable(format!(
                 "{} is locked at this class rank",
                 skill.name
             ))),
-            Gate::NoMana => Err(ActionError::Unusable(format!(
+            Readiness::NoMana => Err(ActionError::Unusable(format!(
                 "not enough mana for {}",
                 skill.name
             ))),
-            Gate::Held => Ok(Prepared::Wait(None)),
-            Gate::At(at) => Ok(Prepared::Wait(Some(at))),
-            Gate::Open => Ok(Prepared::Fire {
+            Readiness::Casting | Readiness::Disabled => Ok(Prepared::Wait(None)),
+            Readiness::At(at) => Ok(Prepared::Wait(Some(at))),
+            Readiness::Ready => Ok(Prepared::Fire {
                 aims: combat::aims(skill, hostile, eid, room),
                 hostile,
             }),
@@ -376,9 +387,12 @@ impl Session {
                 continue;
             }
             match self.combat.gate(me, skills[at], now) {
-                Gate::Open => return (Some((at, skills[at].slot.clone())), None),
-                Gate::At(ready) => wake = wake.into_iter().chain(Some(ready)).min(),
-                Gate::Held | Gate::Locked | Gate::NoMana => {}
+                Readiness::Ready => return (Some((at, skills[at].slot.clone())), None),
+                Readiness::At(ready) => wake = wake.into_iter().chain(Some(ready)).min(),
+                Readiness::Casting
+                | Readiness::Disabled
+                | Readiness::Locked
+                | Readiness::NoMana => {}
             }
         }
         (None, wake)
@@ -400,9 +414,9 @@ impl Session {
         };
         waiting
             .into_iter()
-            .filter(|s| self.combat.ready_but_for_gap(me, s, now))
+            .filter(|s| self.combat.readiness(me, s, now) == Readiness::Ready)
             .filter_map(|s| match self.combat.gate(me, s, now) {
-                Gate::At(at) => Some(at),
+                Readiness::At(at) => Some(at),
                 _ => None,
             })
             .min()
@@ -414,7 +428,12 @@ impl Session {
         };
         self.rotation_skills()
             .filter(|s| s.target == SkillTarget::Hostile)
-            .any(|s| matches!(self.combat.gate(me, s, now), Gate::Open | Gate::At(_)))
+            .any(|s| {
+                matches!(
+                    self.combat.gate(me, s, now),
+                    Readiness::Ready | Readiness::At(_)
+                )
+            })
     }
 
     pub(super) fn tick_combat(&mut self, now: Instant) {

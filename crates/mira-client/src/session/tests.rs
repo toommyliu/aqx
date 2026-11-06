@@ -15,8 +15,8 @@ use mira_protocol::{
 use super::*;
 use crate::quest::{QuestItem, QuestReward, QuestStatus, RewardKind};
 use crate::{
-    Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Item, Monster, Skill, SkillTarget,
-    StatEffect, Stats, TempItem,
+    Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Item, Monster, Readiness, Skill,
+    SkillTarget, StatEffect, Stats, TempItem,
 };
 use crate::{Holder, NoticeKind, Place};
 
@@ -2245,6 +2245,45 @@ fn quest_work_runs_during_a_fight_and_a_join_waits_for_it_to_end() {
     session.join("yulgar");
     queued.send(()).unwrap();
     killing.wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn the_world_shows_when_each_skill_is_ready() {
+    let (cast, sent) = mpsc::channel::<Instant>();
+    let (seen, next) = mpsc::channel::<()>();
+    let (answer, answered) = mpsc::channel::<Instant>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        cast.send(peer.expect_at(&gar(0, "a1", &[ONE, TWO])))
+            .unwrap();
+        next.recv().unwrap();
+        answer.send(Instant::now()).unwrap();
+        peer.answer(0, 1);
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    let ready = |slot: &str| session.snapshot().readiness.get(slot).copied();
+    let striking = session.use_skill("a1", Some(MonMapId(1)));
+    let cast_at = sent.recv().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while ready("a1") != Some(Readiness::Casting) {
+        assert!(Instant::now() < deadline, "Strike never showed as casting");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(ready("a3"), Some(Readiness::NoMana));
+    assert_eq!(ready("a4"), Some(Readiness::Locked));
+    seen.send(()).unwrap();
+    striking.wait().unwrap();
+    let answered_at = answered.recv().unwrap();
+    let Some(Readiness::At(at)) = ready("a1") else {
+        panic!("Strike should be cooling down: {:?}", ready("a1"));
+    };
+    assert!(at > cast_at + Duration::from_millis(1900));
+    assert!(at < answered_at + Duration::from_millis(2100));
     session.logout();
     harness.finish();
 }

@@ -17,6 +17,7 @@ mod world;
 
 pub use api::{Account, ApiError, DeviceId, Server};
 pub use aura::{Aura, Auras, Caster, StatEffect};
+pub use combat::Readiness;
 pub use enhancement::Enhancement;
 pub use event::{Direction, Event, Holder, NoticeKind, Place};
 pub use faction::Faction;
