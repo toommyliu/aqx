@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use mira_protocol::packet::{self, Aim};
-use mira_protocol::{ItemId, MonMapId};
+use mira_protocol::{EntityId, ItemId, MonMapId};
 
 use super::{
     AGGRO_EVERY, ActionError, CELL_PAD, CastStage, CounterHold, EXIT_TIMEOUT, JoinStage, Op,
@@ -213,10 +213,34 @@ impl Session {
         Ok(id)
     }
 
+    fn pick_friend(&self, eid: EntityId) -> Result<EntityId, ActionError> {
+        let Some(room) = &self.room else {
+            return Err(ActionError::NotReady);
+        };
+        if Some(eid) == self.me {
+            return Ok(eid);
+        }
+        let Some(player) = room.players.iter().find(|p| p.eid == eid) else {
+            return Err(ActionError::NoTarget(format!(
+                "no player #{eid} in this map"
+            )));
+        };
+        if player.cell.as_ref() != Some(&room.cell) {
+            return Err(ActionError::NoTarget(format!(
+                "{} isn't in this cell",
+                player.name
+            )));
+        }
+        if player.state == CombatState::Dead {
+            return Err(ActionError::NoTarget(format!("{} is dead", player.name)));
+        }
+        Ok(eid)
+    }
+
     pub(super) fn step_cast(
         &mut self,
         slot: &str,
-        target: Option<MonMapId>,
+        target: Option<Aim>,
         stage: CastStage,
         now: Instant,
     ) -> Result<Option<CastStage>, ActionError> {
@@ -251,10 +275,10 @@ impl Session {
     pub(super) fn prepare(
         &self,
         slot: &str,
-        target: Option<MonMapId>,
+        target: Option<Aim>,
         now: Instant,
     ) -> Result<Prepared, ActionError> {
-        let (Some(me), Some(room), Some(eid)) = (&self.character, &self.room, self.me) else {
+        let (Some(me), Some(room)) = (&self.character, &self.room) else {
             return Err(ActionError::NotReady);
         };
         if me.state == CombatState::Dead {
@@ -274,8 +298,24 @@ impl Session {
         let Some(skill) = me.skills.iter().find(|s| s.slot == slot) else {
             return Err(ActionError::Unusable(format!("no skill in slot {slot}")));
         };
-        let hostile = match skill.target {
-            SkillTarget::Hostile => Some(self.pick_target(target)?),
+        let primary = match (skill.target, target) {
+            (SkillTarget::Hostile, Some(Aim::Player(_))) => {
+                return Err(ActionError::NoTarget(format!(
+                    "{} can't target a player",
+                    skill.name
+                )));
+            }
+            (SkillTarget::Hostile, Some(Aim::Monster(id))) => {
+                Some(Aim::Monster(self.pick_target(Some(id))?))
+            }
+            (SkillTarget::Hostile, None) => Some(Aim::Monster(self.pick_target(None)?)),
+            (SkillTarget::Friendly, Some(Aim::Player(eid))) => {
+                Some(Aim::Player(self.pick_friend(eid)?))
+            }
+            _ => None,
+        };
+        let hostile = match primary {
+            Some(Aim::Monster(id)) => Some(id),
             _ => None,
         };
         if let Some(until) = self.held_by_counter(skill, hostile, now) {
@@ -293,7 +333,7 @@ impl Session {
             Readiness::Casting | Readiness::Disabled => Ok(Prepared::Wait(None)),
             Readiness::At(at) => Ok(Prepared::Wait(Some(at))),
             Readiness::Ready => Ok(Prepared::Fire {
-                aims: combat::aims(skill, hostile, eid, room),
+                aims: combat::aims(skill, primary, me, room),
                 hostile,
             }),
         }
@@ -352,7 +392,8 @@ impl Session {
         }
         let target = self.pick_target(Some(target))?;
         if let (Some((at, slot)), _) = self.rotation(next, now, target)
-            && let Prepared::Fire { aims, hostile } = self.prepare(&slot, Some(target), now)?
+            && let Prepared::Fire { aims, hostile } =
+                self.prepare(&slot, Some(Aim::Monster(target)), now)?
         {
             self.fire(&slot, &aims, hostile, now);
             next = at + 1;
@@ -449,7 +490,7 @@ impl Session {
         let Some(target) = self.combat.auto_target() else {
             return;
         };
-        let (Some(me), Some(room), Some(eid)) = (&self.character, &self.room, self.me) else {
+        let (Some(me), Some(room)) = (&self.character, &self.room) else {
             return;
         };
         let fighting = me.state != CombatState::Dead
@@ -461,7 +502,7 @@ impl Session {
         let Some(skill) = skill.filter(|_| fighting) else {
             return self.combat.disengage();
         };
-        let aims = combat::aims(skill, Some(target), eid, room);
+        let aims = combat::aims(skill, Some(Aim::Monster(target)), me, room);
         if self.combat.auto_went_last()
             && let Some(due) = self.class_skill_due(now)
         {
@@ -489,13 +530,18 @@ impl Session {
                 .filter(|m| m.cell == room.cell)
                 .map(|m| m.id)
                 .collect(),
-            CounterHold::Attacks => combat::aims(skill, target, self.me?, room)
-                .into_iter()
-                .filter_map(|aim| match aim {
-                    Aim::Monster(id) => Some(id),
-                    Aim::Player(_) => None,
-                })
-                .collect(),
+            CounterHold::Attacks => combat::aims(
+                skill,
+                target.map(Aim::Monster),
+                self.character.as_ref()?,
+                room,
+            )
+            .into_iter()
+            .filter_map(|aim| match aim {
+                Aim::Monster(id) => Some(id),
+                Aim::Player(_) => None,
+            })
+            .collect(),
         };
         room.monsters
             .iter()

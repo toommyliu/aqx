@@ -361,7 +361,7 @@ enum Action {
     },
     UseSkill {
         slot: String,
-        target: Option<MonMapId>,
+        target: Option<Aim>,
     },
     Kill {
         target: MonMapId,
@@ -409,7 +409,7 @@ enum Op {
     Cast {
         reply: Reply,
         slot: String,
-        target: Option<MonMapId>,
+        target: Option<Aim>,
         stage: CastStage,
     },
     Leave {
@@ -622,7 +622,7 @@ impl Handle {
         self.act(Action::Attack { target })
     }
 
-    pub fn use_skill(&self, slot: &str, target: Option<MonMapId>) -> Pending {
+    pub fn use_skill(&self, slot: &str, target: Option<Aim>) -> Pending {
         self.act(Action::UseSkill {
             slot: slot.to_owned(),
             target,

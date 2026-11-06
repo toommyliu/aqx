@@ -2160,10 +2160,10 @@ fn a_refused_skill_reports_it_and_keeps_its_old_cooldown() {
         Err(ActionError::NoTarget(why)) if why == "Frogzard #3 is in r2, not this cell"
     ));
     assert!(matches!(
-        session.use_skill("a1", Some(MonMapId(1))).wait(),
+        session.use_skill("a1", Some(ONE)).wait(),
         Err(ActionError::Refused(why)) if why == "the server refused Strike"
     ));
-    session.use_skill("a1", Some(MonMapId(1))).wait().unwrap();
+    session.use_skill("a1", Some(ONE)).wait().unwrap();
     session.logout();
     harness.finish();
 }
@@ -2275,7 +2275,7 @@ fn the_world_shows_when_each_skill_is_ready() {
     wait_for_farm(&harness);
     let session = &harness.session;
     let ready = |slot: &str| session.snapshot().readiness.get(slot).copied();
-    let striking = session.use_skill("a1", Some(MonMapId(1)));
+    let striking = session.use_skill("a1", Some(ONE));
     let cast_at = sent.recv().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     while ready("a1") != Some(Readiness::Casting) {
@@ -3406,6 +3406,45 @@ fn the_item_slot_keeps_its_fill_across_class_changes_and_restarts_its_clock() {
 }
 
 #[test]
+fn aims_friendly_skills_at_the_chosen_player_first() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.send(&json_message(
+            json!({"cmd": "ct", "p": {"player2": {"intHP": 1000, "intHPMax": 1000}}}),
+        ));
+        peer.send(&json_message(json!({"cmd": "sAct", "actions": {"active": [
+            {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "tgt": "h"},
+            {"ref": "a1", "nam": "Heal", "cd": 4000, "mp": 0, "tgt": "f", "tgtMax": 3},
+            {"ref": "a2", "nam": "Strike", "cd": 4000, "mp": 0, "tgt": "h", "tgtMax": 1},
+        ]}})));
+        let (me, player2) = (Aim::Player(EntityId(7)), Aim::Player(EntityId(8)));
+        peer.expect(&gar(0, "a1", &[player2, me]));
+        peer.answer(0, 1);
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    wait_until(session, |me| me.skills.iter().any(|s| s.slot == "a1"));
+    let no_target = |slot, eid| match session
+        .use_skill(slot, Some(Aim::Player(EntityId(eid))))
+        .wait()
+    {
+        Err(ActionError::NoTarget(why)) => why,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(no_target("a2", 8), "Strike can't target a player");
+    assert_eq!(no_target("a1", 9), "player3 isn't in this cell");
+    assert_eq!(no_target("a1", 99), "no player #99 in this map");
+    session
+        .use_skill("a1", Some(Aim::Player(EntityId(8))))
+        .wait()
+        .unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn picks_up_map_items_one_per_second() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
@@ -3738,7 +3777,7 @@ fn attacks_through_counters_unless_asked_to_hold() {
     let session = &harness.session;
     wait_for_farm(&harness);
     wait_for_counter(session, 1);
-    session.use_skill("a1", Some(MonMapId(1))).wait().unwrap();
+    session.use_skill("a1", Some(ONE)).wait().unwrap();
     session.logout();
     harness.finish();
 }
@@ -3765,7 +3804,7 @@ fn holds_a_skill_that_would_hit_a_countering_monster() {
     session.set_counter_hold(CounterHold::Attacks);
     wait_for_farm(&harness);
     wait_for_counter(session, 2);
-    let cast = session.use_skill("a1", Some(MonMapId(1)));
+    let cast = session.use_skill("a1", Some(ONE));
     countering.send(()).unwrap();
     cast.wait().unwrap();
     session.logout();
@@ -3980,7 +4019,7 @@ fn casts_skills_while_repeating_aggro() {
     wait_for_farm(&harness);
     session.set_aggro(Some(Aggro::Cell));
     thread::sleep(Duration::from_millis(100));
-    let cast = session.use_skill("a1", Some(MonMapId(1)));
+    let cast = session.use_skill("a1", Some(ONE));
     asked.send(()).unwrap();
     cast.wait().unwrap();
     thread::sleep(Duration::from_millis(700));

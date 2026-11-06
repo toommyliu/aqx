@@ -401,16 +401,11 @@ pub(crate) fn disabled(me: &Me) -> bool {
     })
 }
 
-pub(crate) fn aims(
-    skill: &Skill,
-    primary: Option<MonMapId>,
-    eid: EntityId,
-    room: &Room,
-) -> Vec<Aim> {
+pub(crate) fn aims(skill: &Skill, primary: Option<Aim>, me: &Me, room: &Room) -> Vec<Aim> {
     let most = usize::try_from(skill.max_targets.max(1)).unwrap_or(usize::MAX);
     match skill.target {
         SkillTarget::Hostile => {
-            let Some(primary) = primary else {
+            let Some(Aim::Monster(primary)) = primary else {
                 return Vec::new();
             };
             let mut others: Vec<_> = room
@@ -426,19 +421,26 @@ pub(crate) fn aims(
                 .collect()
         }
         SkillTarget::Friendly => {
+            let primary = match primary {
+                Some(Aim::Player(eid)) => eid,
+                _ => me.id,
+            };
             let mut others: Vec<_> = room
                 .players
                 .iter()
                 .filter(|p| p.cell.as_ref() == Some(&room.cell) && p.state != CombatState::Dead)
+                .map(|p| (p.eid, p.hp))
+                .chain(iter::once((me.id, me.hp)))
+                .filter(|&(eid, _)| eid != primary)
                 .collect();
-            others.sort_by_key(|p| p.hp);
-            iter::once(eid)
-                .chain(others.into_iter().map(|p| p.eid))
+            others.sort_by_key(|&(_, hp)| hp);
+            iter::once(primary)
+                .chain(others.into_iter().map(|(eid, _)| eid))
                 .take(most)
                 .map(Aim::Player)
                 .collect()
         }
-        SkillTarget::Myself => vec![Aim::Player(eid)],
+        SkillTarget::Myself => vec![Aim::Player(me.id)],
     }
 }
 

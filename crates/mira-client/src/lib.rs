@@ -22,7 +22,8 @@ pub use enhancement::Enhancement;
 pub use event::{Direction, Event, Holder, NoticeKind, Place};
 pub use faction::Faction;
 pub use inventory::{DropOffer, Item, Pool, TempItem};
-pub use mira_protocol::{ItemId, MapItemId, MonMapId, QuestId, ShopId, ShopItemId};
+pub use mira_protocol::packet::Aim;
+pub use mira_protocol::{EntityId, ItemId, MapItemId, MonMapId, QuestId, ShopId, ShopItemId};
 pub use player::{BoostKind, Boosts, Me, Skill, SkillTarget, Stats};
 pub use quest::{
     Quest, QuestItem, QuestPeriod, QuestProgress, QuestReward, QuestStatus, RewardKind,

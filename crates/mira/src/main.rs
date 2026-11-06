@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use mira_client::{
-    ActionError, Aggro, Auras, BoostKind, CombatState, CounterHold, DEFAULT_RECONNECT_ATTEMPTS,
-    DeviceId, Direction, Disconnect, Event, Handle, Item, ItemId, Load, MapItemId, Me, MonMapId,
-    Monster, NoticeKind, Options, Pending, Phase, Place, QuestId, QuestStatus, Readiness,
-    Reconnect, Room, Server, ShopId, ShopItemId, SkillTarget, World, api,
+    ActionError, Aggro, Aim, Auras, BoostKind, CombatState, CounterHold,
+    DEFAULT_RECONNECT_ATTEMPTS, DeviceId, Direction, Disconnect, Event, Handle, Item, ItemId, Load,
+    MapItemId, Me, MonMapId, Monster, NoticeKind, Options, Pending, Phase, Place, QuestId,
+    QuestStatus, Readiness, Reconnect, Room, Server, ShopId, ShopItemId, SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
-const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster], \
+const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster|player], \
      kill <monster>, untarget, stop, cancel, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
@@ -36,7 +36,7 @@ enum Command {
         json: bool,
     },
     /// Log in, then print what the account does and run commands read from stdin
-    /// (join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster], kill <monster>, untarget, stop, cancel,
+    /// (join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster|player], kill <monster>, untarget, stop, cancel,
     /// who, mons [all], me, inv, drops, pick <item>, reps, quests, load <quest>..., accept <quest>,
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
     /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
@@ -245,8 +245,8 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
             in_background("kill", session.kill(target));
         }
         ["skill", slot] => in_background("skill", session.use_skill(slot, None)),
-        ["skill", slot, monster @ ..] => {
-            let target = find_monster(session, &monster.join(" "))?;
+        ["skill", slot, target @ ..] => {
+            let target = find_skill_target(session, slot, &target.join(" "))?;
             in_background("skill", session.use_skill(slot, Some(target)));
         }
         ["untarget"] => session.untarget(),
@@ -572,6 +572,28 @@ fn find_monster(session: &Handle, wanted: &str) -> Result<MonMapId, CommandError
         .min_by_key(|m| m.hp)
         .map(|m| m.id)
         .ok_or_else(|| CommandError::Usage(format!("no live {wanted} in this cell")))
+}
+
+fn find_skill_target(session: &Handle, slot: &str, wanted: &str) -> Result<Aim, CommandError> {
+    let world = session.snapshot();
+    let (Some(me), Some(room)) = (&world.me, &world.room) else {
+        return Err(CommandError::Action(ActionError::NotReady));
+    };
+    let friendly = me
+        .skills
+        .iter()
+        .any(|s| s.slot == slot && matches!(s.target, SkillTarget::Friendly));
+    if !friendly {
+        return find_monster(session, wanted).map(Aim::Monster);
+    }
+    if me.name.eq_ignore_ascii_case(wanted) {
+        return Ok(Aim::Player(me.id));
+    }
+    room.players
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(wanted))
+        .map(|p| Aim::Player(p.eid))
+        .ok_or_else(|| CommandError::Usage(format!("no player {wanted} in this map")))
 }
 
 fn find_monsters(session: &Handle, wanted: &str) -> Result<HashSet<MonMapId>, CommandError> {
