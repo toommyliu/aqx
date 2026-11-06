@@ -11,7 +11,7 @@ use mira_protocol::{AreaId, EntityId, MonMapId, packet};
 use serde_json::{Value, json};
 
 use crate::api::{Account, DeviceId, Server, Token};
-use crate::{Event, Handle, Options, spawn};
+use crate::{DEFAULT_CLIENT_VERSION, Event, Handle, Options, spawn};
 
 pub const TOKEN: &str = "tok-abc123";
 pub const API_OK: &str = "<msg t='sys'><body action='apiOK' r='0'></body></msg>";
@@ -150,8 +150,8 @@ impl Peer {
         while self.stream.read(&mut chunk).unwrap() > 0 {}
     }
 
-    pub fn serve_to_ready(&mut self, version: &str) {
-        self.serve_to_ready_with_token(version, TOKEN);
+    pub fn serve_to_ready(&mut self) {
+        self.serve_to_ready_with_token(DEFAULT_CLIENT_VERSION, TOKEN);
     }
 
     pub fn serve_to_ready_with_token(&mut self, version: &str, token: &str) {
@@ -164,12 +164,12 @@ impl Peer {
         self.serve(version, token, items, json!([]));
     }
 
-    pub fn serve_with_items(&mut self, version: &str, items: Value) {
-        self.serve(version, TOKEN, items, json!([]));
+    pub fn serve_with_items(&mut self, items: Value) {
+        self.serve(DEFAULT_CLIENT_VERSION, TOKEN, items, json!([]));
     }
 
-    pub fn serve_with_inventory(&mut self, version: &str, items: Value, hitems: Value) {
-        self.serve(version, TOKEN, items, hitems);
+    pub fn serve_with_inventory(&mut self, items: Value, hitems: Value) {
+        self.serve(DEFAULT_CLIENT_VERSION, TOKEN, items, hitems);
     }
 
     pub fn answer(&mut self, act: u8, res: u8) {
@@ -180,7 +180,7 @@ impl Peer {
     }
 
     pub fn serve_farm(&mut self) {
-        self.serve_to_ready("5.31");
+        self.serve_to_ready();
         self.send(&json_message(serde_json::from_str(FARM_SKILLS).unwrap()));
         self.send(&json_message(
             json!({"cmd": "stu", "sta": {"$tha": 0.84, "$cmc": 1}}),

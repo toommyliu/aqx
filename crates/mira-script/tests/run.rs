@@ -43,7 +43,7 @@ impl Drop for Dir {
 fn serve(script: impl FnOnce(&mut Peer) + Send + 'static) -> Harness {
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         script(&mut peer);
         peer.expect_logout();
     });
@@ -930,7 +930,7 @@ fn map_moves_follow_players_and_collect_items() {
     let (sent, frames) = mpsc::channel();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::goto("nobody"));
         peer.send("%xt%warning%-1%Player 'nobody' could not be found.%");
         loop {
@@ -996,17 +996,14 @@ fn map_moves_follow_players_and_collect_items() {
 fn inventory_and_drops_follow_the_bag() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_with_items(
-            "5.31",
-            json!([
-                {"ItemID": 100, "CharItemID": 5000, "sName": "Default Sword", "iQty": 1, "iStk": 1,
-                 "sType": "Sword", "sES": "Weapon", "bEquip": 1},
-                {"ItemID": 102, "CharItemID": 5002, "sName": "Battle Axe", "iQty": 1, "iStk": 1,
-                 "sType": "Axe", "sES": "Weapon", "bEquip": 0},
-                {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5,
-                 "iStk": 10, "sType": "Item", "sES": "None", "bEquip": 0},
-            ]),
-        );
+        peer.serve_with_items(json!([
+            {"ItemID": 100, "CharItemID": 5000, "sName": "Default Sword", "iQty": 1, "iStk": 1,
+             "sType": "Sword", "sES": "Weapon", "bEquip": 1},
+            {"ItemID": 102, "CharItemID": 5002, "sName": "Battle Axe", "iQty": 1, "iStk": 1,
+             "sType": "Axe", "sES": "Weapon", "bEquip": 0},
+            {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5,
+             "iStk": 10, "sType": "Item", "sES": "None", "bEquip": 0},
+        ]));
         peer.send(&json_message(json!({"cmd": "dropItem", "items": {
             "300": {"ItemID": 300, "sName": "Mace", "iQty": 1, "iStk": 1,
                     "sType": "Mace", "sES": "Weapon"},

@@ -43,7 +43,7 @@ fn closed_with(events: &[Event]) -> Option<Disconnect> {
 fn logs_in_reports_each_phase_and_logs_out() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::logout());
     });
     harness.session.ready().wait().unwrap();
@@ -60,7 +60,7 @@ fn logs_in_reports_each_phase_and_logs_out() {
         [
             Phase::Connecting {
                 server: "Test".into(),
-                version: "5.31".into()
+                version: DEFAULT_CLIENT_VERSION.into()
             },
             Phase::Handshaking,
             Phase::LoggingIn,
@@ -98,11 +98,11 @@ fn retries_with_the_version_the_server_requires() {
         let mut outdated = Peer::accept(&listener);
         outdated.expect(&packet::version_check());
         outdated.send(API_OK);
-        outdated.expect(&packet::login("player1", "5.31", TOKEN));
+        outdated.expect(&packet::login("player1", DEFAULT_CLIENT_VERSION, TOKEN));
         outdated.send(OUTDATED);
         outdated.wait_for_close();
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.40");
+        peer.serve_to_ready_with_token("5.40", TOKEN);
         peer.expect_logout();
     });
     harness.session.ready().wait().unwrap();
@@ -115,7 +115,7 @@ fn retries_with_the_version_the_server_requires() {
             _ => None,
         })
         .collect();
-    assert_eq!(versions, ["5.31", "5.40"]);
+    assert_eq!(versions, [DEFAULT_CLIENT_VERSION, "5.40"]);
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn a_retry_that_cannot_reconnect_ends_the_login() {
         drop(listener);
         outdated.expect(&packet::version_check());
         outdated.send(API_OK);
-        outdated.expect(&packet::login("player1", "5.31", TOKEN));
+        outdated.expect(&packet::login("player1", DEFAULT_CLIENT_VERSION, TOKEN));
         outdated.send(OUTDATED);
         outdated.wait_for_close();
     });
@@ -226,7 +226,7 @@ fn a_rejected_login_reports_the_servers_reason() {
 fn later_joins_skip_own_data_and_chat_flows_until_logged_in_elsewhere() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
         peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
@@ -253,7 +253,7 @@ fn later_joins_skip_own_data_and_chat_flows_until_logged_in_elsewhere() {
 fn joins_a_map_then_moves_between_its_cells() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::transfer("player1", "yulgar-1"));
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
@@ -305,7 +305,7 @@ fn joins_a_map_then_moves_between_its_cells() {
 fn a_move_sent_during_a_join_runs_after_the_join() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::transfer("player1", "yulgar-1"));
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
@@ -326,7 +326,7 @@ fn a_move_sent_during_a_join_runs_after_the_join() {
 fn the_snapshot_shows_a_joined_room_before_its_event_arrives() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::transfer("player1", "yulgar-1"));
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
@@ -354,7 +354,7 @@ fn the_snapshot_shows_a_joined_room_before_its_event_arrives() {
 fn a_refused_join_reports_the_warning_and_the_next_join_waits_out_the_cooldown_and_backoff() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::transfer("player1", "doomvault-1"));
         let refused_at = Instant::now();
         peer.send("%xt%warning%-1%Cannot join that map.%");
@@ -382,7 +382,7 @@ fn a_refused_join_reports_the_warning_and_the_next_join_waits_out_the_cooldown_a
 fn a_logout_cancels_a_join_waiting_out_the_cooldown() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::transfer("player1", "doomvault-1"));
         peer.send("%xt%warning%-1%Cannot join that map.%");
         peer.expect(&packet::logout());
@@ -405,7 +405,7 @@ fn a_logout_cancels_a_join_waiting_out_the_cooldown() {
 fn a_logout_cancels_a_sent_join_even_if_the_server_confirms_it() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::transfer("player1", "yulgar-1"));
         peer.expect(&packet::logout());
         peer.send(&move_to_area(43, "yulgar-2"));
@@ -428,7 +428,7 @@ fn a_cancelled_sent_join_reports_once_even_if_the_server_confirms_it() {
     let (cancelled, confirm) = mpsc::channel::<()>();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::transfer("player1", "yulgar-1"));
         sent.send(()).unwrap();
         confirm.recv().unwrap();
@@ -459,7 +459,7 @@ fn a_cancelled_sent_join_reports_once_even_if_the_server_confirms_it() {
 fn a_pending_join_reports_the_closed_session_when_the_server_drops() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::transfer("player1", "yulgar-1"));
     });
     let joined = harness.session.join("yulgar-1").wait();
@@ -477,7 +477,7 @@ fn a_pending_join_reports_the_closed_session_when_the_server_drops() {
 fn a_move_after_the_session_ends_reports_why_it_closed() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         thread::sleep(Duration::from_millis(100));
     });
     harness.session.ready().wait().unwrap();
@@ -497,7 +497,7 @@ fn a_move_after_the_session_ends_reports_why_it_closed() {
 fn tracks_players_entering_moving_and_leaving_the_room() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send(
             "<msg t='sys'><body action='uER' r='42'><u i='10' m='0' s='0' p='3'>\
              <n><![CDATA[player4]]></n><vars></vars></u></body></msg>",
@@ -568,7 +568,7 @@ fn tracks_players_entering_moving_and_leaving_the_room() {
 fn tracks_the_rooms_monsters_through_combat_updates() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send(&json_message(json!({
             "cmd": "moveToArea",
             "areaId": 43,
@@ -645,7 +645,7 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
 fn tracks_the_players_vitals_haste_and_skills() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send(&json_message(json!({
             "cmd": "moveToArea",
             "areaId": 43,
@@ -764,7 +764,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
 fn tracks_inventory_and_temp_items() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send(&json_message(json!({"cmd": "addItems", "items": {
             "101": {"CharItemID": 5001, "iQty": 2, "iQtyNow": 7, "bBank": 0},
             "102": {"ItemID": 102, "CharItemID": 5002, "sName": "Iron Axe", "iQty": 1, "iStk": 1,
@@ -844,7 +844,6 @@ fn a_malformed_inventory_item_is_skipped_without_blocking_login() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_with_inventory(
-            "5.31",
             json!([
                 {"ItemID": 100, "sName": "Broken"},
                 {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5},
@@ -881,7 +880,7 @@ fn a_malformed_inventory_item_is_skipped_without_blocking_login() {
 fn tracks_gold_exp_levels_and_drops() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send(&json_message(
             json!({"cmd": "addGoldExp", "intGold": 25, "intExp": 100, "typ": "m", "id": 1}),
         ));
@@ -958,7 +957,7 @@ fn tracks_gold_exp_levels_and_drops() {
 fn tracks_faction_reputation_and_rank() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send(&json_message(json!({
             "cmd": "addGoldExp", "intGold": 0, "intExp": 0, "iRep": 2600, "bonusRep": 100,
             "FactionID": 46, "typ": "q",
@@ -1007,7 +1006,7 @@ fn tracks_faction_reputation_and_rank() {
 fn tracks_quest_progress_and_achievements() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         for (slot, value) in [(3, 35), (250, 1), (151, 40), (152, -1)] {
             peer.send(&json_message(
                 json!({"cmd": "updateQuest", "iIndex": slot, "iValue": value}),
@@ -1072,7 +1071,7 @@ fn tracks_quest_progress_and_achievements() {
 fn quest_status_follows_the_game_clients_checks() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         let quest = |id: i64, name: &str, extra: Value| {
             let mut quest = json!({"QuestID": id, "sName": name});
             quest
@@ -1232,7 +1231,7 @@ fn quest_status_follows_the_game_clients_checks() {
 fn tracks_auras_the_way_the_game_client_stores_them() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         let monster = |id: i64, cell: &str| {
             (
                 json!({"MonMapID": id, "MonID": 10, "strFrame": cell}),
@@ -1453,7 +1452,7 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
 fn tracks_boosts_class_names_and_other_players() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send(&json_message(json!({"cmd": "initUserDatas", "a": [
             {"uid": 8, "data": {"strUsername": "player2", "intLevel": 30, "strClassName": "Healer"}},
         ]})));
@@ -1554,7 +1553,7 @@ fn tracks_boosts_class_names_and_other_players() {
 fn reports_kills_deaths_levels_drops_and_item_changes() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send(&json_message(json!({
             "cmd": "moveToArea", "areaId": 43, "areaName": "farm-1",
             "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "Enter"}],
@@ -1685,7 +1684,7 @@ fn packet_trace_hides_the_token_and_personal_fields() {
     };
     let harness = Harness::start(options, |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect_logout();
     });
     harness.session.ready().wait().unwrap();
@@ -1977,7 +1976,7 @@ fn moves_where_the_respawn_says_and_aggroes_monsters_that_come_back() {
 fn leaving_combat_cancels_fights_queued_behind_another_action() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::transfer("player1", "yulgar-1"));
         thread::sleep(Duration::from_millis(300));
         peer.send(&move_to_area(43, "yulgar-2"));
@@ -2152,7 +2151,7 @@ fn cancelling_answers_at_once_but_holds_the_queue_until_a_sent_request_is_answer
     let first = ids[..14].to_vec();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::get_quests(AreaId(42), &first));
         fetching.send(()).unwrap();
         next.recv_timeout(Duration::from_secs(5))
@@ -2204,7 +2203,7 @@ fn potions(world: &World) -> u32 {
 fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         let ids: Vec<QuestId> = (1..=15).map(QuestId).collect();
         let first = peer.expect_at(&packet::get_quests(AreaId(42), &ids[..14]));
         peer.send(&json_message(json!({"cmd": "getQuests", "quests": {}})));
@@ -2288,7 +2287,7 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
 fn quest_actions_make_the_clients_checks_before_sending() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send(&json_message(json!({"cmd": "getQuests", "quests": {
             "40": {"QuestID": 40, "sName": "Too High", "iLvl": 99},
             "41": {"QuestID": 41, "sName": "Choice",
@@ -2355,7 +2354,7 @@ fn quest_actions_make_the_clients_checks_before_sending() {
 fn picks_up_drops_while_the_bag_has_room() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         let offer = |id: i64, name: &str, kind: &str, extra: Value| {
             let mut item =
                 json!({"ItemID": id, "sName": name, "sType": kind, "iStk": 1, "iQty": 1});
@@ -2485,7 +2484,7 @@ fn shop_reply(id: i64, location: &str) -> String {
 fn loads_shops_once_each_and_refuses_one_known_to_open_elsewhere() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         let first = peer.expect_at(&packet::load_shop(AreaId(42), ShopId(6)));
         peer.send(&shop_reply(6, "faraway"));
         let second = peer.expect_at(&packet::load_shop(AreaId(42), ShopId(5)));
@@ -2543,7 +2542,7 @@ fn loads_shops_once_each_and_refuses_one_known_to_open_elsewhere() {
 fn a_kick_reports_how_long_until_the_account_can_log_in() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send("%xt%logoutWarning%-1%%30%");
         peer.send("<msg t='sys'><body action='logout' r='0'></body></msg>");
         peer.wait_for_close();
@@ -2556,21 +2555,18 @@ fn a_kick_reports_how_long_until_the_account_can_log_in() {
 fn buys_and_sells_within_the_clients_limits() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_with_items(
-            "5.31",
-            json!([
-                {"ItemID": 100, "CharItemID": 5000, "sName": "Default Sword", "iQty": 1,
-                 "iStk": 1, "sType": "Sword", "sES": "Weapon", "bEquip": 1},
-                {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5,
-                 "iStk": 10, "sType": "Item", "sES": "None"},
-                {"ItemID": 102, "CharItemID": 5002, "sName": "Spare Axe", "iQty": 1,
-                 "iStk": 1, "sType": "Axe", "sES": "Weapon"},
-                {"ItemID": 103, "CharItemID": 5003, "sName": "Bound Gem", "iQty": 1,
-                 "iStk": 1, "sType": "Gem", "sES": "None", "sMeta": "NoSell"},
-                {"ItemID": 104, "CharItemID": 5004, "sName": "Placed Banner", "iQty": 1,
-                 "iStk": 1, "sType": "Wall Item", "sES": "hi", "bEquip": 1},
-            ]),
-        );
+        peer.serve_with_items(json!([
+            {"ItemID": 100, "CharItemID": 5000, "sName": "Default Sword", "iQty": 1,
+             "iStk": 1, "sType": "Sword", "sES": "Weapon", "bEquip": 1},
+            {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5,
+             "iStk": 10, "sType": "Item", "sES": "None"},
+            {"ItemID": 102, "CharItemID": 5002, "sName": "Spare Axe", "iQty": 1,
+             "iStk": 1, "sType": "Axe", "sES": "Weapon"},
+            {"ItemID": 103, "CharItemID": 5003, "sName": "Bound Gem", "iQty": 1,
+             "iStk": 1, "sType": "Gem", "sES": "None", "sMeta": "NoSell"},
+            {"ItemID": 104, "CharItemID": 5004, "sName": "Placed Banner", "iQty": 1,
+             "iStk": 1, "sType": "Wall Item", "sES": "hi", "bEquip": 1},
+        ]));
         peer.expect(&packet::load_shop(AreaId(42), ShopId(7)));
         peer.send(&json_message(json!({"cmd": "loadShop", "shopinfo": {
             "ShopID": 7, "sName": "Mixed", "Location": "battleon", "items": [
@@ -2740,7 +2736,7 @@ fn loads_the_bank_once_over_http_with_the_character_id() {
         "sName": "Banked Gem", "iQty": 4, "iStk": 10, "sType": "Item", "bBank": true}]));
     let harness = Harness::start_with_api(Options::default(), base, |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
@@ -2774,7 +2770,7 @@ fn moves_items_between_the_bank_and_inventory_after_the_clients_checks() {
     ]));
     let harness = Harness::start_with_api(Options::default(), base, |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::bank_from_inv(
             AreaId(42),
             ItemId(101),
@@ -2887,7 +2883,7 @@ fn a_bank_load_interrupted_by_logout_reports_the_logout() {
     });
     let harness = Harness::start_with_api(Options::default(), base, move |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::logout());
         logging_out.send(()).unwrap();
         answered.recv().unwrap();
@@ -2919,18 +2915,15 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
                 .extend(extra.as_object().unwrap().clone());
             item
         };
-        peer.serve_with_items(
-            "5.31",
-            json!([
-                gear(1, "Old Sword", "Weapon", json!({"bEquip": 1})),
-                gear(2, "New Sword", "Weapon", json!({"EnhLvl": 10})),
-                gear(3, "Helm", "he", json!({"bEquip": 1})),
-                gear(4, "Bare Cape", "ba", json!({"EnhID": 0})),
-                gear(5, "Big Sword", "Weapon", json!({"EnhLvl": 99})),
-                gear(6, "Pet", "pe", json!({"EnhID": 0})),
-                gear(7, "Member Helm", "he", json!({"bUpg": 1})),
-            ]),
-        );
+        peer.serve_with_items(json!([
+            gear(1, "Old Sword", "Weapon", json!({"bEquip": 1})),
+            gear(2, "New Sword", "Weapon", json!({"EnhLvl": 10})),
+            gear(3, "Helm", "he", json!({"bEquip": 1})),
+            gear(4, "Bare Cape", "ba", json!({"EnhID": 0})),
+            gear(5, "Big Sword", "Weapon", json!({"EnhLvl": 99})),
+            gear(6, "Pet", "pe", json!({"EnhID": 0})),
+            gear(7, "Member Helm", "he", json!({"bUpg": 1})),
+        ]));
         let worn = |cmd: &str, id: i64| json_message(json!({"cmd": cmd, "uid": 7, "ItemID": id}));
         let first = peer.expect_at(&packet::equip_item(AreaId(42), ItemId(2)));
         peer.send(&json_message(
@@ -3020,15 +3013,12 @@ fn names_enhancements_on_gear_with_the_servers_proc_names() {
                 .extend(extra.as_object().unwrap().clone());
             item
         };
-        peer.serve_with_items(
-            "5.31",
-            json!([
-                item(1, "Weapon", json!({"ProcID": 2, "EnhRty": 3})),
-                item(2, "pe", json!({})),
-                item(3, "ba", json!({"EnhPatternID": 11})),
-                item(4, "he", json!({"EnhID": 0})),
-            ]),
-        );
+        peer.serve_with_items(json!([
+            item(1, "Weapon", json!({"ProcID": 2, "EnhRty": 3})),
+            item(2, "pe", json!({})),
+            item(3, "ba", json!({"EnhPatternID": 11})),
+            item(4, "he", json!({"EnhID": 0})),
+        ]));
         peer.send(&json_message(json!({
             "cmd": "sAct", "actions": {"active": []},
             "procs": {"2": {"nam": "Spiral Carve II", "pct": 0.1}},
@@ -3073,15 +3063,12 @@ fn names_enhancements_on_gear_with_the_servers_proc_names() {
 fn fills_the_item_slot_and_uses_it_at_the_clients_pace() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_with_items(
-            "5.31",
-            json!([
-                {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5,
-                 "iStk": 10, "sType": "Item", "sES": "None", "sLink": "potion", "sMeta": "1044"},
-                {"ItemID": 102, "CharItemID": 5002, "sName": "Gem", "iQty": 1, "iStk": 10,
-                 "sType": "Item", "sES": "None", "sLink": "None"},
-            ]),
-        );
+        peer.serve_with_items(json!([
+            {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5,
+             "iStk": 10, "sType": "Item", "sES": "None", "sLink": "potion", "sMeta": "1044"},
+            {"ItemID": 102, "CharItemID": 5002, "sName": "Gem", "iQty": 1, "iStk": 10,
+             "sType": "Item", "sES": "None", "sLink": "None"},
+        ]));
         peer.send(&json_message(json!({"cmd": "sAct", "actions": {"active": [
             {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "tgt": "h"},
             {"ref": "i1", "nam": "Potions", "cd": 60000, "tgt": "f", "mp": 0},
@@ -3136,7 +3123,6 @@ fn the_item_slot_keeps_its_fill_across_class_changes_and_restarts_its_clock() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_with_items(
-            "5.31",
             json!([{"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 1,
                     "iStk": 10, "sType": "Item", "sES": "None", "sLink": "potion",
                     "sMeta": "1044"}]),
@@ -3199,7 +3185,7 @@ fn the_item_slot_keeps_its_fill_across_class_changes_and_restarts_its_clock() {
 fn aims_friendly_skills_at_the_chosen_player_first() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.send(&json_message(
             json!({"cmd": "ct", "p": {"player2": {"intHP": 1000, "intHPMax": 1000}}}),
         ));
@@ -3238,7 +3224,7 @@ fn aims_friendly_skills_at_the_chosen_player_first() {
 fn picks_up_map_items_one_per_second() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         let first = peer.expect_at(&packet::get_map_item(AreaId(42), MapItemId(56)));
         peer.send(&json_message(json!({"cmd": "addItems", "items": {"700": {
             "ItemID": 700, "sName": "Tavern Token", "iQty": 1, "iStk": 7, "bTemp": true,
@@ -3263,7 +3249,7 @@ fn rests_until_full_at_the_clients_pace() {
     let (rested, next) = mpsc::channel::<()>();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         let first = peer.expect_at(&packet::rest_request());
         peer.expect(&packet::emote("rest"));
         peer.send(&json_message(
@@ -3308,7 +3294,7 @@ fn arrival(area: i64, name: &str, kind: &str, frame: &str, pad: &str) -> String 
 fn a_join_without_a_room_uses_the_room_setting() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         let random = peer.recv();
         let room = random
             .strip_prefix("%xt%zm%cmd%1%tfer%player1%yulgar-")
@@ -3342,7 +3328,7 @@ fn a_join_without_a_room_uses_the_room_setting() {
 fn arrives_in_the_cell_a_join_asks_for() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         let locked = packet::transfer_to(AreaId(42), "player1", "tavern-1", "r7", "Left");
         peer.expect(&locked);
         peer.send("%xt%warning%-1%Cannot join that map.%");
@@ -3401,7 +3387,7 @@ fn arrives_in_the_cell_a_join_asks_for() {
 fn a_refused_join_at_never_places_an_arrival_in_the_same_batch() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::transfer_to(
             AreaId(42),
             "player1",
@@ -3428,7 +3414,7 @@ fn a_refused_join_at_never_places_an_arrival_in_the_same_batch() {
 fn goes_to_players_the_way_the_client_does() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::goto("nobody"));
         peer.send("%xt%warning%-1%Player 'nobody' could not be found.%");
         let ignored = peer.expect_at(&packet::goto("player9"));
@@ -3509,7 +3495,7 @@ fn walks_within_a_cell_and_tracks_where_players_stand() {
     let (checked, next) = mpsc::channel::<()>();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         let first = peer.expect_at(&packet::walk(AreaId(42), 667, 453, 8));
         let second = peer.expect_at(&packet::walk(AreaId(42), 120, 300, 8));
         assert!(second - first >= Limit::Walk.gap() - SLACK);
@@ -3981,7 +3967,7 @@ fn reconnects_after_a_lost_connection_when_asked() {
     let harness = Harness::start_with_api(options, base, move |listener| {
         let port = listener.local_addr().unwrap().port();
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         peer.expect(&packet::transfer("player1", "yulgar-1"));
         drop(peer);
         dropped_in.send(Instant::now()).unwrap();
@@ -3989,7 +3975,7 @@ fn reconnects_after_a_lost_connection_when_asked() {
         let mut peer = Peer::accept(&listener);
         attempting_in.send(()).unwrap();
         go.recv().unwrap();
-        peer.serve_to_ready_with_token("5.31", "tok2");
+        peer.serve_to_ready_with_token(DEFAULT_CLIENT_VERSION, "tok2");
         peer.send("%xt%uotls%-1%player1%afk:true%");
         peer.expect(&packet::move_to_cell(AreaId(42), "r2", "Left"));
         peer.expect_logout();
@@ -4057,11 +4043,11 @@ fn waits_out_a_kick_and_gives_up_after_the_configured_attempts() {
             kicked_in.send(Instant::now()).unwrap();
         };
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         kick(&mut peer);
         replies_in.send(login_reply(TOKEN, port)).unwrap();
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         kick(&mut peer);
         let full = json!({
             "login": {"bSuccess": 1, "sToken": TOKEN, "iUpg": 0},
@@ -4100,7 +4086,7 @@ fn reconnects_only_when_asked_and_only_after_a_retryable_disconnect() {
             false,
             |listener| {
                 let mut peer = Peer::accept(&listener);
-                peer.serve_to_ready("5.31");
+                peer.serve_to_ready();
             },
             Disconnect::ConnectionLost(String::new()),
         ),
@@ -4108,7 +4094,7 @@ fn reconnects_only_when_asked_and_only_after_a_retryable_disconnect() {
             true,
             |listener| {
                 let mut peer = Peer::accept(&listener);
-                peer.serve_to_ready("5.31");
+                peer.serve_to_ready();
                 peer.send("%xt%multiLoginWarning%-1%");
             },
             Disconnect::LoggedInElsewhere,
@@ -4117,7 +4103,7 @@ fn reconnects_only_when_asked_and_only_after_a_retryable_disconnect() {
             true,
             |listener| {
                 let mut peer = Peer::accept(&listener);
-                peer.serve_to_ready("5.31");
+                peer.serve_to_ready();
                 peer.expect_logout();
             },
             Disconnect::LoggedOut,
@@ -4167,15 +4153,12 @@ fn uses_server_use_items_and_ends_boosts_like_the_client() {
     let (quiet, done) = mpsc::channel::<()>();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_with_items(
-            "5.31",
-            json!([
-                {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5,
-                 "iStk": 10, "sType": "Item", "sES": "None"},
-                {"ItemID": 900, "CharItemID": 5900, "sName": "XP Boost", "iQty": 1,
-                 "iStk": 1, "sType": "ServerUse", "sES": "None"},
-            ]),
-        );
+        peer.serve_with_items(json!([
+            {"ItemID": 101, "CharItemID": 5001, "sName": "Health Potion", "iQty": 5,
+             "iStk": 10, "sType": "Item", "sES": "None"},
+            {"ItemID": 900, "CharItemID": 5900, "sName": "XP Boost", "iQty": 1,
+             "iStk": 1, "sType": "ServerUse", "sES": "None"},
+        ]));
         peer.expect(&packet::use_item(ItemId(900)));
         let started = Instant::now();
         peer.send(&json_message(
@@ -4220,7 +4203,7 @@ fn delivers_events_to_every_subscriber() {
     let (subscribed, next) = mpsc::channel::<()>();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
-        peer.serve_to_ready("5.31");
+        peer.serve_to_ready();
         next.recv().unwrap();
         peer.send("%xt%server%-1%Hello there.%");
         peer.expect_logout();
