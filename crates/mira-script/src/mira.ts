@@ -350,6 +350,8 @@ type Listener = (event: never) => void | Action<void>;
 type Op = { readonly kind: string; readonly [field: string]: unknown };
 
 interface Native {
+  readonly miraVersion: string;
+  versionCompare(left: string, right: string): -1 | 0 | 1;
   init(
     step: typeof STEP,
     error: typeof MiraError,
@@ -389,6 +391,20 @@ interface Native {
 import * as raw from "mira:native";
 
 const native: Native = raw;
+
+export const MIRA_VERSION: string = native.miraVersion;
+
+/**
+ * Compares semantic versions, ignoring build metadata.
+ *
+ * @returns -1, 0, or 1 when left is older, equal, or newer than right.
+ * @throws {RangeError} If either version is invalid or a major, minor, or patch
+ * number exceeds 18446744073709551615.
+ * @throws {TypeError} If either argument is not a string.
+ */
+export function versionCompare(left: string, right: string): -1 | 0 | 1 {
+  return native.versionCompare(checkText(left, "left version"), checkText(right, "right version"));
+}
 
 let miraError: (message: string) => MiraError;
 

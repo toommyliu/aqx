@@ -402,6 +402,16 @@ interface Settings {
         readonly server?: string;
     };
 }
+export declare const MIRA_VERSION: string;
+/**
+ * Compares semantic versions, ignoring build metadata.
+ *
+ * @returns -1, 0, or 1 when left is older, equal, or newer than right.
+ * @throws {RangeError} If either version is invalid or a major, minor, or patch
+ * number exceeds 18446744073709551615.
+ * @throws {TypeError} If either argument is not a string.
+ */
+export declare function versionCompare(left: string, right: string): -1 | 0 | 1;
 export declare class MiraError extends Error {
     private constructor();
 }

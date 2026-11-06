@@ -20,6 +20,8 @@ use serde_json::{Map, Value};
 
 pub use args::{Arg, ArgKind, Scalar};
 
+pub const MIRA_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 const MEMORY_LIMIT: usize = 32 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

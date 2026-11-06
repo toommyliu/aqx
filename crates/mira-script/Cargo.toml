@@ -1,12 +1,13 @@
 [package]
 name = "mira-script"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
 mira-client.workspace = true
 rquickjs.workspace = true
+semver.workspace = true
 serde_json.workspace = true
 swc_common.workspace = true
 swc_ecma_ast.workspace = true

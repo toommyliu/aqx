@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use mira_client::{Aggro, CounterHold, Handle, ItemId, MonMapId, QuestId, Settings, World};
 use rquickjs::module::{Declarations, Exports, ModuleDef};
-use rquickjs::{Constructor, Ctx, Function, JsLifetime, Object, Result, Symbol, Value};
+use rquickjs::{Constructor, Ctx, Exception, Function, JsLifetime, Object, Result, Symbol, Value};
 
 use crate::engine::Loaded;
 use crate::{AutoRelogin, Level, Output, views};
@@ -137,7 +137,9 @@ fn host<'a, 'js>(ctx: &'a Ctx<'js>) -> rquickjs::runtime::UserDataGuard<'a, Host
 
 pub struct Native;
 
-const NAMES: [&str; 23] = [
+const NAMES: [&str; 25] = [
+    "miraVersion",
+    "versionCompare",
     "setCounterHold",
     "setAggro",
     "setAntiAfk",
@@ -172,6 +174,28 @@ impl ModuleDef for Native {
     }
 
     fn evaluate<'js>(ctx: &Ctx<'js>, exports: &Exports<'js>) -> Result<()> {
+        exports.export("miraVersion", crate::MIRA_VERSION)?;
+        exports.export(
+            "versionCompare",
+            Function::new(
+                ctx.clone(),
+                |ctx: Ctx<'js>, left: String, right: String| -> Result<i32> {
+                    let parse = |text: &str| {
+                        semver::Version::parse(text).map_err(|e| {
+                            Exception::throw_range(
+                                &ctx,
+                                &format!("invalid semantic version {text:?}: {e}"),
+                            )
+                        })
+                    };
+                    Ok(match parse(&left)?.cmp_precedence(&parse(&right)?) {
+                        std::cmp::Ordering::Less => -1,
+                        std::cmp::Ordering::Equal => 0,
+                        std::cmp::Ordering::Greater => 1,
+                    })
+                },
+            )?,
+        )?;
         let log =
             |level| move |ctx: Ctx<'js>, text: String| host(&ctx).emit(Output::Log { level, text });
         exports.export(
@@ -406,12 +430,16 @@ mod tests {
             .body
             .body
             .iter()
-            .filter_map(|member| match member {
-                TsTypeElement::TsMethodSignature(method) => match &*method.key {
+            .filter_map(|member| {
+                let key = match member {
+                    TsTypeElement::TsMethodSignature(method) => &*method.key,
+                    TsTypeElement::TsPropertySignature(property) => &*property.key,
+                    _ => return None,
+                };
+                match key {
                     Expr::Ident(name) => Some(name.sym.to_string()),
                     _ => None,
-                },
-                _ => None,
+                }
             })
             .collect();
         let exported: BTreeSet<String> = NAMES.iter().map(|name| (*name).to_owned()).collect();

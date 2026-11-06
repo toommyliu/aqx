@@ -3,6 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
 publish = false
 
@@ -20,6 +21,7 @@ getrandom = "0.2"
 mio = { version = "1", features = ["net", "os-poll"] }
 quick-xml = "0.38"
 rquickjs = { version = "0.14", features = ["loader"] }
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 swc_common = "27"

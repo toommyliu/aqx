@@ -186,6 +186,82 @@ fn failure(outcome: Result<Outcome, LoadError>) -> String {
 }
 
 #[test]
+fn the_mira_version_is_available_before_login_and_during_a_run() {
+    let (outcome, outputs) = run_script(
+        r#"
+        import { MIRA_VERSION, script } from "mira";
+        script.log(MIRA_VERSION);
+        export default function* () {
+          script.log(MIRA_VERSION);
+        }
+        "#,
+    );
+    assert_eq!(outcome, Ok(Outcome::Finished));
+    assert_eq!(
+        logs(&outputs),
+        [env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_VERSION")]
+    );
+}
+
+#[test]
+fn version_compare_uses_semantic_version_precedence() {
+    let (outcome, _) = run_script(
+        r#"
+        import { MIRA_VERSION, versionCompare } from "mira";
+        const cases: [string, string, -1 | 0 | 1][] = [
+          [MIRA_VERSION, MIRA_VERSION, 0],
+          ["1.2.3", "1.2.3", 0],
+          ["1.2.3", "2.0.0", -1],
+          ["1.10.0", "1.2.0", 1],
+          ["1.2.10", "1.2.9", 1],
+          ["1.0.0-alpha", "1.0.0-alpha.1", -1],
+          ["1.0.0-alpha.1", "1.0.0-alpha.beta", -1],
+          ["1.0.0-alpha.beta", "1.0.0-beta", -1],
+          ["1.0.0-beta.2", "1.0.0-beta.11", -1],
+          ["1.0.0-beta.11", "1.0.0-rc.1", -1],
+          ["1.0.0-rc.1", "1.0.0", -1],
+          ["1.0.0+build.1", "1.0.0+build.2", 0],
+          ["1.0.0-alpha+build.1", "1.0.0-alpha+build.2", 0],
+          ["1.0.0-alpha", "1.0.0-Beta", 1],
+          ["1.0.9007199254740992", "1.0.9007199254740993", -1],
+          ["1.0.0-9007199254740992", "1.0.0-9007199254740993", -1],
+        ];
+        for (const [left, right, expected] of cases) {
+          if (versionCompare(left, right) !== expected || versionCompare(right, left) !== -expected) {
+            throw new Error(`wrong precedence for ${left} and ${right}`);
+          }
+        }
+        export default function* () {}
+        "#,
+    );
+    assert_eq!(outcome, Ok(Outcome::Finished));
+}
+
+#[test]
+fn version_compare_rejects_invalid_versions_and_non_strings() {
+    let (outcome, _) = run_script(
+        r#"
+        import { versionCompare } from "mira";
+        for (const value of ["", "1", "1.2", "v1.2.3", "01.2.3", "1.2.3.4", "1.2.3-01", "1.2.3+", " 1.2.3", "1.2.3\n", 123, null, undefined, {}]) {
+          for (const [left, right] of [[value, "1.2.3"], ["1.2.3", value]]) {
+            let error: unknown;
+            try {
+              versionCompare(left, right);
+            } catch (e) {
+              error = e;
+            }
+            if (typeof value === "string" ? !(error instanceof RangeError) : !(error instanceof TypeError)) {
+              throw new Error(`wrong error for ${JSON.stringify([left, right])}`);
+            }
+          }
+        }
+        export default function* () {}
+        "#,
+    );
+    assert_eq!(outcome, Ok(Outcome::Finished));
+}
+
+#[test]
 fn a_script_logs_with_levels_and_sets_its_status() {
     let (outcome, outputs) = run_script(
         r#"
