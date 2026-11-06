@@ -2250,6 +2250,38 @@ fn quest_work_runs_during_a_fight_and_a_join_waits_for_it_to_end() {
 }
 
 #[test]
+fn untargeting_ends_the_fight_and_the_auto_attack_without_moving() {
+    let (fighting, started) = mpsc::channel::<()>();
+    let (untargeted, next) = mpsc::channel::<()>();
+    let (quiet, checked) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.expect(&gar(0, "a1", &[ONE, TWO]));
+        peer.answer(0, 1);
+        peer.expect(&gar(1, "aa", &[ONE]));
+        peer.answer(1, 1);
+        fighting.send(()).unwrap();
+        next.recv_timeout(Duration::from_secs(5))
+            .expect("the kill to end when untargeted");
+        peer.expect_silence(Duration::from_millis(1500));
+        quiet.send(()).unwrap();
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    let killing = session.kill(MonMapId(1));
+    started.recv().unwrap();
+    session.untarget();
+    assert!(matches!(killing.wait(), Err(ActionError::Cancelled)));
+    assert_eq!(session.snapshot().target, None);
+    untargeted.send(()).unwrap();
+    checked.recv().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn cancelling_a_queued_action_or_the_fight_leaves_the_rest_alone() {
     let (fighting, started) = mpsc::channel::<()>();
     let (cancelled, next) = mpsc::channel::<()>();
