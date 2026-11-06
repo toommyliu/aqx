@@ -43,17 +43,57 @@ impl Peer {
         }
     }
 
+    fn take_frame(&mut self) -> Option<String> {
+        let end = self.buf.iter().position(|&b| b == 0)?;
+        let frame: Vec<u8> = self.buf.drain(..=end).collect();
+        Some(String::from_utf8(frame[..end].to_vec()).unwrap())
+    }
+
     fn recv(&mut self) -> String {
         loop {
-            if let Some(end) = self.buf.iter().position(|&b| b == 0) {
-                let frame: Vec<u8> = self.buf.drain(..=end).collect();
-                return String::from_utf8(frame[..end].to_vec()).unwrap();
+            if let Some(frame) = self.take_frame() {
+                return frame;
             }
             let mut chunk = [0u8; 4096];
             let n = self.stream.read(&mut chunk).unwrap();
             assert!(n > 0, "the client closed the connection");
             self.buf.extend_from_slice(&chunk[..n]);
         }
+    }
+
+    fn recv_for(&mut self, window: Duration) -> Vec<String> {
+        let until = Instant::now() + window;
+        let mut frames = Vec::new();
+        loop {
+            while let Some(frame) = self.take_frame() {
+                frames.push(frame);
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            self.stream.set_read_timeout(Some(left)).unwrap();
+            let mut chunk = [0u8; 4096];
+            match self.stream.read(&mut chunk) {
+                Ok(n) => {
+                    assert!(n > 0, "the client closed the connection");
+                    self.buf.extend_from_slice(&chunk[..n]);
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        self.stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        frames
     }
 
     fn expect(&mut self, packet: &str) {
@@ -2170,6 +2210,41 @@ fn leaving_combat_cancels_fights_queued_behind_another_action() {
     leaving.wait().unwrap();
     assert!(matches!(killing.wait(), Err(ActionError::Interrupted)));
     joined.wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn quest_work_runs_during_a_fight_and_a_join_waits_for_it_to_end() {
+    let (queued, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        let load = packet::get_quests(AreaId(43), &[QuestId(1)]);
+        while peer.recv() != load {}
+        peer.send(&json_message(
+            json!({"cmd": "getQuests", "quests": {"1": {"QuestID": 1, "sName": "One"}}}),
+        ));
+        next.recv().unwrap();
+        let transfer = packet::transfer("player1", "yulgar");
+        assert!(
+            !peer
+                .recv_for(Duration::from_millis(300))
+                .contains(&transfer)
+        );
+        peer.send(&json_message(
+            json!({"cmd": "ct", "m": {"1": {"intHP": 0, "intState": 0}}}),
+        ));
+        while peer.recv() != transfer {}
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    let killing = session.kill(MonMapId(1));
+    session.load_quests(&[QuestId(1)]).wait().unwrap();
+    session.join("yulgar");
+    queued.send(()).unwrap();
+    killing.wait().unwrap();
     session.logout();
     harness.finish();
 }

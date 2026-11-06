@@ -5,13 +5,37 @@ use mira_protocol::{ItemId, MonMapId};
 
 use super::{
     AGGRO_EVERY, ActionError, CELL_PAD, CastStage, CounterHold, EXIT_TIMEOUT, JoinStage, Op,
-    Prepared, Session,
+    Prepared, Reply, Session,
 };
 use crate::combat::{self, AUTO_ATTACK, ActionResult, Gate, ITEM_SLOT, Outcome};
 use crate::player::{Skill, SkillTarget};
 use crate::room::{CombatState, Monster, SPAWN};
 
+pub(super) struct Fight {
+    pub(super) reply: Reply,
+    pub(super) target: MonMapId,
+    pub(super) next: usize,
+    pub(super) wake: Option<Instant>,
+}
+
 impl Session {
+    pub(super) fn step_fight(&mut self, now: Instant) {
+        let Some(fight) = self.fight.take() else {
+            return;
+        };
+        match self.step_kill(fight.target, fight.next, now) {
+            Ok(Some((wake, next))) => {
+                self.fight = Some(Fight {
+                    wake,
+                    next,
+                    ..fight
+                })
+            }
+            Ok(None) => self.replies.push((fight.reply, Ok(()))),
+            Err(e) => self.replies.push((fight.reply, Err(e))),
+        }
+    }
+
     pub(super) fn tick_aggro(&mut self, now: Instant) {
         let Some((_, due)) = &mut self.aggro else {
             return;
@@ -362,13 +386,16 @@ impl Session {
 
     pub(super) fn class_skill_due(&self, now: Instant) -> Option<Instant> {
         let me = self.character.as_ref()?;
-        let waiting: Vec<&Skill> = match &self.current {
-            Some(Op::Kill { .. }) => self.rotation_skills().collect(),
-            Some(Op::Cast {
-                slot,
-                stage: CastStage::Waiting { .. },
-                ..
-            }) => me.skills.iter().filter(|s| s.slot == *slot).collect(),
+        let waiting: Vec<&Skill> = match (&self.fight, &self.current) {
+            (Some(_), _) => self.rotation_skills().collect(),
+            (
+                None,
+                Some(Op::Cast {
+                    slot,
+                    stage: CastStage::Waiting { .. },
+                    ..
+                }),
+            ) => me.skills.iter().filter(|s| s.slot == *slot).collect(),
             _ => Vec::new(),
         };
         waiting

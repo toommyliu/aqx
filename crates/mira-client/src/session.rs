@@ -33,6 +33,7 @@ use crate::shop::Shop;
 use crate::world::World;
 use bank::{BankMove, BankStage};
 use equip::EquipStage;
+use fight::Fight;
 use quests::{QuestAction, QuestCall};
 use reconnect::{Recovery, Step};
 use shops::{Trade, TradeStage};
@@ -370,6 +371,15 @@ enum Action {
     },
 }
 
+impl Action {
+    fn runs_during_fight(&self) -> bool {
+        matches!(
+            self,
+            Action::Ready | Action::Quest(_) | Action::PickDrop(_) | Action::MapItem(_)
+        )
+    }
+}
+
 enum Op {
     Login {
         server: Server,
@@ -386,12 +396,6 @@ enum Op {
         slot: String,
         target: Option<MonMapId>,
         stage: CastStage,
-    },
-    Kill {
-        reply: Reply,
-        target: MonMapId,
-        wake: Option<Instant>,
-        next: usize,
     },
     Leave {
         reply: Reply,
@@ -451,7 +455,6 @@ impl Op {
             Op::Login { .. } => None,
             Op::Join { reply, .. }
             | Op::Cast { reply, .. }
-            | Op::Kill { reply, .. }
             | Op::Leave { reply, .. }
             | Op::Quest { reply, .. }
             | Op::Pick { reply, .. }
@@ -779,6 +782,7 @@ pub fn spawn(
         afk_cleared: None,
         boost_check: None,
         combat: Combat::default(),
+        fight: None,
         closing: None,
         logout_deadline: None,
     };
@@ -848,6 +852,7 @@ struct Session {
     afk_cleared: Option<Instant>,
     boost_check: Option<Instant>,
     combat: Combat,
+    fight: Option<Fight>,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
 }
@@ -941,9 +946,12 @@ impl Session {
                 Request::Set(_, epoch) if self.stale_epoch(epoch) => {}
                 Request::Set(setting, _) => self.apply(setting),
                 Request::Act(Action::ExitCombat, reply, _) => {
-                    if matches!(self.current, Some(Op::Kill { .. } | Op::Cast { .. }))
-                        && let Some(Op::Kill { reply, .. } | Op::Cast { reply, .. }) =
-                            self.current.take()
+                    if let Some(fight) = self.fight.take() {
+                        self.replies
+                            .push((fight.reply, Err(ActionError::Interrupted)));
+                    }
+                    if matches!(self.current, Some(Op::Cast { .. }))
+                        && let Some(Op::Cast { reply, .. }) = self.current.take()
                     {
                         self.replies.push((reply, Err(ActionError::Interrupted)));
                     }
@@ -980,6 +988,7 @@ impl Session {
         if let Some(me) = &self.character {
             self.combat.expire(me, now);
         }
+        self.step_fight(now);
         self.run_ops(now);
         self.tick_combat(now);
         self.tick_aggro(now);
@@ -1037,6 +1046,14 @@ impl Session {
                     }
                 }
                 None => {
+                    let held = self.fight.is_some()
+                        && self
+                            .queue
+                            .front()
+                            .is_some_and(|(action, _)| !action.runs_during_fight());
+                    if held {
+                        return;
+                    }
                     let Some((action, reply)) = self.queue.pop_front() else {
                         return;
                     };
@@ -1153,16 +1170,14 @@ impl Session {
                 );
             }
             Action::Kill { target } => {
-                let (wake, next) = (None, 0);
-                return self.step(
-                    Op::Kill {
-                        reply,
-                        target,
-                        wake,
-                        next,
-                    },
-                    now,
-                );
+                self.fight = Some(Fight {
+                    reply,
+                    target,
+                    next: 0,
+                    wake: None,
+                });
+                self.step_fight(now);
+                return None;
             }
         };
         self.replies.push((reply, result));
@@ -1306,27 +1321,6 @@ impl Session {
                     slot,
                     target,
                     stage,
-                }),
-                Ok(None) => {
-                    self.replies.push((reply, Ok(())));
-                    None
-                }
-                Err(e) => {
-                    self.replies.push((reply, Err(e)));
-                    None
-                }
-            },
-            Op::Kill {
-                reply,
-                target,
-                next,
-                ..
-            } => match self.step_kill(target, next, now) {
-                Ok(Some((wake, next))) => Some(Op::Kill {
-                    reply,
-                    target,
-                    wake,
-                    next,
                 }),
                 Ok(None) => {
                     self.replies.push((reply, Ok(())));
@@ -1533,8 +1527,7 @@ impl Session {
             Some(Op::Cast {
                 stage: CastStage::Waiting { wake },
                 ..
-            })
-            | Some(Op::Kill { wake, .. }) => *wake,
+            }) => *wake,
             Some(Op::Quest { call, .. }) => call.stage.deadline(),
             Some(Op::Trade { stage, .. }) => stage.deadline(),
             Some(Op::Bank {
@@ -1575,6 +1568,7 @@ impl Session {
             .filter_map(Monster::counter_deadline)
             .filter(|until| Instant::now() < *until);
         op.into_iter()
+            .chain(self.fight.as_ref().and_then(|fight| fight.wake))
             .chain(counters)
             .chain(self.logout_deadline)
             .chain(self.recovery.as_ref().and_then(|r| match r.step {
@@ -1842,8 +1836,10 @@ impl Session {
         self.reconnects += 1;
         let at = Instant::now() + wait;
         let dropped = self.current.take().and_then(Op::into_reply);
+        let fighting = self.fight.take().map(|fight| fight.reply);
         for reply in dropped
             .into_iter()
+            .chain(fighting)
             .chain(self.queue.drain(..).map(|(_, r)| r))
         {
             self.replies
