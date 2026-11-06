@@ -17,13 +17,11 @@ use crate::player::{
     BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, SkillList, StatUpdate,
 };
 use crate::quest::{self, AchievementUpdate, QuestList, QuestUpdate};
-use crate::room::{
-    self, MonsterUpdate, MoveToArea, PlayerUpdate, Room, SPAWN, Tick, UserEntry, UserList,
-};
+use crate::room::{self, MonsterUpdate, MoveToArea, PlayerUpdate, Room, Tick, UserEntry, UserList};
 use crate::shop::{Bought, LoadedShop};
 
 use super::{
-    BOOST_CHECK, Disconnect, JoinStage, Load, Op, Phase, Recovery, Respawn, Session, ShopStage,
+    BOOST_CHECK, Disconnect, JoinStage, Load, Op, Phase, Recovery, Session, ShopStage,
     required_version,
 };
 
@@ -142,25 +140,13 @@ impl Session {
                 }
             }
             "resTimed" => {
-                let (cell, pad) = match (xt.field(4), xt.field(5)) {
+                let to = match (xt.field(4), xt.field(5)) {
                     (Some(cell), Some(pad)) if !cell.is_empty() && !pad.is_empty() => {
-                        (cell.to_owned(), pad.to_owned())
+                        Some((cell.to_owned(), pad.to_owned()))
                     }
-                    _ => (SPAWN.0.to_owned(), SPAWN.1.to_owned()),
+                    _ => self.room.as_ref().map(|room| room.spawn_point.clone()),
                 };
-                let _ = self.move_to_cell(&cell, &pad);
-                let died_in = self.died_in.take();
-                let room = self.room.as_ref();
-                let back = match &self.respawn {
-                    Respawn::Spawn => None,
-                    Respawn::WhereDied => died_in
-                        .filter(|(area, ..)| room.is_some_and(|room| room.area == *area))
-                        .map(|(_, cell, pad)| (cell, pad)),
-                    Respawn::At { cell, pad } => Some((cell.clone(), pad.clone())),
-                };
-                if let Some((cell, pad)) =
-                    back.filter(|(cell, _)| room.is_some_and(|room| room.cell != *cell))
-                {
+                if let Some((cell, pad)) = to {
                     let _ = self.move_to_cell(&cell, &pad);
                 }
             }

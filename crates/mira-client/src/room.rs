@@ -20,6 +20,8 @@ pub struct Room {
     pub y: i32,
     pub players: Vec<Player>,
     pub monsters: Vec<Monster>,
+    #[serde(skip)]
+    pub(crate) spawn_point: (String, String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -229,6 +231,7 @@ impl Room {
                 })
                 .collect(),
             monsters: monsters(area.monster_types, area.monster_spots, area.monsters),
+            spawn_point: (SPAWN.0.to_owned(), SPAWN.1.to_owned()),
         };
         let mine = mine.into_iter().next().map(|p| Mine {
             vitals: p.vitals,

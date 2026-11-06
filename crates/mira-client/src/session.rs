@@ -12,8 +12,8 @@ use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Waker};
 use mira_protocol::packet::Aim;
 use mira_protocol::{
-    AreaId, EntityId, Framer, ItemId, MapItemId, Message, MonMapId, QuestId, ShopId, ShopItemId,
-    XmlUser, packet,
+    EntityId, Framer, ItemId, MapItemId, Message, MonMapId, QuestId, ShopId, ShopItemId, XmlUser,
+    packet,
 };
 use serde::de::DeserializeOwned;
 use serde::{Serialize, Serializer};
@@ -322,17 +322,6 @@ impl Aggro {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum Respawn {
-    #[default]
-    Spawn,
-    WhereDied,
-    At {
-        cell: String,
-        pad: String,
-    },
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CounterHold {
     #[default]
@@ -344,7 +333,7 @@ pub enum CounterHold {
 enum Setting {
     CounterHold(CounterHold),
     Aggro(Option<Aggro>),
-    Respawn(Respawn),
+    SpawnPoint(String, String),
     AntiAfk(bool),
 }
 
@@ -728,8 +717,8 @@ impl Handle {
         self.set(Setting::Aggro(aggro));
     }
 
-    pub fn set_respawn(&self, respawn: Respawn) {
-        self.set(Setting::Respawn(respawn));
+    pub fn set_spawn_point(&self, cell: &str, pad: &str) {
+        self.set(Setting::SpawnPoint(cell.to_owned(), pad.to_owned()));
     }
 
     pub fn set_anti_afk(&self, on: bool) {
@@ -876,8 +865,6 @@ pub fn spawn(
         requested_spot: None,
         counter_hold: CounterHold::Off,
         aggro: None,
-        respawn: Respawn::Spawn,
-        died_in: None,
         anti_afk: false,
         afk_cleared: None,
         boost_check: None,
@@ -948,8 +935,6 @@ struct Session {
     requested_spot: Option<Spot>,
     counter_hold: CounterHold,
     aggro: Option<(Aggro, Instant)>,
-    respawn: Respawn,
-    died_in: Option<(AreaId, String, String)>,
     anti_afk: bool,
     afk_cleared: Option<Instant>,
     boost_check: Option<Instant>,
@@ -1062,7 +1047,11 @@ impl Session {
         match setting {
             Setting::CounterHold(hold) => self.counter_hold = hold,
             Setting::Aggro(aggro) => self.aggro = aggro.map(|aggro| (aggro, Instant::now())),
-            Setting::Respawn(respawn) => self.respawn = respawn,
+            Setting::SpawnPoint(cell, pad) => {
+                if let Some(room) = &mut self.room {
+                    room.spawn_point = (cell, pad);
+                }
+            }
             Setting::AntiAfk(on) => self.anti_afk = on,
         }
     }
@@ -2362,10 +2351,6 @@ impl Session {
         match (was, character.state) {
             (CombatState::Dead, CombatState::Dead) => {}
             (_, CombatState::Dead) => {
-                self.died_in = self
-                    .room
-                    .as_ref()
-                    .map(|room| (room.area, room.cell.clone(), room.pad.clone()));
                 self.combat.died(Instant::now());
                 self.emit(Event::Died);
             }

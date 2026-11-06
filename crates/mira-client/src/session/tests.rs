@@ -1955,6 +1955,10 @@ impl Peer {
         self.send(&json_message(
             json!({"cmd": "stu", "sta": {"$tha": 0.84, "$cmc": 1}}),
         ));
+        self.join_farm();
+    }
+
+    fn join_farm(&mut self) {
         self.send(&json_message(json!({
             "cmd": "moveToArea", "areaId": 43, "areaName": "farm-1",
             "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "Enter",
@@ -4003,9 +4007,8 @@ fn aggroes_only_the_chosen_monsters_in_the_cell() {
 }
 
 #[test]
-fn respawns_back_in_the_cell_where_it_died_when_asked() {
-    let (step, next) = mpsc::channel::<()>();
-    let (done, wait) = mpsc::channel::<()>();
+fn respawns_at_the_spawn_point_until_the_next_map_join() {
+    let (set, was_set) = mpsc::channel::<()>();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_farm();
@@ -4016,42 +4019,21 @@ fn respawns_back_in_the_cell_where_it_died_when_asked() {
                 ));
             }
             peer.send("%xt%resTimed%-1%");
-            peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
-            peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
         };
-        let away = packet::move_to_cell(AreaId(43), "r2", "Left");
-        peer.expect(&away);
-        die_and_respawn(&mut peer);
-        peer.expect(&away);
-        for _ in 0..2 {
-            step.send(()).unwrap();
-            wait.recv().unwrap();
-            die_and_respawn(&mut peer);
-            peer.expect_silence(Duration::from_millis(500));
-        }
-        step.send(()).unwrap();
-        wait.recv().unwrap();
+        was_set.recv().unwrap();
         die_and_respawn(&mut peer);
         peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Right"));
-        step.send(()).unwrap();
-        peer.expect_logout();
+        peer.join_farm();
+        die_and_respawn(&mut peer);
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
+        peer.send("%xt%multiLoginWarning%-1%");
     });
     let session = &harness.session;
     wait_for_farm(&harness);
-    session.set_respawn(Respawn::WhereDied);
-    session.move_to_cell("r2", "Left").wait().unwrap();
-    let at = Respawn::At {
-        cell: "r2".into(),
-        pad: "Right".into(),
-    };
-    for respawn in [Respawn::Spawn, Respawn::WhereDied, at] {
-        next.recv().unwrap();
-        session.set_respawn(respawn);
-        session.ready().wait().unwrap();
-        done.send(()).unwrap();
-    }
-    next.recv().unwrap();
-    session.logout();
+    session.set_spawn_point("r2", "Right");
+    session.ready().wait().unwrap();
+    set.send(()).unwrap();
     harness.finish();
 }
 

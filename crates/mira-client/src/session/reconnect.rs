@@ -3,7 +3,7 @@ use std::thread;
 
 use std::time::Instant;
 
-use super::{CounterHold, Disconnect, Respawn, Session};
+use super::{CounterHold, Disconnect, Session};
 use crate::api::{self, ApiError};
 
 pub(super) struct Recovery {
@@ -21,8 +21,6 @@ impl Session {
     pub(super) fn forget_session(&mut self) {
         self.counter_hold = CounterHold::Off;
         self.aggro = None;
-        self.respawn = Respawn::Spawn;
-        self.died_in = None;
         self.anti_afk = false;
         self.afk_cleared = None;
         self.requested_spot = None;

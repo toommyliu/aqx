@@ -10,7 +10,7 @@ use mira_client::{
     ActionError, Aggro, Auras, BoostKind, CombatState, CounterHold, DEFAULT_RECONNECT_ATTEMPTS,
     DeviceId, Direction, Disconnect, Event, Handle, Item, ItemId, Load, MapItemId, Me, MonMapId,
     Monster, NoticeKind, Options, Pending, Phase, Place, QuestId, QuestStatus, Readiness,
-    Reconnect, Respawn, Room, Server, ShopId, ShopItemId, SkillTarget, World, api,
+    Reconnect, Room, Server, ShopId, ShopItemId, SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
@@ -18,7 +18,7 @@ const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <mons
      kill <monster>, untarget, stop, cancel, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
-     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, use <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, respawn spawn|back|<cell> [pad], antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout";
+     swap <#inventory item> <#bank item>, equip <item>, unequip <item>, use <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, spawnpoint <cell> [pad], antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout";
 
 #[derive(Parser)]
 #[command(name = "mira", version, about = "A headless AQW client")]
@@ -41,7 +41,7 @@ enum Command {
     /// complete <quest> [times] [reward], shop <id>, buy <#listing> [qty], sell <item> [qty], bank,
     /// deposit <item>, withdraw <item>, swap <#inventory item> <#bank item>, equip <item>,
     /// unequip <item>, use <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>,
-    /// respawn spawn|back|<cell> [pad], antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout)
+    /// spawnpoint <cell> [pad], antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout)
     /// until it logs out. A monster or a dropped item is
     /// its #id or its name. Quests and rewards are ids.
     Login {
@@ -484,16 +484,8 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
         ["rest"] => session.rest().wait()?,
         ["antiafk", "on"] => session.set_anti_afk(true),
         ["antiafk", "off"] => session.set_anti_afk(false),
-        ["respawn", "spawn"] => session.set_respawn(Respawn::Spawn),
-        ["respawn", "back"] => session.set_respawn(Respawn::WhereDied),
-        ["respawn", cell] => session.set_respawn(Respawn::At {
-            cell: (*cell).to_owned(),
-            pad: DEFAULT_PAD.to_owned(),
-        }),
-        ["respawn", cell, pad] => session.set_respawn(Respawn::At {
-            cell: (*cell).to_owned(),
-            pad: (*pad).to_owned(),
-        }),
+        ["spawnpoint", cell] => session.set_spawn_point(cell, DEFAULT_PAD),
+        ["spawnpoint", cell, pad] => session.set_spawn_point(cell, pad),
         ["aggro", "on"] => session.set_aggro(Some(Aggro::Cell)),
         ["aggro", "off"] => session.set_aggro(None),
         ["aggro", monsters @ ..] if !monsters.is_empty() => {
