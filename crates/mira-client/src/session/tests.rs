@@ -525,7 +525,7 @@ fn joins_a_map_then_moves_between_its_cells() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
-        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::transfer("player1", "yulgar-1"));
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
         peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
@@ -537,7 +537,7 @@ fn joins_a_map_then_moves_between_its_cells() {
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
-    session.join("yulgar").wait().unwrap();
+    session.join("yulgar-1").wait().unwrap();
     assert_eq!(session.snapshot().room.as_ref().unwrap().name, "yulgar-2");
     session.join("yulgar").wait().unwrap();
     session.move_to_cell("r2", "Left").wait().unwrap();
@@ -561,7 +561,7 @@ fn a_move_sent_during_a_join_runs_after_the_join() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
-        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::transfer("player1", "yulgar-1"));
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
         peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
@@ -569,7 +569,7 @@ fn a_move_sent_during_a_join_runs_after_the_join() {
         peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
         peer.expect_logout();
     });
-    let joined = harness.session.join("yulgar");
+    let joined = harness.session.join("yulgar-1");
     let moved = harness.session.move_to_cell("r2", "Left");
     joined.wait().unwrap();
     moved.wait().unwrap();
@@ -582,12 +582,12 @@ fn the_snapshot_shows_a_joined_room_before_its_event_arrives() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
-        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::transfer("player1", "yulgar-1"));
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
         peer.expect_logout();
     });
-    let joined = harness.session.join("yulgar");
+    let joined = harness.session.join("yulgar-1");
     let room_at_event = harness.events.iter().find_map(|event| match event {
         Event::Joined { map, .. } if map == "yulgar-2" => Some(
             harness
@@ -610,21 +610,21 @@ fn a_refused_join_reports_the_warning_and_the_next_join_waits_out_the_cooldown_a
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
-        peer.expect(&packet::transfer("player1", "doomvault"));
+        peer.expect(&packet::transfer("player1", "doomvault-1"));
         let refused_at = Instant::now();
         peer.send("%xt%warning%-1%Cannot join that map.%");
         thread::sleep(Duration::from_millis(300));
         peer.send("%xt%warning%-1%Please slow down.%");
-        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::transfer("player1", "yulgar-1"));
         let gap = Limit::Transfer.gap() + combat::BACKOFF_STEP;
         assert!(refused_at.elapsed() >= gap - Duration::from_millis(100));
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
         peer.expect_logout();
     });
-    let refused = harness.session.join("doomvault").wait().unwrap_err();
+    let refused = harness.session.join("doomvault-1").wait().unwrap_err();
     assert!(matches!(refused, ActionError::Refused(why) if why == "Cannot join that map."));
-    harness.session.join("yulgar").wait().unwrap();
+    harness.session.join("yulgar-1").wait().unwrap();
     assert_eq!(
         harness.session.snapshot().room.as_ref().unwrap().name,
         "yulgar-2"
@@ -638,12 +638,12 @@ fn a_logout_cancels_a_join_waiting_out_the_cooldown() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
-        peer.expect(&packet::transfer("player1", "doomvault"));
+        peer.expect(&packet::transfer("player1", "doomvault-1"));
         peer.send("%xt%warning%-1%Cannot join that map.%");
         peer.expect(&packet::logout());
     });
-    harness.session.join("doomvault").wait().unwrap_err();
-    let cooling = harness.session.join("yulgar");
+    harness.session.join("doomvault-1").wait().unwrap_err();
+    let cooling = harness.session.join("yulgar-1");
     thread::sleep(Duration::from_millis(100));
     harness.session.logout();
     let started = Instant::now();
@@ -661,12 +661,12 @@ fn a_logout_cancels_a_sent_join_even_if_the_server_confirms_it() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
-        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::transfer("player1", "yulgar-1"));
         peer.expect(&packet::logout());
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
     });
-    let sent = harness.session.join("yulgar");
+    let sent = harness.session.join("yulgar-1");
     thread::sleep(Duration::from_millis(100));
     harness.session.logout();
     let joined = sent.wait();
@@ -682,9 +682,9 @@ fn a_pending_join_reports_the_closed_session_when_the_server_drops() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
-        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::transfer("player1", "yulgar-1"));
     });
-    let joined = harness.session.join("yulgar").wait();
+    let joined = harness.session.join("yulgar-1").wait();
     assert!(
         matches!(
             joined,
@@ -2202,7 +2202,7 @@ fn leaving_combat_cancels_fights_queued_behind_another_action() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
-        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::transfer("player1", "yulgar-1"));
         thread::sleep(Duration::from_millis(300));
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
@@ -2212,7 +2212,7 @@ fn leaving_combat_cancels_fights_queued_behind_another_action() {
     });
     let session = &harness.session;
     session.ready().wait().unwrap();
-    let joined = session.join("yulgar");
+    let joined = session.join("yulgar-1");
     let killing = session.kill(MonMapId(1));
     let leaving = session.exit_combat();
     leaving.wait().unwrap();
@@ -2234,7 +2234,7 @@ fn quest_work_runs_during_a_fight_and_a_join_waits_for_it_to_end() {
             json!({"cmd": "getQuests", "quests": {"1": {"QuestID": 1, "sName": "One"}}}),
         ));
         next.recv().unwrap();
-        let transfer = packet::transfer("player1", "yulgar");
+        let transfer = packet::transfer("player1", "yulgar-1");
         assert!(
             !peer
                 .recv_for(Duration::from_millis(300))
@@ -2250,7 +2250,7 @@ fn quest_work_runs_during_a_fight_and_a_join_waits_for_it_to_end() {
     let session = &harness.session;
     let killing = session.kill(MonMapId(1));
     session.load_quests(&[QuestId(1)]).wait().unwrap();
-    session.join("yulgar");
+    session.join("yulgar-1");
     queued.send(()).unwrap();
     killing.wait().unwrap();
     session.logout();
@@ -2339,8 +2339,8 @@ fn cancelling_a_queued_action_or_the_fight_leaves_the_rest_alone() {
         peer.expect(&gar(0, "a1", &[ONE, TWO]));
         fighting.send(()).unwrap();
         next.recv().unwrap();
-        let skipped = packet::transfer("player1", "yulgar");
-        let wanted = packet::transfer("player1", "battleon");
+        let skipped = packet::transfer("player1", "yulgar-1");
+        let wanted = packet::transfer("player1", "battleon-1");
         loop {
             let sent = peer.recv();
             assert_ne!(sent, skipped);
@@ -2356,8 +2356,8 @@ fn cancelling_a_queued_action_or_the_fight_leaves_the_rest_alone() {
     let session = &harness.session;
     let killing = session.kill(MonMapId(1));
     started.recv().unwrap();
-    let skipped = session.join("yulgar");
-    session.join("battleon");
+    let skipped = session.join("yulgar-1");
+    session.join("battleon-1");
     session.cancel(skipped.id());
     assert!(matches!(skipped.wait(), Err(ActionError::Cancelled)));
     session.cancel(killing.id());
@@ -2659,12 +2659,12 @@ fn a_join_refuses_in_combat_and_when_dead_without_sending() {
         peer.send(&json_message(
             json!({"cmd": "uotls", "unm": "player1", "o": {"intHP": 1000, "intState": 1}}),
         ));
-        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::transfer("player1", "yulgar-1"));
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
     wait_until(session, |me| me.state == CombatState::InCombat);
-    let in_combat = session.join("yulgar").wait();
+    let in_combat = session.join("yulgar-1").wait();
     assert!(
         matches!(in_combat, Err(ActionError::InCombat)),
         "{in_combat:?}"
@@ -2672,12 +2672,12 @@ fn a_join_refuses_in_combat_and_when_dead_without_sending() {
     step.send(()).unwrap();
     wait_until(session, |me| me.state == CombatState::Dead);
     assert!(matches!(
-        session.join("yulgar").wait(),
+        session.join("yulgar-1").wait(),
         Err(ActionError::Dead)
     ));
     step.send(()).unwrap();
     wait_until(session, |me| me.state == CombatState::Idle);
-    let _joining = session.join("yulgar");
+    let _joining = session.join("yulgar-1");
     thread::sleep(Duration::from_millis(100));
     session.logout();
     harness.finish();
@@ -3515,11 +3515,44 @@ fn arrival(area: i64, name: &str, kind: &str, frame: &str, pad: &str) -> String 
 }
 
 #[test]
+fn a_join_without_a_room_uses_the_room_setting() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        let random = peer.recv();
+        let room = random
+            .strip_prefix("%xt%zm%cmd%1%tfer%player1%yulgar-")
+            .and_then(|rest| rest.strip_suffix('%'))
+            .and_then(|room| room.parse::<u32>().ok());
+        assert!(
+            room.is_some_and(|room| (1000..=99999).contains(&room)),
+            "{random}"
+        );
+        peer.send(&arrival(43, "yulgar-5000", "0", "Enter", "Spawn"));
+        peer.send("%xt%server%-1%You joined \"yulgar-5000\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::transfer("player1", "farm-1"));
+        peer.send(&arrival(44, "farm-1", "0", "Enter", "Spawn"));
+        peer.send("%xt%server%-1%You joined \"farm-1\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(44), "Enter", "Spawn"));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    session.join("yulgar").wait().unwrap();
+    session.join("Yulgar").wait().unwrap();
+    session.set_room(Some(1));
+    session.join("farm").wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn arrives_in_the_cell_a_join_asks_for() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
-        let locked = packet::transfer_to(AreaId(42), "player1", "tavern", "r7", "Left");
+        let locked = packet::transfer_to(AreaId(42), "player1", "tavern-1", "r7", "Left");
         peer.expect(&locked);
         peer.send("%xt%warning%-1%Cannot join that map.%");
         thread::sleep(Duration::from_millis(100));
@@ -3529,7 +3562,7 @@ fn arrives_in_the_cell_a_join_asks_for() {
         peer.expect(&packet::transfer_to(
             AreaId(46),
             "player1",
-            "xantown",
+            "xantown-1",
             "r7",
             "Left",
         ));
@@ -3546,7 +3579,7 @@ fn arrives_in_the_cell_a_join_asks_for() {
         peer.send(&arrival(44, "farm-98367", "0", "Enter", "Spawn"));
         peer.send("%xt%server%-1%You joined \"farm-98367\"!%");
         peer.expect(&packet::move_to_cell(AreaId(44), "Crop1", "Left"));
-        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::transfer("player1", "yulgar-1"));
         peer.send(&arrival(45, "yulgar-1", "2", "r3", "Right"));
         peer.send("%xt%server%-1%You joined \"yulgar-1\"!%");
         peer.expect(&packet::move_to_cell(AreaId(45), "r3", "Right"));
@@ -3554,19 +3587,19 @@ fn arrives_in_the_cell_a_join_asks_for() {
     });
     let session = &harness.session;
     session.ready().wait().unwrap();
-    let locked = session.join_at("tavern", "r7", "Left").wait();
+    let locked = session.join_at("tavern-1", "r7", "Left").wait();
     assert!(matches!(locked, Err(ActionError::Refused(_))), "{locked:?}");
     harness
         .events
         .iter()
         .find(|e| matches!(e, Event::Joined { map, .. } if map == "tavern-1"))
         .unwrap();
-    session.join_at("xantown", "r7", "Left").wait().unwrap();
+    session.join_at("xantown-1", "r7", "Left").wait().unwrap();
     session
         .join_at("farm-100000", "Crop1", "Left")
         .wait()
         .unwrap();
-    session.join("yulgar").wait().unwrap();
+    session.join("yulgar-1").wait().unwrap();
     let room = session.snapshot().room.clone().unwrap();
     assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r3", "Right"));
     session.logout();
@@ -3581,7 +3614,7 @@ fn a_refused_join_at_never_places_an_arrival_in_the_same_batch() {
         peer.expect(&packet::transfer_to(
             AreaId(42),
             "player1",
-            "tavern",
+            "tavern-1",
             "r7",
             "Left",
         ));
@@ -3595,7 +3628,7 @@ fn a_refused_join_at_never_places_an_arrival_in_the_same_batch() {
     });
     let session = &harness.session;
     session.ready().wait().unwrap();
-    let _ = session.join_at("tavern", "r7", "Left").wait();
+    let _ = session.join_at("tavern-1", "r7", "Left").wait();
     session.logout();
     harness.finish();
 }
@@ -3969,7 +4002,7 @@ fn stops_repeating_aggro_when_turned_off_or_joining() {
         step.send(()).unwrap();
         peer.expect_silence(Duration::from_millis(800));
         step.send(()).unwrap();
-        while peer.recv() != packet::transfer("player1", "yulgar") {}
+        while peer.recv() != packet::transfer("player1", "yulgar-1") {}
         peer.expect_silence(Duration::from_millis(800));
         peer.send(&move_to_area(44, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
@@ -3982,7 +4015,7 @@ fn stops_repeating_aggro_when_turned_off_or_joining() {
     session.set_aggro(None);
     next.recv().unwrap();
     session.set_aggro(Some(Aggro::Cell));
-    session.join("yulgar").wait().unwrap();
+    session.join("yulgar-1").wait().unwrap();
     session.logout();
     harness.finish();
 }
@@ -4154,7 +4187,7 @@ fn reconnects_after_a_lost_connection_when_asked() {
         let port = listener.local_addr().unwrap().port();
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
-        peer.expect(&packet::transfer("player1", "yulgar"));
+        peer.expect(&packet::transfer("player1", "yulgar-1"));
         drop(peer);
         dropped_in.send(Instant::now()).unwrap();
         replies_in.send(login_reply("tok2", port)).unwrap();
@@ -4175,7 +4208,7 @@ fn reconnects_after_a_lost_connection_when_asked() {
             Err(ActionError::Closed(Disconnect::ConnectionLost(_)))
         )
     };
-    assert!(lost(session.join("yulgar").wait()));
+    assert!(lost(session.join("yulgar-1").wait()));
     assert!(lost(session.ready().wait()));
     session.set_anti_afk(true);
     attempting.recv().unwrap();

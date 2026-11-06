@@ -181,6 +181,11 @@ pub(crate) struct Spot {
     pub(crate) pad: String,
 }
 
+pub(crate) fn names_room(name: &str) -> bool {
+    name.rsplit_once('-')
+        .is_some_and(|(_, room)| !room.is_empty() && room.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn without_room(name: &str) -> &str {
     name.rsplit_once('-').map_or(name, |(base, _)| base)
 }

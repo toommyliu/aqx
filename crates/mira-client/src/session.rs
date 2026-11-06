@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::hash::{BuildHasher, Hasher, RandomState};
 use std::io::{self, Read, Write};
 use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,7 +29,7 @@ use crate::faction::Faction;
 use crate::inventory::{Inventory, Item, Pool};
 use crate::player::{BoostKind, Me};
 use crate::quest::Quest;
-use crate::room::{CombatState, Monster, Room, Spot, UserEntry, Vitals};
+use crate::room::{CombatState, Monster, Room, Spot, UserEntry, Vitals, names_room};
 use crate::shop::Shop;
 use crate::world::World;
 use bank::{BankMove, BankStage};
@@ -223,6 +224,11 @@ impl fmt::Debug for Reconnect {
     }
 }
 
+fn random_room() -> u32 {
+    let bits = RandomState::new().build_hasher().finish();
+    1000 + (bits % 99_000) as u32
+}
+
 fn jitter(wait: Duration) -> Duration {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -335,6 +341,7 @@ enum Setting {
     Aggro(Option<Aggro>),
     SpawnPoint(String, String),
     AntiAfk(bool),
+    Room(Option<u32>),
 }
 
 enum Request {
@@ -725,6 +732,10 @@ impl Handle {
         self.set(Setting::AntiAfk(on));
     }
 
+    pub fn set_room(&self, room: Option<u32>) {
+        self.set(Setting::Room(room));
+    }
+
     fn set(&self, setting: Setting) {
         let epoch = self.epoch.load(Ordering::SeqCst);
         self.request(Request::Set(setting, epoch));
@@ -863,6 +874,7 @@ pub fn spawn(
         shop: None,
         shop_maps: HashMap::new(),
         requested_spot: None,
+        join_room: None,
         counter_hold: CounterHold::Off,
         aggro: None,
         anti_afk: false,
@@ -933,6 +945,7 @@ struct Session {
     shop: Option<Arc<Shop>>,
     shop_maps: HashMap<ShopId, Vec<String>>,
     requested_spot: Option<Spot>,
+    join_room: Option<u32>,
     counter_hold: CounterHold,
     aggro: Option<(Aggro, Instant)>,
     anti_afk: bool,
@@ -1053,6 +1066,7 @@ impl Session {
                 }
             }
             Setting::AntiAfk(on) => self.anti_afk = on,
+            Setting::Room(room) => self.join_room = room,
         }
     }
 
@@ -1771,12 +1785,21 @@ impl Session {
         now: Instant,
     ) -> Result<Option<JoinStage>, ActionError> {
         self.ensure_ready()?;
+        let map = match self.join_room {
+            Some(number) if !names_room(&map) => format!("{map}-{number}"),
+            _ => map,
+        };
         if self.room.as_ref().is_some_and(|room| room.is_in(&map)) {
             if let Some((cell, pad)) = spot {
                 self.move_to_cell(&cell, &pad)?;
             }
             return Ok(None);
         }
+        let map = if names_room(&map) {
+            map
+        } else {
+            format!("{map}-{}", random_room())
+        };
         let until = self.cooling(Limit::Transfer, now).unwrap_or(now);
         let to = JoinTarget::Map { map, spot };
         Ok(Some(JoinStage::Cooling { to, until }))
