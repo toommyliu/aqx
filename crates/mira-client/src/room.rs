@@ -6,13 +6,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::aura::{AuraChange, AuraDelta, Auras};
 use crate::combat::ActionResult;
+use crate::event::Event;
 
 pub(crate) const SPAWN: (&str, &str) = ("Enter", "Spawn");
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Room {
     #[serde(skip)]
-    pub(crate) area: AreaId,
+    pub area: AreaId,
     pub name: String,
     pub cell: String,
     pub pad: String,
@@ -20,6 +21,7 @@ pub struct Room {
     pub y: i32,
     pub players: Vec<Player>,
     pub monsters: Vec<Monster>,
+    pub zone: Option<String>,
     #[serde(skip)]
     pub(crate) spawn_point: (String, String),
 }
@@ -99,7 +101,7 @@ pub struct Monster {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Counter {
     Warned(Instant),
-    Active { until: Instant },
+    Active,
 }
 
 pub(crate) const COUNTER_AURA: &str = "Counter Attack";
@@ -112,11 +114,16 @@ impl Monster {
     }
 
     pub fn countering(&self, now: Instant) -> bool {
-        self.alive() && self.counter_deadline().is_some_and(|until| now < until)
+        self.alive()
+            && match self.counter {
+                Some(Counter::Warned(at)) => now < at + COUNTER_WINDOW,
+                Some(Counter::Active) => true,
+                None => false,
+            }
     }
 
     pub(crate) fn warn_counter(&mut self, now: Instant) {
-        if !matches!(self.counter, Some(Counter::Active { until }) if now < until) {
+        if self.counter != Some(Counter::Active) {
             self.counter = Some(Counter::Warned(now));
         }
     }
@@ -124,17 +131,11 @@ impl Monster {
     pub(crate) fn apply_aura(&mut self, change: AuraChange, now: Instant) -> Vec<AuraDelta> {
         let counter = change.names().any(|name| name == COUNTER_AURA);
         let removed = change.removes();
-        let until = change
-            .duration_of(COUNTER_AURA)
-            .filter(|secs| *secs > 0.0)
-            .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
-            .and_then(|lasts| now.checked_add(lasts))
-            .unwrap_or(now + COUNTER_WINDOW);
         let deltas = self.auras.apply(change, now);
         let aura = self.auras.active.iter().any(|a| a.name == COUNTER_AURA);
         match (counter, removed, aura) {
             (true, true, _) => self.counter = None,
-            (true, false, true) => self.counter = Some(Counter::Active { until }),
+            (true, false, true) => self.counter = Some(Counter::Active),
             _ => {}
         }
         deltas
@@ -143,7 +144,7 @@ impl Monster {
     pub(crate) fn counter_deadline(&self) -> Option<Instant> {
         match self.counter? {
             Counter::Warned(at) => Some(at + COUNTER_WINDOW),
-            Counter::Active { until } => Some(until),
+            Counter::Active => None,
         }
     }
 }
@@ -239,6 +240,7 @@ impl Room {
                 })
                 .collect(),
             monsters: monsters(area.monster_types, area.monster_spots, area.monsters),
+            zone: None,
             spawn_point: (SPAWN.0.to_owned(), SPAWN.1.to_owned()),
         };
         let mine = mine.into_iter().next().map(|p| Mine {
@@ -290,38 +292,41 @@ impl Room {
         Some(self.players.remove(at).name)
     }
 
-    pub(crate) fn move_player(&mut self, name: &str, fields: &str) {
+    pub(crate) fn move_player(&mut self, name: &str, fields: &str) -> Option<Event> {
         let field = |wanted: &str| {
             fields
                 .split(',')
                 .filter_map(|pair| pair.split_once(':'))
                 .find_map(|(key, value)| (key == wanted).then(|| value.to_owned()))
         };
-        self.place_player(name, field("strFrame"), field("strPad"));
+        let jumped = self.place_player(name, field("strFrame"), field("strPad"));
         let at = |key| field(key).and_then(|value| value.parse().ok());
         if let Some(away) = field("afk").map(|value| value == "true")
             && let Some(player) = self.player_named(name)
         {
             player.away = away;
         }
-        if let (Some(x), Some(y)) = (at("tx"), at("ty"))
-            && let Some(player) = self
-                .players
-                .iter_mut()
-                .find(|p| p.name.eq_ignore_ascii_case(name))
-        {
-            (player.x, player.y) = (x, y);
-        }
+        let (Some(x), Some(y)) = (at("tx"), at("ty")) else {
+            return jumped;
+        };
+        let player = self.player_named(name)?;
+        (player.x, player.y) = (x, y);
+        Some(Event::PlayerWalked {
+            name: player.name.clone(),
+            cell: player.cell.clone().unwrap_or_default(),
+            x,
+            y,
+        })
     }
 
-    pub(crate) fn place_player(&mut self, name: &str, cell: Option<String>, pad: Option<String>) {
-        let Some(player) = self
-            .players
-            .iter_mut()
-            .find(|p| p.name.eq_ignore_ascii_case(name))
-        else {
-            return;
-        };
+    pub(crate) fn place_player(
+        &mut self,
+        name: &str,
+        cell: Option<String>,
+        pad: Option<String>,
+    ) -> Option<Event> {
+        let player = self.player_named(name)?;
+        let jumped = cell.is_some();
         if cell.is_some() {
             player.cell = cell;
             (player.x, player.y) = (0, 0);
@@ -329,6 +334,11 @@ impl Room {
         if pad.is_some() {
             player.pad = pad;
         }
+        jumped.then(|| Event::PlayerJumped {
+            name: player.name.clone(),
+            cell: player.cell.clone().unwrap_or_default(),
+            pad: player.pad.clone().unwrap_or_default(),
+        })
     }
 
     pub(crate) fn patch_monster(&mut self, id: MonMapId, patch: &Vitals) {
@@ -575,10 +585,9 @@ mod tests {
                 "auras": [{"nam": "Counter Attack", "dur": 6, "isNew": true}]})),
             at(1000),
         );
-        assert!(monster.countering(at(6900)));
-        assert!(!monster.countering(at(7100)));
+        assert!(monster.countering(at(7500)));
         monster.warn_counter(at(2000));
-        assert!(monster.countering(at(6900)));
+        assert!(monster.countering(at(9500)));
         monster.apply_aura(
             change(serde_json::json!({"cmd": "aura--", "tInf": "m:1",
                 "aura": {"nam": "Counter Attack"}})),

@@ -31,7 +31,7 @@ use crate::player::{BoostKind, Me};
 use crate::quest::Quest;
 use crate::room::{CombatState, Monster, Room, Spot, UserEntry, Vitals, names_room};
 use crate::shop::Shop;
-use crate::world::World;
+use crate::world::{Settings, World};
 use bank::{BankMove, BankStage};
 use equip::EquipStage;
 use fight::Fight;
@@ -155,7 +155,7 @@ impl Serialize for Disconnect {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ActionError {
     #[error("the character has not loaded yet")]
     NotReady,
@@ -291,7 +291,55 @@ pub struct ActionId(u64);
 
 struct Reply {
     id: ActionId,
-    tx: mpsc::SyncSender<Result<(), ActionError>>,
+    tx: Option<mpsc::SyncSender<Result<(), ActionError>>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Update {
+    Event(Event),
+    Done {
+        id: ActionId,
+        result: Result<(), ActionError>,
+    },
+    Packet(String),
+}
+
+enum Outgoing {
+    Event(Event),
+    Packet(String),
+}
+
+enum Subscriber {
+    Events(mpsc::Sender<Event>),
+    Updates(mpsc::Sender<Update>),
+}
+
+impl Subscriber {
+    fn event(&self, event: &Event) -> bool {
+        match self {
+            Subscriber::Events(tx) => tx.send(event.clone()).is_ok(),
+            Subscriber::Updates(tx) => tx.send(Update::Event(event.clone())).is_ok(),
+        }
+    }
+
+    fn packet(&self, text: &str) -> bool {
+        match self {
+            Subscriber::Events(_) => true,
+            Subscriber::Updates(tx) => tx.send(Update::Packet(text.to_owned())).is_ok(),
+        }
+    }
+
+    fn done(&self, id: ActionId, result: &Result<(), ActionError>) -> bool {
+        match self {
+            Subscriber::Events(_) => true,
+            Subscriber::Updates(tx) => tx
+                .send(Update::Done {
+                    id,
+                    result: result.clone(),
+                })
+                .is_ok(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -307,6 +355,10 @@ impl Cancel {
             Cancel::All => true,
         }
     }
+}
+
+fn player_not_found(warning: &str) -> bool {
+    warning.starts_with("Player '") && warning.ends_with("' could not be found.")
 }
 
 fn latest(slot: &Slot) -> Arc<World> {
@@ -349,7 +401,7 @@ enum Request {
     Set(Setting, u64),
     Cancel(Cancel),
     Untarget,
-    Subscribe(mpsc::Sender<Event>),
+    Subscribe(Subscriber),
     Logout,
 }
 
@@ -372,6 +424,7 @@ enum Action {
     },
     Kill {
         target: MonMapId,
+        slots: Option<Vec<String>>,
     },
     ExitCombat,
     Quest(QuestAction),
@@ -391,6 +444,7 @@ enum Action {
         x: i32,
         y: i32,
     },
+    Send(String),
 }
 
 impl Action {
@@ -637,7 +691,17 @@ impl Handle {
     }
 
     pub fn kill(&self, target: MonMapId) -> Pending {
-        self.act(Action::Kill { target })
+        self.act(Action::Kill {
+            target,
+            slots: None,
+        })
+    }
+
+    pub fn kill_with(&self, target: MonMapId, slots: &[&str]) -> Pending {
+        self.act(Action::Kill {
+            target,
+            slots: Some(slots.iter().map(|slot| (*slot).to_owned()).collect()),
+        })
     }
 
     pub fn exit_combat(&self) -> Pending {
@@ -674,6 +738,10 @@ impl Handle {
 
     pub fn goto(&self, player: &str) -> Pending {
         self.act(Action::Goto(player.to_owned()))
+    }
+
+    pub fn send_raw(&self, text: &str) -> Pending {
+        self.act(Action::Send(text.to_owned()))
     }
 
     pub fn rest(&self) -> Pending {
@@ -743,8 +811,14 @@ impl Handle {
 
     pub fn subscribe(&self) -> mpsc::Receiver<Event> {
         let (subscriber, events) = mpsc::channel();
-        self.request(Request::Subscribe(subscriber));
+        self.request(Request::Subscribe(Subscriber::Events(subscriber)));
         events
+    }
+
+    pub fn updates(&self) -> mpsc::Receiver<Update> {
+        let (subscriber, updates) = mpsc::channel();
+        self.request(Request::Subscribe(Subscriber::Updates(subscriber)));
+        updates
     }
 
     pub fn logout(&self) {
@@ -753,6 +827,10 @@ impl Handle {
 
     pub fn snapshot(&self) -> Arc<World> {
         latest(&self.world)
+    }
+
+    pub fn same_session(&self, other: &Handle) -> bool {
+        Arc::ptr_eq(&self.world, &other.world)
     }
 
     pub fn cancel(&self, id: ActionId) {
@@ -771,7 +849,7 @@ impl Handle {
         let (tx, result) = mpsc::sync_channel(1);
         let id = ActionId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let epoch = self.epoch.load(Ordering::SeqCst);
-        self.request(Request::Act(action, Reply { id, tx }, epoch));
+        self.request(Request::Act(action, Reply { id, tx: Some(tx) }, epoch));
         Pending {
             id,
             result,
@@ -850,7 +928,7 @@ pub fn spawn(
         poll,
         ready: Events::with_capacity(16),
         requests,
-        events: vec![events],
+        subscribers: vec![Subscriber::Events(events)],
         world: Arc::clone(&world),
         outgoing: Vec::new(),
         replies: Vec::new(),
@@ -921,9 +999,9 @@ struct Session {
     poll: Poll,
     ready: Events,
     requests: mpsc::Receiver<Request>,
-    events: Vec<mpsc::Sender<Event>>,
+    subscribers: Vec<Subscriber>,
     world: Slot,
-    outgoing: Vec<Event>,
+    outgoing: Vec<Outgoing>,
     replies: Vec<(Reply, Result<(), ActionError>)>,
     queue: VecDeque<(Action, Reply)>,
     current: Option<Op>,
@@ -1039,11 +1117,12 @@ impl Session {
         if let Some(reply) = self.current.as_mut().and_then(Op::reply_mut)
             && which.covers(reply)
         {
-            let (detached, _) = mpsc::sync_channel(1);
-            let tx = std::mem::replace(&mut reply.tx, detached);
-            let id = reply.id;
-            self.replies
-                .push((Reply { id, tx }, Err(ActionError::Cancelled)));
+            let answered = Reply {
+                id: reply.id,
+                tx: reply.tx.take(),
+            };
+            let id = answered.id;
+            self.replies.push((answered, Err(ActionError::Cancelled)));
             self.cancelled = Some(id);
         }
     }
@@ -1081,7 +1160,7 @@ impl Session {
                 }
                 Request::Cancel(which) => self.cancel(which),
                 Request::Untarget => self.untarget(),
-                Request::Subscribe(subscriber) => self.events.push(subscriber),
+                Request::Subscribe(subscriber) => self.subscribers.push(subscriber),
                 Request::Logout => self.begin_logout(),
                 Request::Set(_, epoch) if self.stale_epoch(epoch) => {}
                 Request::Set(setting, _) => self.apply(setting),
@@ -1211,6 +1290,7 @@ impl Session {
             Action::Ready => self.ensure_ready(),
             Action::MoveToCell { cell, pad } => self.move_to_cell(&cell, &pad),
             Action::UseItem(item) => self.use_item(item),
+            Action::Send(text) => self.ensure_ready().map(|()| self.send(&text)),
             Action::Walk { x, y } => {
                 let op = Op::Walk {
                     reply,
@@ -1312,10 +1392,11 @@ impl Session {
                     now,
                 );
             }
-            Action::Kill { target } => {
+            Action::Kill { target, slots } => {
                 self.fight = Some(Fight {
                     reply,
                     target,
+                    slots,
                     next: 0,
                     wake: None,
                 });
@@ -1434,7 +1515,11 @@ impl Session {
                 } else if self.joins != joins {
                     Ok(())
                 } else if let Some(why) = self.refusal.clone() {
-                    Err(ActionError::Refused(why))
+                    Err(if goto && player_not_found(&why) {
+                        ActionError::NoTarget(why)
+                    } else {
+                        ActionError::Refused(why)
+                    })
                 } else if now >= deadline {
                     Err(ActionError::NoReply)
                 } else {
@@ -1758,13 +1843,24 @@ impl Session {
             procs: Arc::clone(&self.procs),
             target: self.combat.auto_target(),
             readiness: self.readiness(Instant::now()),
+            settings: Settings {
+                counter_hold: self.counter_hold,
+                aggro: self.aggro.as_ref().map(|(aggro, _)| aggro.clone()),
+                anti_afk: self.anti_afk,
+                room: self.join_room,
+            },
         });
-        for event in self.outgoing.drain(..) {
-            self.events
-                .retain(|subscriber| subscriber.send(event.clone()).is_ok());
+        for outgoing in self.outgoing.drain(..) {
+            self.subscribers.retain(|subscriber| match &outgoing {
+                Outgoing::Event(event) => subscriber.event(event),
+                Outgoing::Packet(text) => subscriber.packet(text),
+            });
         }
         for (reply, result) in self.replies.drain(..) {
-            let _ = reply.tx.send(result);
+            let Some(tx) = reply.tx else { continue };
+            self.subscribers
+                .retain(|subscriber| subscriber.done(reply.id, &result));
+            let _ = tx.send(result);
         }
     }
 
@@ -1813,7 +1909,7 @@ impl Session {
             _ => {}
         }
         if name.eq_ignore_ascii_case(&self.username) {
-            return Err(ActionError::NoTarget("that's this player".into()));
+            return Err(ActionError::Unusable("that's this player".into()));
         }
         if let Some(result) = self.goto_in_room(&name) {
             return result.map(|()| None);
@@ -2016,7 +2112,7 @@ impl Session {
     }
 
     fn emit(&mut self, event: Event) {
-        self.outgoing.push(event);
+        self.outgoing.push(Outgoing::Event(event));
     }
 
     fn send_action(&mut self, packet: &str) {
@@ -2112,6 +2208,7 @@ impl Session {
     }
 
     fn receive(&mut self, frame: &[u8]) {
+        let mut received = None;
         let message = mira_protocol::unpack(frame).and_then(|text| {
             if self.options.trace_packets {
                 self.emit(Event::Packet {
@@ -2119,7 +2216,9 @@ impl Session {
                     text: redact(&text),
                 });
             }
-            mira_protocol::parse(&text)
+            let message = mira_protocol::parse(&text);
+            received = Some(text);
+            message
         });
         let handled = match message {
             Ok(Message::Xml(xml)) => {
@@ -2135,6 +2234,13 @@ impl Session {
         };
         if let Err(error) = handled {
             self.emit(Event::Unreadable { error });
+        }
+        let watched = self
+            .subscribers
+            .iter()
+            .any(|s| matches!(s, Subscriber::Updates(_)));
+        if let Some(text) = received.filter(|_| watched) {
+            self.outgoing.push(Outgoing::Packet(redact(&text)));
         }
     }
 
@@ -2301,8 +2407,12 @@ impl Session {
             me.away = away;
             self.emit(Event::AwayChanged { away });
         }
-        if let Some(room) = &mut self.room {
-            room.move_player(name, fields);
+        if let Some(moved) = self
+            .room
+            .as_mut()
+            .and_then(|room| room.move_player(name, fields))
+        {
+            self.emit(moved);
         }
     }
 

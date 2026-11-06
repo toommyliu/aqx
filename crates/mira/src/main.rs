@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::BufRead;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,6 +14,7 @@ use mira_client::{
     MapItemId, Me, MonMapId, Monster, NoticeKind, Options, Pending, Phase, Place, QuestId,
     QuestStatus, Readiness, Reconnect, Room, Server, ShopId, ShopItemId, SkillTarget, World, api,
 };
+use mira_script::{AutoRelogin, Cancel, Level, Outcome, Output, Script, Start};
 
 const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster|player], \
@@ -69,6 +72,31 @@ enum Command {
         #[arg(long, value_name = "N", default_value_t = DEFAULT_RECONNECT_ATTEMPTS, requires = "reconnect")]
         reconnect_attempts: u32,
     },
+    /// Log in, run a script until it ends, then log out.
+    Run {
+        /// The script, a .ts or .js file.
+        script: PathBuf,
+        #[arg(long)]
+        user: String,
+        #[arg(long)]
+        pass: String,
+        /// Server name, as `mira servers` lists it.
+        #[arg(long)]
+        server: String,
+        /// Log in with exactly this client version instead of following the server's minimum.
+        #[arg(long, value_name = "VERSION")]
+        client_version: Option<String>,
+        /// A value for script.args(). Lists and maps are JSON. Repeatable.
+        #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = parse_arg)]
+        args: Vec<(String, String)>,
+    },
+}
+
+fn parse_arg(text: &str) -> Result<(String, String), String> {
+    text.split_once('=')
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .filter(|(key, _)| !key.is_empty())
+        .ok_or_else(|| format!("{text} isn't KEY=VALUE"))
 }
 
 fn main() -> ExitCode {
@@ -98,6 +126,24 @@ fn main() -> ExitCode {
                 reconnect,
             )
         }
+        Command::Run {
+            script,
+            user,
+            pass,
+            server,
+            client_version,
+            args,
+        } => DeviceId::load()
+            .map_err(anyhow::Error::from)
+            .and_then(|device| {
+                let login = Login {
+                    device,
+                    user,
+                    pass,
+                    client_version,
+                };
+                run(&script, login, &server, &args)
+            }),
     };
     result.unwrap_or_else(|e| {
         eprintln!("mira: {e:#}");
@@ -192,6 +238,181 @@ fn login(
     } else {
         ExitCode::FAILURE
     })
+}
+
+struct Login {
+    device: DeviceId,
+    user: String,
+    pass: String,
+    client_version: Option<String>,
+}
+
+impl Login {
+    fn connect(&self, server: &str) -> anyhow::Result<Handle> {
+        let account = api::login(&self.device, &self.user, &self.pass)?;
+        let server = account.pick_server(server)?.clone();
+        let options = Options {
+            client_version: self.client_version.clone(),
+            ..Options::default()
+        };
+        let (session, events) = mira_client::spawn(&account, server, options)?;
+        drop(events);
+        session.ready().wait()?;
+        Ok(session)
+    }
+}
+
+impl mira_script::Account for Login {
+    fn servers(&self) -> Result<Vec<Server>, String> {
+        api::servers(&self.device).map_err(|e| e.to_string())
+    }
+
+    fn login(&self, server: &str) -> Result<Handle, String> {
+        self.connect(server).map_err(|e| format!("{e:#}"))
+    }
+}
+
+fn run(
+    path: &Path,
+    login: Login,
+    server: &str,
+    given: &[(String, String)],
+) -> anyhow::Result<ExitCode> {
+    let started = Instant::now();
+    let cancel = Cancel::default();
+    let load = || Script::load(path, move |out| show(started, &out), &cancel);
+    let mut script = load()?;
+    let args = script.parse_args(given).map_err(anyhow::Error::msg)?;
+    let login = Arc::new(login);
+    let mut server = server.to_owned();
+    let mut session = login.connect(&server)?;
+
+    let current = Arc::new(Mutex::new(session.clone()));
+    let interrupt = (cancel.clone(), Arc::clone(&current));
+    let interrupted = AtomicBool::new(false);
+    ctrlc::set_handler(move || {
+        if interrupted.swap(true, Ordering::SeqCst) {
+            std::process::exit(130);
+        }
+        interrupt.0.cancel();
+        interrupt
+            .1
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .logout();
+    })?;
+
+    let outcome = loop {
+        let account: Arc<dyn mira_script::Account> = Arc::clone(&login) as _;
+        let ended = script.run(Start {
+            session,
+            server: server.clone(),
+            args: args.clone(),
+            account,
+        });
+        (session, server) = (ended.session, ended.server);
+        *current.lock().unwrap_or_else(PoisonError::into_inner) = session.clone();
+        match ended.outcome {
+            Outcome::Restart => {
+                println!("{}restarting the script", stamp(started));
+            }
+            Outcome::Relogin(policy) => {
+                let target = policy.server.clone().unwrap_or_else(|| server.clone());
+                let Some(relogged) = relogin(&login, &target, &policy, &cancel, started) else {
+                    break Outcome::Disconnected("couldn't log back in".into());
+                };
+                *current.lock().unwrap_or_else(PoisonError::into_inner) = relogged.clone();
+                (session, server) = (relogged, target);
+            }
+            outcome => break outcome,
+        }
+        script = load()?;
+    };
+    let closing = session.subscribe();
+    session.logout();
+    for event in closing {
+        if matches!(event, Event::Phase(Phase::Closed { .. })) {
+            break;
+        }
+    }
+    Ok(match outcome {
+        Outcome::Finished => {
+            println!("{}the script finished", stamp(started));
+            ExitCode::SUCCESS
+        }
+        Outcome::Stopped(reason) => {
+            let reason = reason.map(|r| format!(": {r}")).unwrap_or_default();
+            println!("{}the script stopped{reason}", stamp(started));
+            ExitCode::SUCCESS
+        }
+        Outcome::LoggedOut => {
+            println!("{}the script logged out", stamp(started));
+            ExitCode::SUCCESS
+        }
+        Outcome::Cancelled => {
+            println!("{}the script was cancelled", stamp(started));
+            ExitCode::from(130)
+        }
+        Outcome::Disconnected(reason) => {
+            eprintln!("mira: the session closed: {reason}");
+            ExitCode::FAILURE
+        }
+        Outcome::Failed(why) => {
+            eprintln!("mira: {why}");
+            ExitCode::FAILURE
+        }
+        Outcome::Restart | Outcome::Relogin(_) => unreachable!("handled in the run loop"),
+    })
+}
+
+fn relogin(
+    login: &Login,
+    server: &str,
+    policy: &AutoRelogin,
+    cancel: &Cancel,
+    started: Instant,
+) -> Option<Handle> {
+    let mut delay = policy.delay;
+    for attempt in 1..=policy.attempts {
+        println!(
+            "{}the session closed; logging back in to {server} in {:.1} s (attempt {attempt} of {})",
+            stamp(started),
+            delay.as_secs_f64(),
+            policy.attempts
+        );
+        let until = Instant::now() + delay;
+        while Instant::now() < until {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(100).min(until - Instant::now()));
+        }
+        match login.connect(server) {
+            Ok(session) => return Some(session),
+            Err(e) => eprintln!("mira: couldn't log back in: {e:#}"),
+        }
+        delay = delay.saturating_mul(2);
+    }
+    None
+}
+
+fn show(started: Instant, output: &Output) {
+    let stamp = stamp(started);
+    match output {
+        Output::Log {
+            level: Level::Log,
+            text,
+        } => println!("{stamp}{text}"),
+        Output::Log {
+            level: Level::Warn,
+            text,
+        } => println!("{stamp}warning: {text}"),
+        Output::Log {
+            level: Level::Error,
+            text,
+        } => println!("{stamp}error: {text}"),
+        Output::Status(text) => println!("{stamp}status: {text}"),
+    }
 }
 
 fn serve_stdin(session: &Handle, json: bool) {
@@ -849,6 +1070,9 @@ fn describe(event: &Event) -> Option<String> {
         Event::Moved { cell, pad } => format!("moved to {cell}/{pad}"),
         Event::PlayerEntered { name } => format!("{name} entered"),
         Event::PlayerLeft { name } => format!("{name} left"),
+        Event::PlayerJumped { .. } | Event::PlayerWalked { .. } => return None,
+        Event::Zone { zone: Some(zone) } => format!("the boss marked floor zone {zone}"),
+        Event::Zone { zone: None } => "the boss cleared the floor zone".into(),
         Event::Ready { level, gold, items } => {
             format!("ready: level {level}, {gold} gold, {items} items")
         }

@@ -292,8 +292,21 @@ impl Session {
             "uotls" => {
                 let update: PlayerUpdate = read(&json)?;
                 self.patch_player(&update.name, &update.o.vitals);
-                if let Some(room) = &mut self.room {
-                    room.place_player(&update.name, update.o.cell, update.o.pad);
+                let room = self.room.as_mut();
+                if let Some(jumped) = room
+                    .and_then(|room| room.place_player(&update.name, update.o.cell, update.o.pad))
+                {
+                    self.emit(jumped);
+                }
+            }
+            "event" => {
+                let zone = json.data.pointer("/args/zoneSet").and_then(Value::as_str);
+                if let (Some(zone), Some(room)) = (zone, &mut self.room) {
+                    let zone = (!zone.is_empty()).then(|| zone.to_owned());
+                    if room.zone != zone {
+                        room.zone = zone.clone();
+                        self.emit(Event::Zone { zone });
+                    }
                 }
             }
             "stu" => {

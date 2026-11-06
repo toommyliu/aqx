@@ -30,6 +30,17 @@ pub enum Event {
     PlayerLeft {
         name: String,
     },
+    PlayerJumped {
+        name: String,
+        cell: String,
+        pad: String,
+    },
+    PlayerWalked {
+        name: String,
+        cell: String,
+        x: i32,
+        y: i32,
+    },
     Ready {
         level: u32,
         gold: u64,
@@ -93,6 +104,9 @@ pub enum Event {
     },
     AwayChanged {
         away: bool,
+    },
+    Zone {
+        zone: Option<String>,
     },
     Unreadable {
         error: String,

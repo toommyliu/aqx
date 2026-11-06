@@ -46,7 +46,7 @@ impl Token {
         &self.0
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_tests(token: &str) -> Token {
         Token(token.into())
     }
@@ -119,7 +119,7 @@ impl DeviceId {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_tests() -> DeviceId {
         DeviceId("0123456789abcdef0123456789abcdef".into())
     }

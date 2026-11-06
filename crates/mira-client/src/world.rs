@@ -1,17 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use mira_protocol::{MonMapId, QuestId};
+use mira_protocol::{ItemId, MonMapId, QuestId};
 
 use crate::combat::Readiness;
 use crate::faction::Faction;
-use crate::inventory::{DropOffer, Item, TempItem};
+use crate::inventory::{self, DropOffer, Item, Pool, TempItem};
 
 const ENHANCED_SLOTS: [&str; 4] = ["Weapon", "he", "ar", "ba"];
 use crate::player::Me;
 use crate::quest::Quest;
 use crate::room::Room;
-use crate::session::Phase;
+use crate::session::{Aggro, CounterHold, Phase};
 use crate::shop::Shop;
 
 #[derive(Debug, Clone)]
@@ -30,6 +30,15 @@ pub struct World {
     pub procs: Arc<HashMap<u32, String>>,
     pub target: Option<MonMapId>,
     pub readiness: BTreeMap<String, Readiness>,
+    pub settings: Settings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Settings {
+    pub counter_hold: CounterHold,
+    pub aggro: Option<Aggro>,
+    pub anti_afk: bool,
+    pub room: Option<u32>,
 }
 
 impl World {
@@ -49,7 +58,14 @@ impl World {
             procs: Arc::default(),
             target: None,
             readiness: BTreeMap::new(),
+            settings: Settings::default(),
         }
+    }
+
+    pub fn has_room(&self, id: ItemId, pool: Pool) -> bool {
+        self.me
+            .as_ref()
+            .is_some_and(|me| !inventory::no_room(&self.inventory, id, pool, me))
     }
 
     pub fn enhancement_name(&self, item: &Item) -> Option<String> {

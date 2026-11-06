@@ -1,0 +1,19 @@
+[package]
+name = "mira-script"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+mira-client.workspace = true
+rquickjs.workspace = true
+serde_json.workspace = true
+swc_common.workspace = true
+swc_ecma_ast.workspace = true
+swc_ecma_parser.workspace = true
+swc_ecma_visit.workspace = true
+swc_ts_fast_strip.workspace = true
+
+[dev-dependencies]
+mira-client = { workspace = true, features = ["test-support"] }
+mira-protocol.workspace = true

@@ -1,0 +1,479 @@
+/*
+ * A script's default export is a generator function, and mira runs it. Run an
+ * action with `yield*`.
+ *
+ * An action throws a MiraError when it fails in a way its return type doesn't
+ * name. An error that nothing catches ends the run.
+ *
+ * A number that can't apply, such as a negative count or a fractional
+ * attempt, throws a RangeError before mira sends anything.
+ *
+ * Handler calls run alongside the script. Predicates read state and can't run
+ * actions.
+ *
+ * mira stops a generator when it loses a `wait.first`, when its handler is
+ * removed, and when the run ends. Stopping cancels its action and runs its
+ * `finally` blocks.
+ *
+ * A run can hold 100 pending handler calls and 100 pending actions. Past
+ * either limit, the run ends.
+ *
+ * A dropped connection ends the run, unless `settings.autoRelogin` is on.
+ */
+declare module "mira" {
+  export class MiraError extends Error {
+    private constructor();
+  }
+
+  const step: unique symbol;
+
+  interface Step {
+    readonly [step]: true;
+  }
+
+  /** An action, or a call to your own generator function. */
+  export interface Action<T> {
+    [Symbol.iterator](): Iterator<Step, T, unknown>;
+  }
+
+  export type ValueOf<X> = X extends Action<infer T> ? T : never;
+
+  /**
+   * The return type for the default export and your own generator functions.
+   * With it, `yield` without the star is a type error.
+   */
+  export type Script<T = void> = Generator<Step, T, unknown>;
+
+  export type ItemRef = number | string;
+  /** A monMapId, or a name in the player's cell. */
+  export type MonsterRef = number | string;
+  /** An entityId, or a name in the map. */
+  export type PlayerRef = number | string;
+  /** 0 auto attack, 1-4 class skills, 5 the consumable slot. */
+  export type Slot = 0 | 1 | 2 | 3 | 4 | 5;
+  export type CombatState = "idle" | "combat" | "dead";
+
+  export interface Aura {
+    readonly name: string;
+    readonly stacks: number;
+    readonly remainingMs: number | null;
+  }
+
+  export interface Stats {
+    readonly strength: number;
+    readonly endurance: number;
+    readonly dexterity: number;
+    readonly intellect: number;
+    readonly wisdom: number;
+    readonly luck: number;
+    /** 0.25 is 25%. */
+    readonly hit: number;
+    readonly evasion: number;
+    readonly crit: number;
+    readonly haste: number;
+  }
+
+  export interface Faction {
+    readonly id: number;
+    readonly name: string;
+    readonly rep: number;
+    readonly rank: number;
+  }
+
+  export type SkillStatus =
+    | { readonly kind: "ready" | "casting" | "disabled" | "locked" | "no_mana" }
+    | { readonly kind: "cooling"; readonly readyInMs: number };
+
+  export interface Skill {
+    readonly slot: Slot;
+    readonly name: string;
+    readonly mana: number;
+    readonly cooldownMs: number;
+    readonly target: "hostile" | "friendly" | "self";
+    readonly maxTargets: number;
+    readonly status: SkillStatus;
+  }
+
+  export interface Monster {
+    readonly monMapId: number;
+    readonly monId: number;
+    readonly name: string;
+    readonly cell: string;
+    readonly hp: number;
+    readonly maxHp: number;
+    readonly state: CombatState;
+    readonly auras: readonly Aura[];
+  }
+
+  export interface Player {
+    /** The id raw packets use for this player. */
+    readonly entityId: number;
+    readonly name: string;
+    readonly level: number | null;
+    readonly class: string | null;
+    readonly cell: string | null;
+    readonly pad: string | null;
+    readonly x: number | null;
+    readonly y: number | null;
+    readonly hp: number;
+    readonly maxHp: number;
+    readonly mp: number;
+    readonly maxMp: number;
+    readonly state: CombatState;
+    readonly away: boolean;
+  }
+
+  export interface Stack {
+    readonly id: number;
+    readonly name: string;
+    readonly qty: number;
+  }
+
+  export interface TempItem extends Stack {
+    readonly maxStack: number;
+  }
+
+  export interface Item extends TempItem {
+    readonly charItemId: number;
+    readonly type: string;
+    readonly slot: string;
+    readonly pool: "bag" | "misc" | "class" | "house";
+    readonly meta: string;
+    readonly equipped: boolean;
+    readonly coins: boolean;
+    readonly member: boolean;
+    readonly enhancement: string | null;
+  }
+
+  export interface Drop extends TempItem {
+    readonly type: string;
+    readonly pool: Item["pool"];
+    readonly coins: boolean;
+    readonly member: boolean;
+  }
+
+  export interface Quest {
+    readonly id: number;
+    readonly name: string;
+    readonly status: "available" | "locked" | "done" | "done_this_period";
+    readonly accepted: boolean;
+    /** How many times quests.complete would succeed now. */
+    readonly turnIns: number;
+    /** Held, not taken. */
+    readonly required: readonly Stack[];
+    /** Taken on turn-in. */
+    readonly turnIn: readonly Stack[];
+    readonly requiredClass: { readonly id: number; readonly points: number } | null;
+    readonly gold: number;
+    readonly exp: number;
+    readonly rewards: readonly (Stack & { readonly kind: "always" | "rolled" | "chosen" | "random" })[];
+  }
+
+  export interface ShopItem {
+    readonly listingId: number;
+    readonly id: number;
+    readonly name: string;
+    /** Units one purchase gives. */
+    readonly qty: number;
+    readonly cost: number;
+    readonly coins: boolean;
+    readonly member: boolean;
+    readonly merge: readonly Stack[];
+    readonly token: { readonly id: number; readonly qty: number } | null;
+  }
+
+  export interface Shop {
+    readonly id: number;
+    readonly name: string;
+    readonly items: readonly ShopItem[];
+  }
+
+  export interface Server {
+    readonly name: string;
+    readonly online: boolean;
+    readonly members: boolean;
+    readonly players: number;
+    readonly capacity: number;
+  }
+
+  export const player: {
+    readonly entityId: number;
+    readonly charId: number;
+    readonly name: string;
+    readonly level: number;
+    readonly exp: number;
+    readonly maxExp: number;
+    readonly hp: number;
+    readonly maxHp: number;
+    readonly mp: number;
+    readonly maxMp: number;
+    readonly state: CombatState;
+    readonly away: boolean;
+    readonly gold: number;
+    readonly coins: number;
+    readonly member: boolean;
+    readonly class: string;
+    readonly classRank: number;
+    readonly stats: Stats;
+    readonly auras: readonly Aura[];
+    readonly factions: readonly Faction[];
+    /** Milliseconds left. */
+    readonly boosts: { readonly xp: number; readonly gold: number; readonly rep: number; readonly classPoints: number };
+    rest(): Action<void>;
+  };
+
+  export const map: {
+    /** With the room, as in "battleon-1234". */
+    readonly name: string;
+    readonly areaId: number;
+    readonly cell: string;
+    readonly pad: string;
+    readonly x: number | null;
+    readonly y: number | null;
+    /** The floor zone a boss marked. */
+    readonly zone: string | null;
+    readonly players: readonly Player[];
+    readonly monsters: readonly Monster[];
+    /**
+     * Without a room in `name`, joins settings.room. "refused" when the map is
+     * locked, full, or for members only.
+     */
+    join(name: string, options?: { readonly cell?: string; readonly pad?: string }): Action<"joined" | "refused">;
+    jump(cell: string, pad?: string): Action<void>;
+    /** Skipped if the player changes map or cell before it's sent. */
+    walk(x: number, y: number): Action<void>;
+    /** "not_found" when the player isn't on this server. */
+    goto(player: string): Action<"arrived" | "not_found" | "refused">;
+    /** Finishes once sent. */
+    collect(mapItemId: number): Action<void>;
+    /**
+     * Where the player respawns in this map when the server doesn't name a
+     * cell. Each join resets it to Enter, Spawn. `pad` defaults to "Left".
+     */
+    setSpawnPoint(cell: string, pad?: string): void;
+  };
+
+  export const combat: {
+    readonly skills: readonly Skill[];
+    readonly target: Monster | null;
+    /**
+     * Fights the live match with the least HP in the player's cell, casting
+     * `skills` in turn (default 1-4). "none" when no match is alive. With
+     * `waitForRespawn`, it waits for a dead match in the cell to come back,
+     * and returns "none" only when the cell has no match at all.
+     */
+    kill(
+      target: MonsterRef,
+      options?: { readonly skills?: readonly Exclude<Slot, 0>[]; readonly waitForRespawn?: boolean },
+    ): Action<"killed" | "died" | "none">;
+    attack(target: MonsterRef): Action<void>;
+    /**
+     * A friendly skill aims at `player`, who must be alive in the player's
+     * cell, or else at the player. A hostile skill can't aim at a player.
+     */
+    useSkill(
+      slot: Exclude<Slot, 0>,
+      target?:
+        | { readonly monster: MonsterRef; readonly player?: never }
+        | { readonly player: PlayerRef; readonly monster?: never },
+    ): Action<void>;
+    exit(): Action<void>;
+    untarget(): void;
+  };
+
+  export const inventory: {
+    readonly items: readonly Item[];
+    readonly temp: readonly TempItem[];
+    readonly bagSlots: number;
+    readonly houseSlots: number;
+    get(item: ItemRef): Item | undefined;
+    /** Items and temp items together, as quests count them. */
+    count(item: ItemRef): number;
+    canFit(drop: Drop): boolean;
+    equip(item: ItemRef): Action<void>;
+    unequip(item: ItemRef): Action<void>;
+    /** For the slotted consumable, use combat.useSkill(5). */
+    use(item: ItemRef): Action<void>;
+  };
+
+  export const bank: {
+    readonly items: readonly Item[] | null;
+    readonly slots: number;
+    load(): Action<readonly Item[]>;
+    deposit(item: ItemRef): Action<void>;
+    withdraw(item: ItemRef): Action<void>;
+    swap(inventoryItem: ItemRef, bankItem: ItemRef): Action<void>;
+  };
+
+  export const drops: {
+    readonly pending: readonly Drop[];
+    /** "gone" when the offer is no longer pending. */
+    pickup(item: ItemRef): Action<"picked" | "no_room" | "gone">;
+    readonly registered: readonly ItemRef[];
+    /** Includes offers already pending. A failed pickup is logged and stays pending. */
+    register(...items: ItemRef[]): void;
+    unregister(...items: ItemRef[]): void;
+  };
+
+  export interface QuestRegistration {
+    readonly id: number;
+    readonly reward?: ItemRef;
+  }
+
+  export const quests: {
+    get(id: number): Quest | undefined;
+    load(...ids: number[]): Action<void>;
+    accept(id: number): Action<void>;
+    complete(id: number, options?: { readonly reward?: ItemRef; readonly times?: number }): Action<void>;
+    readonly registered: readonly QuestRegistration[];
+    /**
+     * Accepts each quest, turns it in whenever it can, and accepts it again.
+     * A quest that fails is logged and unregistered.
+     */
+    register(...quests: (number | QuestRegistration)[]): void;
+    unregister(...ids: number[]): void;
+  };
+
+  export const shop: {
+    readonly current: Shop | null;
+    load(id: number): Action<Shop>;
+    /** `qty` counts units. An item two listings sell needs the listing. */
+    buy(item: ItemRef | { readonly listingId: number }, qty?: number): Action<void>;
+    sell(item: ItemRef, qty?: number): Action<void>;
+  };
+
+  export type AuraHolder = { readonly kind: "player" } | { readonly kind: "monster"; readonly monMapId: number };
+
+  export interface Events {
+    joined: { readonly map: string; readonly cell: string; readonly pad: string };
+    moved: { readonly cell: string; readonly pad: string };
+    playerEntered: { readonly name: string };
+    playerLeft: { readonly name: string };
+    playerMoved:
+      | { readonly kind: "jump"; readonly name: string; readonly cell: string; readonly pad: string }
+      | { readonly kind: "walk"; readonly name: string; readonly cell: string; readonly x: number; readonly y: number };
+    zone: { readonly zone: string | null };
+    chat: { readonly channel: string; readonly sender: string; readonly text: string };
+    whisper: { readonly sender: string; readonly text: string };
+    notice: { readonly kind: "server" | "notify" | "warning"; readonly text: string };
+    killed: { readonly monMapId: number; readonly name: string; readonly gold: number; readonly exp: number };
+    died: {};
+    respawned: {};
+    leveledUp: { readonly level: number };
+    dropOffered: Drop;
+    /** `qty` is the new total in that place. */
+    itemChanged: Stack & { readonly place: "inventory" | "temp" | "bank" };
+    questAccepted: { readonly id: number };
+    questCompleted: { readonly id: number };
+    /** Auras that run out raise no event. */
+    auraAdded: { readonly on: AuraHolder; readonly name: string; readonly stacks: number };
+    auraRemoved: { readonly on: AuraHolder; readonly name: string };
+    counterStarted: { readonly monMapId: number };
+    counterEnded: { readonly monMapId: number };
+    awayChanged: { readonly away: boolean };
+  }
+
+  export type Handler<T> = (event: T) => void | Action<void>;
+
+  export const events: {
+    on<K extends keyof Events>(event: K, handler: Handler<Events[K]>): void;
+    off<K extends keyof Events>(event: K, handler: Handler<Events[K]>): void;
+    once<K extends keyof Events>(event: K, filter?: (event: Events[K]) => boolean): Action<Events[K]>;
+  };
+
+  /** `b.o` of each JSON command mira parses. Other commands get `unknown`. */
+  export interface JsonPackets {}
+
+  /** The fields after the room of each XT command mira parses. Other commands get strings. */
+  export interface XtPackets {}
+
+  export type PacketMatch =
+    | { readonly kind: "json"; readonly cmd: string }
+    | { readonly kind: "xt"; readonly cmd: string };
+
+  export type PacketOf<M extends PacketMatch> = M extends { readonly kind: "json"; readonly cmd: infer C }
+    ? { readonly cmd: C; readonly data: C extends keyof JsonPackets ? JsonPackets[C] : unknown }
+    : M extends { readonly cmd: infer C }
+      ? { readonly cmd: C; readonly args: C extends keyof XtPackets ? XtPackets[C] : readonly string[] }
+      : never;
+
+  export const packets: {
+    /** Runs after mira has applied the message to state. */
+    on<const M extends PacketMatch>(match: M, handler: Handler<PacketOf<M>>): void;
+    off<const M extends PacketMatch>(match: M, handler: Handler<PacketOf<M>>): void;
+    /** Started right after `send`, it sees the reply. */
+    once<const M extends PacketMatch>(match: M, filter?: (packet: PacketOf<M>) => boolean): Action<PacketOf<M>>;
+    /** Queued behind earlier actions. mira can't pace a raw packet the way the client would. */
+    send(text: string): Action<void>;
+  };
+
+  export const wait: {
+    ms(ms: number): Action<void>;
+    /** Checks now and whenever state changes. */
+    until(predicate: () => boolean): Action<void>;
+    /** Runs these together until one finishes, then stops the rest. */
+    first<R extends Record<string, Action<unknown>>>(
+      actions: R,
+    ): Action<{ [K in keyof R]: { readonly winner: K; readonly value: ValueOf<R[K]> } }[keyof R]>;
+  };
+
+  /** Values go back to what they were before the run when it ends. */
+  export const settings: {
+    /**
+     * The room map.join uses when the name has none. null, the default, picks
+     * a random room from 1000 to 99999 on each join into another map. 
+     */
+    room: number | null;
+    antiAfk: boolean;
+    /**
+     * While a monster in the player's cell counters, `all` holds every cast,
+     * auto attacks included, and `attacks` holds only the casts that would hit
+     * a countering monster. A held cast goes out once the counter ends.
+     */
+    counterHold: "off" | "all" | "attacks";
+    aggro: "off" | "cell" | readonly MonsterRef[];
+    /** After a dropped connection, log back in and restart the script in a fresh context. */
+    autoRelogin:
+      | false
+      | {
+          /** The wait before the first attempt. It doubles after each failed one. */
+          readonly delayMs: number;
+          /** Default 5. */
+          readonly attempts?: number;
+          /** Default the server the account was on. */
+          readonly server?: string;
+        };
+  };
+
+  export const auth: {
+    readonly server: string;
+    servers(): Action<readonly Server[]>;
+    relogin(server?: string): Action<void>;
+    /** Ends the run. */
+    logout(): Action<never>;
+  };
+
+  export type Scalar = string | number | boolean;
+  export type ArgValue = Scalar | readonly Scalar[] | Readonly<Record<string, Scalar>>;
+
+  type Defaulted<T> = { [K in keyof T]-?: {} extends Pick<T, K> ? K : never }[keyof T];
+  type Defaults<T> = { readonly [K in Defaulted<T>]-?: Exclude<T[K], undefined> };
+
+  export const script: {
+    /**
+     * Optional keys take their default from `defaults`. mira reads `T` from the
+     * source to parse and ask for values, so write it inline. Lists and maps
+     * are JSON on the CLI: `--arg monsters='["Treeant"]'`.
+     */
+    args<T extends Record<string, ArgValue | undefined>>(
+      ...defaults: [Defaulted<T>] extends [never] ? [] : [Defaults<T>]
+    ): { readonly [K in keyof T]-?: Exclude<T[K], undefined> };
+    status(text: string): void;
+    log(...args: unknown[]): void;
+    warn(...args: unknown[]): void;
+    error(...args: unknown[]): void;
+    stop(reason?: string): never;
+    /** Ends the run and starts the script again in a fresh context, with the same args. */
+    restart(): never;
+  };
+}

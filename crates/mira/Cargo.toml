@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 mira-client.workspace = true
+mira-script.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true

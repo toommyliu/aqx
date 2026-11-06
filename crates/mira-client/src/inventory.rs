@@ -429,16 +429,7 @@ impl Inventory {
     }
 
     fn no_room(&self, id: ItemId, pool: Pool, me: &Me) -> bool {
-        let used = |pool| self.items.iter().filter(|i| i.pool() == pool).count();
-        let owned = self.items.iter().find(|i| i.id == id);
-        let stacks = owned.is_some_and(|i| i.qty < i.max_stack);
-        let bag = me.bag_slots as usize;
-        match pool {
-            Pool::Class => false,
-            Pool::House => used(Pool::House) >= me.house_slots as usize,
-            Pool::Misc => owned.is_none() && used(Pool::Misc) >= bag,
-            Pool::Bag => !stacks && used(Pool::Bag) >= bag,
-        }
+        no_room(&self.items, id, pool, me)
     }
 
     pub(crate) fn sell(&mut self, sold: &Sold) -> Option<Event> {
@@ -581,6 +572,19 @@ pub(crate) struct Worn {
     pub(crate) uid: EntityId,
     #[serde(rename = "ItemID")]
     pub(crate) id: ItemId,
+}
+
+pub(crate) fn no_room(items: &[Item], id: ItemId, pool: Pool, me: &Me) -> bool {
+    let used = |pool| items.iter().filter(|i| i.pool() == pool).count();
+    let owned = items.iter().find(|i| i.id == id);
+    let stacks = owned.is_some_and(|i| i.qty < i.max_stack);
+    let bag = me.bag_slots as usize;
+    match pool {
+        Pool::Class => false,
+        Pool::House => used(Pool::House) >= me.house_slots as usize,
+        Pool::Misc => owned.is_none() && used(Pool::Misc) >= bag,
+        Pool::Bag => !stacks && used(Pool::Bag) >= bag,
+    }
 }
 
 #[cfg(test)]

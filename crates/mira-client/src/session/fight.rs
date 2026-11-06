@@ -15,6 +15,7 @@ use crate::room::{CombatState, Monster, SPAWN};
 pub(super) struct Fight {
     pub(super) reply: Reply,
     pub(super) target: MonMapId,
+    pub(super) slots: Option<Vec<String>>,
     pub(super) next: usize,
     pub(super) wake: Option<Instant>,
 }
@@ -34,7 +35,7 @@ impl Session {
         let Some(fight) = self.fight.take() else {
             return;
         };
-        match self.step_kill(fight.target, fight.next, now) {
+        match self.step_kill(fight.target, fight.next, fight.slots.as_deref(), now) {
             Ok(Some((wake, next))) => {
                 self.fight = Some(Fight {
                     wake,
@@ -319,7 +320,7 @@ impl Session {
             _ => None,
         };
         if let Some(until) = self.held_by_counter(skill, hostile, now) {
-            return Ok(Prepared::Wait(Some(until)));
+            return Ok(Prepared::Wait(until));
         }
         match self.combat.gate(me, skill, now) {
             Readiness::Locked => Err(ActionError::Unusable(format!(
@@ -378,6 +379,7 @@ impl Session {
         &mut self,
         target: MonMapId,
         mut next: usize,
+        slots: Option<&[String]>,
         now: Instant,
     ) -> Result<Option<(Option<Instant>, usize)>, ActionError> {
         self.ensure_ready()?;
@@ -391,24 +393,30 @@ impl Session {
             return Ok(None);
         }
         let target = self.pick_target(Some(target))?;
-        if let (Some((at, slot)), _) = self.rotation(next, now, target)
+        if let (Some((at, slot)), _) = self.rotation(next, now, target, slots)
             && let Prepared::Fire { aims, hostile } =
                 self.prepare(&slot, Some(Aim::Monster(target)), now)?
         {
             self.fire(&slot, &aims, hostile, now);
             next = at + 1;
         }
-        if self.combat.auto_target() != Some(target) && !self.hostile_coming(now) {
+        if self.combat.auto_target() != Some(target) && !self.hostile_coming(slots, now) {
             self.combat.engage(target, now);
         }
-        Ok(Some((self.rotation(next, now, target).1, next)))
+        Ok(Some((self.rotation(next, now, target, slots).1, next)))
     }
 
-    pub(super) fn rotation_skills(&self) -> impl Iterator<Item = &Skill> {
-        self.character
-            .iter()
-            .flat_map(|me| &me.skills)
-            .filter(|s| s.slot != AUTO_ATTACK && s.slot != ITEM_SLOT)
+    pub(super) fn rotation_skills(&self, slots: Option<&[String]>) -> Vec<&Skill> {
+        let skills = self.character.iter().flat_map(|me| &me.skills);
+        match slots {
+            Some(slots) => slots
+                .iter()
+                .filter_map(|slot| skills.clone().find(|s| s.slot == *slot))
+                .collect(),
+            None => skills
+                .filter(|s| s.slot != AUTO_ATTACK && s.slot != ITEM_SLOT)
+                .collect(),
+        }
     }
 
     pub(super) fn rotation(
@@ -416,15 +424,16 @@ impl Session {
         next: usize,
         now: Instant,
         target: MonMapId,
+        slots: Option<&[String]>,
     ) -> (Option<(usize, String)>, Option<Instant>) {
         let Some(me) = &self.character else {
             return (None, None);
         };
-        let skills: Vec<&Skill> = self.rotation_skills().collect();
+        let skills = self.rotation_skills(slots);
         let mut wake = None;
         for at in (0..skills.len()).map(|i| (next + i) % skills.len()) {
             if let Some(until) = self.held_by_counter(skills[at], Some(target), now) {
-                wake = wake.into_iter().chain(Some(until)).min();
+                wake = wake.into_iter().chain(until).min();
                 continue;
             }
             match self.combat.gate(me, skills[at], now) {
@@ -442,7 +451,7 @@ impl Session {
     pub(super) fn class_skill_due(&self, now: Instant) -> Option<Instant> {
         let me = self.character.as_ref()?;
         let waiting: Vec<&Skill> = match (&self.fight, &self.current) {
-            (Some(_), _) => self.rotation_skills().collect(),
+            (Some(fight), _) => self.rotation_skills(fight.slots.as_deref()),
             (
                 None,
                 Some(Op::Cast {
@@ -463,11 +472,12 @@ impl Session {
             .min()
     }
 
-    pub(super) fn hostile_coming(&self, now: Instant) -> bool {
+    pub(super) fn hostile_coming(&self, slots: Option<&[String]>, now: Instant) -> bool {
         let Some(me) = &self.character else {
             return false;
         };
-        self.rotation_skills()
+        self.rotation_skills(slots)
+            .into_iter()
             .filter(|s| s.target == SkillTarget::Hostile)
             .any(|s| {
                 matches!(
@@ -520,7 +530,7 @@ impl Session {
         skill: &Skill,
         target: Option<MonMapId>,
         now: Instant,
-    ) -> Option<Instant> {
+    ) -> Option<Option<Instant>> {
         let room = self.room.as_ref()?;
         let hit: Vec<MonMapId> = match self.counter_hold {
             CounterHold::Off => return None,
@@ -543,11 +553,15 @@ impl Session {
             })
             .collect(),
         };
-        room.monsters
+        let countering: Vec<&Monster> = room
+            .monsters
             .iter()
             .filter(|m| hit.contains(&m.id) && m.countering(now))
-            .filter_map(Monster::counter_deadline)
-            .min()
+            .collect();
+        if countering.is_empty() {
+            return None;
+        }
+        Some(countering.iter().filter_map(|m| m.counter_deadline()).min())
     }
 
     pub(super) fn settle(&mut self, result: &ActionResult) {
