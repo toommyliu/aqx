@@ -9,7 +9,8 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
     "strict": true,
-    "noEmit": true
+    "noEmit": true,
+    "paths": { "mira": ["../api/mira.d.ts"] }
   },
-  "include": ["**/*.ts", "../api/mira.d.ts"]
+  "include": ["**/*.ts"]
 }

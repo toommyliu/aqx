@@ -22,7 +22,7 @@ mira run farm.ts --user player1 --pass "$MIRA_PASS" --server Twilly --arg monste
 
 ## Set up type checking
 
-Copy [`examples/tsconfig.json`](../examples/tsconfig.json) next to your scripts, and point its `include` entry at `api/mira.d.ts`. mira removes types without compiling, so it rejects syntax that generates code, such as `enum`. The config's `erasableSyntaxOnly` option makes your editor flag that syntax too.
+Copy [`examples/tsconfig.json`](../examples/tsconfig.json) next to your scripts, and point its `paths` entry for `"mira"` at `api/mira.d.ts`. mira removes types without compiling, so it rejects syntax that generates code, such as `enum`. The config's `erasableSyntaxOnly` option makes your editor flag that syntax too.
 
 ## Put the script in the default export
 

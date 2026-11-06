@@ -1,0 +1,15 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "api": "tsc -p scripts && tsc -p crates/mira-script && node scripts/api.ts",
+    "api:check": "tsc -p scripts && tsc -p crates/mira-script && node scripts/api.ts --check"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

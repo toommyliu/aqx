@@ -14,7 +14,9 @@ use mira_protocol::{AreaId, EntityId, ItemId, QuestId, ShopId};
 use mira_script::{Account, Cancel, Level, LoadError, Outcome, Output, Script, Start};
 use std::sync::{Arc, Mutex};
 
-use serde_json::json;
+use serde_json::{Value, json};
+
+mod api_types;
 
 struct Dir(PathBuf);
 
@@ -245,13 +247,15 @@ fn a_generator_of_the_scripts_own_is_an_action() {
           yield* wait.ms(1);
           return n * 2;
         }
+        const callable = Object.assign(() => {}, { [Symbol.iterator]: () => double(4) });
         export default function* () {
           script.log(yield* double(21));
+          script.log(JSON.stringify(yield* wait.first({ callable })));
         }
         "#,
     );
     assert_eq!(outcome, Ok(Outcome::Finished));
-    assert_eq!(logs(&outputs), ["42"]);
+    assert_eq!(logs(&outputs), ["42", r#"{"winner":"callable","value":8}"#]);
 }
 
 #[test]
@@ -1571,9 +1575,14 @@ fn auth_lists_servers_and_relogs_without_ending_the_run() {
         account,
         move |out| {
             if matches!(out, Output::Log { text, .. } if text.starts_with("Other")) {
-                let relogged = watched.0.lock().unwrap();
-                *during.lock().unwrap() =
-                    Some(relogged[0].session.snapshot().settings.counter_hold);
+                let session = watched.0.lock().unwrap()[0].session.clone();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while session.snapshot().settings.counter_hold != mira_client::CounterHold::All
+                    && Instant::now() < deadline
+                {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                *during.lock().unwrap() = Some(session.snapshot().settings.counter_hold);
             }
         },
     );
@@ -1871,6 +1880,136 @@ fn the_floor_zone_follows_the_boss() {
             "marked A",
             "zone null",
             "cleared null"
+        ]
+    );
+}
+
+#[test]
+fn what_mira_builds_matches_the_generated_types() {
+    let (listening, ready) = mpsc::channel();
+    let harness = farm(move |peer| {
+        ready.recv().unwrap();
+        peer.send(
+            "<msg t='sys'><body action='uER' r='43'><u i='10' m='0' s='0' p='3'>\
+             <n><![CDATA[player4]]></n><vars></vars></u></body></msg>",
+        );
+        peer.expect(&packet::retrieve_user_data(AreaId(43), EntityId(10)));
+        let aura = |caster: &str, target: &str, name: &str| {
+            json_message(json!({"cmd": "aura+", "cInf": caster, "tInf": target,
+                "auras": [{"nam": name, "dur": 5, "isNew": true}]}))
+        };
+        peer.send(&aura("p:7", "m:1", "Bleed"));
+        peer.send(&aura("m:1", "p:7", "Stun"));
+        peer.send(&json_message(json!({"cmd": "addItems", "items": {"201": {
+            "ItemID": 201, "sName": "Frog Leg", "iQty": 1, "iStk": 5, "bTemp": true,
+        }}})));
+        peer.send(&json_message(json!({"cmd": "dropItem", "items": {"300": {
+            "ItemID": 300, "sName": "Mace", "iQty": 1, "iStk": 1, "sType": "Mace", "sES": "Weapon",
+        }}})));
+        peer.send(&chat("hello"));
+        peer.expect(&packet::get_quests(AreaId(43), &[QuestId(30)]));
+        peer.send(&json_message(json!({"cmd": "getQuests", "quests": {"30": {
+            "QuestID": 30, "sName": "Potion Run",
+            "turnin": [{"ItemID": 101, "iQty": 2}],
+            "oItems": {"101": {"ItemID": 101, "sName": "Health Potion"}},
+            "reward": [{"ItemID": 600, "iQty": 1, "iRate": 100, "iType": 2}],
+        }}})));
+        peer.expect(&packet::load_shop(AreaId(43), ShopId(7)));
+        peer.send(&json_message(json!({"cmd": "loadShop", "shopinfo": {
+            "ShopID": 7, "sName": "Mixed", "Location": "farm", "items": [
+                {"ItemID": 905, "ShopItemID": 74, "sName": "Token Buy", "iCost": 0, "iStk": 10,
+                 "iQty": 1, "TokID": 101, "TokQty": 2},
+            ],
+        }})));
+    });
+    let dir = Dir::new();
+    let path = dir.file(
+        "main.ts",
+        r#"
+        import { auth, bank, combat, drops, events, inventory, map, player, quests, script, shop, wait } from "mira";
+        export default function* () {
+          const seen: [string, unknown][] = [];
+          for (const name of ["playerEntered", "auraAdded", "itemChanged", "dropOffered", "chat"] as const) {
+            events.on(name, (event) => {
+              seen.push([name, event]);
+            });
+          }
+          script.log("listening");
+          yield* wait.until(() => seen.some(([name]) => name === "chat"));
+          yield* quests.load(30);
+          yield* shop.load(7);
+          const servers = yield* auth.servers();
+          const { registered, ...pending } = drops;
+          script.log(JSON.stringify({
+            player, map, combat, inventory, bank, drops: pending, shop,
+            quest: quests.get(30), servers, seen,
+          }));
+        }
+        "#,
+    );
+    let account: Arc<dyn Account> = Arc::new(Relogins(Mutex::new(Vec::new())));
+    let (outcome, outputs) = run_with(
+        &harness,
+        &path,
+        &Cancel::default(),
+        &[],
+        account,
+        signal_on("listening", listening),
+    );
+    finish(harness);
+    assert_eq!(outcome, Ok(Outcome::Finished));
+    let built: Value = serde_json::from_str(logs(&outputs).last().unwrap()).unwrap();
+    for list in [
+        "/player/auras",
+        "/player/factions",
+        "/map/players",
+        "/map/monsters",
+        "/map/monsters/0/auras",
+        "/combat/skills",
+        "/inventory/items",
+        "/inventory/temp",
+        "/drops/pending",
+        "/shop/current/items",
+        "/quest/turnIn",
+        "/quest/rewards",
+        "/servers",
+    ] {
+        let found = built.pointer(list).and_then(Value::as_array);
+        assert!(
+            found.is_some_and(|items| !items.is_empty()),
+            "{list} is empty, so its type went unchecked"
+        );
+    }
+
+    let api = api_types::Api::load();
+    for (key, ty) in [
+        ("player", "PlayerFields"),
+        ("map", "MapFields"),
+        ("combat", "CombatFields"),
+        ("inventory", "InventoryFields"),
+        ("bank", "BankFields"),
+        ("drops", "DropsFields"),
+        ("shop", "ShopFields"),
+        ("quest", "Quest"),
+        ("servers", "readonly Server[]"),
+    ] {
+        api.check(ty, &built[key]).unwrap();
+    }
+    let mut events = Vec::new();
+    for pair in built["seen"].as_array().unwrap() {
+        let name = pair[0].as_str().unwrap();
+        api.check_event(name, &pair[1]).unwrap();
+        events.push(name);
+    }
+    events.dedup();
+    assert_eq!(
+        events,
+        [
+            "playerEntered",
+            "auraAdded",
+            "itemChanged",
+            "dropOffered",
+            "chat"
         ]
     );
 }

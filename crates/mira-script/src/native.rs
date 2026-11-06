@@ -366,3 +366,55 @@ impl ModuleDef for Native {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use swc_common::sync::Lrc;
+    use swc_common::{FileName, SourceMap};
+    use swc_ecma_ast::{Decl, Expr, ModuleItem, Stmt, TsTypeElement};
+    use swc_ecma_parser::{Parser, StringInput, Syntax, TsSyntax};
+
+    use super::NAMES;
+
+    #[test]
+    fn the_native_module_exports_what_mira_ts_declares() {
+        let map: Lrc<SourceMap> = Lrc::default();
+        let file = map.new_source_file(
+            Lrc::new(FileName::Custom("mira.ts".into())),
+            include_str!("mira.ts").to_owned(),
+        );
+        let module = Parser::new(
+            Syntax::Typescript(TsSyntax::default()),
+            StringInput::from(&*file),
+            None,
+        )
+        .parse_module()
+        .unwrap();
+        let native = module
+            .body
+            .iter()
+            .find_map(|item| match item {
+                ModuleItem::Stmt(Stmt::Decl(Decl::TsInterface(i))) if &*i.id.sym == "Native" => {
+                    Some(i)
+                }
+                _ => None,
+            })
+            .expect("mira.ts declares interface Native");
+        let declared: BTreeSet<String> = native
+            .body
+            .body
+            .iter()
+            .filter_map(|member| match member {
+                TsTypeElement::TsMethodSignature(method) => match &*method.key {
+                    Expr::Ident(name) => Some(name.sym.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        let exported: BTreeSet<String> = NAMES.iter().map(|name| (*name).to_owned()).collect();
+        assert_eq!(declared, exported);
+    }
+}

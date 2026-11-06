@@ -14,7 +14,7 @@ use crate::native::Native;
 
 const MIRA: &str = "mira";
 const NATIVE: &str = "mira:native";
-const MIRA_JS: &str = include_str!("mira.js");
+const MIRA_TS: &str = include_str!("mira.ts");
 
 pub struct Resolve;
 
@@ -52,7 +52,11 @@ impl Loader for Load {
         _: Option<ImportAttributes<'js>>,
     ) -> Result<Module<'js, Declared>> {
         match name {
-            MIRA => Module::declare(ctx.clone(), name, MIRA_JS),
+            MIRA => {
+                let code = strip_types(name, MIRA_TS.to_owned())
+                    .map_err(|why| Error::new_loading_message(name, why))?;
+                Module::declare(ctx.clone(), name, code)
+            }
             NATIVE => Module::declare_def::<Native, _>(ctx.clone(), name),
             _ => {
                 let code =
