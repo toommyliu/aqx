@@ -97,6 +97,15 @@ impl World {
             &self.factions,
         ))
     }
+
+    pub fn turn_in_limit(&self, id: QuestId) -> Option<Result<u32, String>> {
+        let held = Held {
+            items: &self.inventory,
+            temp: &self.temp,
+        };
+        let accepted = self.accepted_quests.contains(&id);
+        Some(turn_in_limit(self.quests.get(&id)?, accepted, held))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -151,7 +160,10 @@ pub(crate) fn status(quest: &Quest, me: &Me, held: Held, factions: &[Faction]) -
     }
 }
 
-pub(crate) fn turn_in_limit(quest: &Quest, held: Held) -> Result<u32, String> {
+pub(crate) fn turn_in_limit(quest: &Quest, accepted: bool, held: Held) -> Result<u32, String> {
+    if !accepted {
+        return Err(format!("{} hasn't been accepted", quest.name));
+    }
     let mut most = MAX_TURN_INS;
     for need in &quest.turn_in {
         let qty = held.qty(need.id).unwrap_or(0);

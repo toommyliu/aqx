@@ -2526,6 +2526,12 @@ fn quest_actions_make_the_clients_checks_before_sending() {
     while !session.snapshot().accepted_quests.contains(&QuestId(44)) {
         thread::sleep(Duration::from_millis(5));
     }
+    let world = session.snapshot();
+    let limit = |id| world.turn_in_limit(QuestId(id));
+    assert!(matches!(limit(40), Some(Err(_))));
+    assert!(matches!(limit(42), Some(Err(_))));
+    assert_eq!(limit(43), Some(Ok(1)));
+    assert_eq!(limit(99), None);
     let unusable = |pending: Pending| matches!(pending.wait(), Err(ActionError::Unusable(_)));
     assert!(unusable(session.accept_quest(QuestId(40))));
     assert!(unusable(session.complete_quest(QuestId(40), None, 1)));

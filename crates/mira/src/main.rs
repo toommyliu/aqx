@@ -297,6 +297,7 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                             "quest": quest,
                             "status": world.quest_status(quest.id),
                             "accepted": world.accepted_quests.contains(&quest.id),
+                            "turn_ins": world.turn_in_limit(quest.id).and_then(Result::ok),
                         })
                     })
                     .collect();
@@ -312,10 +313,13 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                         Some(QuestStatus::Available) => "available",
                         None => "unknown",
                     };
-                    let accepted = if world.accepted_quests.contains(&quest.id) {
-                        ", accepted"
-                    } else {
-                        ""
+                    let accepted = match world.turn_in_limit(quest.id) {
+                        _ if !world.accepted_quests.contains(&quest.id) => String::new(),
+                        Some(Ok(1)) => ", accepted, ready to turn in".into(),
+                        Some(Ok(times)) => {
+                            format!(", accepted, ready to turn in up to {times} at once")
+                        }
+                        _ => ", accepted".into(),
                     };
                     println!("  {} {} ({status}{accepted})", quest.id, quest.name);
                 }
