@@ -3515,7 +3515,7 @@ fn arrival(area: i64, name: &str, kind: &str, frame: &str, pad: &str) -> String 
 }
 
 #[test]
-fn arrives_where_the_client_would_after_a_join() {
+fn arrives_in_the_cell_a_join_asks_for() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready("5.31");
@@ -3539,13 +3539,13 @@ fn arrives_where_the_client_would_after_a_join() {
         peer.expect(&packet::transfer_to(
             AreaId(43),
             "player1",
-            "farm",
+            "farm-100000",
             "Crop1",
             "Left",
         ));
-        peer.send(&arrival(44, "farm-1", "0", "Enter", "Spawn"));
-        peer.send("%xt%server%-1%You joined \"farm-1\"!%");
-        peer.expect(&packet::move_to_cell(AreaId(44), "Enter", "Spawn"));
+        peer.send(&arrival(44, "farm-98367", "0", "Enter", "Spawn"));
+        peer.send("%xt%server%-1%You joined \"farm-98367\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(44), "Crop1", "Left"));
         peer.expect(&packet::transfer("player1", "yulgar"));
         peer.send(&arrival(45, "yulgar-1", "2", "r3", "Right"));
         peer.send("%xt%server%-1%You joined \"yulgar-1\"!%");
@@ -3562,7 +3562,10 @@ fn arrives_where_the_client_would_after_a_join() {
         .find(|e| matches!(e, Event::Joined { map, .. } if map == "tavern-1"))
         .unwrap();
     session.join_at("xantown", "r7", "Left").wait().unwrap();
-    session.join_at("farm", "Crop1", "Left").wait().unwrap();
+    session
+        .join_at("farm-100000", "Crop1", "Left")
+        .wait()
+        .unwrap();
     session.join("yulgar").wait().unwrap();
     let room = session.snapshot().room.clone().unwrap();
     assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r3", "Right"));

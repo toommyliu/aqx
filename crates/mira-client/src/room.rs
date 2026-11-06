@@ -181,14 +181,17 @@ pub(crate) struct Spot {
     pub(crate) pad: String,
 }
 
+fn without_room(name: &str) -> &str {
+    name.rsplit_once('-').map_or(name, |(base, _)| base)
+}
+
 fn names_map(area: &str, map: &str) -> bool {
-    let base = area.rsplit_once('-').map_or(area, |(base, _)| base);
-    area.eq_ignore_ascii_case(map) || base.eq_ignore_ascii_case(map)
+    area.eq_ignore_ascii_case(map) || without_room(area).eq_ignore_ascii_case(map)
 }
 
 impl MoveToArea {
     pub(crate) fn is_for(&self, map: &str) -> bool {
-        names_map(&self.name, map)
+        without_room(&self.name).eq_ignore_ascii_case(without_room(map))
     }
 }
 
@@ -198,6 +201,7 @@ impl Room {
         me: Option<EntityId>,
         requested: Option<Spot>,
     ) -> (Room, Option<Mine>) {
+        let requested = requested.filter(|spot| area.is_for(&spot.map));
         let (mine, others): (Vec<AreaPlayer>, Vec<AreaPlayer>) =
             area.players.into_iter().partition(|p| Some(p.eid) == me);
         let (x, y) = mine.first().map_or((0, 0), |p| (p.tx, p.ty));
@@ -206,7 +210,6 @@ impl Room {
             (p.cell.clone(), pad.to_owned())
         });
         let (cell, pad) = requested
-            .filter(|spot| area.kind != 0 && names_map(&area.name, &spot.map))
             .map(|spot| (spot.cell, spot.pad))
             .or(placed)
             .unwrap_or_else(|| (SPAWN.0.to_owned(), SPAWN.1.to_owned()));
@@ -396,8 +399,6 @@ pub(crate) struct MoveToArea {
     area: AreaId,
     #[serde(rename = "areaName")]
     name: String,
-    #[serde(rename = "intType", default, deserialize_with = "flex::int")]
-    kind: i64,
     #[serde(rename = "uoBranch", default)]
     players: Vec<AreaPlayer>,
     #[serde(rename = "mondef", default)]
@@ -619,6 +620,12 @@ mod tests {
         let (room, _) = Room::arriving(area("tavern-1"), me, Some(spot()));
         assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r3", "Right"));
         let (room, _) = Room::arriving(area("xantown-2"), me, Some(spot()));
+        assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r7", "Left"));
+        let spot = Spot {
+            map: "xantown-100000".into(),
+            ..spot()
+        };
+        let (room, _) = Room::arriving(area("xantown-98367"), me, Some(spot));
         assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r7", "Left"));
     }
 }
