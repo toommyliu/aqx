@@ -352,6 +352,7 @@ enum Request {
     Act(Action, Reply, u64),
     Set(Setting, u64),
     Cancel(Cancel),
+    Untarget,
     Subscribe(mpsc::Sender<Event>),
     Logout,
 }
@@ -762,6 +763,10 @@ impl Handle {
         self.request(Request::Cancel(Cancel::All));
     }
 
+    pub fn untarget(&self) {
+        self.request(Request::Untarget);
+    }
+
     fn act(&self, action: Action) -> Pending {
         let (tx, result) = mpsc::sync_channel(1);
         let id = ActionId(self.next_id.fetch_add(1, Ordering::Relaxed));
@@ -1030,12 +1035,8 @@ impl Session {
         for (_, reply) in dropped {
             self.replies.push((reply, Err(ActionError::Cancelled)));
         }
-        if self.fight.as_ref().is_some_and(|f| which.covers(&f.reply))
-            && let Some(fight) = self.fight.take()
-        {
-            self.combat.disengage();
-            self.replies
-                .push((fight.reply, Err(ActionError::Cancelled)));
+        if self.fight.as_ref().is_some_and(|f| which.covers(&f.reply)) {
+            self.untarget();
         }
         if let Some(reply) = self.current.as_mut().and_then(Op::reply_mut)
             && which.covers(reply)
@@ -1047,6 +1048,14 @@ impl Session {
                 .push((Reply { id, tx }, Err(ActionError::Cancelled)));
             self.cancelled = Some(id);
         }
+    }
+
+    fn untarget(&mut self) {
+        if let Some(fight) = self.fight.take() {
+            self.replies
+                .push((fight.reply, Err(ActionError::Cancelled)));
+        }
+        self.combat.disengage();
     }
 
     fn apply(&mut self, setting: Setting) {
@@ -1068,6 +1077,7 @@ impl Session {
                     self.replies.push((reply, Err(ActionError::Closed(why))));
                 }
                 Request::Cancel(which) => self.cancel(which),
+                Request::Untarget => self.untarget(),
                 Request::Subscribe(subscriber) => self.events.push(subscriber),
                 Request::Logout => self.begin_logout(),
                 Request::Set(_, epoch) if self.stale_epoch(epoch) => {}
