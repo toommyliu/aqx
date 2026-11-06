@@ -253,9 +253,9 @@ impl Session {
         times: u32,
     ) -> Result<(), ActionError> {
         let unusable = |why: String| Err(ActionError::Unusable(why));
-        if !self.accepted_quests.contains(&quest.id) {
-            return unusable(format!("{} hasn't been accepted", quest.name));
-        }
+        let accepted = self.accepted_quests.contains(&quest.id);
+        let most =
+            quest::turn_in_limit(quest, accepted, self.held()).map_err(ActionError::Unusable)?;
         let mut choices = quest
             .rewards
             .iter()
@@ -269,7 +269,6 @@ impl Session {
             }
             _ => {}
         }
-        let most = quest::turn_in_limit(quest, self.held()).map_err(ActionError::Unusable)?;
         if times == 0 || times > most {
             return unusable(format!(
                 "{} can be turned in {most} time{} at once now",
