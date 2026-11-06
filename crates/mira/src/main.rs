@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::BufRead;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,8 +9,8 @@ use clap::{Parser, Subcommand};
 use mira_client::{
     ActionError, Aggro, Auras, BoostKind, CombatState, CounterHold, DEFAULT_RECONNECT_ATTEMPTS,
     DeviceId, Direction, Disconnect, Event, Handle, Item, ItemId, Load, MapItemId, Me, MonMapId,
-    Monster, NoticeKind, Options, Pending, Phase, Place, QuestId, QuestStatus, Reconnect, Respawn,
-    Room, Server, ShopId, ShopItemId, SkillTarget, World, api,
+    Monster, NoticeKind, Options, Pending, Phase, Place, QuestId, QuestStatus, Readiness,
+    Reconnect, Respawn, Room, Server, ShopId, ShopItemId, SkillTarget, World, api,
 };
 
 const DEFAULT_PAD: &str = "Left";
@@ -514,11 +514,16 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                 session.get_map_item(id).wait()?;
             }
         }
-        ["me"] => match &session.snapshot().me {
-            Some(me) if json => println!("{}", serde_json::to_string(me).expect("me serializes")),
-            Some(me) => print!("{}", describe_me(me)),
-            None => return Err(CommandError::Action(ActionError::NotReady)),
-        },
+        ["me"] => {
+            let world = session.snapshot();
+            match &world.me {
+                Some(me) if json => {
+                    println!("{}", serde_json::to_string(me).expect("me serializes"))
+                }
+                Some(me) => print!("{}", describe_me(me, &world.readiness)),
+                None => return Err(CommandError::Action(ActionError::NotReady)),
+            }
+        }
         _ => {
             return Err(CommandError::Usage(format!(
                 "can't run {line:?}; commands are {COMMANDS}"
@@ -674,7 +679,7 @@ fn describe_inventory(world: &World) -> String {
     text
 }
 
-fn describe_me(me: &Me) -> String {
+fn describe_me(me: &Me, readiness: &BTreeMap<String, Readiness>) -> String {
     let mut text = format!(
         "level {} ({}/{} xp), {} rank {} ({} CP), {} gold, {} AC, {}/{} HP, {}/{} MP, {}, haste {}\n",
         me.level,
@@ -718,9 +723,19 @@ fn describe_me(me: &Me) -> String {
             SkillTarget::Friendly => "friendly",
             SkillTarget::Myself => "self",
         };
-        let locked = if skill.unlocked { "" } else { ", locked" };
+        let ready = match readiness.get(&skill.slot) {
+            Some(Readiness::At(at)) if *at > now => {
+                format!(", ready in {:.1} s", (*at - now).as_secs_f64())
+            }
+            Some(Readiness::Ready | Readiness::At(_)) => ", ready".into(),
+            Some(Readiness::Casting) => ", casting".into(),
+            Some(Readiness::Disabled) => ", disabled".into(),
+            Some(Readiness::Locked) => ", locked".into(),
+            Some(Readiness::NoMana) => ", no mana".into(),
+            None => String::new(),
+        };
         text.push_str(&format!(
-            "  {:<3} {} ({} ms, {} MP, {target} x{}{locked})\n",
+            "  {:<3} {} ({} ms, {} MP, {target} x{}{ready})\n",
             skill.slot, skill.name, skill.cooldown_ms, skill.mana, skill.max_targets
         ));
     }

@@ -1754,6 +1754,7 @@ impl Session {
             bank: self.bank.clone(),
             procs: Arc::clone(&self.procs),
             target: self.combat.auto_target(),
+            readiness: self.readiness(Instant::now()),
         });
         for event in self.outgoing.drain(..) {
             self.events

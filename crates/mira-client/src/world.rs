@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use mira_protocol::{MonMapId, QuestId};
 
+use crate::combat::Readiness;
 use crate::faction::Faction;
 use crate::inventory::{DropOffer, Item, TempItem};
 
@@ -28,6 +29,7 @@ pub struct World {
     pub bank: Option<Arc<Vec<Item>>>,
     pub procs: Arc<HashMap<u32, String>>,
     pub target: Option<MonMapId>,
+    pub readiness: BTreeMap<String, Readiness>,
 }
 
 impl World {
@@ -46,6 +48,7 @@ impl World {
             bank: None,
             procs: Arc::default(),
             target: None,
+            readiness: BTreeMap::new(),
         }
     }
 
