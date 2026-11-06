@@ -28,7 +28,7 @@ pub use quest::{
 };
 pub use room::{CombatState, Monster, Player, Room};
 pub use session::{
-    ActionError, Aggro, CounterHold, DEFAULT_CLIENT_VERSION, DEFAULT_RECONNECT_ATTEMPTS,
+    ActionError, ActionId, Aggro, CounterHold, DEFAULT_CLIENT_VERSION, DEFAULT_RECONNECT_ATTEMPTS,
     Disconnect, Handle, Load, Options, Pending, Phase, Reconnect, Respawn, spawn,
 };
 pub use shop::{MergeCost, Shop, ShopItem};

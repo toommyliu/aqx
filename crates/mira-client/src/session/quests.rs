@@ -48,6 +48,10 @@ impl Stage {
             Stage::Fetching { deadline, .. } | Stage::Sent { deadline } => Some(*deadline),
         }
     }
+
+    pub(super) fn awaiting(&self) -> bool {
+        !matches!(self, Stage::Ready { .. })
+    }
 }
 
 pub(super) enum Answer {

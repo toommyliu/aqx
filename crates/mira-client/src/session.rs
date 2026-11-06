@@ -180,6 +180,8 @@ pub enum ActionError {
     Closed(Disconnect),
     #[error("the session stopped without closing")]
     Stopped,
+    #[error("cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -277,7 +279,29 @@ impl Limits {
 }
 
 type Slot = Arc<Mutex<Arc<World>>>;
-type Reply = mpsc::SyncSender<Result<(), ActionError>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ActionId(u64);
+
+struct Reply {
+    id: ActionId,
+    tx: mpsc::SyncSender<Result<(), ActionError>>,
+}
+
+#[derive(Clone, Copy)]
+enum Cancel {
+    One(ActionId),
+    All,
+}
+
+impl Cancel {
+    fn covers(self, reply: &Reply) -> bool {
+        match self {
+            Cancel::One(id) => reply.id == id,
+            Cancel::All => true,
+        }
+    }
+}
 
 fn latest(slot: &Slot) -> Arc<World> {
     Arc::clone(&slot.lock().unwrap_or_else(PoisonError::into_inner))
@@ -327,6 +351,7 @@ enum Setting {
 enum Request {
     Act(Action, Reply, u64),
     Set(Setting, u64),
+    Cancel(Cancel),
     Subscribe(mpsc::Sender<Event>),
     Logout,
 }
@@ -467,6 +492,60 @@ impl Op {
             | Op::Walk { reply, .. } => Some(reply),
         }
     }
+
+    fn reply(&self) -> Option<&Reply> {
+        match self {
+            Op::Login { .. } => None,
+            Op::Join { reply, .. }
+            | Op::Cast { reply, .. }
+            | Op::Leave { reply, .. }
+            | Op::Quest { reply, .. }
+            | Op::Pick { reply, .. }
+            | Op::Shop { reply, .. }
+            | Op::Trade { reply, .. }
+            | Op::Bank { reply, .. }
+            | Op::Equip { reply, .. }
+            | Op::MapItem { reply, .. }
+            | Op::Rest { reply, .. }
+            | Op::Walk { reply, .. } => Some(reply),
+        }
+    }
+
+    fn reply_mut(&mut self) -> Option<&mut Reply> {
+        match self {
+            Op::Login { .. } => None,
+            Op::Join { reply, .. }
+            | Op::Cast { reply, .. }
+            | Op::Leave { reply, .. }
+            | Op::Quest { reply, .. }
+            | Op::Pick { reply, .. }
+            | Op::Shop { reply, .. }
+            | Op::Trade { reply, .. }
+            | Op::Bank { reply, .. }
+            | Op::Equip { reply, .. }
+            | Op::MapItem { reply, .. }
+            | Op::Rest { reply, .. }
+            | Op::Walk { reply, .. } => Some(reply),
+        }
+    }
+
+    fn awaiting(&self) -> bool {
+        match self {
+            Op::Join { stage, .. } => matches!(stage, JoinStage::Sent { .. }),
+            Op::Cast { stage, .. } => matches!(stage, CastStage::Sent { .. }),
+            Op::Quest { call, .. } => call.stage.awaiting(),
+            Op::Pick { .. } => true,
+            Op::Shop { stage, .. } => matches!(stage, ShopStage::Sent { .. }),
+            Op::Trade { stage, .. } => !matches!(stage, TradeStage::Waiting { .. }),
+            Op::Bank { stage, .. } => !matches!(stage, BankStage::Idle),
+            Op::Equip { stage, .. } => matches!(stage, EquipStage::Sent { .. }),
+            Op::Login { .. }
+            | Op::Leave { .. }
+            | Op::MapItem { .. }
+            | Op::Rest { .. }
+            | Op::Walk { .. } => false,
+        }
+    }
 }
 
 enum RestStage {
@@ -520,6 +599,7 @@ pub struct Handle {
     waker: Arc<Waker>,
     world: Slot,
     epoch: Arc<AtomicU64>,
+    next_id: Arc<AtomicU64>,
 }
 
 impl Handle {
@@ -674,11 +754,21 @@ impl Handle {
         latest(&self.world)
     }
 
+    pub fn cancel(&self, id: ActionId) {
+        self.request(Request::Cancel(Cancel::One(id)));
+    }
+
+    pub fn cancel_all(&self) {
+        self.request(Request::Cancel(Cancel::All));
+    }
+
     fn act(&self, action: Action) -> Pending {
-        let (reply, result) = mpsc::sync_channel(1);
+        let (tx, result) = mpsc::sync_channel(1);
+        let id = ActionId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let epoch = self.epoch.load(Ordering::SeqCst);
-        self.request(Request::Act(action, reply, epoch));
+        self.request(Request::Act(action, Reply { id, tx }, epoch));
         Pending {
+            id,
             result,
             world: Arc::clone(&self.world),
         }
@@ -692,11 +782,16 @@ impl Handle {
 }
 
 pub struct Pending {
+    id: ActionId,
     result: mpsc::Receiver<Result<(), ActionError>>,
     world: Slot,
 }
 
 impl Pending {
+    pub fn id(&self) -> ActionId {
+        self.id
+    }
+
     pub fn wait(self) -> Result<(), ActionError> {
         self.result
             .recv()
@@ -783,6 +878,7 @@ pub fn spawn(
         boost_check: None,
         combat: Combat::default(),
         fight: None,
+        cancelled: None,
         closing: None,
         logout_deadline: None,
     };
@@ -794,6 +890,7 @@ pub fn spawn(
         waker,
         world,
         epoch,
+        next_id: Arc::default(),
     };
     Ok((handle, events_in))
 }
@@ -853,6 +950,7 @@ struct Session {
     boost_check: Option<Instant>,
     combat: Combat,
     fight: Option<Fight>,
+    cancelled: Option<ActionId>,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
 }
@@ -923,6 +1021,34 @@ impl Session {
         self.recovery.is_some() || epoch != self.epoch.load(Ordering::SeqCst)
     }
 
+    fn cancel(&mut self, which: Cancel) {
+        let (dropped, kept): (Vec<_>, Vec<_>) = self
+            .queue
+            .drain(..)
+            .partition(|(_, reply)| which.covers(reply));
+        self.queue = kept.into();
+        for (_, reply) in dropped {
+            self.replies.push((reply, Err(ActionError::Cancelled)));
+        }
+        if self.fight.as_ref().is_some_and(|f| which.covers(&f.reply))
+            && let Some(fight) = self.fight.take()
+        {
+            self.combat.disengage();
+            self.replies
+                .push((fight.reply, Err(ActionError::Cancelled)));
+        }
+        if let Some(reply) = self.current.as_mut().and_then(Op::reply_mut)
+            && which.covers(reply)
+        {
+            let (detached, _) = mpsc::sync_channel(1);
+            let tx = std::mem::replace(&mut reply.tx, detached);
+            let id = reply.id;
+            self.replies
+                .push((Reply { id, tx }, Err(ActionError::Cancelled)));
+            self.cancelled = Some(id);
+        }
+    }
+
     fn apply(&mut self, setting: Setting) {
         match setting {
             Setting::CounterHold(hold) => self.counter_hold = hold,
@@ -941,6 +1067,7 @@ impl Session {
                     let why = why.unwrap_or(Disconnect::Ended);
                     self.replies.push((reply, Err(ActionError::Closed(why))));
                 }
+                Request::Cancel(which) => self.cancel(which),
                 Request::Subscribe(subscriber) => self.events.push(subscriber),
                 Request::Logout => self.begin_logout(),
                 Request::Set(_, epoch) if self.stale_epoch(epoch) => {}
@@ -1039,6 +1166,9 @@ impl Session {
     fn run_ops(&mut self, now: Instant) {
         loop {
             match self.current.take() {
+                Some(op)
+                    if !op.awaiting()
+                        && op.reply().is_some_and(|r| Some(r.id) == self.cancelled) => {}
                 Some(op) => {
                     self.current = self.step(op, now);
                     if self.current.is_some() {
@@ -1620,7 +1750,7 @@ impl Session {
                 .retain(|subscriber| subscriber.send(event.clone()).is_ok());
         }
         for (reply, result) in self.replies.drain(..) {
-            let _ = reply.send(result);
+            let _ = reply.tx.send(result);
         }
     }
 

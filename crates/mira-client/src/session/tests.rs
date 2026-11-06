@@ -2249,6 +2249,80 @@ fn quest_work_runs_during_a_fight_and_a_join_waits_for_it_to_end() {
     harness.finish();
 }
 
+#[test]
+fn cancelling_a_queued_action_or_the_fight_leaves_the_rest_alone() {
+    let (fighting, started) = mpsc::channel::<()>();
+    let (cancelled, next) = mpsc::channel::<()>();
+    let (quiet, checked) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.expect(&gar(0, "a1", &[ONE, TWO]));
+        fighting.send(()).unwrap();
+        next.recv().unwrap();
+        let skipped = packet::transfer("player1", "yulgar");
+        let wanted = packet::transfer("player1", "battleon");
+        loop {
+            let sent = peer.recv();
+            assert_ne!(sent, skipped);
+            if sent == wanted {
+                break;
+            }
+        }
+        peer.expect_silence(Duration::from_millis(1500));
+        quiet.send(()).unwrap();
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    let killing = session.kill(MonMapId(1));
+    started.recv().unwrap();
+    let skipped = session.join("yulgar");
+    session.join("battleon");
+    session.cancel(skipped.id());
+    assert!(matches!(skipped.wait(), Err(ActionError::Cancelled)));
+    session.cancel(killing.id());
+    assert!(matches!(killing.wait(), Err(ActionError::Cancelled)));
+    cancelled.send(()).unwrap();
+    checked.recv().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn cancelling_answers_at_once_but_holds_the_queue_until_a_sent_request_is_answered() {
+    let (fetching, sent) = mpsc::channel::<()>();
+    let (cancelled, next) = mpsc::channel::<()>();
+    let ids: Vec<QuestId> = (1..=15).map(QuestId).collect();
+    let first = ids[..14].to_vec();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready("5.31");
+        peer.expect(&packet::get_quests(AreaId(42), &first));
+        fetching.send(()).unwrap();
+        next.recv_timeout(Duration::from_secs(5))
+            .expect("the cancelled load to answer before its request");
+        peer.expect_silence(Limit::LoadQuests.gap() + Duration::from_millis(500));
+        peer.send(&json_message(json!({"cmd": "getQuests", "quests": {}})));
+        peer.expect(&packet::get_quests(AreaId(42), &[QuestId(30)]));
+        peer.send(&json_message(
+            json!({"cmd": "getQuests", "quests": {"30": {"QuestID": 30, "sName": "Thirty"}}}),
+        ));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let loading = session.load_quests(&ids);
+    sent.recv().unwrap();
+    session.cancel_all();
+    let after = session.load_quests(&[QuestId(30)]);
+    assert!(matches!(loading.wait(), Err(ActionError::Cancelled)));
+    cancelled.send(()).unwrap();
+    after.wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
 fn potions(world: &World) -> u32 {
     world
         .inventory
