@@ -13,7 +13,7 @@ use crate::combat::{self, ITEM_SLOT};
 use crate::enhancement::Enhanced;
 use crate::event::{Event, NoticeKind};
 use crate::faction::{self, AddedFaction, Faction, FactionData};
-use crate::inventory::{AddedItems, LoadInventory, Picked, Sold, TurnIn, Worn};
+use crate::inventory::{AddedItems, LoadInventory, Picked, Removed, Sold, TurnIn, Worn};
 use crate::player::{
     Balance, BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, SkillList, StatUpdate,
 };
@@ -467,6 +467,11 @@ impl Session {
                     coins: sold.coins,
                 });
                 self.on_sold(sold.char_item_id);
+            }
+            "removeItem" => {
+                if let Some(event) = self.inventory.remove(&read::<Removed>(&json)?) {
+                    self.emit(event);
+                }
             }
             "buyItem" => self.on_bought(read::<Bought>(&json)?),
             "enhanceItemShop" => {

@@ -825,6 +825,12 @@ fn tracks_inventory_and_temp_items() {
         peer.send(&json_message(
             json!({"cmd": "sellItem", "CharItemID": 5003, "iQty": 1, "intAmount": 0}),
         ));
+        peer.send(&json_message(
+            json!({"cmd": "removeItem", "CharItemID": 5001, "iQty": 1}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "removeItem", "CharItemID": 5000}),
+        ));
         peer.send("%xt%multiLoginWarning%-1%");
     });
     let session = harness.session.clone();
@@ -856,8 +862,7 @@ fn tracks_inventory_and_temp_items() {
     assert_eq!(
         *world.inventory,
         [
-            item(100, 5000, "Default Sword", 1, 1, "Sword", "Weapon", false),
-            item(101, 5001, "Health Potion", 4, 10, "Item", "None", false),
+            item(101, 5001, "Health Potion", 3, 10, "Item", "None", false),
             item(102, 5002, "Iron Axe", 1, 1, "Axe", "Weapon", true),
         ]
     );

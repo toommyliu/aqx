@@ -513,6 +513,20 @@ impl Inventory {
         Some(take(Arc::make_mut(&mut self.items), at, sold.qty))
     }
 
+    pub(crate) fn remove(&mut self, removed: &Removed) -> Option<Event> {
+        if removed.bank {
+            return None;
+        }
+        let at = self
+            .items
+            .iter()
+            .position(|i| i.char_item_id == removed.char_item_id)?;
+        let qty = removed
+            .qty_now
+            .map_or(removed.qty, |now| self.items[at].qty.saturating_sub(now));
+        Some(take(Arc::make_mut(&mut self.items), at, qty))
+    }
+
     pub(crate) fn wear(&mut self, id: ItemId, on: bool) {
         let items = Arc::make_mut(&mut self.items);
         let slot = items.iter().find(|i| i.id == id).map(|i| i.slot.clone());
@@ -626,6 +640,22 @@ pub(crate) struct Sold {
     pub(crate) qty_now: u32,
     #[serde(rename = "bCoins", default, deserialize_with = "flex::bool")]
     pub(crate) coins: bool,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Removed {
+    #[serde(rename = "CharItemID")]
+    char_item_id: CharItemId,
+    #[serde(rename = "iQty", default = "one", deserialize_with = "flex::int")]
+    qty: u32,
+    #[serde(rename = "iQtyNow", default, deserialize_with = "flex::opt_int")]
+    qty_now: Option<u32>,
+    #[serde(rename = "bBank", default, deserialize_with = "flex::bool")]
+    bank: bool,
+}
+
+fn one() -> u32 {
+    1
 }
 
 #[derive(Deserialize)]
