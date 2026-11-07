@@ -144,7 +144,7 @@ fn account_tags_reject_unknown_accounts_and_lite_keys_share_typed_values() {
 using Skua.Core.Interfaces;
 public class Preferences {
     public void ScriptMain(IScriptInterface bot) {
-        bot.Log($"unknown {bot.Accounts.AddTags("missing", "tag")} {bot.Accounts.GetAllAccounts().Count}");
+        bot.Log($"unknown {bot.Accounts.AddTags("missing", "tag")} {bot.Accounts.AddTag(bot.Player.Username, "tag")} {bot.Accounts.GetAllAccounts().Count}");
         bot.Lite.Set("bReaccept", true);
         bot.Log($"reaccept {bot.Lite.ReacceptQuest}");
         bot.Lite.ReacceptQuest = false;
@@ -158,7 +158,7 @@ public class Preferences {
 "#);
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
     for expected in [
-        "unknown False 0",
+        "unknown False False 0",
         "reaccept True",
         "raw reaccept False",
         "dictionary 123",

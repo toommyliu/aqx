@@ -43,7 +43,7 @@ public class SetOptionsOnly {
     );
     assert!(
         logs.iter()
-            .any(|l| l == "class Legion Revenant, tagged True, skills running True"),
+            .any(|l| l == "class Legion Revenant, tagged False, skills running True"),
         "{logs:#?}"
     );
     assert!(!sent.iter().any(|p| p.contains("%loadBank%")), "{sent:#?}");
