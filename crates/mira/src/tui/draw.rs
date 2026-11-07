@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::time::Duration;
 
 use ratatui::Frame;
@@ -8,12 +9,13 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use tui_input::Input as TextInput;
 use unicode_width::UnicodeWidthChar;
 
-use super::{App, Filter, Hit, Section, View};
+use super::{App, Filter, Hit, Scope, Section, View};
 use crate::fleet::{Channel, Line as LogLine};
-use crate::view::{Game, QuestProgress, Shown, Stack, Standing, State, order};
+use crate::view::{Game, QuestProgress, Shown, Stack, Standing, State, found, matches, order};
 
 const WIDE: u16 = 90;
 const ACCENT: Color = Color::Blue;
+const FOUND: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
 const CARD_WIDTH: u16 = 44;
 const CARD_HEIGHT: u16 = 8;
 const RAIL_WIDTH: u16 = 34;
@@ -33,7 +35,7 @@ const ACCOUNT_KEYS: [(&str, &str); 15] = [
     ("↑ ↓", "pick"),
     ("tab", "next"),
     ("{ }", "online / offline"),
-    ("/", "filter by name"),
+    ("/", "filter, on the dashboard"),
     ("space", "mark"),
     ("a", "mark all / none"),
     ("esc", "back to log, unmark"),
@@ -51,6 +53,7 @@ const VIEW_KEYS: [(&str, &str); 15] = [
     ("1", "log"),
     ("2-8", "players … factions"),
     ("[ ]", "log channel"),
+    ("/", "search the log or list"),
     ("g", "dashboard"),
     ("d", "more details"),
     ("b", "hide sidebar"),
@@ -59,7 +62,6 @@ const VIEW_KEYS: [(&str, &str); 15] = [
     ("⇧↑ ⇧↓", "scroll a line"),
     ("PgUp PgDn", "scroll a page"),
     ("End", "newest lines"),
-    ("", ""),
     ("", ""),
     ("", ""),
 ];
@@ -258,7 +260,7 @@ fn script_label(s: &Shown) -> String {
 pub(super) fn draw(f: &mut Frame, app: &App, shown: &[Shown]) {
     app.hits.borrow_mut().clear();
     let matches: Vec<String> = match &app.prompt {
-        _ if app.querying => order(shown, app.query.value())
+        _ if app.querying && app.scope() == Scope::Accounts => order(shown, app.query.value())
             .into_iter()
             .map(|i| shown[i].name.clone())
             .collect(),
@@ -346,12 +348,13 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, shown: &[Shown], overview: 
         let online = shown.iter().filter(|s| !s.offline()).count();
         left.push(Span::raw(format!("  {online} of {} online", shown.len())).dark_gray());
     } else if let Some(account) = shown.get(app.selected).filter(|_| shown.len() > 1) {
-        let order = order(shown, app.query.value());
+        let order = order(shown, app.search(Scope::Accounts));
         let at = order.iter().position(|&i| i == app.selected).unwrap_or(0);
         left.push(Span::raw(format!("  {} {}/{}", account.name, at + 1, order.len())).dark_gray());
     }
-    if !app.query.value().is_empty() {
-        left.push(Span::raw(format!(" · filter \"{}\"", app.query.value())).dark_gray());
+    let accounts = app.search(Scope::Accounts);
+    if !accounts.is_empty() {
+        left.push(Span::raw(format!(" · filter \"{accounts}\"")).dark_gray());
     }
     if !app.marked.is_empty() {
         left.push(Span::raw(format!(" · {} marked", app.marked.len())).dark_gray());
@@ -380,7 +383,7 @@ fn name_width(shown: &[Shown]) -> usize {
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     let inner = usize::from(area.width.saturating_sub(1));
     let name_col = name_width(shown).min(inner.saturating_sub(4));
-    let rows = sidebar_rows(shown, app.query.value());
+    let rows = sidebar_rows(shown, app.search(Scope::Accounts));
     let offline = rows
         .iter()
         .flatten()
@@ -511,17 +514,26 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         return f.render_widget(Paragraph::new(Line::from(line)), area);
     }
     if app.querying {
-        let keys = hints(&[
-            ("↑↓", "pick"),
-            ("tab", "complete"),
-            ("enter", "done"),
-            ("esc", "clear"),
-        ]);
-        let typed = [
-            vec![Span::raw(" filter accounts: ").bold()],
-            typed_spans(&app.query),
-        ]
-        .concat();
+        let (label, keys) = match app.scope() {
+            Scope::Accounts => (
+                " filter accounts: ".to_owned(),
+                hints(&[
+                    ("↑↓", "pick"),
+                    ("tab", "complete"),
+                    ("enter", "done"),
+                    ("esc", "clear"),
+                ]),
+            ),
+            Scope::Log => (
+                " search the log: ".to_owned(),
+                hints(&[("enter", "done"), ("esc", "clear")]),
+            ),
+            Scope::List(section) => (
+                format!(" search {}: ", section.label().to_lowercase()),
+                hints(&[("enter", "done"), ("esc", "clear")]),
+            ),
+        };
+        let typed = [vec![Span::raw(label).bold()], typed_spans(&app.query)].concat();
         return f.render_widget(
             Paragraph::new(spread(typed, keys, width.saturating_sub(1))),
             area,
@@ -639,13 +651,16 @@ fn list_keys(app: &App) -> Vec<(&'static str, &'static str)> {
         keys.push(("PgUp PgDn", "scroll"));
     }
     keys.extend([
+        ("/", "search"),
         ("1-8", "views"),
         (
             "esc",
-            if app.picked.is_empty() {
-                "back to log"
-            } else {
+            if !app.picked.is_empty() {
                 "clear marks"
+            } else if !app.query.value().is_empty() {
+                "clear search"
+            } else {
+                "back to log"
             },
         ),
     ]);
@@ -684,7 +699,7 @@ fn draw_grid(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     let cols = usize::from(area.width / CARD_WIDTH).max(1);
     let rows = usize::from(area.height / CARD_HEIGHT).max(1);
     app.grid_cols.set(cols);
-    let order = order(shown, app.query.value());
+    let order = order(shown, app.search(Scope::Accounts));
     let row = order.iter().position(|&i| i == app.selected).unwrap_or(0) / cols;
     let top = app
         .grid_top
@@ -847,6 +862,7 @@ fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
                     }
                 }
             }
+            searched(&mut rule, app);
             if !app.picked.is_empty() {
                 rule.push(Span::raw(format!(" · {} marked", app.picked.len())));
             }
@@ -867,6 +883,7 @@ fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
                 Some(g) => tab_strip(&mut rule, app, g, usize::from(main.width)),
                 None => filter_strip(&mut rule, app),
             }
+            searched(&mut rule, app);
             if scrolled > 0 {
                 rule.push(Span::raw(format!(" · ↑{scrolled}")));
             }
@@ -935,6 +952,12 @@ impl Strip {
     }
 }
 
+fn searched(rule: &mut Strip, app: &App) {
+    if !app.query.value().is_empty() {
+        rule.push(Span::raw(format!(" · search \"{}\"", app.query.value())));
+    }
+}
+
 fn filter_strip(rule: &mut Strip, app: &App) {
     rule.push(Span::raw("log  "));
     for (i, filter) in Filter::ALL.into_iter().enumerate() {
@@ -998,6 +1021,12 @@ fn draw_log(f: &mut Frame, area: Rect, app: &App) -> usize {
     );
     let scrolled = app.scroll.min(app.max_scroll.get());
     let has_log = !log.is_empty();
+    let query = app.search(Scope::Log);
+    if !has_log && !query.is_empty() {
+        let text = Line::raw(format!("  No lines match \"{query}\".")).dark_gray();
+        f.render_widget(Paragraph::new(text), area);
+        return 0;
+    }
     f.render_widget(Paragraph::new(log), area);
     if scrolled > 0 && has_log {
         draw_jump(f, area, app);
@@ -1037,7 +1066,7 @@ fn draw_rail(f: &mut Frame, area: Rect, g: &Game, app: &App) {
             entries
                 .into_iter()
                 .take(fits)
-                .map(|(name, value)| Line::from(entry(3, name, value, width))),
+                .map(|(name, value)| Line::from(entry(3, vec![Span::raw(name)], value, width))),
         );
         if cut {
             lines.push(Line::raw(format!("   +{more}")).dark_gray());
@@ -1163,13 +1192,10 @@ fn held(s: &Stack) -> Field {
     }
 }
 
-fn entry(indent: usize, name: String, value: Field, width: usize) -> Field {
+fn entry(indent: usize, name: Field, value: Field, width: usize) -> Field {
     let value_width = spans_width(&value);
     let mut spans = vec![Span::raw(" ".repeat(indent))];
-    spans.extend(clip(
-        vec![Span::raw(name)],
-        width.saturating_sub(indent + value_width + 1),
-    ));
+    spans.extend(clip(name, width.saturating_sub(indent + value_width + 1)));
     spans.push(Span::raw(
         " ".repeat(width.saturating_sub(spans_width(&spans) + value_width)),
     ));
@@ -1178,17 +1204,29 @@ fn entry(indent: usize, name: String, value: Field, width: usize) -> Field {
 }
 
 fn draw_section(f: &mut Frame, area: Rect, g: &Game, section: Section, app: &App) {
-    let entries = section.entries(g);
+    let query = app.search(Scope::List(section));
+    let all = section.entries(g);
+    let none = all.is_empty();
+    let entries: Vec<(usize, (String, Field))> = all
+        .into_iter()
+        .enumerate()
+        .filter(|(_, (name, _))| matches(name, query))
+        .collect();
     app.list_len.set(entries.len());
     if entries.is_empty() {
         app.list_max.set(0);
-        let text = Line::raw(format!("  {}", section.nothing(g))).dark_gray();
+        let text = if none {
+            section.nothing(g).to_owned()
+        } else {
+            format!("Nothing matches \"{query}\".")
+        };
+        let text = Line::raw(format!("  {text}")).dark_gray();
         return f.render_widget(Paragraph::new(text), area);
     }
     let width = usize::from(area.width);
     let widest = entries
         .iter()
-        .map(|(name, value)| Span::raw(name.as_str()).width() + spans_width(value))
+        .map(|(_, (name, value))| Span::raw(name.as_str()).width() + spans_width(value))
         .max()
         .unwrap_or(0);
     let picker = section == Section::Drops;
@@ -1211,11 +1249,14 @@ fn draw_section(f: &mut Frame, area: Rect, g: &Game, section: Section, app: &App
         at = at.min(row).max((row + 1).saturating_sub(height));
     }
     app.list_at.set(at);
-    let marks = |i: usize| -> Field {
+    let marks = |i: usize, original: usize| -> Field {
         let Some(cursor) = cursor else {
             return vec![Span::raw("  ")];
         };
-        let picked = g.drops.get(i).is_some_and(|d| app.picked.contains(&d.id));
+        let picked = g
+            .drops
+            .get(original)
+            .is_some_and(|d| app.picked.contains(&d.id));
         vec![
             Span::raw(if i == cursor { "▌" } else { " " }).fg(ACCENT),
             Span::raw(if picked { "◆" } else { " " }).fg(ACCENT),
@@ -1226,12 +1267,12 @@ fn draw_section(f: &mut Frame, area: Rect, g: &Game, section: Section, app: &App
             let cells = (0..cols)
                 .map(|col| col * rows + row)
                 .filter_map(|i| Some((i, entries.get(i)?)));
-            let spans = cells.flat_map(|(i, (name, value))| {
-                marks(i)
+            let spans = cells.flat_map(|(i, (original, (name, value)))| {
+                marks(i, *original)
                     .into_iter()
                     .chain(entry(
                         0,
-                        name.clone(),
+                        lit(name, 0, &found(name, query)),
                         value.clone(),
                         column.saturating_sub(4),
                     ))
@@ -1245,7 +1286,7 @@ fn draw_section(f: &mut Frame, area: Rect, g: &Game, section: Section, app: &App
 
 fn draw_jump(f: &mut Frame, area: Rect, app: &App) {
     let unseen = app.unseen_from.map_or(0, |from| {
-        app.log.since(from).filter(|l| app.filter.shows(l)).count()
+        app.log.since(from).filter(|l| app.shows(l)).count()
     });
     let label = if unseen > 0 {
         format!(" {unseen} new · jump to bottom (end) ↓ ")
@@ -1538,7 +1579,7 @@ fn spans_width(spans: &[Span]) -> usize {
 fn log_lines(app: &App, height: usize, width: usize) -> Vec<Line<'static>> {
     app.log_width.set(width);
     let tagged = app.filter.tagged();
-    let lines: Vec<&LogLine> = app.log.lines().filter(|l| app.filter.shows(l)).collect();
+    let lines: Vec<&LogLine> = app.log.lines().filter(|l| app.shows(l)).collect();
     let sizes: Vec<usize> = lines
         .iter()
         .map(|l| pieces(l, width, tagged).1.len())
@@ -1553,7 +1594,7 @@ fn log_lines(app: &App, height: usize, width: usize) -> Vec<Line<'static>> {
         let (first, last) = (at.max(start), (at + size).min(end));
         if first < last {
             rows.extend(
-                log_rows(line, width, tagged)
+                log_rows(line, width, tagged, app.search(Scope::Log))
                     .into_iter()
                     .skip(first - at)
                     .take(last - first),
@@ -1593,17 +1634,45 @@ fn pieces(l: &LogLine, width: usize, tagged: bool) -> (Field, Vec<&str>) {
     (head, pieces)
 }
 
-pub(super) fn log_rows(l: &LogLine, width: usize, tagged: bool) -> Vec<Line<'static>> {
+pub(super) fn log_rows(l: &LogLine, width: usize, tagged: bool, query: &str) -> Vec<Line<'static>> {
     let (mut head, pieces) = pieces(l, width, tagged);
     let indent = " ".repeat(spans_width(&head));
+    let found = found(&l.text, query);
+    let text = |piece: &str| match found.as_slice() {
+        [] => vec![Span::raw(piece.to_owned())],
+        found => lit(
+            piece,
+            piece.as_ptr() as usize - l.text.as_ptr() as usize,
+            found,
+        ),
+    };
     let mut pieces = pieces.into_iter();
-    head.push(Span::raw(pieces.next().unwrap_or_default().to_owned()));
+    head.extend(text(pieces.next().unwrap_or_default()));
     let mut rows = vec![Line::from(head)];
     rows.extend(
-        pieces
-            .map(|piece| Line::from(vec![Span::raw(indent.clone()), Span::raw(piece.to_owned())])),
+        pieces.map(|piece| Line::from([vec![Span::raw(indent.clone())], text(piece)].concat())),
     );
     rows
+}
+
+fn lit(piece: &str, from: usize, found: &[Range<usize>]) -> Field {
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for range in found {
+        let start = range.start.max(from + at) - from;
+        let end = range.end.min(from + piece.len()).saturating_sub(from);
+        if start < end {
+            if at < start {
+                spans.push(Span::raw(piece[at..start].to_owned()));
+            }
+            spans.push(Span::styled(piece[start..end].to_owned(), FOUND));
+            at = end;
+        }
+    }
+    if at < piece.len() || spans.is_empty() {
+        spans.push(Span::raw(piece[at..].to_owned()));
+    }
+    spans
 }
 
 fn wrap(text: &str, room: usize) -> Vec<&str> {

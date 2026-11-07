@@ -23,7 +23,7 @@ use tui_input::{Input as TextInput, InputRequest};
 
 use crate::control::{Action, Source, Want};
 use crate::fleet::{Channel, Line, Log};
-use crate::view::{self, Shown, order};
+use crate::view::{self, Game, Shown, order};
 use ask::{Ask, Remembered};
 use mask::Mask;
 use prompt::{History, Prompt, Recent};
@@ -134,6 +134,13 @@ impl Filter {
         let at = Filter::ALL.iter().position(|&f| f == self).unwrap_or(0) as isize;
         Filter::ALL[(at + by).clamp(0, Filter::ALL.len() as isize - 1) as usize]
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Scope {
+    Accounts,
+    Log,
+    List(Section),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -396,8 +403,9 @@ impl App {
 
     fn receive(&mut self, mut line: Line) {
         line.text = self.mask.hide(&line.text);
-        if self.scroll > 0 && self.filter.shows(&line) {
-            self.scroll += draw::log_rows(&line, self.log_width.get(), self.filter.tagged()).len();
+        if self.scroll > 0 && self.shows(&line) {
+            self.scroll +=
+                draw::log_rows(&line, self.log_width.get(), self.filter.tagged(), "").len();
             self.unseen_from.get_or_insert(line.seq);
         }
         self.log.insert(line);
@@ -421,6 +429,31 @@ impl App {
             redact,
             ..App::default()
         }
+    }
+
+    fn scope(&self) -> Scope {
+        match (self.grid, self.view) {
+            (true, _) => Scope::Accounts,
+            (false, View::Log) => Scope::Log,
+            (false, View::List(section)) => Scope::List(section),
+        }
+    }
+
+    fn search(&self, scope: Scope) -> &str {
+        if self.scope() == scope {
+            self.query.value()
+        } else {
+            ""
+        }
+    }
+
+    fn clear_search(&mut self) {
+        self.query.reset();
+        self.querying = false;
+    }
+
+    fn shows(&self, line: &Line) -> bool {
+        self.filter.shows(line) && view::matches(&line.text, self.search(Scope::Log))
     }
 
     fn targets(&self) -> Vec<usize> {
@@ -453,7 +486,7 @@ impl App {
     }
 
     fn step(&mut self, shown: &[Shown], by: isize, wrap: bool) {
-        let order = order(shown, self.query.value());
+        let order = order(shown, self.search(Scope::Accounts));
         let Some(at) = order.iter().position(|&i| i == self.selected) else {
             return;
         };
@@ -467,7 +500,7 @@ impl App {
     }
 
     fn jump(&mut self, shown: &[Shown], by: isize) {
-        let order = order(shown, self.query.value());
+        let order = order(shown, self.search(Scope::Accounts));
         let offline = |i: usize| shown[i].offline();
         let starts: Vec<usize> = (0..order.len())
             .filter(|&at| at == 0 || offline(order[at]) != offline(order[at - 1]))
@@ -480,9 +513,18 @@ impl App {
     }
 
     fn refilter(&mut self, shown: &[Shown]) {
-        let order = order(shown, self.query.value());
-        if let Some(&first) = order.first().filter(|_| !order.contains(&self.selected)) {
-            self.pick(first);
+        match self.scope() {
+            Scope::Accounts => {
+                let order = order(shown, self.search(Scope::Accounts));
+                if let Some(&first) = order.first().filter(|_| !order.contains(&self.selected)) {
+                    self.pick(first);
+                }
+            }
+            Scope::Log => self.scroll = 0,
+            Scope::List(_) => {
+                self.list_at.set(0);
+                self.cursor = 0;
+            }
         }
     }
 
@@ -497,6 +539,7 @@ impl App {
         if view != self.view {
             self.view = view;
             self.reset_list();
+            self.clear_search();
         }
     }
 
@@ -550,22 +593,30 @@ impl App {
         }
     }
 
-    fn drops<'a>(&self, shown: &'a [Shown]) -> &'a [view::Stack] {
-        shown
-            .get(self.selected)
-            .and_then(|s| s.game.as_ref())
-            .map_or(&[], |g| g.drops.as_slice())
+    fn game<'a>(&self, shown: &'a [Shown]) -> Option<&'a Game> {
+        shown.get(self.selected).and_then(|s| s.game.as_ref())
+    }
+
+    fn drops<'a>(&self, shown: &'a [Shown]) -> Vec<&'a view::Stack> {
+        let query = self.search(Scope::List(Section::Drops));
+        self.game(shown)
+            .map_or(&[][..], |g| g.drops.as_slice())
+            .iter()
+            .filter(|d| view::matches(&d.name, query))
+            .collect()
     }
 
     fn pick_up(&mut self, source: &dyn Source, shown: &[Shown]) {
-        let drops = self.drops(shown);
         let wanted: Vec<&view::Stack> = if self.picked.is_empty() {
+            let drops = self.drops(shown);
             drops
                 .get(self.cursor.min(drops.len().saturating_sub(1)))
+                .copied()
                 .into_iter()
                 .collect()
         } else {
-            drops
+            self.game(shown)
+                .map_or(&[][..], |g| g.drops.as_slice())
                 .iter()
                 .filter(|d| self.picked.contains(&d.id))
                 .collect()
@@ -754,29 +805,51 @@ impl App {
             return None;
         }
         if self.querying {
-            match key.code {
+            let accounts = self.scope() == Scope::Accounts;
+            let changed = match key.code {
                 KeyCode::Esc => {
-                    self.query.reset();
-                    self.querying = false;
+                    self.clear_search();
+                    true
                 }
-                KeyCode::Enter => self.querying = false,
-                KeyCode::Up => self.step(shown, -1, false),
-                KeyCode::Down => self.step(shown, 1, false),
-                KeyCode::Tab => {
+                KeyCode::Enter => {
+                    self.querying = false;
+                    false
+                }
+                KeyCode::Up if accounts => {
+                    self.step(shown, -1, false);
+                    false
+                }
+                KeyCode::Down if accounts => {
+                    self.step(shown, 1, false);
+                    false
+                }
+                KeyCode::Up => {
+                    self.up(1);
+                    false
+                }
+                KeyCode::Down => {
+                    self.down(1);
+                    false
+                }
+                KeyCode::Tab if accounts => {
                     let names: Vec<&str> = order(shown, self.query.value())
                         .into_iter()
                         .map(|i| shown[i].name.as_str())
                         .collect();
                     self.query = TextInput::new(complete(self.query.value(), &names));
+                    true
                 }
-                _ => {
-                    self.query.handle_event(&Input::Key(key));
-                }
+                _ => self
+                    .query
+                    .handle_event(&Input::Key(key))
+                    .is_some_and(|changed| changed.value),
+            };
+            if changed {
+                self.refilter(shown);
             }
-            self.refilter(shown);
             return None;
         }
-        let visible = order(shown, self.query.value());
+        let visible = order(shown, self.search(Scope::Accounts));
         let cols = self.grid_cols.get().max(1) as isize;
         let line = shown.len() < 2 || key.modifiers.contains(KeyModifiers::SHIFT);
         let picking = self.picking();
@@ -784,14 +857,20 @@ impl App {
             KeyCode::Char('q') => return Some(Leave::Detach),
             KeyCode::Char('Q') => self.ending = true,
             KeyCode::Char('?') => self.keys = true,
-            KeyCode::Char('g') if shown.len() > 1 => self.grid = !self.grid,
+            KeyCode::Char('g') if shown.len() > 1 => {
+                self.grid = !self.grid;
+                self.clear_search();
+            }
             KeyCode::Char('d' | '[' | ']' | '1'..='8')
             | KeyCode::PageUp
             | KeyCode::PageDown
             | KeyCode::Home
             | KeyCode::End
                 if self.grid => {}
-            KeyCode::Enter if self.grid => self.grid = false,
+            KeyCode::Enter if self.grid => {
+                self.grid = false;
+                self.clear_search();
+            }
             KeyCode::Left if self.grid => self.step(shown, -1, false),
             KeyCode::Right if self.grid => self.step(shown, 1, false),
             KeyCode::Up if self.grid => self.step(shown, -cols, false),
@@ -808,13 +887,17 @@ impl App {
             KeyCode::Char('a') if picking => {
                 let ids: Vec<ItemId> = self.drops(shown).iter().map(|d| d.id).collect();
                 if ids.iter().all(|id| self.picked.contains(id)) {
-                    self.picked.clear();
+                    self.picked.retain(|id| !ids.contains(id));
                 } else {
                     self.picked.extend(ids);
                 }
             }
             KeyCode::Enter if picking => self.pick_up(source, shown),
             KeyCode::Esc if !self.picked.is_empty() => self.picked.clear(),
+            KeyCode::Esc if !self.query.value().is_empty() => {
+                self.query.reset();
+                self.refilter(shown);
+            }
             KeyCode::Esc if self.view != View::Log => self.show(View::Log),
             KeyCode::Esc => self.marked.clear(),
             KeyCode::Up if line => self.up(1),

@@ -163,6 +163,31 @@ fn accented(app: &App, shown: &[Shown], width: u16, height: u16, has: &str) -> S
         .collect()
 }
 
+fn lit(app: &App, shown: &[Shown], width: u16, height: u16, has: &str) -> Vec<String> {
+    let rows = cells(app, shown, width, height);
+    let line = rows
+        .iter()
+        .find(|r| {
+            r.iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+                .contains(has)
+        })
+        .unwrap_or_else(|| panic!("no row has {has:?}"));
+    let mut runs: Vec<String> = Vec::new();
+    let mut last = false;
+    for c in line {
+        let on = c.bg == Color::Yellow;
+        match runs.last_mut() {
+            Some(run) if on && last => run.push_str(c.symbol()),
+            _ if on => runs.push(c.symbol().to_owned()),
+            _ => {}
+        }
+        last = on;
+    }
+    runs
+}
+
 fn press(app: &mut App, shown: &[Shown], code: KeyCode) {
     app.handle(KeyEvent::from(code), &idle_fleet(), shown);
 }
@@ -833,4 +858,134 @@ fn a_paste_lands_in_the_open_input_at_once_and_never_submits() {
         "player2",
         "a paste replaces an offered answer"
     );
+}
+
+fn type_in(app: &mut App, shown: &[Shown], text: &str) {
+    for c in text.chars() {
+        press(app, shown, KeyCode::Char(c));
+    }
+}
+
+#[test]
+fn slash_searches_the_open_log_and_esc_clears_it() {
+    let shown = [farmer("player1"), farmer("player2")];
+    let mut app = App::default();
+    push(&mut app, Channel::Script, "Killed Void Spider");
+    push(&mut app, Channel::Server, "Profanity filter On.");
+
+    press(&mut app, &shown, KeyCode::Char('/'));
+    type_in(&mut app, &shown, "void");
+    let s = screen(&app, &shown, 150, 30);
+    assert!(s.contains(" search the log: void"), "{s}");
+    assert!(
+        s.contains("Killed Void Spider") && !s.contains("Profanity filter"),
+        "{s}"
+    );
+    assert_eq!(lit(&app, &shown, 150, 30, "Killed Void Spider"), ["Void"]);
+    assert!(
+        s.contains("player2"),
+        "the sidebar keeps every account:\n{s}"
+    );
+
+    press(&mut app, &shown, KeyCode::Enter);
+    press(&mut app, &shown, KeyCode::Tab);
+    let s = screen(&app, &shown, 150, 30);
+    assert_eq!(app.selected, 1);
+    assert!(
+        s.contains("search \"void\"") && !s.contains("Profanity filter"),
+        "the search stays on when the account changes:\n{s}"
+    );
+
+    type_in(&mut app, &shown, "/x");
+    assert!(
+        screen(&app, &shown, 150, 30).contains("No lines match \"voidx\"."),
+        "/ edits the search"
+    );
+    press(&mut app, &shown, KeyCode::Enter);
+    press(&mut app, &shown, KeyCode::Esc);
+    assert!(app.query.value().is_empty());
+    assert!(screen(&app, &shown, 150, 30).contains("Profanity filter"));
+}
+
+#[test]
+fn slash_searches_the_open_list_and_another_view_clears_it() {
+    let shown = [farmer("player1")];
+    let mut app = App::default();
+    press(&mut app, &shown, KeyCode::Char('6'));
+    press(&mut app, &shown, KeyCode::Char('/'));
+    type_in(&mut app, &shown, "BAIT");
+    let s = screen(&app, &shown, 150, 30);
+    assert!(s.contains(" search inventory: BAIT"), "{s}");
+    assert!(
+        s.contains("Fishing Bait") && !s.contains("Master Ranger"),
+        "{s}"
+    );
+    assert_eq!(lit(&app, &shown, 150, 30, "Fishing Bait"), ["Bait"]);
+    type_in(&mut app, &shown, "zz");
+    assert!(screen(&app, &shown, 150, 30).contains("Nothing matches \"BAITzz\"."));
+
+    press(&mut app, &shown, KeyCode::Enter);
+    press(&mut app, &shown, KeyCode::Char('3'));
+    assert!(app.query.value().is_empty(), "a new view starts unsearched");
+
+    press(&mut app, &shown, KeyCode::Char('/'));
+    type_in(&mut app, &shown, "drop 5");
+    press(&mut app, &shown, KeyCode::Enter);
+    let s = screen(&app, &shown, 150, 30);
+    assert!(
+        s.contains(" ▌ Spider Drop 5") && !s.contains("Spider Drop 4"),
+        "{s}"
+    );
+    assert!(s.contains("esc clear search"), "{s}");
+    press(&mut app, &shown, KeyCode::Char(' '));
+    assert_eq!(
+        app.picked,
+        HashSet::from([ItemId(205)]),
+        "space marks the drop under the cursor"
+    );
+    press(&mut app, &shown, KeyCode::Esc);
+    press(&mut app, &shown, KeyCode::Esc);
+    assert!(
+        app.query.value().is_empty() && app.view == View::List(Section::Drops),
+        "esc clears the marks, then the search"
+    );
+    press(&mut app, &shown, KeyCode::Esc);
+    assert_eq!(app.view, View::Log);
+}
+
+#[test]
+fn slash_on_the_dashboard_filters_accounts() {
+    let shown = [farmer("player1"), farmer("player2")];
+    let mut app = App::default();
+    press(&mut app, &shown, KeyCode::Char('g'));
+    press(&mut app, &shown, KeyCode::Char('/'));
+    type_in(&mut app, &shown, "player2");
+    let s = screen(&app, &shown, 150, 30);
+    assert!(s.contains(" filter accounts: player2"), "{s}");
+    assert!(!s.contains("player1"), "{s}");
+    assert_eq!(app.selected, 1);
+
+    press(&mut app, &shown, KeyCode::Enter);
+    press(&mut app, &shown, KeyCode::Enter);
+    assert!(
+        !app.grid && app.query.value().is_empty(),
+        "opening an account drops the account filter"
+    );
+}
+
+#[test]
+fn a_match_split_by_wrapping_lights_up_on_both_rows() {
+    let shown = [farmer("player1")];
+    let mut app = App::default();
+    push(
+        &mut app,
+        Channel::Script,
+        &format!("{} Moonstone Shard", "x".repeat(37)),
+    );
+    press(&mut app, &shown, KeyCode::Char('/'));
+    type_in(&mut app, &shown, "moonstone sh");
+    let s = screen(&app, &shown, 72, 20);
+    assert!(row(&s, "Shard").trim() == "Shard", "{s}");
+    assert_eq!(lit(&app, &shown, 72, 20, "Moonstone"), ["Moonstone"]);
+    assert_eq!(lit(&app, &shown, 72, 20, "Shard"), ["Sh"]);
 }

@@ -64,7 +64,7 @@ Keys act on the marked accounts, or on the selected one when nothing is marked.
 | `x` | Log out |
 | `↑` `↓`, `tab` | Pick an account. With one account, `↑` `↓` scroll instead. |
 | `space`, `a` | Mark one account, or all of them |
-| `/` | Filter the accounts by name |
+| `/` | Search what the main pane shows: lines in the log, rows in a list, or accounts by name on the dashboard. `enter` keeps the search, `esc` clears it. |
 | `g` | Show every account as a card |
 | `d` | Show more of the selected account |
 | `q` | Detach, leaving the accounts running |
@@ -88,7 +88,7 @@ The area under the account shows its log or one of its lists. Each view has a nu
 | `7` | Bank, once a script has opened it |
 | `8` | Faction ranks |
 
-`esc` goes back to the log. The side panel labels each list with its number, and clicking a list there opens it. With the side panel hidden (`B`), the divider shows every view as a tab instead.
+`esc` goes back to the log. A search stays on when you pick another account, and opening another view clears it. The side panel labels each list with its number, and clicking a list there opens it. With the side panel hidden (`B`), the divider shows every view as a tab instead.
 
 The log sorts lines into channels: `mira`, `script`, `server`, `chat` and `game`. The divider lists them, with the one shown highlighted. `[` and `]` move one channel left or right, and stop at the ends. `main`, the default, shows everything except chat and game events. `all` shows every channel. Clicking a channel shows it.
 

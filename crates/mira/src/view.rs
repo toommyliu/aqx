@@ -1,4 +1,5 @@
 use std::cmp::Reverse;
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use mira_client::{CombatState, Disconnect, Item, ItemId, Load, Me, Phase, Pool, Readiness, World};
@@ -451,11 +452,50 @@ fn lists(world: &World, me: &Me, board: &Board, game: &mut Game) {
 }
 
 pub fn order(shown: &[Shown], query: &str) -> Vec<usize> {
-    let query = query.to_lowercase();
     let (online, offline): (Vec<usize>, Vec<usize>) = (0..shown.len())
-        .filter(|&i| shown[i].name.to_lowercase().contains(&query))
+        .filter(|&i| matches(&shown[i].name, query))
         .partition(|&i| !shown[i].offline());
     [online, offline].concat()
+}
+
+pub fn matches(text: &str, query: &str) -> bool {
+    query.is_empty()
+        || text
+            .char_indices()
+            .any(|(at, _)| match_len(&text[at..], query).is_some())
+}
+
+pub fn found(text: &str, query: &str) -> Vec<Range<usize>> {
+    let mut found = Vec::new();
+    if query.is_empty() {
+        return found;
+    }
+    let mut at = 0;
+    while let Some(c) = text[at..].chars().next() {
+        match match_len(&text[at..], query) {
+            Some(len) => {
+                found.push(at..at + len);
+                at += len;
+            }
+            None => at += c.len_utf8(),
+        }
+    }
+    found
+}
+
+fn match_len(text: &str, query: &str) -> Option<usize> {
+    let mut want = query.chars().flat_map(char::to_lowercase).peekable();
+    for (at, c) in text.char_indices() {
+        for lower in c.to_lowercase() {
+            if want.next() != Some(lower) {
+                return None;
+            }
+        }
+        if want.peek().is_none() {
+            return Some(at + c.len_utf8());
+        }
+    }
+    None
 }
 
 pub fn time_of_day(at_ms: u64) -> String {
@@ -500,6 +540,15 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_search_finds_every_match_in_any_case() {
+        let text = "Void Spider, VOID aura, Größe";
+        assert_eq!(found(text, "void"), [0..4, 13..17]);
+        assert_eq!(&text[found(text, "GRÖ")[0].clone()], "Grö");
+        assert!(found(text, "voids").is_empty() && !matches(text, "voids"));
+        assert!(matches(text, "") && found(text, "").is_empty());
+    }
 
     #[test]
     fn an_online_account_shows_where_it_is_and_what_it_holds() {
