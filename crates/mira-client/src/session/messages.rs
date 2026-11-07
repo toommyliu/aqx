@@ -12,7 +12,7 @@ use crate::aura::{self, Target};
 use crate::combat::{self, ITEM_SLOT};
 use crate::enhancement::Enhanced;
 use crate::event::{Event, NoticeKind};
-use crate::faction::{self, AddedFaction, Faction, FactionData};
+use crate::faction::{self, AddedFaction, Caught, Faction, FactionData};
 use crate::inventory::{AddedItems, LoadInventory, Picked, Removed, Sold, TurnIn, Worn};
 use crate::player::{
     Balance, BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, SkillList, StatUpdate,
@@ -539,6 +539,10 @@ impl Session {
                         exp: reward.exp,
                     });
                 }
+            }
+            "CatchResult" => {
+                let caught: Caught = read(&json)?;
+                faction::add_rep(&mut self.factions, faction::FISHING, caught.result.rep);
             }
             "levelUp" => {
                 let level: LevelUp = read(&json)?;

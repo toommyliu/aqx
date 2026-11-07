@@ -1020,6 +1020,12 @@ fn tracks_faction_reputation_and_rank() {
         peer.send(&json_message(
             json!({"cmd": "addGoldExp", "intGold": 5, "intExp": 5, "typ": "m", "id": 1}),
         ));
+        peer.send(&json_message(json!({"cmd": "addFaction", "faction": {
+            "FactionID": "20", "CharFactionID": "902", "sName": "Fishing", "iRep": "400",
+        }})));
+        peer.send(&json_message(
+            json!({"cmd": "CatchResult", "catchResult": {"myRep": 600}}),
+        ));
         peer.send("%xt%multiLoginWarning%-1%");
     });
     let session = harness.session.clone();
@@ -1046,6 +1052,14 @@ fn tracks_faction_reputation_and_rank() {
                 rank: 1,
                 rank_progress: 0,
                 rank_progress_max: Some(900),
+            },
+            Faction {
+                id: FactionId(20),
+                name: "Fishing".into(),
+                rep: 1000,
+                rank: 2,
+                rank_progress: 100,
+                rank_progress_max: Some(2700),
             },
         ]
     );
