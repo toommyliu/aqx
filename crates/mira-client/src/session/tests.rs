@@ -2528,7 +2528,7 @@ fn picks_up_drops_while_the_bag_has_room() {
 }
 
 #[test]
-fn a_join_refuses_in_combat_and_when_dead_without_sending() {
+fn a_join_leaves_combat_first_and_refuses_when_dead_without_sending() {
     let (step, next) = mpsc::channel::<()>();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
@@ -2536,23 +2536,26 @@ fn a_join_refuses_in_combat_and_when_dead_without_sending() {
         peer.send(&json_message(
             json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}),
         ));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        thread::sleep(Duration::from_millis(300));
+        let idle = Instant::now();
+        peer.send(&json_message(
+            json!({"cmd": "uotls", "unm": "player1", "o": {"intState": 1}}),
+        ));
+        assert!(peer.expect_at(&packet::transfer("player1", "yulgar-1")) >= idle);
+        peer.send("%xt%warning%-1%Cannot join that map.%");
         next.recv().unwrap();
         peer.send(&json_message(
             json!({"cmd": "ct", "p": {"player1": {"intHP": 0, "intState": 0}}}),
         ));
-        next.recv().unwrap();
-        peer.send(&json_message(
-            json!({"cmd": "uotls", "unm": "player1", "o": {"intHP": 1000, "intState": 1}}),
-        ));
-        peer.expect(&packet::transfer("player1", "yulgar-1"));
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
     wait_until(session, |me| me.state == CombatState::InCombat);
-    let in_combat = session.join("yulgar-1").wait();
+    let refused = session.join("yulgar-1").wait();
     assert!(
-        matches!(in_combat, Err(ActionError::InCombat)),
-        "{in_combat:?}"
+        matches!(refused, Err(ActionError::Refused(_))),
+        "{refused:?}"
     );
     step.send(()).unwrap();
     wait_until(session, |me| me.state == CombatState::Dead);
@@ -2560,10 +2563,6 @@ fn a_join_refuses_in_combat_and_when_dead_without_sending() {
         session.join("yulgar-1").wait(),
         Err(ActionError::Dead)
     ));
-    step.send(()).unwrap();
-    wait_until(session, |me| me.state == CombatState::Idle);
-    let _joining = session.join("yulgar-1");
-    thread::sleep(Duration::from_millis(100));
     session.logout();
     harness.finish();
 }
@@ -3668,6 +3667,16 @@ fn goes_to_players_the_way_the_client_does() {
         peer.send(&json_message(
             json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}),
         ));
+        peer.expect(&packet::move_to_cell(AreaId(47), "r5", "Up"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(47), &[EntityId(11)]));
+        peer.expect(&packet::move_to_cell(AreaId(47), "r5", "Up"));
+        thread::sleep(Duration::from_millis(300));
+        let idle = Instant::now();
+        peer.send(&json_message(
+            json!({"cmd": "uotls", "unm": "player1", "o": {"intState": 1}}),
+        ));
+        assert!(peer.expect_at(&packet::goto("player13")) >= idle);
+        peer.send("%xt%warning%-1%Player 'player13' could not be found.%");
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
@@ -3704,10 +3713,10 @@ fn goes_to_players_the_way_the_client_does() {
     session.goto("player12").wait().unwrap();
     assert_eq!(session.snapshot().room.as_ref().unwrap().cell, "r8");
     wait_until(session, |me| me.state == CombatState::InCombat);
-    assert!(matches!(
-        session.goto("player11").wait(),
-        Err(ActionError::InCombat)
-    ));
+    session.goto("player11").wait().unwrap();
+    assert_eq!(session.snapshot().room.as_ref().unwrap().cell, "r5");
+    let away = session.goto("player13").wait();
+    assert!(matches!(away, Err(ActionError::NoTarget(_))), "{away:?}");
     session.logout();
     harness.finish();
 }

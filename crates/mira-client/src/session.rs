@@ -29,7 +29,7 @@ use crate::faction::Faction;
 use crate::inventory::{Inventory, Item, Pool};
 use crate::player::{BoostKind, Me};
 use crate::quest::Quest;
-use crate::room::{CombatState, Monster, Room, Spot, UserEntry, Vitals, names_room};
+use crate::room::{CombatState, Monster, Player, Room, Spot, UserEntry, Vitals, names_room};
 use crate::shop::Shop;
 use crate::world::{Settings, World};
 use bank::{BankMove, BankStage};
@@ -688,6 +688,11 @@ enum JoinTarget {
 }
 
 enum JoinStage {
+    Leaving {
+        to: JoinTarget,
+        cell: String,
+        deadline: Instant,
+    },
     Cooling {
         to: JoinTarget,
         until: Instant,
@@ -1613,13 +1618,35 @@ impl Session {
             },
             Op::Join {
                 reply,
+                stage: JoinStage::Leaving { to, cell, deadline },
+            } => match self.step_leaving(&cell, deadline, now) {
+                task::Poll::Pending => Some(Op::Join {
+                    reply,
+                    stage: JoinStage::Leaving { to, cell, deadline },
+                }),
+                task::Poll::Ready(Ok(())) => {
+                    let until = self.cooling(Limit::Transfer, now).unwrap_or(now);
+                    let stage = JoinStage::Cooling { to, until };
+                    self.step(Op::Join { reply, stage }, now)
+                }
+                task::Poll::Ready(Err(e)) => {
+                    self.replies.push((reply, Err(e)));
+                    None
+                }
+            },
+            Op::Join {
+                reply,
                 stage: JoinStage::Cooling { to, .. },
             } => {
                 let state = self.character.as_ref().map(|me| me.state);
+                let in_room =
+                    matches!(&to, JoinTarget::Player(name) if self.player_in_room(name).is_some());
                 let refused = match (self.ensure_ready(), state) {
                     (Err(e), _) => Some(e),
                     (Ok(()), Some(CombatState::Dead)) => Some(ActionError::Dead),
-                    (Ok(()), Some(CombatState::InCombat)) => Some(ActionError::InCombat),
+                    (Ok(()), Some(CombatState::InCombat)) if !in_room => {
+                        Some(ActionError::InCombat)
+                    }
                     (Ok(()), _) => None,
                 };
                 if let Some(e) = refused {
@@ -1733,24 +1760,17 @@ impl Session {
                 reply,
                 cell,
                 deadline,
-            } => {
-                let state = self.character.as_ref().map(|me| me.state);
-                let result = match (self.ensure_ready(), state) {
-                    (Err(e), _) => Err(e),
-                    (Ok(()), Some(CombatState::Dead)) => Err(ActionError::Dead),
-                    (Ok(()), Some(CombatState::InCombat)) if now < deadline => {
-                        return Some(Op::Leave {
-                            reply,
-                            cell,
-                            deadline,
-                        });
-                    }
-                    (Ok(()), Some(CombatState::InCombat)) => Err(ActionError::StillInCombat(cell)),
-                    (Ok(()), _) => Ok(()),
-                };
-                self.replies.push((reply, result));
-                None
-            }
+            } => match self.step_leaving(&cell, deadline, now) {
+                task::Poll::Pending => Some(Op::Leave {
+                    reply,
+                    cell,
+                    deadline,
+                }),
+                task::Poll::Ready(result) => {
+                    self.replies.push((reply, result));
+                    None
+                }
+            },
             Op::Pick {
                 reply,
                 item,
@@ -1928,7 +1948,7 @@ impl Session {
             | Some(Op::Leave { deadline, .. })
             | Some(Op::Pick { deadline, .. })
             | Some(Op::Join {
-                stage: JoinStage::Sent { deadline, .. },
+                stage: JoinStage::Sent { deadline, .. } | JoinStage::Leaving { deadline, .. },
                 ..
             }) => Some(*deadline),
             Some(Op::Join {
@@ -2108,17 +2128,17 @@ impl Session {
         } else {
             format!("{map}-{}", random_room())
         };
-        let until = self.cooling(Limit::Transfer, now).unwrap_or(now);
-        let to = JoinTarget::Map { map, spot };
-        Ok(Some(JoinStage::Cooling { to, until }))
+        self.start_transfer(JoinTarget::Map { map, spot }, now)
     }
 
     fn start_goto(&mut self, name: String, now: Instant) -> Result<Option<JoinStage>, ActionError> {
         self.ensure_ready()?;
-        match self.character.as_ref().map(|me| me.state) {
-            Some(CombatState::Dead) => return Err(ActionError::Dead),
-            Some(CombatState::InCombat) => return Err(ActionError::InCombat),
-            _ => {}
+        if self
+            .character
+            .as_ref()
+            .is_some_and(|me| me.state == CombatState::Dead)
+        {
+            return Err(ActionError::Dead);
         }
         if name.eq_ignore_ascii_case(&self.username) {
             return Err(ActionError::Unusable("that's this player".into()));
@@ -2126,9 +2146,41 @@ impl Session {
         if let Some(result) = self.goto_in_room(&name) {
             return result.map(|()| None);
         }
+        self.start_transfer(JoinTarget::Player(name), now)
+    }
+
+    fn start_transfer(
+        &mut self,
+        to: JoinTarget,
+        now: Instant,
+    ) -> Result<Option<JoinStage>, ActionError> {
+        let in_combat = self
+            .character
+            .as_ref()
+            .is_some_and(|me| me.state == CombatState::InCombat);
+        if in_combat && let Some((cell, deadline)) = self.start_leaving(now)? {
+            return Ok(Some(JoinStage::Leaving { to, cell, deadline }));
+        }
         let until = self.cooling(Limit::Transfer, now).unwrap_or(now);
-        let to = JoinTarget::Player(name);
         Ok(Some(JoinStage::Cooling { to, until }))
+    }
+
+    fn step_leaving(
+        &self,
+        cell: &str,
+        deadline: Instant,
+        now: Instant,
+    ) -> task::Poll<Result<(), ActionError>> {
+        let state = self.character.as_ref().map(|me| me.state);
+        task::Poll::Ready(match (self.ensure_ready(), state) {
+            (Err(e), _) => Err(e),
+            (Ok(()), Some(CombatState::Dead)) => Err(ActionError::Dead),
+            (Ok(()), Some(CombatState::InCombat)) if now < deadline => return task::Poll::Pending,
+            (Ok(()), Some(CombatState::InCombat)) => {
+                Err(ActionError::StillInCombat(cell.to_owned()))
+            }
+            (Ok(()), _) => Ok(()),
+        })
     }
 
     fn step_walk(&mut self, x: i32, y: i32, now: Instant) -> Result<Option<Instant>, ActionError> {
@@ -2162,12 +2214,17 @@ impl Session {
         self.ensure_ready().map(|()| None)
     }
 
-    fn goto_in_room(&mut self, name: &str) -> Option<Result<(), ActionError>> {
-        let room = self.room.as_ref()?;
-        let player = room
+    fn player_in_room(&self, name: &str) -> Option<&Player> {
+        self.room
+            .as_ref()?
             .players
             .iter()
-            .find(|p| p.name.eq_ignore_ascii_case(name))?;
+            .find(|p| p.name.eq_ignore_ascii_case(name))
+    }
+
+    fn goto_in_room(&mut self, name: &str) -> Option<Result<(), ActionError>> {
+        let player = self.player_in_room(name)?;
+        let room = self.room.as_ref()?;
         let Some(cell) = player.cell.clone() else {
             return Some(Err(ActionError::Unusable(format!(
                 "{}'s cell isn't known yet",

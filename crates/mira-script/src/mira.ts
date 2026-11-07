@@ -615,8 +615,8 @@ export const map = view(
   { cells: true, name: true, areaId: true, cell: true, pad: true, x: true, y: true, zone: true, players: true, monsters: true },
   {
     /**
-     * Without a room in `name`, joins settings.room. "refused" when the map is
-     * locked, full, or for members only.
+     * Without a room in `name`, joins settings.room. Leaves combat first.
+     * "refused" when the map is locked, full, or for members only.
      */
     join(name: string, options: { readonly cell?: string; readonly pad?: string } = {}): Action<"joined" | "refused"> {
       const map = checkText(name, "map.join's map name");
@@ -632,7 +632,10 @@ export const map = view(
     walk(x: number, y: number): Action<void> {
       return act("walk", { x: checkCoordinate(x, "x"), y: checkCoordinate(y, "y") });
     },
-    /** "not_found" when the player isn't on this server. */
+    /**
+     * Leaves combat first when the player is in another map. "not_found" when
+     * the player isn't on this server.
+     */
     goto(player: string): Action<"arrived" | "not_found" | "refused"> {
       return act("goto", { player: checkText(player, "map.goto's player") });
     },

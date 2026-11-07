@@ -421,8 +421,8 @@ export declare const player: PlayerFields & {
 };
 export declare const map: MapFields & {
     /**
-     * Without a room in `name`, joins settings.room. "refused" when the map is
-     * locked, full, or for members only.
+     * Without a room in `name`, joins settings.room. Leaves combat first.
+     * "refused" when the map is locked, full, or for members only.
      */
     join(name: string, options?: {
         readonly cell?: string;
@@ -431,7 +431,10 @@ export declare const map: MapFields & {
     jump(cell: string, pad?: string): Action<void>;
     /** Skipped if the player changes map or cell before it's sent. */
     walk(x: number, y: number): Action<void>;
-    /** "not_found" when the player isn't on this server. */
+    /**
+     * Leaves combat first when the player is in another map. "not_found" when
+     * the player isn't on this server.
+     */
     goto(player: string): Action<"arrived" | "not_found" | "refused">;
     /** Finishes once sent. */
     collect(mapItemId: number): Action<void>;
