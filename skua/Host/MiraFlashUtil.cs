@@ -229,11 +229,17 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
     int Achievement(string field, int index) => index is < 0 or > 31 || state.Me?.Quests.Achievements.TryGetValue(field, out _) != true ? -1 : (int)((state.Me.Quests.Achievements[field] >> index) & 1);
     int MaximumTurnIns(int quest)
     {
-        if (!state.Quests.Definitions.TryGetValue(quest, out var definition)) { IScriptInterface.Instance.Quests.EnsureLoad(quest); definition = state.Quests.Definitions.GetValueOrDefault(quest); }
-        if (definition is null) return 0;
-        if (definition.TurnIn.IsEmpty) return 1;
-        if (definition.Once || definition.Period is not null) return 1;
-        return definition.TurnIn.Aggregate(250, (count, item) => Math.Min(count, ((state.Inventory.ById.GetValueOrDefault(item.Id)?.Qty ?? 0) + state.Temp.Where(i => i.Id == item.Id).Sum(i => i.Qty)) / Math.Max(1, item.Qty)));
+        if (!state.Quests.Definitions.TryGetValue(quest, out var definition)) return 0;
+        int most = -1;
+        foreach (var item in definition.TurnIn)
+        {
+            var held = state.Inventory.ById.GetValueOrDefault(item.Id);
+            int qty = (held?.Qty ?? 0) + state.Temp.Where(i => i.Id == item.Id).Sum(i => i.Qty);
+            if (qty < item.Qty || held?.Equipped == true) return 0;
+            int sets = qty / Math.Max(1, item.Qty);
+            if (most == -1 || sets < most) most = sets;
+        }
+        return Math.Min(most, 250);
     }
     bool LoadQuests(string ids) { IScriptInterface.Instance.Quests.Load(ids.Split(',').Select(int.Parse).ToArray()); return true; }
     object? SendPacket(string packet) { protocol.Call(new SendCall(packet)); Remember(packet); return null; }

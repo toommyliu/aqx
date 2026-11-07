@@ -446,7 +446,7 @@ using Skua.Core.Interfaces;
 public class Equipped {
     public void ScriptMain(IScriptInterface bot) {
         bot.Quests.EnsureAccept(11);
-        bot.Log($"can complete {bot.Quests.CanComplete(11)}");
+        bot.Log($"can complete {bot.Quests.CanComplete(11)}, turn-ins {bot.Flash.CallGameFunction<int>("world.maximumQuestTurnIns", 11)}");
     }
 }
 "#,
@@ -454,9 +454,48 @@ public class Equipped {
 
     assert!(result == Outcome::Finished, "{result:?}\n{logged:#?}");
     assert!(
-        logged.contains(&"can complete True".to_string()),
+        logged.contains(&"can complete True, turn-ins 0".to_string()),
         "{logged:#?}"
     );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn maximum_turn_ins_counts_like_the_client() {
+    let fake = Fake::start_with(
+        FARM,
+        json!([{"ItemID":87,"CharItemID":9,"sName":"Treeant Branch","iQty":7,"iStk":10,"sType":"Item","sES":"None"}]),
+        json!([]),
+        |msg, wire| {
+            if msg.contains("%getQuests%") {
+                wire.object(
+                    r#"{"cmd":"getQuests","quests":{
+                    "21":{"QuestID":21,"sName":"Nothing Needed","bOnce":false,"iSlot":-1,"turnin":[],"oItems":{},"oRewards":{},"reward":[]},
+                    "22":{"QuestID":22,"sName":"Once","bOnce":true,"iSlot":-1,"turnin":[{"ItemID":87,"iQty":2}],"oItems":{"87":{"ItemID":87,"sName":"Treeant Branch","iStk":10}},"oRewards":{},"reward":[]}}}"#,
+                );
+            }
+        },
+    );
+    let (result, logged, sent) = fake.run(
+        r#"
+using Skua.Core.Interfaces;
+public class Maximum {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Quests.Load(21, 22);
+        bot.Wait.ForTrue(() => bot.Quests.Tree.Count == 2, 20);
+        int Most(int id) => bot.Flash.CallGameFunction<int>("world.maximumQuestTurnIns", id);
+        bot.Log($"empty {Most(21)}, once {Most(22)}, unloaded {Most(404)}");
+    }
+}
+"#,
+    );
+
+    assert!(result == Outcome::Finished, "{result:?}\n{logged:#?}");
+    assert!(
+        logged.contains(&"empty -1, once 3, unloaded 0".to_string()),
+        "{logged:#?}"
+    );
+    assert!(!sent.iter().any(|m| m.contains("%404%")), "{sent:#?}");
 }
 
 #[test]
