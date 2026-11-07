@@ -977,6 +977,24 @@ public class Helpers {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_failed_bank_load_leaves_the_bank_unloaded_without_throwing() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class FailedLoad {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Bank.Load();
+        bot.Log($"loaded {bot.Bank.Loaded} {bot.Bank.Items.Count}");
+    }
+}
+"#;
+    let (outcome, logs, _) =
+        Fake::start_with(FARM, json!([]), json!("down"), |_, _| {}).run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(logs.contains(&"loaded False 0".into()), "{logs:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn shop_selling_protects_local_favorites_unless_disabled() {
     let source = r#"
 using Skua.Core.Interfaces;

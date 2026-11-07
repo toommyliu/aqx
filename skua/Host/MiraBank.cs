@@ -28,7 +28,8 @@ public sealed class MiraBank : IScriptBank
         {
             if (Loaded) { StrongReferenceMessenger.Default.Send(new BankLoadedMessage()); return; }
             if (loading is null || loading.IsCompleted) loading = Task.Run(() => {
-                protocol.Call(new LoadBankCall());
+                try { protocol.Call(new LoadBankCall()); }
+                catch (InvalidOperationException) { return; }
                 Loaded = true;
                 StrongReferenceMessenger.Default.Send(new BankLoadedMessage());
             });
