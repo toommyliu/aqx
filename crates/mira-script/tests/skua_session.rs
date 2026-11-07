@@ -139,6 +139,45 @@ public class Movement {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn packets_go_out_while_another_call_waits_on_the_server() {
+    let mut asked = false;
+    let (outcome, logs, sent) = Fake::start(move |message, wire| {
+        if message.contains("%getQuests%") {
+            asked = true;
+        } else if asked && message.contains("%afk%") {
+            wire.object(r#"{"cmd":"getQuests","quests":{"19":{"QuestID":19,"sName":"Repeat","bOnce":false,"iSlot":-1,"turnin":[],"oItems":{},"oRewards":{},"reward":[]}}}"#);
+        } else if message.contains("%acceptQuest%5%19%") {
+            wire.object(r#"{"cmd":"acceptQuest","QuestID":19,"bSuccess":1}"#);
+        }
+    })
+    .run(
+        r#"
+using System.Diagnostics;
+using System.Threading.Tasks;
+using Skua.Core.Interfaces;
+public class Packets {
+    public void ScriptMain(IScriptInterface bot) {
+        Task<bool> accept = Task.Run(() => bot.Quests.Accept(19));
+        bot.Sleep(200);
+        Stopwatch clock = Stopwatch.StartNew();
+        bot.Send.ClientPacket("%xt%server%-1%hello%");
+        bot.Send.Packet("%xt%zm%afk%1%false%");
+        bot.Log($"packets {(clock.ElapsedMilliseconds < 500 ? "went at once" : "waited")}");
+        bot.Log($"accepted {accept.Result}");
+    }
+}
+"#,
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    for expected in ["packets went at once", "accepted True"] {
+        assert!(logs.contains(&expected.into()), "{logs:?}");
+    }
+    let at = |wanted: &str| sent.iter().position(|m| m.contains(wanted));
+    assert!(at("%getQuests%") < at("%afk%"), "{sent:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn account_tags_reject_unknown_accounts_and_lite_keys_share_typed_values() {
     let (outcome, logs, _) = Fake::start(|_, _| {}).run(r#"
 using Skua.Core.Interfaces;

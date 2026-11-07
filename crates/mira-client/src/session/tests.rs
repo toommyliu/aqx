@@ -2041,6 +2041,58 @@ fn a_refused_skill_reports_it_and_keeps_its_old_cooldown() {
 }
 
 #[test]
+fn a_fired_skill_answers_once_sent_and_lets_queued_actions_pass_while_it_waits() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.expect("%xt%zm%afk%1%false%");
+        let moved = peer.expect_at(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
+        let shield = peer.expect_at(&gar(0, "a2", &[Aim::Player(EntityId(7))]));
+        assert!(shield - moved >= Duration::from_millis(700) - SLACK);
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    session.send_now("%xt%zm%afk%1%false%").wait().unwrap();
+    let shield = session.fire_skill("a2", None);
+    assert!(matches!(
+        session.fire_skill("a1", Some(ONE)).wait(),
+        Err(ActionError::Unusable(why)) if why == "another skill is waiting to fire"
+    ));
+    session.move_to_cell("Enter", "Spawn").wait().unwrap();
+    shield.wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn direct_requests_answer_while_a_queued_action_waits_on_the_server() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::get_quests(AreaId(42), &[QuestId(30)]));
+        peer.expect("%xt%zm%afk%1%false%");
+        peer.send(&json_message(
+            json!({"cmd": "getQuests", "quests": {"30": {"QuestID": 30, "sName": "Potion Run"}}}),
+        ));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let loading = session.load_quests(&[QuestId(30)]);
+    session.inject(&json_message(
+        json!({"cmd": "balance", "intGold": 10, "intCoins": 50}),
+    ));
+    session.sync().wait().unwrap();
+    assert_eq!(session.snapshot().me.as_ref().unwrap().gold, 10);
+    session.send_now("%xt%zm%afk%1%false%").wait().unwrap();
+    loading.wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn moves_where_the_respawn_says_and_aggroes_monsters_that_come_back() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
@@ -2327,7 +2379,7 @@ fn cancelling_answers_at_once_but_holds_the_queue_until_a_sent_request_is_answer
     let (fetching, sent) = mpsc::channel::<()>();
     let (cancelled, next) = mpsc::channel::<()>();
     let ids: Vec<QuestId> = (1..=15).map(QuestId).collect();
-    let first = ids[..14].to_vec();
+    let first = ids.clone();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
@@ -2384,15 +2436,12 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
         let ids: Vec<QuestId> = (1..=15).map(QuestId).collect();
-        let first = peer.expect_at(&packet::get_quests(AreaId(42), &ids[..14]));
-        peer.send(&json_message(json!({"cmd": "getQuests", "quests": {}})));
-        let second = peer.expect_at(&packet::get_quests(AreaId(42), &ids[14..]));
-        assert!(second - first >= Limit::LoadQuests.gap() - SLACK);
+        let first = peer.expect_at(&packet::get_quests(AreaId(42), &ids));
         peer.send(&json_message(
             json!({"cmd": "getQuests", "quests": {"15": {"QuestID": 15, "sName": "Fifteen"}}}),
         ));
-        let third = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(30)]));
-        assert!(third - second >= Limit::LoadQuests.gap() - SLACK);
+        let second = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(30)]));
+        assert!(second - first >= Limit::LoadQuests.gap() - SLACK);
         peer.send(&json_message(
             json!({"cmd": "getQuests", "quests": {"16": {"QuestID": 16, "sName": "Sixteen"}}}),
         ));
@@ -4620,7 +4669,7 @@ fn aggro_all_includes_monsters_in_other_cells() {
 }
 
 #[test]
-fn rest_packets_do_not_send_an_emote_or_wait_for_recovery() {
+fn rest_packets_skip_the_cooldown_instead_of_waiting_and_send_no_emote() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
@@ -4631,6 +4680,10 @@ fn rest_packets_do_not_send_an_emote_or_wait_for_recovery() {
     });
     harness.session.ready().wait().unwrap();
     harness.session.request_rest_packet().wait().unwrap();
+    let skipped = Instant::now();
+    harness.session.request_rest_packet().wait().unwrap();
+    assert!(skipped.elapsed() < Duration::from_millis(500));
+    thread::sleep(Limit::RestPacket.gap());
     harness.session.request_rest_packet().wait().unwrap();
     harness.session.logout();
     harness.finish();

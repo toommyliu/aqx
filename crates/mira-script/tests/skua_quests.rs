@@ -658,6 +658,49 @@ public class Reaccept {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_slow_reaccept_does_not_hold_up_later_events() {
+    let mut accepts = 0;
+    let (result, logs, _) = Fake::start(move |msg, wire| {
+        if msg.contains("%getQuests%") {
+            wire.object(r#"{"cmd":"getQuests","quests":{"19":{"QuestID":19,"sName":"Repeat","bOnce":false,"iSlot":-1,"turnin":[],"oItems":{},"oRewards":{},"reward":[]}}}"#);
+        } else if msg.contains("%acceptQuest%5%19%") {
+            accepts += 1;
+            if accepts > 1 {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            wire.object(r#"{"cmd":"acceptQuest","QuestID":19,"bSuccess":1}"#);
+        } else if msg.contains("%tryQuestComplete%5%19%") {
+            wire.object(r#"{"cmd":"ccqr","QuestID":19,"bSuccess":1}"#);
+            wire.object(r#"{"cmd":"dropItem","items":{"87":{"ItemID":87,"sName":"Treeant Branch","iQty":1,"iStk":10}}}"#);
+        }
+    }).run(r#"
+using System.Diagnostics;
+using Skua.Core.Interfaces;
+public class Reaccept {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Options.ActionDelay = 0;
+        bot.Quests.EnsureAccept(19);
+        bot.Lite.ReacceptQuest = true;
+        Stopwatch clock = Stopwatch.StartNew();
+        long dropped = -1;
+        bot.Events.ItemDropped += (item, added, quantity) => dropped = clock.ElapsedMilliseconds;
+        bot.Quests.Complete(19);
+        for (int i = 0; i < 50 && dropped < 0; i++) bot.Sleep(20);
+        bot.Log($"drop seen {(dropped >= 0 ? "at once" : "late")}");
+        bot.Lite.ReacceptQuest = false;
+        bot.Wait.ForTrue(() => bot.Quests.IsInProgress(19), 40);
+        bot.Log($"accepted again {bot.Quests.IsInProgress(19)}");
+    }
+}
+"#);
+    assert_eq!(result, Outcome::Finished, "{logs:?}");
+    for expected in ["drop seen at once", "accepted again True"] {
+        assert!(logs.contains(&expected.into()), "{logs:?}");
+    }
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn quest_loader_service_repairs_a_range_and_registered_quests_notify_and_cancel() {
     let (result, logs, _) = Fake::start(|msg, wire| {
         if msg.contains("%getQuests%") {

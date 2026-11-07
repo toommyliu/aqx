@@ -34,7 +34,7 @@ use crate::shop::Shop;
 use crate::world::{Settings, World};
 use bank::{BankMove, BankStage};
 use equip::EquipStage;
-use fight::Fight;
+use fight::{Fight, PendingCast};
 use quests::{QuestAction, QuestCall};
 use reconnect::{Recovery, Step};
 use shops::{Trade, TradeStage};
@@ -433,6 +433,7 @@ enum Setting {
 
 enum Request {
     Act(Action, Reply, u64),
+    Direct(Direct, Reply, u64),
     Set(Setting, u64),
     Cancel(Cancel),
     Untarget,
@@ -487,6 +488,12 @@ enum Action {
         y: i32,
     },
     Send(String),
+}
+
+enum Direct {
+    Sync,
+    Send(String),
+    Cast { slot: String, target: Option<Aim> },
 }
 
 impl Action {
@@ -826,6 +833,21 @@ impl Handle {
         self.act(Action::Send(text.to_owned()))
     }
 
+    pub fn send_now(&self, text: &str) -> Pending {
+        self.direct(Direct::Send(text.to_owned()))
+    }
+
+    pub fn fire_skill(&self, slot: &str, target: Option<Aim>) -> Pending {
+        self.direct(Direct::Cast {
+            slot: slot.to_owned(),
+            target,
+        })
+    }
+
+    pub fn sync(&self) -> Pending {
+        self.direct(Direct::Sync)
+    }
+
     pub fn request_rest_packet(&self) -> Pending {
         self.act(Action::RequestRestPacket)
     }
@@ -963,10 +985,18 @@ impl Handle {
     }
 
     fn act(&self, action: Action) -> Pending {
+        self.pend(|reply, epoch| Request::Act(action, reply, epoch))
+    }
+
+    fn direct(&self, direct: Direct) -> Pending {
+        self.pend(|reply, epoch| Request::Direct(direct, reply, epoch))
+    }
+
+    fn pend(&self, request: impl FnOnce(Reply, u64) -> Request) -> Pending {
         let (tx, result) = mpsc::sync_channel(1);
         let id = ActionId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let epoch = self.epoch.load(Ordering::SeqCst);
-        self.request(Request::Act(action, Reply { id, tx: Some(tx) }, epoch));
+        self.request(request(Reply { id, tx: Some(tx) }, epoch));
         Pending {
             id,
             result,
@@ -1084,6 +1114,7 @@ pub fn spawn(
         boost_check: None,
         combat: Combat::default(),
         fight: None,
+        pending_cast: None,
         cancelled: None,
         closing: None,
         logout_deadline: None,
@@ -1170,6 +1201,7 @@ struct Session {
     boost_check: Option<Instant>,
     combat: Combat,
     fight: Option<Fight>,
+    pending_cast: Option<PendingCast>,
     cancelled: Option<ActionId>,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -1271,6 +1303,9 @@ impl Session {
         if self.fight.as_ref().is_some_and(|f| which.covers(&f.reply)) {
             self.untarget();
         }
+        if let Some(cast) = self.pending_cast.take_if(|c| which.covers(&c.reply)) {
+            self.replies.push((cast.reply, Err(ActionError::Cancelled)));
+        }
         if let Some(reply) = self.current.as_mut().and_then(Op::reply_mut)
             && which.covers(reply)
         {
@@ -1310,7 +1345,9 @@ impl Session {
     fn take_requests(&mut self) {
         while let Ok(request) = self.requests.try_recv() {
             match request {
-                Request::Act(_, reply, epoch) if self.stale_epoch(epoch) => {
+                Request::Act(_, reply, epoch) | Request::Direct(_, reply, epoch)
+                    if self.stale_epoch(epoch) =>
+                {
                     let why = self.recovery.as_ref().map(|r| r.why.clone());
                     let why = why.or_else(|| self.stale.clone());
                     let why = why.unwrap_or(Disconnect::Ended);
@@ -1323,6 +1360,7 @@ impl Session {
                 Request::Logout => self.begin_logout(),
                 Request::Set(_, epoch) if self.stale_epoch(epoch) => {}
                 Request::Set(setting, _) => self.apply(setting),
+                Request::Direct(direct, reply, _) => self.direct(direct, reply),
                 Request::Act(Action::LoadCells, reply, _) => self.load_map_cells(Some(reply)),
                 Request::Act(Action::ExitCombat, reply, _) => {
                     if let Some(fight) = self.fight.take() {
@@ -1333,6 +1371,10 @@ impl Session {
                         && let Some(Op::Cast { reply, .. }) = self.current.take()
                     {
                         self.replies.push((reply, Err(ActionError::Interrupted)));
+                    }
+                    if let Some(cast) = self.pending_cast.take() {
+                        self.replies
+                            .push((cast.reply, Err(ActionError::Interrupted)));
                     }
                     let (fights, rest): (Vec<_>, Vec<_>) =
                         self.queue.drain(..).partition(|(action, _)| {
@@ -1354,6 +1396,26 @@ impl Session {
         }
     }
 
+    fn direct(&mut self, direct: Direct, reply: Reply) {
+        let result = match direct {
+            Direct::Sync => Ok(()),
+            Direct::Send(text) => self.ensure_ready().map(|()| self.send(&text)),
+            Direct::Cast { .. } if self.pending_cast.is_some() => Err(ActionError::Unusable(
+                "another skill is waiting to fire".into(),
+            )),
+            Direct::Cast { slot, target } => {
+                self.pending_cast = Some(PendingCast {
+                    reply,
+                    slot,
+                    target,
+                    wake: None,
+                });
+                return;
+            }
+        };
+        self.replies.push((reply, result));
+    }
+
     fn advance(&mut self, now: Instant) {
         if self.logout_deadline.is_some_and(|d| now >= d) {
             self.close(Disconnect::LoggedOut);
@@ -1369,6 +1431,7 @@ impl Session {
         }
         self.step_fight(now);
         self.run_ops(now);
+        self.step_pending_cast(now);
         self.tick_combat(now);
         self.tick_aggro(now);
         self.end_boosts(now);
@@ -1841,6 +1904,12 @@ impl Session {
                     (Ok(()), _, stage @ RestStage::Sent { .. }) => {
                         return Some(Op::Rest { reply, stage, mode });
                     }
+                    (Ok(()), _, RestStage::Cooling { .. })
+                        if mode == RestMode::Packet
+                            && self.cooling(Limit::RestPacket, now).is_some() =>
+                    {
+                        Ok(())
+                    }
                     (Ok(()), _, RestStage::Cooling { .. }) => {
                         let limit = if mode == RestMode::Packet {
                             Limit::RestPacket
@@ -2002,6 +2071,7 @@ impl Session {
             .filter(|until| Instant::now() < *until);
         op.into_iter()
             .chain(self.fight.as_ref().and_then(|fight| fight.wake))
+            .chain(self.pending_cast.as_ref().and_then(|cast| cast.wake))
             .chain(counters)
             .chain(self.logout_deadline)
             .chain(self.recovery.as_ref().and_then(|r| match r.step {
@@ -2377,9 +2447,11 @@ impl Session {
         let at = Instant::now() + wait;
         let dropped = self.current.take().and_then(Op::into_reply);
         let fighting = self.fight.take().map(|fight| fight.reply);
+        let casting = self.pending_cast.take().map(|cast| cast.reply);
         for reply in dropped
             .into_iter()
             .chain(fighting)
+            .chain(casting)
             .chain(self.queue.drain(..).map(|(_, r)| r))
         {
             self.replies

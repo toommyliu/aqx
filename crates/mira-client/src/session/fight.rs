@@ -20,6 +20,13 @@ pub(super) struct Fight {
     pub(super) wake: Option<Instant>,
 }
 
+pub(super) struct PendingCast {
+    pub(super) reply: Reply,
+    pub(super) slot: String,
+    pub(super) target: Option<Aim>,
+    pub(super) wake: Option<Instant>,
+}
+
 impl Session {
     pub(super) fn readiness(&self, now: Instant) -> BTreeMap<String, Readiness> {
         let Some(me) = &self.character else {
@@ -45,6 +52,26 @@ impl Session {
             }
             Ok(None) => self.replies.push((fight.reply, Ok(()))),
             Err(e) => self.replies.push((fight.reply, Err(e))),
+        }
+    }
+
+    pub(super) fn step_pending_cast(&mut self, now: Instant) {
+        let Some(cast) = self.pending_cast.take() else {
+            return;
+        };
+        let moving = matches!(self.current, Some(Op::Join { .. } | Op::Leave { .. }));
+        let prepared = match self.ensure_ready() {
+            Err(e) => Err(e),
+            Ok(()) if moving => Ok(Prepared::Wait(None)),
+            Ok(()) => self.prepare(&cast.slot, cast.target, now),
+        };
+        match prepared {
+            Ok(Prepared::Wait(wake)) => self.pending_cast = Some(PendingCast { wake, ..cast }),
+            Ok(Prepared::Fire { aims, hostile }) => {
+                self.fire(&cast.slot, &aims, hostile, now);
+                self.replies.push((cast.reply, Ok(())));
+            }
+            Err(e) => self.replies.push((cast.reply, Err(e))),
         }
     }
 
@@ -459,9 +486,11 @@ impl Session {
 
     pub(super) fn class_skill_due(&self, now: Instant) -> Option<Instant> {
         let me = self.character.as_ref()?;
-        let waiting: Vec<&Skill> = match (&self.fight, &self.current) {
-            (Some(fight), _) => self.rotation_skills(fight.slots.as_deref()),
-            (
+        let waiting: Vec<&Skill> = match (&self.fight, &self.pending_cast, &self.current) {
+            (Some(fight), ..) => self.rotation_skills(fight.slots.as_deref()),
+            (None, Some(PendingCast { slot, .. }), _)
+            | (
+                None,
                 None,
                 Some(Op::Cast {
                     slot,

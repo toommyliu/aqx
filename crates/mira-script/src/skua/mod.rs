@@ -413,7 +413,7 @@ impl SkuaScript {
                         Call::RestPacket => Some(session.request_rest_packet()),
                         Call::ExitCombat => Some(session.exit_combat()),
                         Call::Attack { target } => Some(session.attack(target)),
-                        Call::UseSkill { slot, target } => Some(session.use_skill(
+                        Call::UseSkill { slot, target } => Some(session.fire_skill(
                             &slot,
                             target.map(|target| match target {
                                 protocol::Target::Monster(id) => mira_client::Aim::Monster(id),
@@ -445,10 +445,10 @@ impl SkuaScript {
                         Call::Equip { item } => Some(session.equip(item)),
                         Call::Unequip { item } => Some(session.unequip(item)),
                         Call::UseItem { item } => Some(session.use_item(item)),
-                        Call::Send { text } => Some(session.send_raw(&text)),
+                        Call::Send { text } => Some(session.send_now(&text)),
                         Call::SetSkillLastUse { slot, at } => {
                             session.set_skill_last_use(&slot, projection.instant_at(at));
-                            Some(session.ready())
+                            Some(session.sync())
                         }
                         Call::Untarget => {
                             session.untarget();
@@ -456,7 +456,7 @@ impl SkuaScript {
                         }
                         Call::Inject { text } => {
                             session.inject(&text);
-                            Some(session.ready())
+                            Some(session.sync())
                         }
                         Call::SetAggro { mode } => {
                             session.set_aggro(match mode {
