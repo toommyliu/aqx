@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use mira_protocol::{EntityId, JsonMessage, MonMapId, XmlMessage, XtMessage, packet};
+use mira_protocol::{EntityId, JsonMessage, MonMapId, QuestId, XmlMessage, XtMessage, packet};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -124,7 +124,11 @@ impl Session {
                 let secs = xt.field(5).and_then(|secs| secs.parse().ok()).unwrap_or(0);
                 self.closing = Some(Disconnect::Kicked { secs });
             }
-            "zm" if xt.field(3) == Some("tryQuestComplete") => self.answer(Answer::TurnInEchoed),
+            "zm" if xt.field(3) == Some("tryQuestComplete") => {
+                if let Some(id) = xt.field(5).and_then(|id| id.parse().ok()) {
+                    self.answer(Answer::TurnInEchoed(QuestId(id)));
+                }
+            }
             "exitArea" => {
                 if let Some(eid) = xt.field(4).and_then(|eid| eid.parse().ok()) {
                     self.on_player_left(EntityId(eid));

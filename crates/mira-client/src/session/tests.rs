@@ -2411,6 +2411,20 @@ fn quest_actions_make_the_clients_checks_before_sending() {
             None,
             1,
         ));
+        peer.send("%xt%zm%tryQuestComplete%42%99%-1%false%1%wvz%");
+        peer.send(&json_message(
+            json!({"cmd": "ccqr", "QuestID": 44, "bSuccess": 1, "sName": "Echoed"}),
+        ));
+        peer.expect(&packet::accept_quest(AreaId(42), QuestId(44)));
+        peer.send(&json_message(
+            json!({"cmd": "acceptQuest", "QuestID": 44, "bSuccess": 1}),
+        ));
+        peer.expect(&packet::try_quest_complete(
+            AreaId(42),
+            QuestId(44),
+            None,
+            1,
+        ));
         peer.send("%xt%zm%tryQuestComplete%42%44%-1%false%1%wvz%");
         peer.expect(&packet::logout());
     });
@@ -2440,6 +2454,8 @@ fn quest_actions_make_the_clients_checks_before_sending() {
     let missing = session.load_quests(&[QuestId(46), QuestId(45), QuestId(44)]);
     assert!(matches!(missing.wait(), Err(ActionError::NoTarget(_))));
     assert!(session.snapshot().quests.contains_key(&QuestId(45)));
+    session.complete_quest(QuestId(44), None, 1).wait().unwrap();
+    session.accept_quest(QuestId(44)).wait().unwrap();
     let echoed = session.complete_quest(QuestId(44), None, 1).wait();
     assert!(matches!(echoed, Err(ActionError::Refused(_))));
     session.logout();

@@ -60,7 +60,7 @@ pub(super) enum Answer {
     SlowedDown,
     Accepted(Verdict),
     TurnedIn(Verdict),
-    TurnInEchoed,
+    TurnInEchoed(QuestId),
 }
 
 #[derive(Deserialize)]
@@ -216,9 +216,13 @@ impl Session {
             {
                 verdict.result("the turn-in failed")
             }
-            (Stage::Sent { .. }, QuestAction::TurnIn { .. }, Answer::TurnInEchoed) => Err(
-                ActionError::Refused("the server sent the turn-in back unanswered".into()),
-            ),
+            (Stage::Sent { .. }, QuestAction::TurnIn { id, .. }, Answer::TurnInEchoed(echoed))
+                if echoed == *id =>
+            {
+                Err(ActionError::Refused(
+                    "the server sent the turn-in back unanswered".into(),
+                ))
+            }
             _ => return,
         };
         if let Some(Op::Quest { reply, .. }) = self.current.take() {
