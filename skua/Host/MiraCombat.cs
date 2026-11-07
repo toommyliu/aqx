@@ -36,7 +36,7 @@ public sealed class MiraCombat : IScriptCombat
     }
     void OnEvent(ClientEvent data)
     {
-        if (data is DiedClientEvent) { StopAttacking = false; Volatile.Write(ref selection, null); }
+        if (data is DiedClientEvent) StopAttacking = false;
         if (!EnableCounterHandler) return;
         if (data is CounterStartedClientEvent)
         {

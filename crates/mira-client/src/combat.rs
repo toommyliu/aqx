@@ -85,6 +85,7 @@ pub(crate) enum Outcome {
 struct Auto {
     target: MonMapId,
     due: Instant,
+    running: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,12 +322,24 @@ impl Combat {
 
     pub(crate) fn engage(&mut self, target: MonMapId, now: Instant) {
         match &mut self.auto {
-            Some(auto) => auto.target = target,
-            None => {
+            Some(auto) if auto.running => auto.target = target,
+            _ => {
                 let due = self.auto_rest.map_or(now, |rest| rest.max(now));
-                self.auto = Some(Auto { target, due });
+                self.auto = Some(Auto {
+                    target,
+                    due,
+                    running: true,
+                });
             }
         }
+    }
+
+    pub(crate) fn hold(&mut self, target: MonMapId, now: Instant) {
+        self.auto = Some(Auto {
+            target,
+            due: now,
+            running: false,
+        });
     }
 
     pub(crate) fn auto_went_last(&self) -> bool {
@@ -347,8 +360,15 @@ impl Combat {
         self.auto.as_ref().map(|auto| auto.target)
     }
 
+    pub(crate) fn attacking(&self) -> Option<MonMapId> {
+        self.auto
+            .as_ref()
+            .filter(|auto| auto.running)
+            .map(|auto| auto.target)
+    }
+
     fn auto_due(&self, now: Instant) -> Option<Instant> {
-        let auto = self.auto.as_ref()?;
+        let auto = self.auto.as_ref().filter(|auto| auto.running)?;
         if self
             .clocks
             .get(AUTO_ATTACK)
@@ -376,7 +396,9 @@ impl Combat {
     }
 
     pub(crate) fn died(&mut self, now: Instant) {
-        self.auto = None;
+        if let Some(auto) = &mut self.auto {
+            auto.running = false;
+        }
         self.respawn_at = Some(now + RESPAWN_DELAY);
     }
 
@@ -628,7 +650,9 @@ mod tests {
         let mut combat = Combat::default();
         combat.engage(MonMapId(1), t0);
         combat.died(t0);
-        assert_eq!(combat.auto_target(), None);
+        assert_eq!(combat.auto_target(), Some(MonMapId(1)));
+        assert_eq!(combat.attacking(), None);
+        assert_eq!(combat.next_deadline(t0, true), Some(t0 + ms(10_000)));
         assert!(!combat.respawn_due(t0 + ms(9999)));
         assert!(combat.respawn_due(t0 + ms(10_000)));
         assert!(!combat.respawn_due(t0 + ms(20_000)));

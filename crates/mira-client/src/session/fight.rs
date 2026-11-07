@@ -129,15 +129,16 @@ impl Session {
 
     pub(super) fn attack(&mut self, target: MonMapId, now: Instant) -> Result<(), ActionError> {
         self.ensure_ready()?;
+        let target = self.pick_target(Some(target))?;
         if self
             .character
             .as_ref()
             .is_some_and(|me| me.state == CombatState::Dead)
         {
-            return Err(ActionError::Dead);
+            self.combat.hold(target, now);
+        } else {
+            self.combat.engage(target, now);
         }
-        let target = self.pick_target(Some(target))?;
-        self.combat.engage(target, now);
         Ok(())
     }
 
@@ -408,7 +409,7 @@ impl Session {
             self.fire(&slot, &aims, hostile, now);
             next = at + 1;
         }
-        if self.combat.auto_target() != Some(target) && !self.hostile_coming(slots, now) {
+        if self.combat.attacking() != Some(target) && !self.hostile_coming(slots, now) {
             self.combat.engage(target, now);
         }
         Ok(Some((self.rotation(next, now, target, slots).1, next)))
@@ -511,11 +512,10 @@ impl Session {
         let (Some(me), Some(room)) = (&self.character, &self.room) else {
             return;
         };
-        let fighting = me.state != CombatState::Dead
-            && room
-                .monsters
-                .iter()
-                .any(|m| m.id == target && m.cell == room.cell && m.alive());
+        let fighting = room
+            .monsters
+            .iter()
+            .any(|m| m.id == target && m.cell == room.cell && m.alive());
         let skill = me.skills.iter().find(|s| s.slot == AUTO_ATTACK);
         let Some(skill) = skill.filter(|_| fighting) else {
             return self.combat.disengage();

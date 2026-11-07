@@ -334,6 +334,34 @@ fn rest_packets_and_aggro_all_monsters_send_in_the_background() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn aggro_monsters_pulls_the_cell_and_outlasts_aggro_all_monsters() {
+    let (outcome, logs, sent) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        public class AggroCell {
+            public void ScriptMain(IScriptInterface bot) {
+                bot.Map.Jump("r2", "Left");
+                bot.Options.AggroMonsters = true;
+                bot.Options.AggroAllMonsters = true;
+                bot.Options.AggroAllMonsters = false;
+                bot.Sleep(1300);
+                bot.Options.AggroMonsters = false;
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    assert!(
+        sent.iter()
+            .filter(|m| m.ends_with("%aggroMon%5%2%"))
+            .count()
+            >= 2,
+        "{sent:?}"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn resting_sends_once_and_waits_for_full_only_briefly() {
     let map = FARM.replace("\"intHP\":3000", "\"intHP\":100");
     let (outcome, logs, sent) = Fake::start_with(&map, json!([]), json!([]), |_, _| {}).run(REST);
@@ -602,6 +630,40 @@ fn counter_handler_cancels_restores_and_resets_on_death_and_stop() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn the_target_survives_a_death_until_the_respawn_move() {
+    let (outcome, logs, _) = Fake::start(|m, w| match m {
+        "die" => w.object(r#"{"cmd":"ct","p":{"player1":{"intHP":0,"intState":0}}}"#),
+        "revive" => {
+            w.object(r#"{"cmd":"uotls","unm":"player1","o":{"intHP":3000,"intState":1}}"#);
+            w.send("%xt%resTimed%-1%r2%Left%");
+        }
+        _ => {}
+    })
+    .run(
+        r#"
+        using Skua.Core.Interfaces;
+        public class DeathTarget {
+            public void ScriptMain(IScriptInterface bot) {
+                bot.Map.Jump("r2", "Left");
+                bot.Combat.Attack("Treeant");
+                bot.Send.Packet("die");
+                bot.Sleep(200);
+                bot.Log($"dead {bot.Player.HasTarget} {bot.Combat.Attack("Treeant")} {bot.Player.Target?.MapID}");
+                bot.Send.Packet("revive");
+                bot.Sleep(300);
+                bot.Log($"respawned {bot.Player.Cell} {bot.Player.HasTarget}");
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    for expected in ["dead True True 2", "respawned r2 False"] {
+        assert!(logs.contains(&expected.into()), "{logs:?}");
+    }
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn skill_readiness_checks_targets_and_reports_real_cooldown_deadlines() {
     let (outcome, logs, _) = Fake::start(|m,w| {
         if m.contains("%gar%") {
@@ -628,6 +690,30 @@ fn skill_readiness_checks_targets_and_reports_real_cooldown_deadlines() {
     ] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn using_the_auto_attack_slot_starts_the_auto_attack() {
+    let (outcome, logs, sent) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        public class AutoAttackSlot {
+            public void ScriptMain(IScriptInterface bot) {
+                bot.Map.Jump("r2", "Left");
+                bot.Log($"aa {bot.Skills.UseSkill(0)} {bot.Player.Target?.MapID}");
+                bot.Sleep(300);
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    assert!(logs.contains(&"aa True 2".into()), "{logs:?}");
+    assert!(
+        sent.iter()
+            .any(|m| m.contains("%gar%") && m.contains("aa>m:2")),
+        "{sent:?}"
+    );
 }
 
 #[test]
@@ -787,7 +873,7 @@ fn skill_info_preserves_action_metadata_and_last_use() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
-fn skill_set_updates_use_downloaded_contents_and_report_failures() {
+fn skill_sets_update_from_downloads_and_from_a_newer_bundled_copy() {
     let (outcome, logs, _) = Fake::start(|_,_| {}).run(r#"
         using System.Net;
         using System.Net.Sockets;
@@ -832,4 +918,35 @@ fn skill_set_updates_use_downloaded_contents_and_report_failures() {
     for expected in ["downloaded True True", "failure True True"] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        using Skua.Core.Models;
+        public class StaleSkills {
+            public void ScriptMain(IScriptInterface bot) {
+                string user = Path.Combine(ClientFileSources.SkuaDIR, "UserAdvancedSkills.json");
+                string stale = File.ReadAllText(ClientFileSources.SkuaAdvancedSkillsFile) + "\n\n";
+                foreach (string file in new[] { ClientFileSources.SkuaAdvancedSkillsFile, user }) {
+                    File.WriteAllText(file, stale);
+                    File.SetLastWriteTimeUtc(file, DateTime.UnixEpoch);
+                }
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        using Skua.Core.Models;
+        public class SyncedSkills {
+            public void ScriptMain(IScriptInterface bot) {
+                bool Synced(string file) => !File.ReadAllText(file).EndsWith("\n\n");
+                bot.Log($"synced {Synced(ClientFileSources.SkuaAdvancedSkillsFile)} {Synced(Path.Combine(ClientFileSources.SkuaDIR, "UserAdvancedSkills.json"))}");
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    assert!(logs.contains(&"synced True True".into()), "{logs:?}");
 }

@@ -246,7 +246,8 @@ public sealed class MiraFlashUtil(Protocol protocol, State state, MiraEvent even
     }
     static int Remaining(ulong? at) => at is { } deadline ? (int)Math.Clamp((long)deadline - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0, int.MaxValue) : 0;
     int Cooldown(int index) => Slot(index) is { } slot ? Remaining(state.Combat.SkillTiming?.GetValueOrDefault(slot)?.Cooldown) : 0;
-    bool UseSkill(int index) => Slot(index) is { } slot && CanUseSkill(index, true) && Act(new UseSkillCall(slot, ((MiraCombat)IScriptInterface.Instance.Combat).SelectedTarget));
+    bool UseSkill(int index) => Slot(index) is { } slot && CanUseSkill(index, true) && (slot == "aa" ? AutoAttack() : Act(new UseSkillCall(slot, ((MiraCombat)IScriptInterface.Instance.Combat).SelectedTarget)));
+    static bool AutoAttack() => IScriptInterface.Instance.Combat is MiraCombat combat && (combat.SelectedTarget is { Kind: "monster" } target ? combat.Attack((int)target.Id) : combat.Attack("*"));
     bool Act(Request request) { try { protocol.Call(request); return true; } catch (InvalidOperationException) { return false; } }
     int QuestValue(int slot)
     {
