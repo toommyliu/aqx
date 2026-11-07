@@ -268,6 +268,39 @@ public class Relogged {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_relogin_keeps_aggro_monsters_pulling_the_cell() {
+    let account = Arc::new(LoginAccount {
+        farm: true,
+        ..LoginAccount::default()
+    });
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run_account(
+        r#"
+using Skua.Core.Interfaces;
+public class Relogged {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Options.AggroMonsters = true;
+        bot.Log($"relogged {bot.Servers.Relogin("Fallback")}");
+        bot.Sleep(1500);
+    }
+}
+"#,
+        &Cancel::default(),
+        Default::default(),
+        account.clone(),
+        |_| {},
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(logs.contains(&"relogged True".into()), "{logs:?}");
+    for session in account.sessions.lock().unwrap().drain(..) {
+        session.finish();
+    }
+    let sent = account.sent.lock().unwrap();
+    let cell = packet::aggro_mon(AreaId(43), &[MonMapId(1), MonMapId(2)]);
+    assert!(sent.contains(&cell), "{sent:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn join_packet_is_nonblocking_and_jump_honors_client_only_auto_correct_and_delay() {
     let started = Instant::now();
     let (outcome, logs, sent) = Fake::start(|_, _| {}).run(

@@ -11,7 +11,7 @@ public sealed class MiraOption : IScriptOption
     static readonly System.Reflection.PropertyInfo[] properties = typeof(MiraOption).GetProperties().Where(p => p.CanWrite).ToArray();
     public MiraOption(Protocol protocol, State state) : this(protocol, true)
     {
-        protocol.StateReceived += section => { if (section.Section == SectionName.Settings && aggroAllMonsters && state.Settings.Aggro.Mode == "off") protocol.Call(new SetAggroCall(new("all"))); };
+        protocol.StateReceived += section => { if (section.Section == SectionName.Settings && (aggroAllMonsters || aggroMonsters) && state.Settings.Aggro.Mode == "off") SendAggro(); };
     }
     MiraOption(Protocol protocol, bool load)
     {
