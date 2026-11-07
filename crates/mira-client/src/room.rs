@@ -265,6 +265,9 @@ impl Room {
     pub(crate) fn load_map(&mut self, map: &MapFile) {
         self.cells = map.cells.iter().map(|cell| cell.name.clone()).collect();
         self.cells_loaded = true;
+        if (self.x, self.y) == (0, 0) {
+            (self.x, self.y) = map.arrival(&self.cell, &self.pad);
+        }
     }
 
     pub(crate) fn is_in(&self, map: &str) -> bool {

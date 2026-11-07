@@ -2262,12 +2262,15 @@ impl Session {
         client_only: bool,
     ) -> Result<(), ActionError> {
         self.ensure_ready()?;
+        let arrival = self
+            .loaded_map()
+            .map_or((0, 0), |map| map.arrival(cell, pad));
         let Some(room) = &mut self.room else {
             return Err(ActionError::NotReady);
         };
         room.cell = cell.to_owned();
         room.pad = pad.to_owned();
-        (room.x, room.y) = (0, 0);
+        (room.x, room.y) = arrival;
         let area = room.area;
         self.combat.disengage();
         if !client_only {

@@ -4709,6 +4709,53 @@ fn a_door_reply_moves_the_player_into_the_doors_cell_without_a_move_packet() {
 }
 
 #[test]
+fn the_player_stands_on_the_pad_after_a_join_or_a_jump() {
+    let (http, base) = map_http();
+    let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "arena-1"));
+        join_map(&mut peer, 43, "arena-1", "arena.swf");
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(9)]));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Top"));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("arena-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let loading = session.load_cells();
+    reply_map_with(
+        &mut stream,
+        &[
+            MapCell {
+                name: "Enter",
+                pads: &[("Spawn", 322, 350)],
+                doors: &[],
+            },
+            MapCell {
+                name: "r2",
+                pads: &[("Right", 788, 350), ("Left", 190, 340)],
+                doors: &[],
+            },
+        ],
+    );
+    loading.wait().unwrap();
+    let position = || {
+        let world = session.snapshot();
+        let room = world.room.as_ref().unwrap();
+        (room.x, room.y)
+    };
+    assert_eq!(position(), (322, 350));
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    assert_eq!(position(), (190, 340));
+    session.move_to_cell("r2", "Top").wait().unwrap();
+    assert_eq!(position(), (480, 275));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn map_cells_wait_for_the_join_to_finish() {
     let (http, base) = map_http();
     let (joining, continue_join) = mpsc::channel();

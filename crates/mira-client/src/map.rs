@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read};
 
 const MAX_BYTES: u64 = 32 * 1024 * 1024;
+const STAGE_CENTER: (i32, i32) = (480, 275);
 
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct MapFile {
@@ -32,6 +33,12 @@ pub(crate) struct Door {
 impl MapFile {
     pub(crate) fn cell(&self, name: &str) -> Option<&Cell> {
         self.cells.iter().find(|cell| cell.name == name)
+    }
+
+    pub(crate) fn arrival(&self, cell: &str, pad: &str) -> (i32, i32) {
+        self.cell(cell)
+            .and_then(|cell| cell.pads.iter().find(|p| p.name == pad))
+            .map_or(STAGE_CENTER, |pad| (pad.x, pad.y))
     }
 }
 
