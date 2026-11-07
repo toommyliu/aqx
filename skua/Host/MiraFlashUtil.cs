@@ -4,7 +4,7 @@ using Skua.Core.Flash;
 
 namespace Mira.Skua;
 
-public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
+public sealed class MiraFlashUtil(Protocol protocol, State state, MiraEvent events) : IFlashUtil
 {
     static readonly Dictionary<string, (int Bit, int On)> PreferenceBits = new()
     {
@@ -12,7 +12,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         ["bParty"] = (8, 0), ["bGuild"] = (9, 0), ["bWhisper"] = (10, 0), ["bTT"] = (11, 0), ["bFBShare"] = (12, 1), ["bDuel"] = (13, 0), ["bProf"] = (18, 0),
     };
     System.Collections.Immutable.ImmutableDictionary<long, System.Collections.Immutable.ImmutableHashSet<int>> favorites = System.Collections.Immutable.ImmutableDictionary<long, System.Collections.Immutable.ImmutableHashSet<int>>.Empty;
-    public event FlashCallHandler? FlashCall;
+    public event FlashCallHandler? FlashCall { add => events.FlashCall += value; remove => events.FlashCall -= value; }
     public void InitializeFlash() { }
     public void Dispose() { }
     public string? Call(string function, params object[] args)

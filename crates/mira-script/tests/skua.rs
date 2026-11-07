@@ -309,6 +309,37 @@ public class Events {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn flash_call_handlers_see_sent_and_received_packets() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class FlashCalls {
+    public void ScriptMain(IScriptInterface bot) {
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        bot.Flash.FlashCall += (name, args) => seen.Enqueue($"{name} {args[0]}");
+        bot.Send.Packet("%xt%zm%cmd%1%probe%");
+        for (int i = 0; i < 100 && seen.Count < 3; i++) bot.Sleep(20);
+        foreach (var call in seen) bot.Log(call);
+    }
+}
+"#;
+    let (outcome, logs, _) = Fake::start(|message, wire| {
+        if message.contains("%probe%") {
+            wire.send("%xt%probe%-1%You will not resist!%");
+        }
+    })
+    .run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert_eq!(
+        logs,
+        [
+            "packet %xt%zm%cmd%1%probe%",
+            "packetFromServer %xt%probe%-1%You will not resist!%",
+            r#"pext {"params":{"type":"str","dataObj":["probe","-1","You will not resist!"]}}"#,
+        ]
+    );
+}
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn a_cached_script_does_not_load_the_compiler() {
     let source = r#"
 using Skua.Core.Interfaces;

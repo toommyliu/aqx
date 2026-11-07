@@ -6,7 +6,7 @@ public sealed class MiraBot(Protocol protocol, State state, string path) : IScri
 {
     readonly object services = new();
     MiraFlashUtil? flash;
-    public IFlashUtil Flash { get { lock (services) return flash ??= new(protocol, state); } }
+    public IFlashUtil Flash { get { lock (services) return flash ??= new(protocol, state, (MiraEvent)Events); } }
     MiraStatus? manager;
     public IScriptStatus Manager { get { lock (services) return manager ??= new(this, path); } }
     public IScriptAuto Auto { get; } = new MiraAuto();
