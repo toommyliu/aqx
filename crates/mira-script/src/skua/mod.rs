@@ -325,6 +325,7 @@ impl SkuaScript {
         }
         let mut actions: HashMap<ActionId, (RequestId, Pending)> = HashMap::new();
         let mut ended = false;
+        let mut offline = false;
         let mut listening = [false; 2];
         let mut stopping = None;
         if self.cancel.is_cancelled() {
@@ -571,10 +572,21 @@ impl SkuaScript {
                     {
                         send(&mut stdin, &message)?;
                     }
+                    if matches!(
+                        update,
+                        Update::Event(mira_client::Event::Phase(Phase::Ready))
+                    ) {
+                        offline = false;
+                    }
                     match update {
-                        Update::Event(mira_client::Event::Phase(mira_client::Phase::Closed {
-                            reason,
-                        })) if !suppress_close && relogging.is_none() && stopping.is_none() => {
+                        Update::Event(mira_client::Event::Phase(
+                            Phase::Closed { reason } | Phase::Reconnecting { reason, .. },
+                        )) if !offline
+                            && !suppress_close
+                            && relogging.is_none()
+                            && stopping.is_none() =>
+                        {
+                            offline = true;
                             send(
                                 &mut stdin,
                                 &Message::Disconnected {
@@ -664,6 +676,7 @@ impl SkuaScript {
                             *session = next;
                             suppress_close = false;
                             ended = false;
+                            offline = false;
                             *server = name;
                             generation += 1;
                             send(

@@ -103,6 +103,45 @@ public class Recovery {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_reconnecting_session_stops_the_script_and_automatic_relogin_restarts_it() {
+    let account = Arc::new(LoginAccount::default());
+    let (outcome, logs, _) = Fake::reconnecting(|msg, wire| {
+        if msg == "disconnect" {
+            wire.hang_up();
+        }
+    })
+    .run_account(
+        r#"
+using Skua.Core.Interfaces;
+public class Reconnected {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Log($"run on {bot.Servers.LastName}");
+        if (bot.Servers.LastName == "Fallback") return;
+        bot.Options.AutoRelogin = true;
+        bot.Options.ReloginServer = "Fallback";
+        bot.Options.ReloginTryDelay = 20;
+        bot.Events.ScriptStopping += _ => { bot.Log("stopping"); return true; };
+        bot.Send.Packet("disconnect");
+        for (;;) { bot.Map.Jump("r2", "Left"); bot.Sleep(100); }
+    }
+}
+"#,
+        &Cancel::default(),
+        Default::default(),
+        account.clone(),
+        |_| {},
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(logs.contains(&"stopping".into()), "{logs:?}");
+    assert!(logs.contains(&"run on Fallback".into()), "{logs:?}");
+    assert_eq!(*account.attempts.lock().unwrap(), ["Fallback"]);
+    for session in account.sessions.lock().unwrap().drain(..) {
+        session.finish();
+    }
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn an_action_after_the_session_ends_fails_instead_of_hanging() {
     let cancel = Cancel::default();
     let deadline = cancel.clone();
