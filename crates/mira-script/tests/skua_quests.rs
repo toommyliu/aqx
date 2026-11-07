@@ -433,6 +433,34 @@ fn the_full_completion_check_counts_the_bank() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn an_equipped_turn_in_item_still_completes_the_quest() {
+    let fake = Fake::start_with(
+        FARM,
+        json!([{"ItemID":87,"CharItemID":9,"sName":"Treeant Branch","iQty":1,"iStk":10,"sType":"Item","sES":"Weapon","bEquip":true}]),
+        json!([]),
+        farm_quest_server,
+    );
+    let (result, logged, _) = fake.run(
+        r#"
+using Skua.Core.Interfaces;
+public class Equipped {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Quests.EnsureAccept(11);
+        bot.Log($"can complete {bot.Quests.CanComplete(11)}");
+    }
+}
+"#,
+    );
+
+    assert!(result == Outcome::Finished, "{result:?}\n{logged:#?}");
+    assert!(
+        logged.contains(&"can complete True".to_string()),
+        "{logged:#?}"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn core_story_kills_for_a_quest_and_turns_it_in() {
     let fake = Fake::start_config(
         FARM,

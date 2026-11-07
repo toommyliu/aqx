@@ -145,7 +145,7 @@ impl Projection {
             .keys()
             .map(|id| {
                 let status = if world.accepted_quests.contains(id) {
-                    json!(if matches!(world.turn_in_limit(*id), Some(Ok(_))) {
+                    json!(if world.holds_turn_in(*id) == Some(true) {
                         "completable"
                     } else {
                         "active"

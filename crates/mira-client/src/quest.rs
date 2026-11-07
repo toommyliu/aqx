@@ -112,6 +112,20 @@ impl World {
         let accepted = self.accepted_quests.contains(&id);
         Some(turn_in_limit(self.quests.get(&id)?, accepted, held))
     }
+
+    pub fn holds_turn_in(&self, id: QuestId) -> Option<bool> {
+        let held = Held {
+            items: &self.inventory,
+            temp: &self.temp,
+        };
+        let quest = self.quests.get(&id)?;
+        Some(
+            quest
+                .turn_in
+                .iter()
+                .all(|need| held.qty(need.id).is_some_and(|qty| qty >= need.qty)),
+        )
+    }
 }
 
 #[derive(Clone, Copy)]
