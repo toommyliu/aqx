@@ -1,4 +1,5 @@
 using CommunityToolkit.Mvvm.Messaging;
+using Skua.Core.Messaging;
 using System.Text.Json;
 
 namespace Mira.Skua;
@@ -38,7 +39,8 @@ public sealed class MiraServers(Protocol protocol, State state) : IScriptServers
     [Unsupported] public void Login(string username, string password)  => throw new NotSupportedException("IScriptServers.Login");
     [Unsupported] public void Login()  => throw new NotSupportedException("IScriptServers.Login");
     public bool LoggingOut { get; private set; }
-    public void Logout() { LoggingOut = true; protocol.Call(new LogoutCall()); }
+    public void Logout() { LoggingOut = true; LoggedOut(); protocol.Call(new LogoutCall()); }
+    static void LoggedOut() => StrongReferenceMessenger.Default.Send<LogoutMessage, int>((int)MessageChannels.GameEvents);
     public bool Reconnect(string serverName, int loginDelay = 2000) { ((MiraBot)IScriptInterface.Instance).Sleep(loginDelay); return Relogin(serverName); }
     public bool Reconnect(Server server, int loginDelay = 2000) => Reconnect(server.Name, loginDelay);
     IScriptInterface Bot => IScriptInterface.Instance;
@@ -65,6 +67,7 @@ public sealed class MiraServers(Protocol protocol, State state) : IScriptServers
         try
         {
             LoggingOut = false;
+            LoggedOut();
             protocol.Call(new ReloginCall(server.Name, Bot.Options.LoginTimeout), token);
             LastName = server.Name;
             LastIP = server.IP;

@@ -187,23 +187,31 @@ public class AfterLogout {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
-fn a_relogin_clears_bank_loaded_and_keeps_aggro_all_on() {
+fn a_relogin_clears_bank_loaded_and_drops_and_keeps_aggro_all_on() {
     let account = Arc::new(LoginAccount {
         farm: true,
         ..LoginAccount::default()
     });
-    let (outcome, logs, _) = Fake::start(|_, _| {}).run_account(
+    let (outcome, logs, _) = Fake::start(|msg, wire| {
+        if msg == "drop" {
+            wire.object(r#"{"cmd":"dropItem","items":{"5":{"ItemID":5,"sName":"Dust","iQty":1,"iStk":10}}}"#);
+        }
+    })
+    .run_account(
         r#"
 using Skua.Core.Interfaces;
 public class Relogged {
     public void ScriptMain(IScriptInterface bot) {
         bot.Bank.Load();
-        bot.Log($"before relogin {bot.Bank.Loaded}");
+        _ = bot.Drops.CurrentDrops;
+        bot.Send.Packet("drop");
+        bot.Wait.ForTrue(() => bot.Drops.Exists("Dust"), 50);
+        bot.Log($"before relogin {bot.Bank.Loaded} {bot.Drops.Exists("Dust")}");
         bot.Options.AggroAllMonsters = true;
         bot.Events.CellChanged += (map, cell, pad) => Thread.Sleep(1500);
         bot.Map.Jump("r2", "Left");
         bot.Log($"relogged {bot.Servers.Relogin("Fallback")}");
-        bot.Log($"after relogin {bot.Bank.Loaded} {bot.Options.AggroAllMonsters}");
+        bot.Log($"after relogin {bot.Bank.Loaded} {bot.Drops.Exists("Dust")} {bot.Options.AggroAllMonsters}");
         bot.Sleep(2500);
     }
 }
@@ -215,9 +223,9 @@ public class Relogged {
     );
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
     for expected in [
-        "before relogin True",
+        "before relogin True True",
         "relogged True",
-        "after relogin False True",
+        "after relogin False False True",
     ] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
