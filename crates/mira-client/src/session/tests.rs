@@ -2736,6 +2736,8 @@ fn buys_and_sells_within_the_clients_limits() {
                  "iQty": 1, "TokID": 101, "TokQty": 2},
                 {"ItemID": 906, "ShopItemID": 75, "sName": "Bow", "iCost": 1, "iStk": 1,
                  "iQty": 1, "sType": "Bow"},
+                {"ItemID": 907, "ShopItemID": 76, "sName": "Dust", "iCost": 10, "iStk": 10,
+                 "iQty": 1, "sType": "Item"},
             ],
         }})));
         let bought = peer.expect_at(&packet::buy_item(
@@ -2770,6 +2772,23 @@ fn buys_and_sells_within_the_clients_limits() {
             "cmd": "sellItem", "CharItemID": 5001, "iQty": 2, "iQtyNow": 7, "intAmount": 50,
             "bCoins": 0,
         })));
+        peer.send(&json_message(
+            json!({"cmd": "loadBank", "bitSuccess": 1, "items": [
+                {"ItemID": 907, "CharItemID": 5007, "sName": "Dust", "iQty": 2, "iStk": 10,
+                 "sType": "Item"},
+            ]}),
+        ));
+        peer.expect(&packet::buy_item(
+            AreaId(42),
+            ItemId(907),
+            ShopId(7),
+            ShopItemId(76),
+            3,
+        ));
+        peer.send(&json_message(json!({
+            "cmd": "buyItem", "bitSuccess": 1, "ItemID": 907, "CharItemID": 5007, "iQty": 3,
+            "bBank": 1,
+        })));
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
@@ -2799,6 +2818,15 @@ fn buys_and_sells_within_the_clients_limits() {
     session.sell(ItemId(101), 2).wait().unwrap();
     let world = session.snapshot();
     assert_eq!((potions(&world), world.me.as_ref().unwrap().gold), (7, 850));
+    session.buy(ShopItemId(76), 3).wait().unwrap();
+    let world = session.snapshot();
+    assert!(!world.inventory.iter().any(|i| i.id == ItemId(907)));
+    let bank = world.bank.as_ref().unwrap();
+    assert_eq!(
+        bank.iter().map(|i| (i.id, i.qty)).collect::<Vec<_>>(),
+        [(ItemId(907), 5)]
+    );
+    assert_eq!(world.me.as_ref().unwrap().gold, 820);
     session.logout();
     harness.finish();
 }

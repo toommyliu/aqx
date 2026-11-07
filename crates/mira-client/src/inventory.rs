@@ -390,11 +390,13 @@ impl Inventory {
         events
     }
 
-    pub(crate) fn buy(&mut self, listed: &ShopItem, bought: &Bought) -> Option<Event> {
-        if bought.bank {
-            return None;
-        }
-        let items = Arc::make_mut(&mut self.items);
+    pub(crate) fn buy(
+        items: &mut Arc<Vec<Item>>,
+        listed: &ShopItem,
+        bought: &Bought,
+        place: Place,
+    ) -> Option<Event> {
+        let items = Arc::make_mut(items);
         let qty = match items.iter_mut().find(|i| i.id == listed.id) {
             Some(held) => {
                 held.qty += bought.qty;
@@ -433,7 +435,7 @@ impl Inventory {
             id: listed.id,
             name: listed.name.clone(),
             qty,
-            place: Place::Inventory,
+            place,
         })
     }
 
