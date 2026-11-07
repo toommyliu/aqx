@@ -729,6 +729,8 @@ fn tracks_the_players_vitals_haste_and_skills() {
             char_id: 4242,
             aq: 0,
             email_verified: false,
+            created: String::new(),
+            gender: String::new(),
             bag_slots: 2,
             house_slots: 1,
             bank_slots: 3,

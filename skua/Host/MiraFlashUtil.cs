@@ -114,7 +114,9 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         _ when path.StartsWith("world.invTree.") => InventoryTree(path[14..]),
         _ when path.StartsWith("world.uoTree.") => PlayerTree(path[13..]),
         _ when path == "world.shopinfo" || path.StartsWith("world.shopinfo.") => ShopObject(path[14..].TrimStart('.')),
-        "world.myAvatar.objData.strEmail" or "world.myAvatar.objData.dCreated" or "world.myAvatar.objData.strGender" => null,
+        "world.myAvatar.objData.strEmail" => null,
+        "world.myAvatar.objData.dCreated" => Created(),
+        "world.myAvatar.objData.strGender" => state.Me?.Gender,
         "ui.mcPopup.currentLabel" => "",
         "ui.monsterIcon.redX.visible" => false,
         "world.myAvatar.objData.guild.Name" => "",
@@ -210,6 +212,12 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
             "intHPMax" => player.MaxHp,
             _ => throw new NotSupportedException($"IFlashUtil game object world.uoTree.{path}")
         };
+    }
+    string? Created()
+    {
+        if (!DateTime.TryParse(state.Me?.Created, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeLocal, out var at)) return null;
+        var offset = TimeZoneInfo.Local.GetUtcOffset(at);
+        return string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{at:ddd MMM d HH:mm:ss} GMT{(offset < TimeSpan.Zero ? '-' : '+')}{offset:hhmm} {at:yyyy}");
     }
     int Boost(string kind) => state.Me?.Boosts.GetValueOrDefault(kind) is { } at ? (int)Math.Max(0, ((long)at - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) / 1000) : 0;
     object? ActiveSkill(int slot)

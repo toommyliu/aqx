@@ -190,6 +190,7 @@ public class ReadAccount
         bot.Log($"slots {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iBagSlots")} {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iBankSlots")} {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iHouseSlots")}");
         bot.Log($"hp {bot.Flash.GetGameObject<int>("world.uoTree.player2.intHP")}/{bot.Flash.GetGameObject<int>("world.uoTree.player2.intHPMax")}");
         bot.Log($"file {bot.Flash.GetGameObject<string>("world.strMapFileName")}");
+        bot.Log($"account {bot.Flash.GetGameObject("world.myAvatar.objData.dCreated")} {bot.Flash.GetGameObject("world.myAvatar.objData.strGender")}");
         bot.Log($"prefs {string.Join(" ", new[] { "bGoto", "bFriend", "bParty", "bGuild", "bWhisper", "bDuel" }.Select(k => bot.Flash.GetGameObject<bool>($"uoPref.{k}")))}");
     }
 }
@@ -200,13 +201,16 @@ public class ReadAccount
         &map.to_string(),
         json!([]),
         json!([]),
-        json!({"iUpgDays":27,"iBagSlots":40,"iBankSlots":50,"iHouseSlots":20,"ia1":(1 << 8) | (1 << 13)}),
+        json!({"iUpgDays":27,"iBagSlots":40,"iBankSlots":50,"iHouseSlots":20,"ia1":(1 << 8) | (1 << 13),"dCreated":"2015-01-01T00:00:00","strGender":"F"}),
         |_, _| {},
     )
     .run(source);
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    let [days, slots, hp, file, account, prefs] = &logs[..] else {
+        panic!("{logs:?}")
+    };
     assert_eq!(
-        logs,
+        [days, slots, hp, file, prefs],
         [
             "days 27",
             "slots 40 50 20",
@@ -214,6 +218,11 @@ public class ReadAccount
             "file farm/farm.swf",
             "prefs True True False True True False"
         ]
+    );
+    assert!(
+        account.starts_with(r#"account "Thu Jan 1 00:00:00 GMT"#)
+            && account.ends_with(r#" 2015" "F""#),
+        "{account}"
     );
 }
 #[test]
