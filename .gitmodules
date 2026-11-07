@@ -1,0 +1,12 @@
+[submodule "skua/vendor/Skua"]
+	path = skua/vendor/Skua
+	url = https://github.com/auqw/Skua
+	shallow = true
+	branch = master
+	ignore = untracked
+[submodule "skua/vendor/Scripts"]
+	path = skua/vendor/Scripts
+	url = https://github.com/auqw/Scripts
+	branch = Skua
+	shallow = true
+	ignore = untracked

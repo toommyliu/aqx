@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>mira-skua</AssemblyName>
+    <RootNamespace>Mira.Skua</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="*.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptDrop.cs" />
+    <ProjectReference Include="../Core/Core.csproj" />
+    <ProjectReference Include="../Interfaces/Interfaces.csproj" />
+    <ProjectReference Include="../WinForms/WinForms.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="../vendor/Skua/Skua.App.WPF/AdvancedSkills.json" Link="AdvancedSkills.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
+  </ItemGroup>
+
+</Project>

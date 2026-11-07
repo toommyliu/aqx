@@ -15,6 +15,9 @@ pub struct Room {
     #[serde(skip)]
     pub area: AreaId,
     pub name: String,
+    pub file: String,
+    pub cells: Vec<String>,
+    pub cells_loaded: bool,
     pub cell: String,
     pub pad: String,
     pub x: i32,
@@ -26,7 +29,7 @@ pub struct Room {
     pub(crate) spawn_point: (String, String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Player {
     pub eid: EntityId,
     pub name: String,
@@ -42,6 +45,7 @@ pub struct Player {
     pub max_mp: u32,
     pub state: CombatState,
     pub away: bool,
+    pub auras: Auras,
     #[serde(skip)]
     fetched: bool,
 }
@@ -63,6 +67,7 @@ impl Player {
             max_mp: 0,
             state: CombatState::default(),
             away: false,
+            auras: Auras::default(),
             fetched,
         }
     }
@@ -88,6 +93,8 @@ pub struct Monster {
     pub id: MonMapId,
     pub mon_id: MonId,
     pub name: String,
+    pub race: String,
+    pub file: String,
     pub cell: String,
     pub hp: u32,
     pub max_hp: u32,
@@ -222,6 +229,9 @@ impl Room {
         let room = Room {
             area: area.area,
             name: area.name,
+            file: area.file,
+            cells: vec![],
+            cells_loaded: false,
             cell,
             pad,
             x,
@@ -372,7 +382,7 @@ fn monsters(
     spots: Vec<MonsterSpot>,
     monsters: Vec<MonsterBranch>,
 ) -> Vec<Monster> {
-    let names: HashMap<MonId, String> = types.into_iter().map(|t| (t.id, t.name)).collect();
+    let types: HashMap<MonId, MonsterType> = types.into_iter().map(|t| (t.id, t)).collect();
     let spots: HashMap<MonMapId, MonsterSpot> = spots.into_iter().map(|s| (s.id, s)).collect();
     monsters
         .into_iter()
@@ -381,7 +391,18 @@ fn monsters(
             Some(Monster {
                 id: m.id,
                 mon_id: m.kind,
-                name: names.get(&m.kind).cloned().unwrap_or_default(),
+                name: types
+                    .get(&m.kind)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default(),
+                race: types
+                    .get(&m.kind)
+                    .map(|t| t.race.clone())
+                    .unwrap_or_default(),
+                file: types
+                    .get(&m.kind)
+                    .map(|t| t.file.clone())
+                    .unwrap_or_default(),
                 cell: spot.cell.clone(),
                 hp: m.hp,
                 max_hp: m.max_hp,
@@ -414,6 +435,8 @@ pub(crate) struct MoveToArea {
     area: AreaId,
     #[serde(rename = "areaName")]
     name: String,
+    #[serde(rename = "strMapFileName", default)]
+    file: String,
     #[serde(rename = "uoBranch", default)]
     players: Vec<AreaPlayer>,
     #[serde(rename = "mondef", default)]
@@ -478,6 +501,10 @@ struct MonsterType {
     id: MonId,
     #[serde(rename = "strMonName")]
     name: String,
+    #[serde(rename = "sRace", default)]
+    race: String,
+    #[serde(rename = "strMonFileName", default)]
+    file: String,
 }
 
 #[derive(Deserialize)]
@@ -563,6 +590,8 @@ mod tests {
             id: MonMapId(1),
             mon_id: MonId(10),
             name: "Mosquito".into(),
+            race: String::new(),
+            file: String::new(),
             cell: "Enter".into(),
             hp: 10,
             max_hp: 10,

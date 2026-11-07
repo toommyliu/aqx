@@ -14,6 +14,8 @@ use crate::world::World;
 pub struct Quest {
     pub id: QuestId,
     pub name: String,
+    pub description: String,
+    pub end_text: String,
     pub turn_in: Vec<QuestItem>,
     pub required: Vec<QuestItem>,
     pub rewards: Vec<QuestReward>,
@@ -36,6 +38,8 @@ pub struct QuestItem {
     pub id: ItemId,
     pub name: String,
     pub qty: u32,
+    pub max_stack: u32,
+    pub temp: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -43,6 +47,8 @@ pub struct QuestReward {
     pub id: ItemId,
     pub name: String,
     pub qty: u32,
+    pub max_stack: u32,
+    pub temp: bool,
     pub chance: f64,
     pub kind: RewardKind,
 }
@@ -326,23 +332,32 @@ fn parse(key: &str, value: Value) -> Result<Quest, serde_json::Error> {
                 .map_err(|_| serde::de::Error::custom(format!("quest {key:?} has no QuestID")))?,
         ),
     };
-    let mut names = HashMap::new();
+    let mut metadata = HashMap::new();
     for items in [
         &data.turn_in_items,
         &data.required_items,
         &data.reward_items,
     ] {
-        collect_names(items, &mut names);
+        collect_items(items, &mut metadata);
     }
-    let name = |id: ItemId| names.get(&id).cloned().unwrap_or_default();
+    let name = |id: ItemId| {
+        metadata
+            .get(&id)
+            .map(|item| item.name.clone())
+            .unwrap_or_default()
+    };
     let item = |need: Need| QuestItem {
         id: need.id,
         name: name(need.id),
         qty: need.qty,
+        max_stack: metadata.get(&need.id).map_or(0, |item| item.max_stack),
+        temp: metadata.get(&need.id).is_some_and(|item| item.temp),
     };
     Ok(Quest {
         id,
         name: data.name,
+        description: data.description,
+        end_text: data.end_text,
         turn_in: data.turnin.into_iter().map(item).collect(),
         required: data.reqd.into_iter().map(item).collect(),
         rewards: data
@@ -352,6 +367,8 @@ fn parse(key: &str, value: Value) -> Result<Quest, serde_json::Error> {
                 id: reward.id,
                 name: name(reward.id),
                 qty: reward.qty,
+                max_stack: metadata.get(&reward.id).map_or(0, |item| item.max_stack),
+                temp: metadata.get(&reward.id).is_some_and(|item| item.temp),
                 chance: reward.rate,
                 kind: reward.kind,
             })
@@ -374,19 +391,27 @@ fn parse(key: &str, value: Value) -> Result<Quest, serde_json::Error> {
     })
 }
 
-fn collect_names(items: &Value, names: &mut HashMap<ItemId, String>) {
-    let Value::Object(map) = items else { return };
-    let id = map
-        .get("ItemID")
-        .and_then(|id| ItemId::deserialize(id.clone()).ok());
-    match (id, map.get("sName").and_then(Value::as_str)) {
-        (Some(id), Some(name)) => {
-            names.insert(id, name.to_owned());
+#[derive(Deserialize)]
+struct QuestItemData {
+    #[serde(rename = "ItemID")]
+    id: ItemId,
+    #[serde(rename = "sName", default)]
+    name: String,
+    #[serde(rename = "iStk", default, deserialize_with = "flex::int")]
+    max_stack: u32,
+    #[serde(rename = "bTemp", default, deserialize_with = "flex::bool")]
+    temp: bool,
+}
+
+fn collect_items(value: &Value, items: &mut HashMap<ItemId, QuestItemData>) {
+    let Value::Object(map) = value else { return };
+    if map.contains_key("ItemID") {
+        if let Ok(item) = serde_json::from_value::<QuestItemData>(value.clone()) {
+            items.insert(item.id, item);
         }
-        _ => {
-            for nested in map.values() {
-                collect_names(nested, names);
-            }
+    } else {
+        for nested in map.values() {
+            collect_items(nested, items);
         }
     }
 }
@@ -401,6 +426,10 @@ struct QuestData {
     id: Option<QuestId>,
     #[serde(rename = "sName", default)]
     name: String,
+    #[serde(rename = "sDesc", default)]
+    description: String,
+    #[serde(rename = "sEndText", default)]
+    end_text: String,
     #[serde(default)]
     turnin: Vec<Need>,
     #[serde(default)]

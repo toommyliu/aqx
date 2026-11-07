@@ -1,4 +1,4 @@
-use mira_protocol::{ItemId, MonMapId, QuestId};
+use mira_protocol::{CharItemId, ItemId, MonMapId, QuestId};
 use serde::Serialize;
 
 use crate::session::Phase;
@@ -80,6 +80,25 @@ pub enum Event {
         name: String,
         qty: u32,
         place: Place,
+    },
+    BankLoaded,
+    ItemPickedUp {
+        id: ItemId,
+    },
+    ItemReceived {
+        id: ItemId,
+        qty: u32,
+        place: Place,
+    },
+    ItemBought {
+        char_item_id: CharItemId,
+    },
+    ItemSold {
+        char_item_id: CharItemId,
+        qty: u32,
+        qty_now: u32,
+        amount: u64,
+        coins: bool,
     },
     QuestAccepted {
         id: QuestId,

@@ -18,6 +18,7 @@ pub(super) enum QuestAction {
         id: QuestId,
         reward: Option<ItemId>,
         times: u32,
+        special: bool,
     },
 }
 
@@ -152,7 +153,12 @@ impl Session {
                 }
                 (Limit::AcceptQuest, packet::accept_quest(area, *id))
             }
-            &QuestAction::TurnIn { id, reward, times } => {
+            &QuestAction::TurnIn {
+                id,
+                reward,
+                times,
+                special,
+            } => {
                 if let Err(e) = self
                     .quest(id)
                     .and_then(|quest| self.can_turn_in(quest, reward, times))
@@ -161,7 +167,7 @@ impl Session {
                 }
                 (
                     Limit::TurnIn,
-                    packet::try_quest_complete(area, id, reward, times),
+                    packet::try_quest_complete_special(area, id, reward, times, special),
                 )
             }
         };

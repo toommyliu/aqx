@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AssemblyName>Skua.Core.Interfaces</AssemblyName>
+    <RootNamespace>Skua.Core.Interfaces</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <WeaverConfiguration>
+      <Weavers>
+        <Caseless />
+      </Weavers>
+    </WeaverConfiguration>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../vendor/Skua/Skua.Core.Interfaces/**/*.cs" Exclude="../vendor/Skua/Skua.Core.Interfaces/bin/**;../vendor/Skua/Skua.Core.Interfaces/obj/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Caseless.Fody" Version="1.9.1" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Models/Models.csproj" />
+    <ProjectReference Include="../vendor/Skua/Skua.Core.Utils/Skua.Core.Utils.csproj" />
+  </ItemGroup>
+
+</Project>

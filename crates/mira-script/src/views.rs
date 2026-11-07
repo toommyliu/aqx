@@ -171,6 +171,7 @@ fn map<'js>(ctx: &Ctx<'js>, room: &Room, now: Instant) -> Result<Object<'js>> {
     view.set("name", room.name.as_str())?;
     view.set("areaId", room.area.0 as f64)?;
     view.set("cell", room.cell.as_str())?;
+    view.set("cells", room.cells.as_slice())?;
     view.set("pad", room.pad.as_str())?;
     view.set("x", room.x)?;
     view.set("y", room.y)?;

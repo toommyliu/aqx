@@ -54,6 +54,8 @@ Actions run only inside generator functions, so callbacks such as `.forEach` can
 
 Fields such as `player.hp` and `map.monsters` read the current state and send nothing to the server. State changes only at a `yield*`, so two reads with no `yield*` between them return the same value.
 
+`map.cells` holds the map's frame labels. mira downloads them once a map finishes loading and keeps them for the rest of the session, so the list is empty for a moment after joining a map for the first time.
+
 To wait for a condition, use `wait.until`. mira checks the predicate right away and again whenever state changes. A predicate can't run actions.
 
 ```ts

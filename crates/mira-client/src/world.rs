@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use mira_protocol::{ItemId, MonMapId, QuestId};
 
@@ -30,7 +31,22 @@ pub struct World {
     pub procs: Arc<HashMap<u32, String>>,
     pub target: Option<MonMapId>,
     pub readiness: BTreeMap<String, Readiness>,
+    pub global_cooldown: Option<Instant>,
+    pub skill_timing: BTreeMap<String, SkillTiming>,
+    pub action_locks: BTreeMap<&'static str, ActionLock>,
     pub settings: Settings,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SkillTiming {
+    pub last_use: Option<Instant>,
+    pub cooldown: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ActionLock {
+    pub used: Option<Instant>,
+    pub cooldown: Duration,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -58,6 +74,9 @@ impl World {
             procs: Arc::default(),
             target: None,
             readiness: BTreeMap::new(),
+            global_cooldown: None,
+            skill_timing: BTreeMap::new(),
+            action_locks: BTreeMap::new(),
             settings: Settings::default(),
         }
     }

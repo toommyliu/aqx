@@ -13,6 +13,36 @@ use crate::shop::{Bought, ShopItem};
 
 const GEAR_OF_DOOM: ItemId = ItemId(45739);
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemDetails {
+    #[serde(rename(deserialize = "sDesc"), default)]
+    pub description: String,
+    #[serde(rename(deserialize = "iLvl"), default, deserialize_with = "flex::int")]
+    pub level: u32,
+    #[serde(rename(deserialize = "iCost"), default, deserialize_with = "flex::int")]
+    pub cost: u64,
+    #[serde(
+        rename(deserialize = "iHrs"),
+        default,
+        deserialize_with = "flex::opt_int"
+    )]
+    pub hours: Option<u32>,
+    #[serde(
+        rename(deserialize = "iQSindex"),
+        default,
+        deserialize_with = "flex::opt_int"
+    )]
+    pub quest_slot: Option<i64>,
+    #[serde(
+        rename(deserialize = "iQSvalue"),
+        default,
+        deserialize_with = "flex::int"
+    )]
+    pub quest_value: i64,
+    #[serde(rename(deserialize = "sQuest"), default)]
+    pub quest: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "WireItem")]
 pub struct Item {
@@ -28,12 +58,16 @@ pub struct Item {
     pub member: bool,
     pub meta: String,
     pub link: String,
+    pub file: String,
     pub house: bool,
     pub enhancement: Option<Enhancement>,
+    pub details: ItemDetails,
 }
 
 #[derive(Deserialize)]
 struct WireItem {
+    #[serde(flatten)]
+    details: ItemDetails,
     #[serde(rename = "ItemID")]
     id: ItemId,
     #[serde(rename = "CharItemID")]
@@ -58,6 +92,8 @@ struct WireItem {
     meta: String,
     #[serde(rename = "sLink", default)]
     link: String,
+    #[serde(rename = "sFile", default)]
+    file: String,
     #[serde(rename = "bHouse", default, deserialize_with = "flex::bool")]
     house: bool,
     #[serde(flatten)]
@@ -79,8 +115,10 @@ impl From<WireItem> for Item {
             member: wire.member,
             meta: wire.meta,
             link: wire.link,
+            file: wire.file,
             house: wire.house,
             enhancement: wire.enhancement.enhancement(),
+            details: wire.details,
         }
     }
 }
@@ -123,10 +161,20 @@ pub struct TempItem {
     pub name: String,
     pub qty: u32,
     pub max_stack: u32,
+    pub details: ItemDetails,
+    pub kind: String,
+    pub slot: String,
+    pub meta: String,
+    pub coins: bool,
+    pub member: bool,
+    pub link: String,
+    pub file: String,
+    pub house: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DropOffer {
+    pub details: ItemDetails,
     pub id: ItemId,
     pub name: String,
     pub qty: u32,
@@ -137,6 +185,7 @@ pub struct DropOffer {
     pub member: bool,
     pub meta: String,
     pub link: String,
+    pub file: String,
     pub house: bool,
     #[serde(serialize_with = "computed_enhancement")]
     pub(crate) enhancement: EnhancementFields,
@@ -185,6 +234,15 @@ impl Inventory {
                         name: added.name.clone(),
                         qty,
                         max_stack: added.max_stack,
+                        details: added.details,
+                        kind: added.kind,
+                        slot: added.slot,
+                        meta: added.meta,
+                        coins: added.coins,
+                        member: added.member,
+                        link: added.link,
+                        file: added.file,
+                        house: added.house,
                     });
                     (added.name, qty, Place::Temp)
                 }
@@ -211,8 +269,10 @@ impl Inventory {
                             member: added.member,
                             meta: added.meta,
                             link: added.link,
+                            file: added.file,
                             house: added.house,
                             enhancement: added.enhancement.enhancement(),
+                            details: added.details,
                         });
                         (added.name, qty, Place::Inventory)
                     }
@@ -248,8 +308,10 @@ impl Inventory {
                 member: offered.member,
                 meta: offered.meta,
                 link: offered.link,
+                file: offered.file,
                 house: offered.house,
                 enhancement: offered.enhancement,
+                details: offered.details,
             }),
         }
         Some(event)
@@ -286,8 +348,10 @@ impl Inventory {
                 member: offer.member,
                 meta: offer.meta,
                 link: offer.link,
+                file: offer.file,
                 house: offer.house,
                 enhancement: picked.enhancement.or(offer.enhancement).enhancement(),
+                details: offer.details,
             });
             (offer.name, qty)
         } else {
@@ -350,8 +414,17 @@ impl Inventory {
                     member: listed.member,
                     meta: listed.meta.clone(),
                     link: listed.link.clone(),
+                    file: listed.file.clone(),
                     house: listed.house,
                     enhancement: EnhancementFields::from_id(listed.enhancement_id).enhancement(),
+                    details: ItemDetails {
+                        level: listed.level,
+                        cost: listed.cost,
+                        quest_slot: Some(listed.quest_slot),
+                        quest_value: listed.quest_value,
+                        quest: listed.quest.clone(),
+                        ..Default::default()
+                    },
                 });
                 bought.qty
             }
@@ -497,6 +570,8 @@ pub(crate) struct AddedItems {
 
 #[derive(Deserialize)]
 pub(crate) struct AddedItem {
+    #[serde(flatten)]
+    details: ItemDetails,
     #[serde(rename = "ItemID", default)]
     id: Option<ItemId>,
     #[serde(rename = "CharItemID", default)]
@@ -506,7 +581,7 @@ pub(crate) struct AddedItem {
     #[serde(rename = "iQty", default, deserialize_with = "flex::int")]
     qty: u32,
     #[serde(rename = "iQtyNow", default, deserialize_with = "flex::opt_int")]
-    qty_now: Option<u32>,
+    pub(crate) qty_now: Option<u32>,
     #[serde(rename = "iStk", default, deserialize_with = "flex::int")]
     max_stack: u32,
     #[serde(rename = "sType", default)]
@@ -521,12 +596,14 @@ pub(crate) struct AddedItem {
     meta: String,
     #[serde(rename = "sLink", default)]
     link: String,
+    #[serde(rename = "sFile", default)]
+    file: String,
     #[serde(rename = "bHouse", default, deserialize_with = "flex::bool")]
     house: bool,
     #[serde(flatten)]
     enhancement: EnhancementFields,
     #[serde(rename = "bBank", default, deserialize_with = "flex::bool")]
-    bank: bool,
+    pub(crate) bank: bool,
     #[serde(rename = "bTemp", default, deserialize_with = "flex::bool")]
     temp: bool,
 }
@@ -542,9 +619,11 @@ pub(crate) struct Sold {
     #[serde(rename = "CharItemID")]
     pub(crate) char_item_id: CharItemId,
     #[serde(rename = "iQty", deserialize_with = "flex::int")]
-    qty: u32,
+    pub(crate) qty: u32,
     #[serde(rename = "intAmount", default, deserialize_with = "flex::int")]
     pub(crate) amount: u64,
+    #[serde(rename = "iQtyNow", default, deserialize_with = "flex::int")]
+    pub(crate) qty_now: u32,
     #[serde(rename = "bCoins", default, deserialize_with = "flex::bool")]
     pub(crate) coins: bool,
 }
@@ -558,11 +637,11 @@ pub(crate) struct Picked {
     #[serde(rename = "CharItemID", default)]
     char_item_id: Option<CharItemId>,
     #[serde(rename = "iQty", default, deserialize_with = "flex::int")]
-    qty: u32,
+    pub(crate) qty: u32,
     #[serde(rename = "iQtyNow", default, deserialize_with = "flex::opt_int")]
-    qty_now: Option<u32>,
+    pub(crate) qty_now: Option<u32>,
     #[serde(rename = "bBank", default, deserialize_with = "flex::bool")]
-    bank: bool,
+    pub(crate) bank: bool,
     #[serde(flatten)]
     enhancement: EnhancementFields,
 }
@@ -589,6 +668,35 @@ pub(crate) fn no_room(items: &[Item], id: ItemId, pool: Pool, me: &Me) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn temporary_items_preserve_item_metadata() {
+        let mut inventory = super::Inventory::default();
+        let item = serde_json::from_value(serde_json::json!({"ItemID":6,"sName":"Temp Dust","iQty":1,"bTemp":1,"sDesc":"A temporary material.","sType":"Quest Item","sMeta":"quest","sES":"None","bCoins":1})).unwrap();
+        inventory.add("6", item).unwrap();
+        let value = serde_json::to_value(&inventory.temp[0]).unwrap();
+        assert_eq!(value["details"]["description"], "A temporary material.");
+        assert_eq!(value["kind"], "Quest Item");
+        assert_eq!(value["meta"], "quest");
+        assert_eq!(value["coins"], true);
+    }
+
+    #[test]
+    fn item_snapshots_preserve_descriptions_and_purchase_metadata() {
+        let item: super::Item = serde_json::from_value(serde_json::json!({
+            "ItemID":5,"CharItemID":15,"sName":"Dust","iQty":2,"sDesc":"A material.",
+            "iLvl":"40","iCost":"25","iHrs":"12","iQSindex":3,"iQSvalue":2,"sQuest":"A Quest"
+        }))
+        .unwrap();
+        let value = serde_json::to_value(item).unwrap();
+        assert_eq!(value["details"]["description"], "A material.");
+        assert_eq!(value["details"]["level"], 40);
+        assert_eq!(value["details"]["cost"], 25);
+        assert_eq!(value["details"]["hours"], 12);
+        assert_eq!(value["details"]["quest_slot"], 3);
+        assert_eq!(value["details"]["quest_value"], 2);
+        assert_eq!(value["details"]["quest"], "A Quest");
+    }
+
     use serde_json::json;
 
     use super::*;
@@ -598,6 +706,15 @@ mod tests {
             items: Arc::new(serde_json::from_value(items).unwrap()),
             ..Inventory::default()
         }
+    }
+
+    #[test]
+    fn inventory_items_retain_their_file_path() {
+        let item: Item = serde_json::from_value(json!({"ItemID": 1, "CharItemID": 2, "sName": "Potion", "iQty": 1, "sFile": "items/potion.swf"})).unwrap();
+        assert_eq!(
+            serde_json::to_value(item).unwrap()["file"],
+            "items/potion.swf"
+        );
     }
 
     fn listing(item: Value) -> ShopItem {

@@ -1095,6 +1095,12 @@ fn inventory_and_drops_follow_the_bag() {
             "cmd": "getDrop", "bSuccess": 1, "ItemID": 101, "CharItemID": 5001,
             "iQty": 2, "iQtyNow": 7, "bBank": 0,
         })));
+        peer.expect("apply-enhancement");
+        peer.send(&json_message(json!({
+            "cmd": "enhanceItemShop", "ItemIDs": [100], "EnhID": 40514,
+            "EnhPID": 9, "EnhLvl": 70, "EnhRty": 6, "ProcID": 3, "iCost": 400,
+            "bSuccess": 1,
+        })));
         peer.expect_logout();
     });
     harness.session.ready().wait().unwrap();
@@ -1102,7 +1108,7 @@ fn inventory_and_drops_follow_the_bag() {
     let path = dir.file(
         "main.ts",
         r#"
-        import { drops, inventory, script, wait } from "mira";
+        import { drops, inventory, packets, player, script, wait } from "mira";
         export default function* () {
           script.log(inventory.items.map((i) => `${i.name} ${i.qty} ${i.pool} ${i.equipped}`).join());
           script.log(inventory.get("health potion")?.id, inventory.count(101), inventory.count("Nothing"), inventory.bagSlots);
@@ -1112,6 +1118,9 @@ fn inventory_and_drops_follow_the_bag() {
           script.log(yield* drops.pickup(300));
           script.log(yield* drops.pickup("health potion"));
           script.log(inventory.count("Health Potion"), drops.pending.map((d) => d.name).join());
+          yield* packets.send("apply-enhancement");
+          yield* packets.once({ kind: "json", cmd: "enhanceItemShop" });
+          script.log(inventory.get(100)?.enhancement, inventory.get(102)?.enhancement, player.gold, player.coins);
         }
         "#,
     );
@@ -1129,6 +1138,7 @@ fn inventory_and_drops_follow_the_bag() {
             "no_room",
             "picked",
             "7 Mace",
+            "Lucky +5, Awe Blast null 800 30",
         ]
     );
 }
@@ -2087,5 +2097,91 @@ fn what_mira_builds_matches_the_generated_types() {
             "dropOffered",
             "chat"
         ]
+    );
+}
+
+#[test]
+fn map_cells_appear_once_each_map_loads_and_stay_cached() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    let http = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let base = format!("http://{}/game/api", http.local_addr().unwrap());
+    let requests = thread::spawn(move || {
+        for (file, cells) in [
+            ("forest.swf", Some(vec!["Enter", "r2", "Blank"])),
+            ("cave.swf", Some(vec!["Enter", "Cave"])),
+        ] {
+            let (mut stream, _) = http.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(
+                line.trim(),
+                format!("GET /game/gamefiles/maps/{file} HTTP/1.1")
+            );
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+            if let Some(cells) = cells {
+                let body = mira_client::testing::map_swf(&cells);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            } else {
+                stream
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n")
+                    .unwrap();
+            }
+        }
+    });
+    let harness = Harness::start_with_api(Options::default(), base, |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        for (area, name, file) in [
+            (43, "forest-1", "forest.swf"),
+            (44, "forest-2", "forest.swf"),
+            (45, "cave-1", "cave.swf"),
+        ] {
+            peer.expect(&packet::transfer("player1", name));
+            let mut message: Value = serde_json::from_str(&move_to_area(area, name)).unwrap();
+            message["b"]["o"]["strMapFileName"] = json!(file);
+            peer.send(&message.to_string());
+            peer.send(&format!("%xt%server%-1%You joined \"{name}\"!%"));
+            peer.expect(&packet::move_to_cell(AreaId(area), "Enter", "Spawn"));
+            peer.expect(&packet::retrieve_user_datas(AreaId(area), &[EntityId(8)]));
+        }
+        peer.expect_logout();
+    });
+    harness.session.ready().wait().unwrap();
+    let (outcome, outputs) = run_on(
+        harness,
+        r#"
+        import { map, script, wait } from "mira";
+        export default function* () {
+          script.log(map.cells.length);
+          yield* map.join("forest-1");
+          yield* wait.until(() => map.cells.length > 0);
+          script.log(map.cells.join(","));
+          yield* map.join("forest-2");
+          script.log(map.cells.join(","));
+          yield* map.join("cave-1");
+          yield* wait.until(() => map.cells.length > 0);
+          script.log(map.cells.join(","));
+        }
+    "#,
+    );
+    requests.join().unwrap();
+    assert_eq!(outcome, Ok(Outcome::Finished));
+    assert_eq!(
+        logs(&outputs),
+        ["0", "Enter,r2,Blank", "Enter,r2,Blank", "Enter,Cave"]
     );
 }

@@ -26,6 +26,8 @@ pub struct Me {
     pub class_name: String,
     pub class_points: u32,
     pub char_id: i64,
+    pub aq: u32,
+    pub email_verified: bool,
     pub bag_slots: u32,
     pub house_slots: u32,
     pub bank_slots: u32,
@@ -74,6 +76,8 @@ impl Me {
         self.member = data.member_days >= 0;
         self.class_points = data.class_points;
         self.char_id = data.char_id;
+        self.aq = data.aq;
+        self.email_verified = data.activation_flag == 5;
         self.bag_slots = data.bag_slots;
         self.house_slots = data.house_slots;
         self.bank_slots = data.bank_slots;
@@ -198,7 +202,7 @@ pub(crate) struct BoostUpdate {
     secs: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Skill {
     #[serde(rename(deserialize = "ref"))]
     pub slot: String,
@@ -224,6 +228,42 @@ pub struct Skill {
     pub unlocked: bool,
     #[serde(skip)]
     pub(crate) old_cooldown_ms: Option<u32>,
+    #[serde(flatten)]
+    pub details: SkillDetails,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SkillDetails {
+    #[serde(default, deserialize_with = "flex::int")]
+    pub id: i64,
+    #[serde(rename(deserialize = "actID"), default, deserialize_with = "flex::int")]
+    pub act_id: i64,
+    #[serde(default, deserialize_with = "flex::float")]
+    pub damage: f64,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(rename(deserialize = "desc"), default)]
+    pub description: String,
+    #[serde(default, deserialize_with = "flex::int")]
+    pub range: u32,
+    #[serde(rename(deserialize = "typ"), default)]
+    pub kind: String,
+    #[serde(rename(deserialize = "anim"), default)]
+    pub animation: String,
+    #[serde(
+        rename(deserialize = "tgtMin"),
+        default,
+        deserialize_with = "flex::int"
+    )]
+    pub min_targets: u32,
+    #[serde(
+        rename(deserialize = "skillLock"),
+        default,
+        deserialize_with = "flex::bool"
+    )]
+    pub skill_lock: bool,
+    #[serde(rename(deserialize = "lock"), default, deserialize_with = "flex::bool")]
+    pub locked: bool,
 }
 
 #[derive(Deserialize)]
@@ -286,6 +326,10 @@ pub(crate) struct UserData {
     class_points: u32,
     #[serde(rename = "CharID", default, deserialize_with = "flex::int")]
     char_id: i64,
+    #[serde(rename = "intAQ", default, deserialize_with = "flex::int")]
+    aq: u32,
+    #[serde(rename = "intActivationFlag", default, deserialize_with = "flex::int")]
+    activation_flag: u32,
     #[serde(rename = "iBagSlots", default, deserialize_with = "flex::int")]
     bag_slots: u32,
     #[serde(rename = "iHouseSlots", default, deserialize_with = "flex::int")]
@@ -316,6 +360,9 @@ pub struct Stats {
     pub evasion: f64,
     pub crit: f64,
     pub haste: f64,
+    pub attack_power: f64,
+    pub spell_power: f64,
+    pub critical_multiplier: f64,
 }
 
 #[derive(Deserialize)]
@@ -346,6 +393,12 @@ struct StatValues {
     crit: Option<f64>,
     #[serde(rename = "$tha")]
     haste: Option<f64>,
+    #[serde(rename = "$ap")]
+    attack_power: Option<f64>,
+    #[serde(rename = "$sp")]
+    spell_power: Option<f64>,
+    #[serde(rename = "$scm")]
+    critical_multiplier: Option<f64>,
     #[serde(rename = "$cmc")]
     mana_rate: Option<f64>,
 }
@@ -365,6 +418,9 @@ impl Me {
             (&mut stats.evasion, sta.evasion),
             (&mut stats.crit, sta.crit),
             (&mut stats.haste, sta.haste),
+            (&mut stats.attack_power, sta.attack_power),
+            (&mut stats.spell_power, sta.spell_power),
+            (&mut stats.critical_multiplier, sta.critical_multiplier),
         ] {
             *to = from.unwrap_or(*to);
         }
@@ -453,4 +509,63 @@ pub(crate) struct LevelUp {
     exp: u64,
     #[serde(rename = "intExpToLevel", default, deserialize_with = "flex::int")]
     exp_to_level: u64,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Balance {
+    #[serde(rename = "intGold", default, deserialize_with = "flex::opt_int")]
+    gold: Option<u64>,
+    #[serde(rename = "intCoins", default, deserialize_with = "flex::opt_int")]
+    coins: Option<u64>,
+    #[serde(rename = "intExp", default, deserialize_with = "flex::opt_int")]
+    exp: Option<u64>,
+}
+impl Me {
+    pub(crate) fn balance(&mut self, balance: Balance) {
+        self.gold = balance.gold.unwrap_or(self.gold);
+        self.coins = balance.coins.unwrap_or(self.coins);
+        self.exp = balance.exp.unwrap_or(self.exp);
+    }
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn account_link_and_verification_follow_user_data() {
+        for (activation, verified) in [(0, false), (4, false), (5, true)] {
+            let data: UserData = serde_json::from_value(
+                json!({"intLevel": 1, "intGold": 0, "intAQ": "1", "intActivationFlag": activation}),
+            )
+            .unwrap();
+            let mut me = Me::default();
+            me.load(&data, Instant::now());
+            let value = serde_json::to_value(me).unwrap();
+            assert_eq!(value["aq"], 1);
+            assert_eq!(value["email_verified"], verified);
+        }
+    }
+}
+
+#[cfg(test)]
+mod skill_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn skill_metadata_keeps_the_action_type_separate_from_the_target() {
+        let skill: Skill = serde_json::from_value(json!({
+            "ref":"a1", "nam":"Strike", "tgt":"h", "typ":"s", "id":"7", "actID":9,
+            "damage":"1.5", "icon":"strike", "desc":"Strike description", "range":301,
+            "anim":"Cast,Attack", "tgtMin":1, "skillLock":true
+        }))
+        .unwrap();
+        let value = serde_json::to_value(skill).unwrap();
+        assert_eq!(value["kind"], "s");
+        assert_eq!(value["id"], 7);
+        assert_eq!(value["damage"], 1.5);
+        assert_eq!(value["skill_lock"], true);
+    }
 }

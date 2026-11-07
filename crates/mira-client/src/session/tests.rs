@@ -270,14 +270,23 @@ fn joins_a_map_then_moves_between_its_cells() {
     let joining = session.join("yulgar-1");
     let joined = joining.id();
     joining.wait().unwrap();
-    let arrival: Vec<Update> = updates.try_iter().collect();
+    let (sent, arrival): (Vec<Update>, Vec<Update>) = updates
+        .try_iter()
+        .filter(|update| !matches!(update, Update::State))
+        .partition(|update| matches!(update, Update::Packet(Direction::Out, _)));
+    let transfer = packet::transfer("player1", "yulgar-1");
+    assert!(
+        sent.iter()
+            .any(|update| matches!(update, Update::Packet(_, text) if *text == transfer)),
+        "{sent:?}"
+    );
     assert!(
         matches!(
             arrival.as_slice(),
             [
                 ..,
                 Update::Event(Event::Joined { map, .. }),
-                Update::Packet(text),
+                Update::Packet(Direction::In, text),
                 Update::Done { id, result: Ok(()) },
             ] if map == "yulgar-2" && text == "%xt%server%-1%You joined \"yulgar-2\"!%" && *id == joined
         ),
@@ -575,7 +584,7 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
             "areaName": "farm-1",
             "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "Enter"}],
             "mondef": [
-                {"MonID": 10, "strMonName": "Mosquito"},
+                {"MonID": 10, "strMonName": "Mosquito", "sRace": "Beast", "strMonFileName": "mosquito.swf"},
                 {"MonID": 11, "strMonName": "Frogzard"},
             ],
             "monmap": [
@@ -610,6 +619,9 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
     let world = session.snapshot();
     let room = world.room.as_ref().unwrap();
     assert_eq!(room.name, "farm-1");
+    let monster = serde_json::to_value(&room.monsters[0]).unwrap();
+    assert_eq!(monster["race"], "Beast");
+    assert_eq!(monster["file"], "mosquito.swf");
     assert_eq!(
         room.monsters,
         [
@@ -617,6 +629,8 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
                 id: MonMapId(1),
                 mon_id: MonId(10),
                 name: "Mosquito".into(),
+                race: "Beast".into(),
+                file: "mosquito.swf".into(),
                 cell: "Enter".into(),
                 hp: 300,
                 max_hp: 540,
@@ -629,6 +643,8 @@ fn tracks_the_rooms_monsters_through_combat_updates() {
                 id: MonMapId(2),
                 mon_id: MonId(11),
                 name: "Frogzard".into(),
+                race: String::new(),
+                file: String::new(),
                 cell: "r2".into(),
                 hp: 0,
                 max_hp: 800,
@@ -658,7 +674,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
         })));
         peer.send("%xt%server%-1%You joined \"farm-1\"!%");
         peer.send(&json_message(
-            json!({"cmd": "stu", "sta": {"$tha": 0.12, "$cmc": 0.8, "$STR": 50}}),
+            json!({"cmd": "stu", "sta": {"$tha": 0.12, "$cmc": 0.8, "$STR": 50, "$ap": 14, "$sp": 37, "$scm": 1.66}}),
         ));
         peer.send(&json_message(json!({"cmd": "sAct", "actions": {"active": [
             {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "mp": -10, "tgt": "h", "tgtMax": 1},
@@ -676,6 +692,9 @@ fn tracks_the_players_vitals_haste_and_skills() {
             json!({"cmd": "uotls", "unm": "player2", "o": {"intMP": 1}}),
         ));
         peer.send(&json_message(json!({"cmd": "stu", "sta": {"$tdo": 0.1}})));
+        peer.send(&json_message(
+            json!({"cmd":"balance", "intGold":10, "intCoins":50}),
+        ));
         peer.send("%xt%multiLoginWarning%-1%");
     });
     let session = harness.session.clone();
@@ -689,6 +708,10 @@ fn tracks_the_players_vitals_haste_and_skills() {
         .filter(|e| matches!(e, Event::AwayChanged { .. }))
         .collect();
     assert_eq!(away, [&Event::AwayChanged { away: true }]);
+    let stats = serde_json::to_value(&session.snapshot().me.as_ref().unwrap().stats).unwrap();
+    assert_eq!(stats["attack_power"], 14.0);
+    assert_eq!(stats["spell_power"], 37.0);
+    assert_eq!(stats["critical_multiplier"], 1.66);
     assert_eq!(
         session.snapshot().me,
         Some(Me {
@@ -697,12 +720,14 @@ fn tracks_the_players_vitals_haste_and_skills() {
             level: 50,
             exp: 400,
             exp_to_level: 2000,
-            gold: 1200,
-            coins: 30,
+            gold: 10,
+            coins: 50,
             member: false,
             class_name: String::new(),
             class_points: 899,
             char_id: 4242,
+            aq: 0,
+            email_verified: false,
             bag_slots: 2,
             house_slots: 1,
             bank_slots: 3,
@@ -717,6 +742,9 @@ fn tracks_the_players_vitals_haste_and_skills() {
             away: true,
             stats: Stats {
                 strength: 50.0,
+                attack_power: 14.0,
+                spell_power: 37.0,
+                critical_multiplier: 1.66,
                 evasion: 0.1,
                 haste: 0.12,
                 ..Stats::default()
@@ -734,6 +762,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
                     max_targets: 1,
                     unlocked: true,
                     old_cooldown_ms: None,
+                    details: Default::default(),
                 },
                 Skill {
                     slot: "a1".into(),
@@ -744,6 +773,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
                     max_targets: 3,
                     unlocked: false,
                     old_cooldown_ms: None,
+                    details: Default::default(),
                 },
                 Skill {
                     slot: "i1".into(),
@@ -754,6 +784,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
                     max_targets: 1,
                     unlocked: true,
                     old_cooldown_ms: None,
+                    details: Default::default(),
                 },
             ],
         })
@@ -817,8 +848,10 @@ fn tracks_inventory_and_temp_items() {
             member: false,
             meta: String::new(),
             link: String::new(),
+            file: String::new(),
             house: false,
             enhancement: None,
+            details: Default::default(),
         };
     assert_eq!(
         *world.inventory,
@@ -835,6 +868,15 @@ fn tracks_inventory_and_temp_items() {
             name: "Mosquito Wing".into(),
             qty: 2,
             max_stack: 5,
+            details: Default::default(),
+            kind: "Quest Item".into(),
+            slot: String::new(),
+            meta: String::new(),
+            coins: false,
+            member: false,
+            link: String::new(),
+            file: String::new(),
+            house: false,
         }]
     );
 }
@@ -947,8 +989,10 @@ fn tracks_gold_exp_levels_and_drops() {
             member: false,
             meta: String::new(),
             link: String::new(),
+            file: String::new(),
             house: false,
             enhancement: Default::default(),
+            details: Default::default(),
         }]
     );
 }
@@ -1084,14 +1128,15 @@ fn quest_status_follows_the_game_clients_checks() {
             "1": quest(1, "Once done", json!({"bOnce": 1, "iSlot": 2, "iValue": 10})),
             "2": quest(2, "Once open", json!({
                 "bOnce": "1", "iSlot": 2, "iValue": 11, "iGold": 100, "iExp": 200,
+                "sDesc": "Bring supplies", "sEndText": "Supplies received",
                 "turnin": [{"ItemID": 101, "iQty": 3}],
-                "oItems": {"101": {"ItemID": 101, "sName": "Health Potion"}},
+                "oItems": {"101": {"ItemID": 101, "sName": "Health Potion", "iStk": 99, "bTemp": true}},
                 "reward": [
                     {"ItemID": 500, "iQty": 1, "iRate": "100", "iType": 0},
                     {"ItemID": "501", "iQty": 2, "iRate": 12.5, "iType": 1},
                 ],
                 "oRewards": {
-                    "itemsS": {"500": {"ItemID": 500, "sName": "Gold Bar"}},
+                    "itemsS": {"500": {"ItemID": 500, "sName": "Gold Bar", "iStk": 10}},
                     "itemsR": {"501": {"ItemID": "501", "sName": "Gem"}},
                 },
             })),
@@ -1189,10 +1234,14 @@ fn quest_status_follows_the_game_clients_checks() {
         Quest {
             id: QuestId(2),
             name: "Once open".into(),
+            description: "Bring supplies".into(),
+            end_text: "Supplies received".into(),
             turn_in: vec![QuestItem {
                 id: ItemId(101),
                 name: "Health Potion".into(),
                 qty: 3,
+                max_stack: 99,
+                temp: true,
             }],
             required: vec![],
             rewards: vec![
@@ -1200,6 +1249,8 @@ fn quest_status_follows_the_game_clients_checks() {
                     id: ItemId(500),
                     name: "Gold Bar".into(),
                     qty: 1,
+                    max_stack: 10,
+                    temp: false,
                     chance: 100.0,
                     kind: RewardKind::Always,
                 },
@@ -1207,6 +1258,8 @@ fn quest_status_follows_the_game_clients_checks() {
                     id: ItemId(501),
                     name: "Gem".into(),
                     qty: 2,
+                    max_stack: 0,
+                    temp: false,
                     chance: 12.5,
                     kind: RewardKind::Rolled,
                 },
@@ -1371,6 +1424,8 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
     let world = session.snapshot();
     let aura = |name: &str, duration: f64, value: Option<f64>, caster| Aura {
         name: name.into(),
+        icon: String::new(),
+        description: String::new(),
         duration,
         stacks: 1,
         value,
@@ -1428,6 +1483,8 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
         untimed(&monsters[1].auras.active),
         [Aura {
             name: "Poison".into(),
+            icon: String::new(),
+            description: String::new(),
             duration: 5.0,
             stacks: 3,
             value: Some(12.5),
@@ -1479,6 +1536,9 @@ fn tracks_boosts_class_names_and_other_players() {
             json!({"cmd": "gboost", "op": "+", "iSecsLeft": "60", "bShowShop": true}),
         ));
         peer.send(&json_message(json!({"cmd": "gboost", "op": "-"})));
+        peer.send(&json_message(json!({"cmd":"aura+", "tInf":"p:8", "auras":[
+            {"nam":"Ward", "dur":60, "isNew":true}
+        ]})));
         peer.send("%xt%multiLoginWarning%-1%");
     });
     let session = harness.session.clone();
@@ -1488,6 +1548,21 @@ fn tracks_boosts_class_names_and_other_players() {
         "{events:?}"
     );
     let world = session.snapshot();
+    assert_eq!(
+        world
+            .room
+            .as_ref()
+            .unwrap()
+            .players
+            .iter()
+            .find(|p| p.eid == EntityId(8))
+            .unwrap()
+            .auras
+            .active[0]
+            .name,
+        "Ward"
+    );
+
     let players: Vec<_> = world
         .room
         .as_ref()
@@ -1587,13 +1662,17 @@ fn reports_kills_deaths_levels_drops_and_item_changes() {
         send(
             &mut peer,
             json!({"cmd": "addItems", "items": {
-                "200": {"ItemID": 200, "sName": "Wing", "iQty": 2, "bTemp": true},
+                "200": {"ItemID": 200, "sName": "Wing", "iQty": 2, "iQtyNow": 2, "bTemp": true},
             }}),
+        );
+        send(
+            &mut peer,
+            json!({"cmd":"buyItem","bitSuccess":1,"ItemID":301,"CharItemID":6001,"iQty":1}),
         );
         send(&mut peer, json!({"cmd": "turnIn", "sItems": "200:2"}));
         send(
             &mut peer,
-            json!({"cmd": "sellItem", "CharItemID": 5001, "iQty": 5, "intAmount": 5}),
+            json!({"cmd": "sellItem", "CharItemID": 5001, "iQty": 5, "iQtyNow": 0, "intAmount": 5}),
         );
         send(
             &mut peer,
@@ -1627,8 +1706,22 @@ fn reports_kills_deaths_levels_drops_and_item_changes() {
         );
         peer.send("%xt%multiLoginWarning%-1%");
     });
-    let events: Vec<Event> = harness
-        .finish()
+    let all = harness.finish();
+    assert!(all.contains(&Event::ItemBought {
+        char_item_id: CharItemId(6001)
+    }));
+    assert!(all.contains(&Event::ItemPickedUp { id: ItemId(300) }));
+    assert!(
+        all.iter().any(|event| serde_json::to_value(event).unwrap()
+            == json!({
+                "event":"item_received", "id":200, "qty":2, "place":"temp"
+            })),
+        "{all:?}"
+    );
+    assert!(all.iter().any(|event| serde_json::to_value(event).unwrap() == json!({
+        "event":"item_sold", "char_item_id":5001, "qty":5, "qty_now":0, "amount":5, "coins":false
+    })), "{all:?}");
+    let events: Vec<Event> = all
         .into_iter()
         .filter(|e| {
             matches!(
@@ -2182,7 +2275,7 @@ fn cancelling_answers_at_once_but_holds_the_queue_until_a_sent_request_is_answer
         .iter()
         .filter_map(|update| match update {
             Update::Done { id, result } => Some((id, result.map_err(|e| e.to_string()))),
-            Update::Event(_) | Update::Packet(_) => None,
+            Update::State | Update::Event(_) | Update::Packet(..) => None,
         })
         .collect();
     assert_eq!(
@@ -2231,7 +2324,7 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
         peer.send(&json_message(
             json!({"cmd": "acceptQuest", "QuestID": 30, "bSuccess": 1, "msg": "success"}),
         ));
-        let turn_in = packet::try_quest_complete(AreaId(42), QuestId(30), Some(ItemId(600)), 2);
+        let turn_in = "%xt%zm%tryQuestComplete%42%30%600%true%2%wvz%";
         let turned_in = peer.expect_at(&turn_in);
         peer.send(&json_message(json!({"cmd": "turnIn", "sItems": "101:4"})));
         peer.send(&json_message(
@@ -2262,7 +2355,7 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
     assert!(session.snapshot().accepted_quests.contains(&QuestId(30)));
     session.accept_quest(QuestId(30)).wait().unwrap();
     session
-        .complete_quest(QuestId(30), Some(ItemId(600)), 2)
+        .complete_quest_special(QuestId(30), Some(ItemId(600)), 2, true)
         .wait()
         .unwrap();
     let world = session.snapshot();
@@ -2276,6 +2369,9 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
         .unwrap_err();
     assert!(matches!(refused, ActionError::Refused(why) if why == "Missing Turn In Item"));
     assert!(session.snapshot().accepted_quests.contains(&QuestId(30)));
+    session.abandon_quest(QuestId(30)).wait().unwrap();
+    assert!(!session.snapshot().accepted_quests.contains(&QuestId(30)));
+    assert!(session.snapshot().quests.contains_key(&QuestId(30)));
     session.logout();
     let events = harness.finish();
     let count = |wanted: &Event| events.iter().filter(|e| *e == wanted).count();
@@ -2490,6 +2586,12 @@ fn loads_shops_once_each_and_refuses_one_known_to_open_elsewhere() {
         let second = peer.expect_at(&packet::load_shop(AreaId(42), ShopId(5)));
         assert!(second - first >= Limit::LoadShop.gap() - SLACK);
         peer.send(&shop_reply(5, "yulgar, battleon"));
+        peer.expect(&packet::load_shop(AreaId(42), ShopId(8)));
+        peer.send(&shop_reply(8, "Menu"));
+        peer.expect(&packet::load_shop(AreaId(42), ShopId(5)));
+        peer.send(&shop_reply(5, "yulgar, battleon"));
+        peer.expect(&packet::load_shop(AreaId(42), ShopId(8)));
+        peer.send(&shop_reply(8, "Menu"));
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
@@ -2525,15 +2627,25 @@ fn loads_shops_once_each_and_refuses_one_known_to_open_elsewhere() {
             slot: String::new(),
             meta: String::new(),
             link: String::new(),
+            file: String::new(),
             house: false,
             merge: vec![],
             token: 0,
             token_qty: 0,
             quest_slot: -1,
             quest_value: 0,
+            quest: String::new(),
+            level: 0,
+            faction_name: String::new(),
+            token_name: String::new(),
+            remaining: None,
             enhancement_id: 0,
         }
     );
+    session.load_shop(ShopId(8)).wait().unwrap();
+    session.load_shop(ShopId(5)).wait().unwrap();
+    session.load_shop(ShopId(8)).wait().unwrap();
+    assert_eq!(session.snapshot().shop.as_ref().unwrap().id, ShopId(8));
     session.logout();
     harness.finish();
 }
@@ -2553,6 +2665,29 @@ fn a_kick_reports_how_long_until_the_account_can_log_in() {
 
 #[test]
 fn buys_and_sells_within_the_clients_limits() {
+    let without_shop = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_with_items(json!([
+            {"ItemID": 102, "CharItemID": 5002, "sName": "Spare Axe", "iQty": 1,
+             "iStk": 1, "sType": "Axe", "sES": "Weapon"},
+        ]));
+        peer.expect(&packet::sell_item(
+            AreaId(42),
+            ItemId(102),
+            1,
+            CharItemId(5002),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "sellItem", "CharItemID": 5002, "iQty": 1, "intAmount": 10}),
+        ));
+        peer.expect_logout();
+    });
+    without_shop.session.ready().wait().unwrap();
+    assert!(without_shop.session.snapshot().shop.is_none());
+    without_shop.session.sell(ItemId(102), 1).wait().unwrap();
+    assert!(without_shop.session.snapshot().inventory.is_empty());
+    without_shop.session.logout();
+    without_shop.finish();
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_with_items(json!([
@@ -2966,6 +3101,9 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
     assert!(unusable(session.unequip(ItemId(1))));
     session.equip(ItemId(1)).wait().unwrap();
     session.equip(ItemId(2)).wait().unwrap();
+    let lock = session.snapshot().action_locks["equipItem"];
+    assert_eq!(lock.cooldown, Duration::from_millis(1500));
+    assert!(lock.used.unwrap() + lock.cooldown > Instant::now());
     session.unequip(ItemId(3)).wait().unwrap();
     session.equip(ItemId(6)).wait().unwrap();
     let world = session.snapshot();
@@ -3028,6 +3166,27 @@ fn names_enhancements_on_gear_with_the_servers_proc_names() {
             "sES": "Weapon", "EnhID": 7, "EnhLvl": 3, "EnhPatternID": 2,
         }}})));
         peer.send("%xt%server%-1%sent%");
+        for (request, reply) in [
+            (
+                "apply-enhancement",
+                json!({
+                    "cmd": "enhanceItemShop", "ItemIDs": [1, "4", 999], "EnhID": "40514",
+                    "EnhPID": "9", "EnhLvl": "70", "EnhRty": "6", "EnhDPS": 100,
+                    "EnhRng": 10, "ProcID": "3", "iCost": "400", "bSuccess": 1,
+                }),
+            ),
+            (
+                "replace-enhancement",
+                json!({
+                    "cmd": "enhanceItemShop", "ItemIDs": [1], "EnhID": 664,
+                    "EnhPID": 7, "EnhLvl": 100, "EnhRty": 1, "bSuccess": 1,
+                }),
+            ),
+        ] {
+            peer.expect(request);
+            peer.send(&json_message(reply));
+            peer.send("%xt%server%-1%enhancement-applied%");
+        }
         peer.expect(&packet::logout());
     });
     harness
@@ -3055,6 +3214,69 @@ fn names_enhancements_on_gear_with_the_servers_proc_names() {
             None,
         ]
     );
+    harness
+        .session
+        .send_raw("apply-enhancement")
+        .wait()
+        .unwrap();
+    harness
+        .events
+        .iter()
+        .find(|e| matches!(e, Event::Notice { text, .. } if text == "enhancement-applied"))
+        .unwrap();
+    let enhanced = harness.session.snapshot();
+    for index in [0, 3] {
+        assert_eq!(
+            enhanced.inventory[index].enhancement,
+            Some(crate::Enhancement {
+                id: 40514,
+                level: 70,
+                pattern: 9,
+                proc_id: 3,
+                plus: 5,
+            })
+        );
+        assert_eq!(
+            enhanced
+                .enhancement_name(&enhanced.inventory[index])
+                .as_deref(),
+            Some("Lucky +5, Awe Blast")
+        );
+    }
+    assert_eq!(enhanced.inventory[1], world.inventory[1]);
+    assert_eq!(enhanced.inventory[2], world.inventory[2]);
+    assert_eq!(enhanced.drops, world.drops);
+    assert_eq!(
+        (
+            enhanced.me.as_ref().unwrap().gold,
+            enhanced.me.as_ref().unwrap().coins
+        ),
+        (800, 30)
+    );
+    assert_eq!(world.inventory[0].enhancement.as_ref().unwrap().id, 5);
+
+    harness
+        .session
+        .send_raw("replace-enhancement")
+        .wait()
+        .unwrap();
+    harness
+        .events
+        .iter()
+        .find(|e| matches!(e, Event::Notice { text, .. } if text == "enhancement-applied"))
+        .unwrap();
+    let replaced = harness.session.snapshot();
+    assert_eq!(
+        replaced.inventory[0].enhancement,
+        Some(crate::Enhancement {
+            id: 664,
+            level: 100,
+            pattern: 7,
+            proc_id: 0,
+            plus: 0,
+        })
+    );
+    assert_eq!(replaced.me.as_ref().unwrap().gold, 800);
     harness.session.logout();
     harness.finish();
 }
@@ -4230,4 +4452,452 @@ fn delivers_events_to_every_subscriber() {
     assert!(events.contains(&hello));
     let rest: Vec<Event> = extra.iter().collect();
     assert_eq!(closed_with(&rest), Some(Disconnect::LoggedOut));
+}
+
+#[test]
+fn a_rest_request_returns_without_waiting_for_recovery() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        let first = peer.expect_at(&packet::rest_request());
+        peer.expect(&packet::emote("rest"));
+        let second = peer.expect_at(&packet::rest_request());
+        assert!(second - first >= Limit::Rest.gap() - SLACK);
+        peer.expect(&packet::emote("rest"));
+        peer.expect(&packet::logout());
+    });
+    harness.session.ready().wait().unwrap();
+    harness.session.request_rest().wait().unwrap();
+    harness.session.request_rest().wait().unwrap();
+    assert!(harness.session.snapshot().me.as_ref().unwrap().hp < 1000);
+    harness.session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_drop_request_returns_without_a_server_reply() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.send(&json_message(json!({"cmd":"dropItem","items":{"1027":{"ItemID":1027,"sName":"Twilly Twig","sType":"Staff","iStk":1,"iQty":1}}})));
+        peer.expect(&packet::get_drop(AreaId(42), ItemId(1027)));
+        peer.expect(&packet::logout());
+    });
+    harness.session.ready().wait().unwrap();
+    while harness.session.snapshot().drops.is_empty() {
+        thread::sleep(Duration::from_millis(5));
+    }
+    harness.session.request_drop(ItemId(1027)).wait().unwrap();
+    harness.session.logout();
+    harness.finish();
+}
+
+#[test]
+fn aggro_all_includes_monsters_in_other_cells() {
+    let (checked, received) = mpsc::channel();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.send(&json_message(
+            json!({"cmd":"ct","m":{"3":{"intHP":0,"intState":0}}}),
+        ));
+        let all = packet::aggro_mon(AreaId(43), &[MonMapId(1), MonMapId(2), MonMapId(3)]);
+        let first = peer.expect_at(&all);
+        let second = peer.expect_at(&all);
+        assert!(second - first >= Duration::from_millis(250) - SLACK);
+        checked.send(()).unwrap();
+        peer.expect_logout();
+    });
+    harness.session.ready().wait().unwrap();
+    while harness
+        .session
+        .snapshot()
+        .room
+        .as_ref()
+        .is_none_or(|r| r.area != AreaId(43) || r.monsters[2].hp != 0)
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    harness.session.set_aggro(Some(Aggro::All));
+    received.recv_timeout(Duration::from_secs(5)).unwrap();
+    harness.session.logout();
+    harness.finish();
+}
+
+#[test]
+fn rest_packets_do_not_send_an_emote_or_wait_for_recovery() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        let first = peer.expect_at(&packet::rest_request());
+        let second = peer.expect_at(&packet::rest_request());
+        assert!(second - first >= Limit::RestPacket.gap() - SLACK);
+        peer.expect(&packet::logout());
+    });
+    harness.session.ready().wait().unwrap();
+    harness.session.request_rest_packet().wait().unwrap();
+    harness.session.request_rest_packet().wait().unwrap();
+    harness.session.logout();
+    harness.finish();
+}
+
+fn map_with_file(area: i64, name: &str, file: &str) -> String {
+    let mut message: serde_json::Value = serde_json::from_str(&move_to_area(area, name)).unwrap();
+    message["b"]["o"]["strMapFileName"] = json!(file);
+    message.to_string()
+}
+
+fn map_http() -> (TcpListener, String) {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let base = format!("http://{}/game/api", listener.local_addr().unwrap());
+    (listener, base)
+}
+
+fn accept_map_request(listener: &TcpListener) -> (TcpStream, Vec<String>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let (headers, _) = read_request(&stream);
+                return (stream, headers);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline, "no map file request");
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+}
+
+fn reply_map(stream: &mut TcpStream, cells: &[&str]) {
+    let body = crate::testing::map_swf(cells);
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
+        body.len()
+    )
+    .unwrap();
+    stream.write_all(&body).unwrap();
+}
+
+fn join_map(peer: &mut Peer, area: i64, name: &str, file: &str) {
+    peer.send(&map_with_file(area, name, file));
+    peer.send(&format!("%xt%server%-1%You joined \"{name}\"!%"));
+    peer.expect(&packet::move_to_cell(AreaId(area), "Enter", "Spawn"));
+    peer.expect(&packet::retrieve_user_datas(AreaId(area), &[EntityId(8)]));
+}
+
+#[test]
+fn map_cells_load_after_each_join_with_the_client_headers_and_cache_by_file() {
+    let (http, base) = map_http();
+    let harness = Harness::start_with_api(Options::default(), base, |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "forest-1"));
+        join_map(&mut peer, 43, "forest-1", "forest/forest.swf");
+        peer.expect(&packet::transfer("player1", "forest-2"));
+        join_map(&mut peer, 44, "forest-2", "forest/forest.swf");
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    session.join("forest-1").wait().unwrap();
+    let (mut stream, headers) = accept_map_request(&http);
+    let waiting = session.load_cells();
+    assert_eq!(
+        headers[0],
+        "GET /game/gamefiles/maps/forest/forest.swf HTTP/1.1"
+    );
+    let mut headers: Vec<_> = headers[1..]
+        .iter()
+        .map(|h| h.to_ascii_lowercase())
+        .collect();
+    headers.sort();
+    assert_eq!(
+        headers,
+        [
+            "accept: */*".to_owned(),
+            "content-type:".to_owned(),
+            format!("host: {}", http.local_addr().unwrap()),
+            "user-agent: ruffle/0.7.1 (https://ruffle.rs)".to_owned(),
+            "x-device-id: 0123456789abcdef0123456789abcdef".to_owned(),
+        ]
+    );
+    reply_map(&mut stream, &["Enter", "r2", "Blank"]);
+    waiting.wait().unwrap();
+    session.join("forest-2").wait().unwrap();
+    let world = session.snapshot();
+    let room = world.room.as_ref().unwrap();
+    assert_eq!(room.cells, ["Enter", "r2", "Blank"]);
+    assert!(room.cells_loaded);
+    thread::sleep(Duration::from_millis(50));
+    assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn map_cells_wait_for_the_join_to_finish() {
+    let (http, base) = map_http();
+    let (joining, continue_join) = mpsc::channel();
+    let (arrived, arrival) = mpsc::channel();
+    let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "forest-1"));
+        peer.send(&map_with_file(43, "forest-1", "forest.swf"));
+        arrived.send(()).unwrap();
+        continue_join.recv_timeout(Duration::from_secs(5)).unwrap();
+        peer.send("%xt%server%-1%You joined \"forest-1\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(8)]));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let joined = session.join("forest-1");
+    arrival.recv_timeout(Duration::from_secs(5)).unwrap();
+    thread::sleep(Duration::from_millis(50));
+    assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    joining.send(()).unwrap();
+    joined.wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    reply_map(&mut stream, &["Enter", "r2"]);
+    session.load_cells().wait().unwrap();
+    assert_eq!(
+        session.snapshot().room.as_ref().unwrap().cells,
+        ["Enter", "r2"]
+    );
+    session.logout();
+    harness.finish();
+}
+
+fn reply_unavailable(stream: &mut TcpStream) {
+    stream
+        .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n")
+        .unwrap();
+}
+
+#[test]
+fn a_failed_map_cell_download_retries_and_loads() {
+    let (http, base) = map_http();
+    let harness = Harness::start_with_api(Options::default(), base, |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "forest-1"));
+        join_map(&mut peer, 43, "forest-1", "forest.swf");
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("forest-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let waiting = session.load_cells();
+    reply_unavailable(&mut stream);
+    let (mut stream, _) = accept_map_request(&http);
+    reply_map(&mut stream, &["Enter", "r2"]);
+    waiting.wait().unwrap();
+    let world = session.snapshot();
+    let room = world.room.as_ref().unwrap();
+    assert_eq!(room.cells, ["Enter", "r2"]);
+    assert!(room.cells_loaded);
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_map_cell_download_that_keeps_failing_reaches_its_waiters_and_can_load_later() {
+    let (http, base) = map_http();
+    let harness = Harness::start_with_api(Options::default(), base, |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "forest-1"));
+        join_map(&mut peer, 43, "forest-1", "forest.swf");
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("forest-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let waiting = session.load_cells();
+    reply_unavailable(&mut stream);
+    for _ in 0..2 {
+        let (mut stream, _) = accept_map_request(&http);
+        reply_unavailable(&mut stream);
+    }
+    assert!(matches!(waiting.wait(), Err(ActionError::Http(message)) if message.contains("503")));
+    let world = session.snapshot();
+    let room = world.room.as_ref().unwrap();
+    assert!(room.cells.is_empty());
+    assert!(!room.cells_loaded);
+    let retry = session.load_cells();
+    let (mut stream, _) = accept_map_request(&http);
+    reply_map(&mut stream, &[]);
+    retry.wait().unwrap();
+    assert!(session.snapshot().room.as_ref().unwrap().cells_loaded);
+    assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn map_cells_that_arrive_after_a_map_change_are_cached_for_a_later_join() {
+    let (http, base) = map_http();
+    let harness = Harness::start_with_api(Options::default(), base, |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        for (area, name, file) in [
+            (43, "forest-1", "forest.swf"),
+            (44, "cave-1", "cave.swf"),
+            (45, "forest-2", "forest.swf"),
+        ] {
+            peer.expect(&packet::transfer("player1", name));
+            join_map(&mut peer, area, name, file);
+        }
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("forest-1").wait().unwrap();
+    let (mut forest, _) = accept_map_request(&http);
+    let waiting = session.load_cells();
+    session.join("cave-1").wait().unwrap();
+    let (mut cave, _) = accept_map_request(&http);
+    reply_map(&mut forest, &["Enter", "Blank"]);
+    assert!(matches!(waiting.wait(), Err(ActionError::Unusable(_))));
+    assert!(session.snapshot().room.as_ref().unwrap().cells.is_empty());
+    reply_map(&mut cave, &["Enter", "Cave"]);
+    session.load_cells().wait().unwrap();
+    assert_eq!(
+        session.snapshot().room.as_ref().unwrap().cells,
+        ["Enter", "Cave"]
+    );
+    session.join("forest-2").wait().unwrap();
+    assert_eq!(
+        session.snapshot().room.as_ref().unwrap().cells,
+        ["Enter", "Blank"]
+    );
+    assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn map_cells_load_during_a_running_kill_and_cancel_only_the_requested_waiter() {
+    let (http, base) = map_http();
+    let (attacking, attack) = mpsc::channel();
+    let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "forest-1"));
+        let mut message: Value =
+            serde_json::from_str(&map_with_file(43, "forest-1", "forest.swf")).unwrap();
+        let room = &mut message["b"]["o"];
+        room["mondef"] = json!([{"MonID": 10, "strMonName": "Mosquito"}]);
+        room["monmap"] = json!([{"MonMapID": 1, "MonID": 10, "strFrame": "Enter"}]);
+        room["monBranch"] =
+            json!([{"MonMapID": 1, "MonID": 10, "intHP": 500, "intHPMax": 500, "intState": 1}]);
+        peer.send(&message.to_string());
+        peer.send("%xt%server%-1%You joined \"forest-1\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(8)]));
+        peer.expect(&gar(0, "aa", &[ONE]));
+        attacking.send(()).unwrap();
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("forest-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let killing = session.kill(MonMapId(1));
+    attack.recv_timeout(Duration::from_secs(5)).unwrap();
+    let queued = session.rest();
+    let cancelled = session.load_cells();
+    let loaded = session.load_cells();
+    session.cancel(cancelled.id());
+    assert!(matches!(cancelled.wait(), Err(ActionError::Cancelled)));
+    reply_map(&mut stream, &["Enter", "Blank"]);
+    loaded.wait().unwrap();
+    assert_eq!(
+        session.snapshot().room.as_ref().unwrap().cells,
+        ["Enter", "Blank"]
+    );
+    assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    session.cancel_all();
+    assert!(matches!(killing.wait(), Err(ActionError::Cancelled)));
+    assert!(matches!(queued.wait(), Err(ActionError::Cancelled)));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn local_cell_movement_updates_state_without_sending_a_packet() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::move_to_cell(AreaId(42), "r2", "Left"));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    session.move_to_cell_local("r1", "Right").wait().unwrap();
+    let world = session.snapshot();
+    let room = world.room.as_ref().unwrap();
+    assert_eq!((&*room.cell, &*room.pad), ("r1", "Right"));
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    session.logout();
+    let events = harness.finish();
+    assert!(events.contains(&Event::Moved {
+        cell: "r1".into(),
+        pad: "Right".into()
+    }));
+}
+
+#[test]
+fn raw_bank_replies_merge_items_and_publish_load_events() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.send(&json_message(
+            json!({"cmd":"loadBank","bitSuccess":1,"items":[
+                {"ItemID":5,"CharItemID":15,"sName":"Dust","iQty":2,"iStk":10}
+            ]}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd":"loadBank","bitSuccess":1,"items":[
+                {"ItemID":6,"CharItemID":16,"sName":"Ash","iQty":1,"iStk":10}
+            ]}),
+        ));
+        peer.send(&json_message(json!({"cmd":"addItems","items":{"5":{"ItemID":5,"CharItemID":15,"iQty":1,"iQtyNow":3,"bBank":1}}})));
+        peer.send(&json_message(json!({"cmd":"getDrop","bSuccess":1,"ItemID":5,"CharItemID":15,"iQty":1,"iQtyNow":4,"bBank":1})));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(events.contains(&Event::ItemReceived {
+        id: ItemId(5),
+        qty: 4,
+        place: Place::Bank
+    }));
+    let world = session.snapshot();
+    let bank = world.bank.as_ref().unwrap();
+    assert_eq!(
+        bank.iter()
+            .map(|item| (item.id, item.qty))
+            .collect::<Vec<_>>(),
+        [(ItemId(5), 4), (ItemId(6), 1)]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| serde_json::to_value(event).unwrap()["event"] == "bank_loaded")
+            .count(),
+        2
+    );
+    assert!(events.contains(&Event::ItemReceived {
+        id: ItemId(5),
+        qty: 3,
+        place: Place::Bank
+    }));
 }

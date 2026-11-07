@@ -43,6 +43,10 @@ impl Peer {
         }
     }
 
+    pub fn set_read_timeout(&self, timeout: Duration) {
+        self.stream.set_read_timeout(Some(timeout)).unwrap();
+    }
+
     fn take_frame(&mut self) -> Option<String> {
         let end = self.buf.iter().position(|&b| b == 0)?;
         let frame: Vec<u8> = self.buf.drain(..=end).collect();
@@ -259,6 +263,23 @@ impl Drop for Peer {
 
 pub fn json_message(o: Value) -> String {
     json!({"t": "xt", "b": {"r": -1, "o": o}}).to_string()
+}
+
+pub fn map_swf(cells: &[&str]) -> Vec<u8> {
+    let mut body = vec![0, 0, 24, 1, 0];
+    for cell in cells {
+        body.extend_from_slice(&((43 << 6) | (cell.len() + 1) as u16).to_le_bytes());
+        body.extend_from_slice(cell.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&(1u16 << 6).to_le_bytes());
+    }
+    body.extend_from_slice(&[0, 0]);
+    [
+        b"FWS\x0a".as_slice(),
+        &((body.len() + 8) as u32).to_le_bytes(),
+        &body,
+    ]
+    .concat()
 }
 
 pub fn move_to_area(area: i64, name: &str) -> String {

@@ -22,6 +22,7 @@ impl Session {
         self.counter_hold = CounterHold::Off;
         self.aggro = None;
         self.anti_afk = false;
+        self.load_cells_pending = false;
         self.afk_cleared = None;
         self.requested_spot = None;
         self.shop_maps.clear();

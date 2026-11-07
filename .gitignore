@@ -1,2 +1,5 @@
 /target
 /node_modules
+/skua/**/bin/
+/skua/**/obj/
+/skua/Host/artifacts/

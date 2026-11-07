@@ -128,6 +128,16 @@ pub fn accept_quest(room: AreaId, id: QuestId) -> String {
 }
 
 pub fn try_quest_complete(room: AreaId, id: QuestId, reward: Option<ItemId>, times: u32) -> String {
+    try_quest_complete_special(room, id, reward, times, false)
+}
+
+pub fn try_quest_complete_special(
+    room: AreaId,
+    id: QuestId,
+    reward: Option<ItemId>,
+    times: u32,
+    special: bool,
+) -> String {
     let reward = reward.map_or(-1, |item| item.0);
     zm(
         "tryQuestComplete",
@@ -135,7 +145,7 @@ pub fn try_quest_complete(room: AreaId, id: QuestId, reward: Option<ItemId>, tim
         &[
             id.to_string(),
             reward.to_string(),
-            "false".into(),
+            special.to_string(),
             times.to_string(),
             "wvz".into(),
         ],

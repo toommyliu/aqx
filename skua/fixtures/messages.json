@@ -1,0 +1,227 @@
+[
+  {
+    "reply": 1,
+    "ok": null
+  },
+  {
+    "reply": 2,
+    "ok": [
+      {
+        "name": "Test"
+      }
+    ]
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "not_ready",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "refused",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "no_reply",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "no_target",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "unusable",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "dead",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "in_combat",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "interrupted",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "still_in_combat",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "http",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "closed",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "stopped",
+      "message": "example"
+    }
+  },
+  {
+    "reply": 3,
+    "error": {
+      "kind": "cancelled",
+      "message": "example"
+    }
+  },
+  {
+    "state": {
+      "section": "session",
+      "value": {
+        "phase": {
+          "phase": "ready"
+        },
+        "server": "Test",
+        "host": "example.invalid"
+      }
+    }
+  },
+  {
+    "state": {
+      "section": "me",
+      "value": null
+    }
+  },
+  {
+    "state": {
+      "section": "room",
+      "value": null
+    }
+  },
+  {
+    "state": {
+      "section": "inventory",
+      "value": []
+    }
+  },
+  {
+    "state": {
+      "section": "temp",
+      "value": []
+    }
+  },
+  {
+    "state": {
+      "section": "drops",
+      "value": []
+    }
+  },
+  {
+    "state": {
+      "section": "bank",
+      "value": null
+    }
+  },
+  {
+    "state": {
+      "section": "quests",
+      "value": {
+        "definitions": {},
+        "accepted": [],
+        "status": {},
+        "progress": null
+      }
+    }
+  },
+  {
+    "state": {
+      "section": "factions",
+      "value": []
+    }
+  },
+  {
+    "state": {
+      "section": "shop",
+      "value": null
+    }
+  },
+  {
+    "state": {
+      "section": "combat",
+      "value": {
+        "target": null,
+        "readiness": {}
+      }
+    }
+  },
+  {
+    "state": {
+      "section": "settings",
+      "value": {
+        "aggro": "off",
+        "counter_hold": "off",
+        "anti_afk": false,
+        "room": null
+      }
+    }
+  },
+  {
+    "event": {
+      "event": "moved",
+      "cell": "r2",
+      "pad": "Left"
+    }
+  },
+  {
+    "packet": {
+      "direction": "in",
+      "text": "%xt%example%-1%"
+    }
+  },
+  {
+    "packet": {
+      "direction": "out",
+      "text": "%xt%example%-1%"
+    }
+  },
+  {
+    "stop": {}
+  },
+  {
+    "reset": {}
+  },
+  {
+    "disconnected": false
+  },
+  {
+    "disconnected": true
+  }
+]

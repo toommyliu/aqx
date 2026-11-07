@@ -346,6 +346,7 @@ interface PlayerFields {
     };
 }
 interface MapFields {
+    readonly cells: readonly string[];
     /** With the room, as in "battleon-1234". */
     readonly name: string;
     readonly areaId: number;

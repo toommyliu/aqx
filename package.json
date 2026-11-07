@@ -3,7 +3,9 @@
   "type": "module",
   "scripts": {
     "api": "tsc -p scripts && tsc -p crates/mira-script && node scripts/api.ts",
-    "api:check": "tsc -p scripts && tsc -p crates/mira-script && node scripts/api.ts --check"
+    "api:check": "tsc -p scripts && tsc -p crates/mira-script && node scripts/api.ts --check",
+    "skua:sync": "tsc -p scripts && node scripts/sync-skua.ts",
+    "skua:test": "sh scripts/skua-test.sh"
   },
   "devDependencies": {
     "@types/node": "26.6.6",

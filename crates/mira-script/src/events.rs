@@ -152,7 +152,15 @@ pub fn payload<'js>(
             view.set("zone", views::nullable(ctx, zone.as_deref())?)?;
             "zone"
         }
-        Event::Phase(_) | Event::Ready { .. } | Event::Unreadable { .. } | Event::Packet { .. } => {
+        Event::BankLoaded
+        | Event::ItemPickedUp { .. }
+        | Event::ItemReceived { .. }
+        | Event::ItemBought { .. }
+        | Event::ItemSold { .. }
+        | Event::Phase(_)
+        | Event::Ready { .. }
+        | Event::Unreadable { .. }
+        | Event::Packet { .. } => {
             return Ok(None);
         }
     };

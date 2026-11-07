@@ -10,11 +10,12 @@ use super::bank;
 use super::quests::{Answer, Verdict};
 use crate::aura::{self, Target};
 use crate::combat::{self, ITEM_SLOT};
+use crate::enhancement::Enhanced;
 use crate::event::{Event, NoticeKind};
 use crate::faction::{self, AddedFaction, Faction, FactionData};
 use crate::inventory::{AddedItems, LoadInventory, Picked, Sold, TurnIn, Worn};
 use crate::player::{
-    BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, SkillList, StatUpdate,
+    Balance, BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, SkillList, StatUpdate,
 };
 use crate::quest::{self, AchievementUpdate, QuestList, QuestUpdate};
 use crate::room::{self, MonsterUpdate, MoveToArea, PlayerUpdate, Room, Tick, UserEntry, UserList};
@@ -241,6 +242,12 @@ impl Session {
                     self.learn_player(&entry);
                 }
             }
+            "balance" => {
+                let balance: Balance = read(&json)?;
+                if let Some(character) = &mut self.character {
+                    character.balance(balance);
+                }
+            }
             "xpboost" | "gboost" | "repboost" | "cpboost" => {
                 let update: BoostUpdate = read(&json)?;
                 if let Some(character) = &mut self.character {
@@ -361,8 +368,38 @@ impl Session {
                 });
             }
             "addItems" => {
-                for (key, item) in read::<AddedItems>(&json)?.items {
-                    if let Some(event) = self.inventory.add(&key, item) {
+                for (key, mut item) in read::<AddedItems>(&json)?.items {
+                    let qty_now = item.qty_now.unwrap_or(0);
+                    let event = if item.bank {
+                        item.bank = false;
+                        self.bank.as_mut().and_then(|bank| {
+                            let mut inventory = crate::inventory::Inventory {
+                                items: Arc::clone(bank),
+                                ..Default::default()
+                            };
+                            let event = inventory.add(&key, item);
+                            *bank = inventory.items;
+                            event.map(|event| match event {
+                                Event::ItemChanged { id, name, qty, .. } => Event::ItemChanged {
+                                    id,
+                                    name,
+                                    qty,
+                                    place: crate::Place::Bank,
+                                },
+                                event => event,
+                            })
+                        })
+                    } else {
+                        self.inventory.add(&key, item)
+                    };
+                    if let Some(event) = event {
+                        if let Event::ItemChanged { id, place, .. } = event {
+                            self.emit(Event::ItemReceived {
+                                id,
+                                qty: qty_now,
+                                place,
+                            });
+                        }
                         self.emit(event);
                     }
                 }
@@ -375,10 +412,37 @@ impl Session {
                 }
             }
             "getDrop" => {
-                let picked: Picked = read(&json)?;
+                let mut picked: Picked = read(&json)?;
                 let (id, ok) = (picked.id, picked.ok);
-                if let Some(event) = self.inventory.pick(picked) {
+                if picked.bank && self.bank.is_some() {
+                    let qty_now = picked.qty_now.unwrap_or(0);
+                    picked.bank = false;
+                    let mut inventory = crate::inventory::Inventory {
+                        items: Arc::clone(self.bank.as_ref().unwrap()),
+                        drops: self.inventory.drops.clone(),
+                        ..Default::default()
+                    };
+                    let event = inventory.pick(picked);
+                    self.bank = Some(inventory.items);
+                    self.inventory.drops = inventory.drops;
+                    if let Some(Event::ItemChanged { id, name, qty, .. }) = event {
+                        self.emit(Event::ItemChanged {
+                            id,
+                            name,
+                            qty,
+                            place: crate::Place::Bank,
+                        });
+                        self.emit(Event::ItemReceived {
+                            id,
+                            qty: qty_now,
+                            place: crate::Place::Bank,
+                        });
+                    }
+                } else if let Some(event) = self.inventory.pick(picked) {
                     self.emit(event);
+                }
+                if ok {
+                    self.emit(Event::ItemPickedUp { id });
                 }
                 self.picked(id, ok);
             }
@@ -395,9 +459,44 @@ impl Session {
                 if let Some(character) = &mut self.character {
                     character.receive(sold.amount, sold.coins);
                 }
+                self.emit(Event::ItemSold {
+                    char_item_id: sold.char_item_id,
+                    qty: sold.qty,
+                    qty_now: sold.qty_now,
+                    amount: sold.amount,
+                    coins: sold.coins,
+                });
                 self.on_sold(sold.char_item_id);
             }
             "buyItem" => self.on_bought(read::<Bought>(&json)?),
+            "enhanceItemShop" => {
+                let enhanced: Enhanced = read(&json)?;
+                for item in Arc::make_mut(&mut self.inventory.items)
+                    .iter_mut()
+                    .filter(|item| enhanced.items.contains(&item.id))
+                {
+                    item.enhancement = enhanced.fields.enhancement();
+                }
+                if let Some(character) = &mut self.character {
+                    character.spend(enhanced.cost, false);
+                }
+            }
+            "loadBank" => {
+                let loaded: bank::Loaded = read(&json)?;
+                if loaded.ok {
+                    let items = self.parse_each::<crate::Item>("bank item", loaded.items);
+                    let bank = self.bank.get_or_insert_with(|| Arc::new(Vec::new()));
+                    let bank = Arc::make_mut(bank);
+                    for item in items {
+                        if let Some(held) = bank.iter_mut().find(|held| held.id == item.id) {
+                            *held = item;
+                        } else {
+                            bank.push(item);
+                        }
+                    }
+                    self.emit(Event::BankLoaded);
+                }
+            }
             "bankFromInv" => self.on_moved(read::<bank::Deposited>(&json)?.into()),
             "bankToInv" => self.on_moved(read::<bank::Withdrew>(&json)?.into()),
             "bankSwapInv" => self.on_moved(read::<bank::Swapped>(&json)?.into()),

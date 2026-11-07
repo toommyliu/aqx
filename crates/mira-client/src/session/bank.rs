@@ -13,6 +13,14 @@ use crate::event::{Event, Place};
 use crate::inventory::{Item, Pool};
 use crate::room::CombatState;
 
+#[derive(Deserialize)]
+pub(super) struct Loaded {
+    #[serde(rename = "bitSuccess", deserialize_with = "flex::bool")]
+    pub ok: bool,
+    #[serde(default)]
+    pub items: Vec<serde_json::Value>,
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum BankMove {
     Deposit(ItemId),

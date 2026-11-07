@@ -279,6 +279,7 @@ interface PlayerFields {
 }
 
 interface MapFields {
+  readonly cells: readonly string[];
   /** With the room, as in "battleon-1234". */
   readonly name: string;
   readonly areaId: number;
@@ -611,7 +612,7 @@ export const player = view(
 
 export const map = view(
   room,
-  { name: true, areaId: true, cell: true, pad: true, x: true, y: true, zone: true, players: true, monsters: true },
+  { cells: true, name: true, areaId: true, cell: true, pad: true, x: true, y: true, zone: true, players: true, monsters: true },
   {
     /**
      * Without a room in `name`, joins settings.room. "refused" when the map is

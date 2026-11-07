@@ -49,13 +49,18 @@ impl Session {
     }
 
     pub(super) fn tick_aggro(&mut self, now: Instant) {
-        let Some((_, due)) = &mut self.aggro else {
+        let Some((mode, due)) = &mut self.aggro else {
             return;
         };
         if now < *due {
             return;
         }
-        *due = now + AGGRO_EVERY;
+        *due = now
+            + if matches!(mode, super::Aggro::All) {
+                std::time::Duration::from_millis(250)
+            } else {
+                AGGRO_EVERY
+            };
         let joining = matches!(
             self.current,
             Some(Op::Join {
@@ -72,7 +77,10 @@ impl Session {
         let ids: Vec<MonMapId> = room
             .monsters
             .iter()
-            .filter(|m| m.cell == room.cell && m.alive())
+            .filter(|m| {
+                matches!(self.aggro, Some((super::Aggro::All, _)))
+                    || (m.cell == room.cell && m.alive())
+            })
             .map(|m| m.id)
             .filter(|id| {
                 self.aggro

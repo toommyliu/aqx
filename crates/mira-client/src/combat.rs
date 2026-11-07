@@ -36,6 +36,7 @@ pub(crate) struct Combat {
     next_act: u8,
     last_packet: Option<Instant>,
     global_from: Option<Instant>,
+    item_lock: Option<Instant>,
     clocks: HashMap<String, Clock>,
     auto: Option<Auto>,
     auto_rest: Option<Instant>,
@@ -151,7 +152,7 @@ impl Combat {
     }
 
     fn gate_paced(&self, me: &Me, skill: &Skill, now: Instant, paced: bool) -> Readiness {
-        if !skill.unlocked {
+        if !skill.unlocked || skill.details.skill_lock || skill.details.locked {
             return Readiness::Locked;
         }
         if !affordable(me, skill) {
@@ -164,17 +165,44 @@ impl Combat {
         if clock.is_some_and(|c| c.sent().is_some()) {
             return Readiness::Casting;
         }
-        let own = clock
-            .and_then(|c| c.from)
-            .map(|from| from + scaled(skill.old_cooldown_ms.unwrap_or(skill.cooldown_ms), me));
-        let global = self
-            .global_from
-            .map(|from| from + scaled(GLOBAL_COOLDOWN_MS, me));
+        let own = self.cooldown(me, skill);
+        let global = self.global_cooldown(me);
         let gap = self.gap(SKILL_GAP, now).filter(|_| paced);
-        match [own, global, gap].into_iter().flatten().max() {
+        let item = self.item_lock.filter(|_| skill.slot == ITEM_SLOT);
+        match [own, global, gap, item].into_iter().flatten().max() {
             Some(at) if at > now => Readiness::At(at),
             _ => Readiness::Ready,
         }
+    }
+
+    pub(crate) fn lock_item_slot(&mut self, now: Instant) {
+        self.item_lock = Some(now + Duration::from_secs(5));
+    }
+
+    pub(crate) fn unlock_item_slot(&mut self) {
+        self.item_lock = None;
+    }
+
+    pub(crate) fn set_last_use(&mut self, slot: &str, at: Option<Instant>) {
+        let clock = self.clocks.entry(slot.to_owned()).or_default();
+        clock.from = at;
+        if let Shot::Flying { before, .. } = &mut clock.shot {
+            *before = at;
+        }
+    }
+
+    pub(crate) fn last_use(&self, slot: &str) -> Option<Instant> {
+        self.clocks.get(slot).and_then(|clock| clock.from)
+    }
+
+    pub(crate) fn cooldown(&self, me: &Me, skill: &Skill) -> Option<Instant> {
+        self.last_use(&skill.slot)
+            .map(|from| from + scaled(skill.old_cooldown_ms.unwrap_or(skill.cooldown_ms), me))
+    }
+
+    pub(crate) fn global_cooldown(&self, me: &Me) -> Option<Instant> {
+        self.global_from
+            .map(|from| from + scaled(GLOBAL_COOLDOWN_MS, me))
     }
 
     pub(crate) fn backoff(&self, now: Instant) -> Duration {
@@ -462,6 +490,7 @@ mod tests {
             max_targets: 1,
             unlocked: true,
             old_cooldown_ms: None,
+            details: Default::default(),
         }
     }
 
@@ -517,6 +546,25 @@ mod tests {
     }
 
     #[test]
+    fn item_skills_wait_for_the_fill_reply_or_five_seconds() {
+        let me = fighter();
+        let now = Instant::now();
+        let mut combat = Combat::default();
+        let item = skill("i1", 0);
+        combat.lock_item_slot(now);
+        assert_eq!(
+            combat.readiness(&me, &item, now),
+            Readiness::At(now + ms(5000))
+        );
+        assert_eq!(
+            combat.readiness(&me, &item, now + ms(5001)),
+            Readiness::Ready
+        );
+        combat.unlock_item_slot();
+        assert_eq!(combat.readiness(&me, &item, now), Readiness::Ready);
+    }
+
+    #[test]
     fn cooldowns_scale_with_haste_capped_at_half() {
         let (me, t0) = (fighter(), Instant::now());
         let mut combat = Combat::default();
@@ -528,6 +576,15 @@ mod tests {
             Some(t0 + ms(20) + ms(2000))
         );
         assert_eq!(gate_at(&combat, &me, "a2", later), Some(t0 + ms(750)));
+        assert_eq!(combat.global_cooldown(&me), Some(t0 + ms(750)));
+        assert_eq!(
+            combat.cooldown(&me, &me.skills[1]),
+            Some(t0 + ms(20) + ms(2000))
+        );
+        assert_eq!(combat.last_use("a1"), Some(t0 + ms(20)));
+        combat.set_last_use("a1", None);
+        assert_eq!(combat.cooldown(&me, &me.skills[1]), None);
+        assert_eq!(gate_at(&combat, &me, "a1", later), Some(t0 + ms(750)));
     }
 
     #[test]
