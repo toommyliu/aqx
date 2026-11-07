@@ -325,10 +325,15 @@ impl Session {
             "seia" => self.on_slot_filled(read(&json)?, Instant::now()),
             "sAct" => {
                 let skills: SkillList = read(&json)?;
-                if let Some(character) = &mut self.character
-                    && character.learn_skills(skills)
-                {
-                    self.combat.restart_clock(ITEM_SLOT);
+                if let Some(character) = &mut self.character {
+                    let item = character.learn_skills(skills);
+                    if std::mem::take(&mut self.class_changed) {
+                        for skill in &character.skills {
+                            self.combat.restart_clock(&skill.slot);
+                        }
+                    } else if item {
+                        self.combat.restart_clock(ITEM_SLOT);
+                    }
                 }
             }
             "loadInventoryBig"
@@ -545,6 +550,7 @@ impl Session {
             "updateClass" => {
                 let class: ClassChange = read(&json)?;
                 if Some(class.uid) == self.me {
+                    self.class_changed = true;
                     if let Some(character) = &mut self.character {
                         character.change_class(&class);
                     }
