@@ -1902,6 +1902,12 @@ impl Session {
                     (Ok(()), _, stage @ RestStage::Sent { .. }) => {
                         return Some(Op::Rest { reply, stage, mode });
                     }
+                    (Ok(()), _, RestStage::Cooling { .. })
+                        if mode == RestMode::Packet
+                            && self.cooling(Limit::RestPacket, now).is_some() =>
+                    {
+                        Ok(())
+                    }
                     (Ok(()), _, RestStage::Cooling { .. }) => {
                         let limit = if mode == RestMode::Packet {
                             Limit::RestPacket

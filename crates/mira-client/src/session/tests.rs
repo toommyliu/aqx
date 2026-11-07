@@ -4586,7 +4586,7 @@ fn aggro_all_includes_monsters_in_other_cells() {
 }
 
 #[test]
-fn rest_packets_do_not_send_an_emote_or_wait_for_recovery() {
+fn rest_packets_skip_the_cooldown_instead_of_waiting_and_send_no_emote() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
@@ -4597,6 +4597,10 @@ fn rest_packets_do_not_send_an_emote_or_wait_for_recovery() {
     });
     harness.session.ready().wait().unwrap();
     harness.session.request_rest_packet().wait().unwrap();
+    let skipped = Instant::now();
+    harness.session.request_rest_packet().wait().unwrap();
+    assert!(skipped.elapsed() < Duration::from_millis(500));
+    thread::sleep(Limit::RestPacket.gap());
     harness.session.request_rest_packet().wait().unwrap();
     harness.session.logout();
     harness.finish();
