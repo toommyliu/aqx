@@ -187,19 +187,32 @@ public class ReadAccount
     public void ScriptMain(IScriptInterface bot)
     {
         bot.Log($"days {bot.Flash.GetGameObject("world.myAvatar.objData.iUpgDays")}");
+        bot.Log($"slots {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iBagSlots")} {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iBankSlots")} {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iHouseSlots")}");
+        bot.Log($"hp {bot.Flash.GetGameObject<int>("world.uoTree.player2.intHP")}/{bot.Flash.GetGameObject<int>("world.uoTree.player2.intHPMax")}");
+        bot.Log($"file {bot.Flash.GetGameObject<string>("world.strMapFileName")}");
     }
 }
 "#;
+    let mut map: Value = serde_json::from_str(FARM).unwrap();
+    map["uoBranch"].as_array_mut().unwrap().push(json!({"entID":1002,"strUsername":"Player2","strFrame":"r1","intHP":1200,"intHPMax":3000,"intState":1}));
     let (outcome, logs, _) = Fake::start_config(
-        FARM,
+        &map.to_string(),
         json!([]),
         json!([]),
-        json!({"iUpgDays":27}),
+        json!({"iUpgDays":27,"iBagSlots":40,"iBankSlots":50,"iHouseSlots":20}),
         |_, _| {},
     )
     .run(source);
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
-    assert_eq!(logs, ["days 27"]);
+    assert_eq!(
+        logs,
+        [
+            "days 27",
+            "slots 40 50 20",
+            "hp 1200/3000",
+            "file farm/farm.swf"
+        ]
+    );
 }
 #[test]
 #[ignore = "run with npm run skua:test"]

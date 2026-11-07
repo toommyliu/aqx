@@ -108,6 +108,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         _ when path.StartsWith("uoPref.") => preferences.GetValueOrDefault(path[7..], true),
         _ when path.StartsWith("world.lock.") => state.Combat.ActionLocks?.GetValueOrDefault(path[11..]) is { } action ? new { TS = action.Used ?? 0, CD = action.Cooldown } : null,
         _ when path.StartsWith("world.invTree.") => InventoryTree(path[14..]),
+        _ when path.StartsWith("world.uoTree.") => PlayerTree(path[13..]),
         _ when path == "world.shopinfo" || path.StartsWith("world.shopinfo.") => ShopObject(path[14..].TrimStart('.')),
         "world.myAvatar.objData.strEmail" or "world.myAvatar.objData.dCreated" or "world.myAvatar.objData.strGender" => null,
         "ui.mcPopup.currentLabel" => "",
@@ -120,12 +121,16 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         "world.myAvatar.objData.intLevel" => state.Me?.Level,
         "world.myAvatar.objData.intGold" => state.Me?.Gold,
         "world.myAvatar.objData.intCoins" => state.Me?.Coins,
+        "world.myAvatar.objData.iBagSlots" => state.Me?.BagSlots,
+        "world.myAvatar.objData.iBankSlots" => state.Me?.BankSlots,
+        "world.myAvatar.objData.iHouseSlots" => state.Me?.HouseSlots,
         "world.myAvatar.objData.iBoostCP" => Boost("class_points"),
         "world.myAvatar.objData.iBoostXP" => Boost("xp"),
         "world.myAvatar.objData.iBoostG" => Boost("gold"),
         "world.myAvatar.objData.iBoostRep" => Boost("rep"),
         "world.myAvatar.objData.strClassName" => state.Me?.ClassName ?? "",
-        "world.strMapName" or "world.strMapFileName" => state.Room?.MapName ?? "",
+        "world.strMapName" => state.Room?.MapName ?? "",
+        "world.strMapFileName" => state.Room?.File ?? "",
         "world.questTree" => state.Quests.ScriptTree.ToDictionary(q => q.ID),
         "cDropsUI.invTree" => ((MiraDrop)IScriptInterface.Instance.Drops).VisibleOffers,
         "world.myAvatar.items" => state.Inventory.InventoryItems,
@@ -189,6 +194,17 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
             "sES" => item.Slot,
             "sMeta" => item.Meta,
             _ => throw new NotSupportedException($"IFlashUtil game object world.invTree.{path}")
+        };
+    }
+    object? PlayerTree(string path)
+    {
+        string[] parts = path.Split('.', 2);
+        if (parts.Length < 2 || state.Room?.Players.FirstOrDefault(p => p.Name.Equals(parts[0], StringComparison.OrdinalIgnoreCase)) is not { } player) return null;
+        return parts[1] switch
+        {
+            "intHP" => player.Hp,
+            "intHPMax" => player.MaxHp,
+            _ => throw new NotSupportedException($"IFlashUtil game object world.uoTree.{path}")
         };
     }
     int Boost(string kind) => state.Me?.Boosts.GetValueOrDefault(kind) is { } at ? (int)Math.Max(0, ((long)at - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) / 1000) : 0;
