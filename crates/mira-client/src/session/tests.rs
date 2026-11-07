@@ -850,6 +850,7 @@ fn tracks_inventory_and_temp_items() {
             kind: kind.into(),
             slot: slot.into(),
             equipped,
+            worn: false,
             coins: false,
             member: false,
             meta: String::new(),
@@ -884,6 +885,49 @@ fn tracks_inventory_and_temp_items() {
             house: false,
         }]
     );
+}
+
+#[test]
+fn tracks_worn_cosmetics() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        let item = |id: i64, slot: &str, worn: u8| {
+            json!({"ItemID": id, "CharItemID": 5000 + id, "sName": format!("Item {id}"),
+                   "iQty": 1, "iStk": 1, "sType": "Armor", "sES": slot, "bWear": worn})
+        };
+        peer.serve_with_items(json!([
+            item(1, "he", 0),
+            item(2, "he", 1),
+            item(3, "ba", 0),
+            item(4, "Weapon", 0),
+            item(5, "mi", 1),
+        ]));
+        for message in [
+            json!({"cmd": "wearItem", "uid": 7, "ItemID": 1, "sES": "he"}),
+            json!({"cmd": "wearItem", "uid": 8, "ItemID": 3, "sES": "ba"}),
+            json!({"cmd": "wearLoadout", "uid": 7, "costume": {
+                "ba": {"ItemID": 3}, "Weapon": {"ItemID": 4},
+            }}),
+            json!({"cmd": "unwearItem", "uid": 7, "ItemID": 4, "sES": "Weapon"}),
+        ] {
+            peer.send(&json_message(message));
+        }
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
+        "{events:?}"
+    );
+    let worn: Vec<ItemId> = session
+        .snapshot()
+        .inventory
+        .iter()
+        .filter(|i| i.worn)
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(worn, [ItemId(3), ItemId(5)]);
 }
 
 #[test]

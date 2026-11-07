@@ -1043,7 +1043,7 @@ using Skua.Core.Interfaces;
 public class ItemMetadata {
     public void ScriptMain(IScriptInterface bot) {
         var item = bot.Inventory.GetItem(5)!;
-        bot.Log($"item {item.Description} {item.Level}");
+        bot.Log($"item {item.Description} {item.Level} {item.Wearing}");
         bot.Send.Packet("temp-item");
         bot.Wait.ForTrue(() => bot.TempInv.Contains(6), 2);
         var temp = bot.TempInv.GetItem(6)!;
@@ -1052,13 +1052,13 @@ public class ItemMetadata {
     }
 }
 "#;
-    let items = json!([{"ItemID":5,"CharItemID":15,"sName":"Dust","iQty":2,"sDesc":"A material.","iLvl":40,"iCost":25,"iHrs":12,"iQSindex":3,"iQSvalue":2,"sQuest":"A Quest"}]);
+    let items = json!([{"ItemID":5,"CharItemID":15,"sName":"Dust","iQty":2,"sDesc":"A material.","iLvl":40,"iCost":25,"iHrs":12,"iQSindex":3,"iQSvalue":2,"sQuest":"A Quest","bWear":1}]);
     let (outcome, logs, _) = Fake::start_with(FARM, items, json!([]), |m,w| {
         if m == "temp-item" { w.object(r#"{"cmd":"addItems","items":{"6":{"ItemID":6,"sName":"Temp Dust","iQty":1,"iStk":10,"bTemp":1,"sDesc":"A temporary material.","sType":"Quest Item","sMeta":"quest","sES":"None","bCoins":1}}}"#); }
     }).run(source);
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
     for expected in [
-        "item A material. 40",
+        "item A material. 40 True",
         "metadata 25 12 3 2 A Quest",
         "temp A temporary material. Quest Item quest None True",
     ] {

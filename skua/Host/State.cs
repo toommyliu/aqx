@@ -94,7 +94,7 @@ public sealed record MonsterSnapshot(long Id, long MonId, string Name, string Ce
     public Monster ToScript() => new() { ID = (int)MonId, MapID = (int)Id, Name = Name, Race = Race, FileName = File, Cell = Cell, HP = Hp, MaxHP = MaxHp, State = (int)State };
 }
 public enum InventoryPool { Bag, Misc, Class, House }
-public sealed record ItemSnapshot(long Id, long CharItemId, string Name, int Qty, int MaxStack, string Kind, string Slot, bool Equipped, bool Coins, bool Member, string Meta, string Link, string File, bool House, EnhancementSnapshot? Enhancement, ItemDetailsSnapshot Details)
+public sealed record ItemSnapshot(long Id, long CharItemId, string Name, int Qty, int MaxStack, string Kind, string Slot, bool Equipped, bool Worn, bool Coins, bool Member, string Meta, string Link, string File, bool House, EnhancementSnapshot? Enhancement, ItemDetailsSnapshot Details)
 {
     public InventoryPool Pool { get; } = Classify(Kind, Meta, House);
     public static InventoryPool Classify(string kind, string meta, bool house) => kind switch
@@ -106,7 +106,7 @@ public sealed record ItemSnapshot(long Id, long CharItemId, string Name, int Qty
         "Item" or "Note" or "Quest Item" or "Resource" => InventoryPool.Misc,
         _ => InventoryPool.Bag
     };
-    public InventoryItem ToScript() => new InventoryEntry { Description = Details.Description, Level = Details.Level, Cost = Details.Cost, Hours = Details.Hours, QuestSlot = Details.QuestSlot, QuestValue = Details.QuestValue, Quest = Details.Quest, ID = (int)Id, CharItemID = (int)CharItemId, Name = Name, Quantity = Qty, MaxStack = MaxStack, CategoryString = Kind, ItemGroup = Slot, Equipped = Equipped, Coins = Coins, Upgrade = Member, Meta = Meta, FileName = Link, FileLink = File, House = House, EnhancementLevel = Enhancement?.Level ?? 0, EnhancementPatternID = Enhancement?.Pattern ?? 0, ProcID = Enhancement?.ProcId ?? 0 };
+    public InventoryItem ToScript() => new InventoryEntry { Description = Details.Description, Level = Details.Level, Cost = Details.Cost, Hours = Details.Hours, QuestSlot = Details.QuestSlot, QuestValue = Details.QuestValue, Quest = Details.Quest, ID = (int)Id, CharItemID = (int)CharItemId, Name = Name, Quantity = Qty, MaxStack = MaxStack, CategoryString = Kind, ItemGroup = Slot, Equipped = Equipped, Wearing = Worn, Coins = Coins, Upgrade = Member, Meta = Meta, FileName = Link, FileLink = File, House = House, EnhancementLevel = Enhancement?.Level ?? 0, EnhancementPatternID = Enhancement?.Pattern ?? 0, ProcID = Enhancement?.ProcId ?? 0 };
 }
 public sealed record ItemDetailsSnapshot(string Description, int Level, ulong Cost, int? Hours, long? QuestSlot, long QuestValue, string Quest);
 public sealed class InventoryEntry : InventoryItem
