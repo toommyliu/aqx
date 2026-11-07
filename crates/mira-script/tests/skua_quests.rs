@@ -506,6 +506,40 @@ public class Maximum {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn clearing_the_quest_tree_forgets_loaded_and_accepted_quests() {
+    let fake = Fake::start(farm_quest_server);
+    let (result, logged, sent) = fake.run(
+        r#"
+using System.Dynamic;
+using Skua.Core.Interfaces;
+public class ClearTree {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Quests.EnsureAccept(11);
+        bot.Flash.SetGameObject("world.questTree", new ExpandoObject());
+        bot.Log($"tree {bot.Quests.Tree.Count} in progress {bot.Quests.IsInProgress(11)}");
+        bot.Quests.EnsureLoad(11);
+        bot.Log($"accepted again {bot.Quests.EnsureAccept(11)}");
+    }
+}
+"#,
+    );
+
+    assert!(result == Outcome::Finished, "{result:?}\n{logged:#?}");
+    assert!(
+        logged.contains(&"tree 0 in progress False".to_string()),
+        "{logged:#?}"
+    );
+    assert!(
+        logged.contains(&"accepted again True".to_string()),
+        "{logged:#?}"
+    );
+    let count = |needle: &str| sent.iter().filter(|m| m.contains(needle)).count();
+    assert_eq!(count("%getQuests%5%11%"), 2, "{sent:#?}");
+    assert_eq!(count("%acceptQuest%5%11%"), 2, "{sent:#?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn core_story_kills_for_a_quest_and_turns_it_in() {
     let fake = Fake::start_config(
         FARM,

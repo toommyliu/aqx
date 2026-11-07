@@ -432,6 +432,7 @@ impl SkuaScript {
                             special,
                         } => Some(session.complete_quest_unchecked(quest, reward, times, special)),
                         Call::Abandon { quest } => Some(session.abandon_quest(quest)),
+                        Call::ForgetQuests => Some(session.forget_quests()),
                         Call::Pickup { item } => Some(session.request_drop(item)),
                         Call::GetMapItem { item } => Some(session.get_map_item(item)),
                         Call::LoadCells => Some(session.load_cells()),

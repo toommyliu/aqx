@@ -467,6 +467,7 @@ enum Action {
     ExitCombat,
     Quest(QuestAction),
     AbandonQuest(QuestId),
+    ForgetQuests,
     PickDrop(ItemId),
     RequestDrop(ItemId),
     LoadShop(ShopId),
@@ -496,6 +497,7 @@ impl Action {
             Action::Ready
                 | Action::Quest(_)
                 | Action::AbandonQuest(_)
+                | Action::ForgetQuests
                 | Action::PickDrop(_)
                 | Action::RequestDrop(_)
                 | Action::MapItem(_)
@@ -792,6 +794,10 @@ impl Handle {
 
     pub fn abandon_quest(&self, id: QuestId) -> Pending {
         self.act(Action::AbandonQuest(id))
+    }
+
+    pub fn forget_quests(&self) -> Pending {
+        self.act(Action::ForgetQuests)
     }
 
     pub fn accept_quest(&self, id: QuestId) -> Pending {
@@ -1463,6 +1469,10 @@ impl Session {
             Action::Ready => self.ensure_ready(),
             Action::AbandonQuest(id) => self.ensure_ready().map(|()| {
                 self.accepted_quests.remove(&id);
+            }),
+            Action::ForgetQuests => self.ensure_ready().map(|()| {
+                self.quests = Arc::default();
+                self.accepted_quests.clear();
             }),
             Action::MoveToCell {
                 cell,

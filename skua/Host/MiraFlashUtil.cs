@@ -65,6 +65,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         ("lnkDestroy", [int id]) => DestroyLink(id),
         ("getGameObject" or "getGameObjectS", [string path]) => GameObject(path),
         ("setGameObject", ["litePreference.data.favs", object value]) => SetFavorites(value),
+        ("setGameObject", ["world.questTree", IDictionary<string, object?> { Count: 0 }]) => ForgetQuests(),
         ("setGameObject" or "setGameObjectKey", _) => null,
         ("isFavoriteItem", [int id]) => Volatile.Read(ref favorites).GetValueOrDefault(state.Me?.CharId ?? 0)?.Contains(id) == true,
         ("rejectExcept", [string names]) => ((MiraDrop)IScriptInterface.Instance.Drops).RejectOffers(names.Split(',')),
@@ -156,6 +157,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         var value = Newtonsoft.Json.Linq.JObject.FromObject(item);
         return ((MiraShop)IScriptInterface.Instance.Shops).MaximumBuys(value.ToObject<ShopItem>()!, value["turnin"] is { Type: not Newtonsoft.Json.Linq.JTokenType.Null });
     }
+    object? ForgetQuests() { Act(new ForgetQuestsCall()); return null; }
     object? SetFavorites(object value)
     {
         var parsed = JsonConvert.DeserializeObject<Dictionary<long, int[]>>(JsonConvert.SerializeObject(value))!;

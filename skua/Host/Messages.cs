@@ -18,6 +18,7 @@ namespace Mira.Skua;
 [JsonDerivedType(typeof(AcceptCall), "accept")]
 [JsonDerivedType(typeof(CompleteCall), "complete")]
 [JsonDerivedType(typeof(AbandonCall), "abandon")]
+[JsonDerivedType(typeof(ForgetQuestsCall), "forget_quests")]
 [JsonDerivedType(typeof(PickupCall), "pickup")]
 [JsonDerivedType(typeof(GetMapItemCall), "get_map_item")]
 [JsonDerivedType(typeof(LoadBankCall), "load_bank")]
@@ -60,6 +61,7 @@ public sealed record LoadQuestsCall(long[] Ids) : Request;
 public sealed record AcceptCall(long Quest) : Request;
 public sealed record CompleteCall(long Quest, long? Reward, int Times, bool Special = false) : Request;
 public sealed record AbandonCall(long Quest) : Request;
+public sealed record ForgetQuestsCall() : Request;
 public sealed record PickupCall(long Item) : Request;
 public sealed record GetMapItemCall(long Item) : Request;
 public sealed record LoadCellsCall() : Request;

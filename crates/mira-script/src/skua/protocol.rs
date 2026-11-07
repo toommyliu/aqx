@@ -77,6 +77,7 @@ pub enum Call {
     Abandon {
         quest: QuestId,
     },
+    ForgetQuests,
     Pickup {
         item: ItemId,
     },
