@@ -2293,7 +2293,7 @@ fn cancelling_answers_at_once_but_holds_the_queue_until_a_sent_request_is_answer
     let (fetching, sent) = mpsc::channel::<()>();
     let (cancelled, next) = mpsc::channel::<()>();
     let ids: Vec<QuestId> = (1..=15).map(QuestId).collect();
-    let first = ids[..14].to_vec();
+    let first = ids.clone();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
@@ -2350,15 +2350,12 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
         let ids: Vec<QuestId> = (1..=15).map(QuestId).collect();
-        let first = peer.expect_at(&packet::get_quests(AreaId(42), &ids[..14]));
-        peer.send(&json_message(json!({"cmd": "getQuests", "quests": {}})));
-        let second = peer.expect_at(&packet::get_quests(AreaId(42), &ids[14..]));
-        assert!(second - first >= Limit::LoadQuests.gap() - SLACK);
+        let first = peer.expect_at(&packet::get_quests(AreaId(42), &ids));
         peer.send(&json_message(
             json!({"cmd": "getQuests", "quests": {"15": {"QuestID": 15, "sName": "Fifteen"}}}),
         ));
-        let third = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(30)]));
-        assert!(third - second >= Limit::LoadQuests.gap() - SLACK);
+        let second = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(30)]));
+        assert!(second - first >= Limit::LoadQuests.gap() - SLACK);
         peer.send(&json_message(
             json!({"cmd": "getQuests", "quests": {"16": {"QuestID": 16, "sName": "Sixteen"}}}),
         ));

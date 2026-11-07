@@ -8,7 +8,6 @@ use super::{ActionError, Limit, Op, Session};
 use crate::REPLY_TIMEOUT;
 use crate::quest::{self, Held, Quest, QuestStatus, RewardKind};
 
-const QUESTS_PER_REQUEST: usize = 14;
 const LOAD_TRIES: u32 = 5;
 
 pub(super) enum QuestAction {
@@ -125,8 +124,7 @@ impl Session {
                 call.stage = Stage::Ready { wake: Some(until) };
                 return Poll::Pending;
             }
-            let size = call.unfetched.len().min(QUESTS_PER_REQUEST);
-            let batch: Vec<QuestId> = call.unfetched.drain(..size).collect();
+            let batch = std::mem::take(&mut call.unfetched);
             self.limits.used(Limit::LoadQuests, now);
             self.send(&packet::get_quests(area, &batch));
             call.stage = Stage::Fetching {
