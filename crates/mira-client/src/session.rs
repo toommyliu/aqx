@@ -1103,6 +1103,8 @@ enum MapCells {
 
 type MapResult = (String, Result<Vec<String>, ActionError>);
 
+const MAP_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
+
 struct Session {
     account: Account,
     waker: Arc<Waker>,
@@ -2515,12 +2517,19 @@ impl Session {
         let tx = self.map_out.clone();
         let waker = self.waker.clone();
         thread::spawn(move || {
-            let cells = crate::api::map_file(&account, &file)
-                .map_err(|e| ActionError::Http(e.to_string()))
-                .and_then(|bytes| {
-                    crate::map::labels(&bytes)
-                        .map_err(|e| ActionError::Http(format!("unreadable map file: {e}")))
-                });
+            let mut delays = MAP_RETRY_DELAYS.iter();
+            let cells = loop {
+                match crate::api::map_file(&account, &file) {
+                    Ok(bytes) => {
+                        break crate::map::labels(&bytes)
+                            .map_err(|e| ActionError::Http(format!("unreadable map file: {e}")));
+                    }
+                    Err(e) => match delays.next() {
+                        Some(delay) => thread::sleep(*delay),
+                        None => break Err(ActionError::Http(e.to_string())),
+                    },
+                }
+            };
             let _ = tx.send((file, cells));
             let _ = waker.wake();
         });

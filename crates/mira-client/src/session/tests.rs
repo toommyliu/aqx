@@ -4677,8 +4677,14 @@ fn map_cells_wait_for_the_join_to_finish() {
     harness.finish();
 }
 
+fn reply_unavailable(stream: &mut TcpStream) {
+    stream
+        .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n")
+        .unwrap();
+}
+
 #[test]
-fn a_failed_map_cell_load_reaches_its_waiters_and_can_retry() {
+fn a_failed_map_cell_download_retries_and_loads() {
     let (http, base) = map_http();
     let harness = Harness::start_with_api(Options::default(), base, |listener| {
         let mut peer = Peer::accept(&listener);
@@ -4691,9 +4697,37 @@ fn a_failed_map_cell_load_reaches_its_waiters_and_can_retry() {
     session.join("forest-1").wait().unwrap();
     let (mut stream, _) = accept_map_request(&http);
     let waiting = session.load_cells();
-    stream
-        .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n")
-        .unwrap();
+    reply_unavailable(&mut stream);
+    let (mut stream, _) = accept_map_request(&http);
+    reply_map(&mut stream, &["Enter", "r2"]);
+    waiting.wait().unwrap();
+    let world = session.snapshot();
+    let room = world.room.as_ref().unwrap();
+    assert_eq!(room.cells, ["Enter", "r2"]);
+    assert!(room.cells_loaded);
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_map_cell_download_that_keeps_failing_reaches_its_waiters_and_can_load_later() {
+    let (http, base) = map_http();
+    let harness = Harness::start_with_api(Options::default(), base, |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "forest-1"));
+        join_map(&mut peer, 43, "forest-1", "forest.swf");
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("forest-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let waiting = session.load_cells();
+    reply_unavailable(&mut stream);
+    for _ in 0..2 {
+        let (mut stream, _) = accept_map_request(&http);
+        reply_unavailable(&mut stream);
+    }
     assert!(matches!(waiting.wait(), Err(ActionError::Http(message)) if message.contains("503")));
     let world = session.snapshot();
     let room = world.room.as_ref().unwrap();
@@ -4704,7 +4738,6 @@ fn a_failed_map_cell_load_reaches_its_waiters_and_can_retry() {
     reply_map(&mut stream, &[]);
     retry.wait().unwrap();
     assert!(session.snapshot().room.as_ref().unwrap().cells_loaded);
-    session.load_cells().wait().unwrap();
     assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
     session.logout();
     harness.finish();
