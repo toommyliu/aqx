@@ -190,6 +190,7 @@ public class ReadAccount
         bot.Log($"slots {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iBagSlots")} {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iBankSlots")} {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iHouseSlots")}");
         bot.Log($"hp {bot.Flash.GetGameObject<int>("world.uoTree.player2.intHP")}/{bot.Flash.GetGameObject<int>("world.uoTree.player2.intHPMax")}");
         bot.Log($"file {bot.Flash.GetGameObject<string>("world.strMapFileName")}");
+        bot.Log($"prefs {string.Join(" ", new[] { "bGoto", "bFriend", "bParty", "bGuild", "bWhisper", "bDuel" }.Select(k => bot.Flash.GetGameObject<bool>($"uoPref.{k}")))}");
     }
 }
 "#;
@@ -199,7 +200,7 @@ public class ReadAccount
         &map.to_string(),
         json!([]),
         json!([]),
-        json!({"iUpgDays":27,"iBagSlots":40,"iBankSlots":50,"iHouseSlots":20}),
+        json!({"iUpgDays":27,"iBagSlots":40,"iBankSlots":50,"iHouseSlots":20,"ia1":(1 << 8) | (1 << 13)}),
         |_, _| {},
     )
     .run(source);
@@ -210,7 +211,8 @@ public class ReadAccount
             "days 27",
             "slots 40 50 20",
             "hp 1200/3000",
-            "file farm/farm.swf"
+            "file farm/farm.swf",
+            "prefs True True False True True False"
         ]
     );
 }

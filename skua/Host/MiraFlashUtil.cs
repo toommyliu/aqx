@@ -6,7 +6,11 @@ namespace Mira.Skua;
 
 public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
 {
-    readonly ConcurrentDictionary<string, bool> preferences = new();
+    static readonly Dictionary<string, (int Bit, int On)> PreferenceBits = new()
+    {
+        ["bCloak"] = (0, 0), ["bHelm"] = (1, 0), ["bPet"] = (2, 0), ["bWAnim"] = (3, 0), ["bGoto"] = (4, 0), ["bMusicOn"] = (6, 0), ["bFriend"] = (7, 0),
+        ["bParty"] = (8, 0), ["bGuild"] = (9, 0), ["bWhisper"] = (10, 0), ["bTT"] = (11, 0), ["bFBShare"] = (12, 1), ["bDuel"] = (13, 0), ["bProf"] = (18, 0),
+    };
     System.Collections.Immutable.ImmutableDictionary<long, System.Collections.Immutable.ImmutableHashSet<int>> favorites = System.Collections.Immutable.ImmutableDictionary<long, System.Collections.Immutable.ImmutableHashSet<int>>.Empty;
     public event FlashCallHandler? FlashCall;
     public void InitializeFlash() { }
@@ -105,7 +109,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
     };
     object? GameObject(string path) => path switch
     {
-        _ when path.StartsWith("uoPref.") => preferences.GetValueOrDefault(path[7..], true),
+        _ when path.StartsWith("uoPref.") => PreferenceBits.TryGetValue(path[7..], out var preference) ? Achievement("ia1", preference.Bit) == preference.On : null,
         _ when path.StartsWith("world.lock.") => state.Combat.ActionLocks?.GetValueOrDefault(path[11..]) is { } action ? new { TS = action.Used ?? 0, CD = action.Cooldown } : null,
         _ when path.StartsWith("world.invTree.") => InventoryTree(path[14..]),
         _ when path.StartsWith("world.uoTree.") => PlayerTree(path[13..]),
@@ -252,9 +256,5 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         return definition.TurnIn.Aggregate(250, (count, item) => Math.Min(count, ((state.Inventory.ById.GetValueOrDefault(item.Id)?.Qty ?? 0) + state.Temp.Where(i => i.Id == item.Id).Sum(i => i.Qty)) / Math.Max(1, item.Qty)));
     }
     bool LoadQuests(string ids) { IScriptInterface.Instance.Quests.Load(ids.Split(',').Select(int.Parse).ToArray()); return true; }
-    object? SendPacket(string packet) { protocol.Call(new SendCall(packet)); Remember(packet); return null; }
-    public void Remember(string packet)
-    {
-        if (packet.Split('%') is [_, "xt", "zm", "cmd", _, "uopref", string key, string value, ..] && bool.TryParse(value, out bool on)) preferences[key] = on;
-    }
+    object? SendPacket(string packet) { protocol.Call(new SendCall(packet)); return null; }
 }
