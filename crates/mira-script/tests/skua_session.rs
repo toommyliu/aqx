@@ -1,5 +1,6 @@
 mod support;
 use mira_client::{Handle, Server, testing::Harness};
+use mira_protocol::{AreaId, MonMapId, packet};
 use mira_script::{Account, Cancel, Outcome};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,6 +10,8 @@ use support::Fake;
 struct LoginAccount {
     sessions: Mutex<Vec<Harness>>,
     attempts: Mutex<Vec<String>>,
+    sent: Arc<Mutex<Vec<String>>>,
+    farm: bool,
 }
 impl Account for LoginAccount {
     fn servers(&self) -> Result<Vec<Server>, String> {
@@ -37,10 +40,22 @@ impl Account for LoginAccount {
         if server == "Preferred" {
             return Err("unavailable".into());
         }
-        let session = Harness::start(Default::default(), |listener| {
+        let (sent, farm) = (self.sent.clone(), self.farm);
+        let session = Harness::start(Default::default(), move |listener| {
             let mut peer = mira_client::testing::Peer::accept(&listener);
-            peer.serve_to_ready();
-            peer.expect_logout();
+            if farm {
+                peer.serve_farm();
+            } else {
+                peer.serve_to_ready();
+            }
+            loop {
+                let message = peer.recv();
+                let logout = message == packet::logout();
+                sent.lock().unwrap().push(message);
+                if logout {
+                    break;
+                }
+            }
         });
         let handle = session.session.clone();
         self.sessions.lock().unwrap().push(session);
@@ -99,6 +114,127 @@ public class Recovery {
     for session in account.sessions.lock().unwrap().drain(..) {
         session.finish();
     }
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn a_reconnecting_session_stops_the_script_and_automatic_relogin_restarts_it() {
+    let account = Arc::new(LoginAccount::default());
+    let (outcome, logs, _) = Fake::reconnecting(|msg, wire| {
+        if msg == "disconnect" {
+            wire.hang_up();
+        }
+    })
+    .run_account(
+        r#"
+using Skua.Core.Interfaces;
+public class Reconnected {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Log($"run on {bot.Servers.LastName}");
+        if (bot.Servers.LastName == "Fallback") return;
+        bot.Options.AutoRelogin = true;
+        bot.Options.ReloginServer = "Fallback";
+        bot.Options.ReloginTryDelay = 20;
+        bot.Events.ScriptStopping += _ => { bot.Log("stopping"); return true; };
+        bot.Send.Packet("disconnect");
+        for (;;) { bot.Map.Jump("r2", "Left"); bot.Sleep(100); }
+    }
+}
+"#,
+        &Cancel::default(),
+        Default::default(),
+        account.clone(),
+        |_| {},
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(logs.contains(&"stopping".into()), "{logs:?}");
+    assert!(logs.contains(&"run on Fallback".into()), "{logs:?}");
+    assert_eq!(*account.attempts.lock().unwrap(), ["Fallback"]);
+    for session in account.sessions.lock().unwrap().drain(..) {
+        session.finish();
+    }
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn an_action_after_the_session_ends_fails_instead_of_hanging() {
+    let cancel = Cancel::default();
+    let deadline = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(10));
+        deadline.cancel();
+    });
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run_with(
+        r#"
+using Skua.Core.Interfaces;
+public class AfterLogout {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Servers.Logout();
+        bot.Wait.ForTrue(() => !bot.Servers.IsConnected, 50);
+        bot.Sleep(300);
+        try { bot.Player.Rest(); bot.Log("rest returned"); }
+        catch (OperationCanceledException) { bot.Log("rest failed"); }
+    }
+}
+"#,
+        &cancel,
+        Default::default(),
+        |_| {},
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(logs.contains(&"rest failed".into()), "{logs:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn a_relogin_clears_bank_loaded_and_drops_and_keeps_aggro_all_on() {
+    let account = Arc::new(LoginAccount {
+        farm: true,
+        ..LoginAccount::default()
+    });
+    let (outcome, logs, _) = Fake::start(|msg, wire| {
+        if msg == "drop" {
+            wire.object(r#"{"cmd":"dropItem","items":{"5":{"ItemID":5,"sName":"Dust","iQty":1,"iStk":10}}}"#);
+        }
+    })
+    .run_account(
+        r#"
+using Skua.Core.Interfaces;
+public class Relogged {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Bank.Load();
+        _ = bot.Drops.CurrentDrops;
+        bot.Send.Packet("drop");
+        bot.Wait.ForTrue(() => bot.Drops.Exists("Dust"), 50);
+        bot.Log($"before relogin {bot.Bank.Loaded} {bot.Drops.Exists("Dust")}");
+        bot.Options.AggroAllMonsters = true;
+        bot.Events.CellChanged += (map, cell, pad) => Thread.Sleep(1500);
+        bot.Map.Jump("r2", "Left");
+        bot.Log($"relogged {bot.Servers.Relogin("Fallback")}");
+        bot.Log($"after relogin {bot.Bank.Loaded} {bot.Drops.Exists("Dust")} {bot.Options.AggroAllMonsters}");
+        bot.Sleep(2500);
+    }
+}
+"#,
+        &Cancel::default(),
+        Default::default(),
+        account.clone(),
+        |_| {},
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    for expected in [
+        "before relogin True True",
+        "relogged True",
+        "after relogin False False True",
+    ] {
+        assert!(logs.contains(&expected.into()), "{logs:?}");
+    }
+    for session in account.sessions.lock().unwrap().drain(..) {
+        session.finish();
+    }
+    let sent = account.sent.lock().unwrap();
+    let all = packet::aggro_mon(AreaId(43), &[MonMapId(1), MonMapId(2), MonMapId(3)]);
+    assert!(sent.contains(&all), "{sent:?}");
 }
 
 #[test]

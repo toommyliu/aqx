@@ -135,13 +135,18 @@ public sealed class MiraEvent : IScriptEvent
         }
         onPacketReceived?.Invoke(packet.Text);
     }
+    static void SendCellChanged(string map, string cell, string pad) => StrongReferenceMessenger.Default.Send<CellChangedMessage, int>(new(map, cell, pad), (int)MessageChannels.GameEvents);
     void OnEvent(ClientEvent data)
     {
         switch (data)
         {
             case DiedClientEvent: PlayerDeath?.Invoke(); break;
             case KilledClientEvent e: MonsterKilled?.Invoke((int)e.Id); break;
-            case JoinedClientEvent e: MapChanged?.Invoke(e.Map); break;
+            case JoinedClientEvent e:
+                SendCellChanged(e.Map.Split('-')[0], e.Cell, e.Pad);
+                MapChanged?.Invoke(e.Map);
+                break;
+            case MovedClientEvent e: SendCellChanged(state.Room?.MapName ?? "", e.Cell, e.Pad); break;
             case QuestCompletedClientEvent e: QuestTurnedIn?.Invoke((int)e.Id); ((MiraQuest)IScriptInterface.Instance.Quests).Reaccept((int)e.Id); break;
             case AwayChangedClientEvent { Away: true }: PlayerAFK?.Invoke(); break;
             case CounterStartedClientEvent: CounterAttack?.Invoke(false); break;

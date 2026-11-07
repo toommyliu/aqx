@@ -33,7 +33,7 @@ public sealed class MiraBot(Protocol protocol, State state, string path) : IScri
     public IScriptBank Bank { get; } = new MiraBank(protocol, state);
     public IScriptInventoryHelper InvHelper { get; } = new MiraInventoryHelper();
     public IScriptLite Lite { get; } = new MiraLite();
-    public IScriptOption Options { get; } = new MiraOption(protocol);
+    public IScriptOption Options { get; } = new MiraOption(protocol, state);
     public IScriptMap Map { get; } = new MiraMap(protocol, state);
     public IScriptMonster Monsters { get; } = new MiraMonster(state);
     public IScriptPlayer Player { get; } = new MiraPlayer(protocol, state);
@@ -88,10 +88,5 @@ public sealed class MiraBot(Protocol protocol, State state, string path) : IScri
     public CancellationTokenSource ScriptCts => stop;
     public void RequestStop() { Combat.StopAttacking = false; stop.Cancel(); }
     public void ThrowIfStopped() { if (!cleanup.Value) stop.Token.ThrowIfCancellationRequested(); }
-    public void RaiseStopping(Exception? error)
-    {
-        if (!stoppingHandlers) return;
-        var handlers = Task.Run(() => { cleanup.Value = true; ((MiraEvent)Events).RaiseStopping(error); });
-        try { handlers.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException e) { Console.Error.WriteLine(e.InnerException?.Message); }
-    }
+    public Task RaiseStopping(Exception? error) => stoppingHandlers ? Task.Run(() => { cleanup.Value = true; ((MiraEvent)Events).RaiseStopping(error); }) : Task.CompletedTask;
 }

@@ -9,7 +9,10 @@ public sealed class MiraOption : IScriptOption
     readonly Protocol protocol;
     readonly Dictionary<string, string>? saved;
     static readonly System.Reflection.PropertyInfo[] properties = typeof(MiraOption).GetProperties().Where(p => p.CanWrite).ToArray();
-    public MiraOption(Protocol protocol) : this(protocol, true) { }
+    public MiraOption(Protocol protocol, State state) : this(protocol, true)
+    {
+        protocol.StateReceived += section => { if (section.Section == SectionName.Settings && aggroAllMonsters && state.Settings.Aggro.Mode == "off") protocol.Call(new SetAggroCall(new("all"))); };
+    }
     MiraOption(Protocol protocol, bool load)
     {
         this.protocol = protocol;
