@@ -23,6 +23,7 @@ pub struct Me {
     pub gold: u64,
     pub coins: u64,
     pub member: bool,
+    pub member_days: i64,
     pub class_name: String,
     pub class_points: u32,
     pub char_id: i64,
@@ -74,6 +75,7 @@ impl Me {
         self.gold = data.gold;
         self.coins = data.coins;
         self.member = data.member_days >= 0;
+        self.member_days = data.member_days;
         self.class_points = data.class_points;
         self.char_id = data.char_id;
         self.aq = data.aq;

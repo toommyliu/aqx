@@ -723,6 +723,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
             gold: 10,
             coins: 50,
             member: false,
+            member_days: -1,
             class_name: String::new(),
             class_points: 899,
             char_id: 4242,

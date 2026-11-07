@@ -179,6 +179,30 @@ fn a_script_reads_the_players_id_cell_and_combat_stats() {
 }
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_script_reads_the_account_from_the_flash_object_paths() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class ReadAccount
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Log($"days {bot.Flash.GetGameObject("world.myAvatar.objData.iUpgDays")}");
+    }
+}
+"#;
+    let (outcome, logs, _) = Fake::start_config(
+        FARM,
+        json!([]),
+        json!([]),
+        json!({"iUpgDays":27}),
+        |_, _| {},
+    )
+    .run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert_eq!(logs, ["days 27"]);
+}
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn jumping_in_place_still_sends_and_joining_the_current_map_does_nothing() {
     let (outcome, logs, sent) = Fake::start(|_, _| {}).run(IN_PLACE);
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
