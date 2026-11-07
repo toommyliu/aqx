@@ -154,8 +154,14 @@ fn session_for(path: &Path, wanted: &Wanted) -> anyhow::Result<(Session, Joined)
 
 fn restart(old: Session, path: &Path, wanted: &Wanted) -> anyhow::Result<Session> {
     let mut resume = old.resumable().unwrap_or_default();
+    match resume.len() {
+        0 => eprintln!("Ending the old session…"),
+        1 => eprintln!("Logging out 1 account…"),
+        n => eprintln!("Logging out {n} accounts…"),
+    }
     resume.retain(|(name, _)| !wanted.accounts.iter().any(|w| w.eq_ignore_ascii_case(name)));
     old.down()?;
+    eprintln!("Starting the new session…");
     let mut resume = resume.into_iter();
     let Some((first, script)) = resume.next() else {
         return daemon::start(path, wanted);
