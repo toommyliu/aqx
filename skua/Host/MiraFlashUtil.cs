@@ -17,7 +17,9 @@ public sealed class MiraFlashUtil(Protocol protocol, State state, MiraEvent even
     public void Dispose() { }
     public string? Call(string function, params object[] args)
     {
-        object? value = Read(function, args);
+        object? value;
+        try { value = Read(function, args); }
+        catch (NotSupportedException) { return null; }
         return value is null ? null : JsonConvert.SerializeObject(value);
     }
     public T? Call<T>(string function, params object[] args) => (T?)Call(function, typeof(T), args);

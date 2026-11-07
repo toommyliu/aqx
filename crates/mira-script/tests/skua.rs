@@ -309,6 +309,23 @@ public class Events {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn unknown_flash_calls_return_null() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class UnknownFlash {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Log($"function {bot.Flash.CallGameFunction("world.myAvatar.loadMovieAtES", "Weapon", "item.swf", "Item") is null}");
+        bot.Log($"path {bot.Flash.GetGameObject("world.ldr_map.contentLoaderInfo.url") is null}");
+        bot.Log($"call {bot.Flash.Call("walkTo", 100, 200, 8) is null}");
+    }
+}
+"#;
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert_eq!(logs, ["function True", "path True", "call True"]);
+}
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn flash_call_handlers_see_sent_and_received_packets() {
     let source = r#"
 using Skua.Core.Interfaces;
