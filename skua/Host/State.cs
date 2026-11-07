@@ -144,8 +144,8 @@ public sealed class ShopListing : ShopItem
 }
 public sealed record MergeCostSnapshot(long Id, string Name, int Qty);
 public sealed record QuestSnapshot(long Id, string Name, ImmutableArray<QuestItemSnapshot> TurnIn, ImmutableArray<QuestItemSnapshot> Required, ImmutableArray<QuestRewardSnapshot> Rewards, bool Once, long Slot, long Value, QuestPeriodSnapshot? Period, bool Member, long Level, [property: JsonPropertyName("class")] long? ClassItem, long RequiredCp, long? Faction, long RequiredRep, long Gold, long Exp, string Description = "", string EndText = "");
-public sealed record QuestItemSnapshot(long Id, string Name, int Qty, int MaxStack, bool Temp);
-public sealed record QuestRewardSnapshot(long Id, string Name, int Qty, int MaxStack, bool Temp, double Chance, string Kind);
+public sealed record QuestItemSnapshot(long Id, string Name, int Qty, int MaxStack, bool Temp, string Description, string Category, bool Member, bool Coins);
+public sealed record QuestRewardSnapshot(long Id, string Name, int Qty, int MaxStack, bool Temp, string Description, string Category, bool Member, bool Coins, double Chance, string Kind);
 public sealed record QuestPeriodSnapshot(string Field, long Index);
 public sealed record FactionsSnapshot(ImmutableList<FactionSnapshot> Items)
 {

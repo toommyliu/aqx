@@ -41,6 +41,8 @@ public class QuestRepeats
         var quest = bot.Quests.EnsureLoad(12)!;
         bot.Log($"{quest.Name} rewards {string.Join(", ", quest.Rewards.Select(r => r.Name))}");
         bot.Log($"text {quest.Description} / {quest.EndText}");
+        var reward = quest.Rewards[0];
+        bot.Log($"member {reward.Upgrade} coins {reward.Coins} {reward.Category} {reward.Description}");
     }
 }
 "#;
@@ -270,7 +272,7 @@ fn a_quest_may_list_the_same_reward_twice() {
         if msg.contains("%getQuests%") {
             wire.object(
                     r#"{"cmd":"getQuests","quests":{"12":{"QuestID":12,"sName":"Twice","sDesc":"Bring supplies","sEndText":"Supplies received","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,
-                    "turnin":[],"oItems":{},"oRewards":{"itemsS":{"0":{"ItemID":1027,"sName":"Twilly Twig","iStk":1},"1":{"ItemID":1027,"sName":"Twilly Twig","iStk":1}}},
+                    "turnin":[],"oItems":{},"oRewards":{"itemsS":{"0":{"ItemID":1027,"sName":"Twilly Twig","iStk":1,"bUpg":"1","bCoins":1,"sType":"Staff","sDesc":"A bent twig"},"1":{"ItemID":1027,"sName":"Twilly Twig","iStk":1,"bUpg":"1","bCoins":1,"sType":"Staff","sDesc":"A bent twig"}}},
                     "reward":[{"ItemID":1027,"iQty":1,"iRate":50,"iType":0},{"ItemID":1027,"iQty":2,"iRate":100,"iType":0}]}}}"#,
                 );
         }
@@ -286,6 +288,10 @@ fn a_quest_may_list_the_same_reward_twice() {
     );
     assert!(
         logged.contains(&"text Bring supplies / Supplies received".into()),
+        "{logged:?}"
+    );
+    assert!(
+        logged.contains(&"member True coins True Staff A bent twig".into()),
         "{logged:?}"
     );
 }
