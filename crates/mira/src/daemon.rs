@@ -375,6 +375,7 @@ pub struct Server {
     started_ms: u64,
     ending: AtomicBool,
     down: AtomicBool,
+    answering: Mutex<bool>,
 }
 
 impl Server {
@@ -386,11 +387,19 @@ impl Server {
             started_ms: now_ms(),
             ending: AtomicBool::new(false),
             down: AtomicBool::new(false),
+            answering: Mutex::new(true),
         })
     }
 
     fn stop_answering(&self) {
-        let _ = std::fs::remove_file(&self.socket);
+        let mut answering = self
+            .answering
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if *answering {
+            let _ = std::fs::remove_file(&self.socket);
+            *answering = false;
+        }
     }
 
     fn done(&self) -> bool {
@@ -482,7 +491,7 @@ impl Server {
         Reply::LastLines(self.fleet.last_lines())
     }
 
-    pub fn run_until_done(&self, print: Print) {
+    pub fn run_until_done(&self, print: Print, release: impl FnOnce()) {
         let mut printed: Vec<u64> = Vec::new();
         loop {
             self.fleet.supervise(Instant::now());
@@ -490,6 +499,7 @@ impl Server {
             if self.done() {
                 self.stop_answering();
                 self.ending.store(true, Ordering::SeqCst);
+                release();
                 thread::sleep(WATCHERS_FINISH);
                 print_new(&self.fleet, &mut printed, print);
                 return;
@@ -536,7 +546,7 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
     unsafe { libc::umask(0o077) };
     let config = std::path::absolute(config)?;
     let paths = paths_for(&config)?;
-    let _lock = lock(&paths.lock, LOCK_WAIT)?;
+    let held = lock(&paths.lock, LOCK_WAIT)?;
     let _ = std::fs::remove_file(&paths.socket);
     let listener =
         UnixListener::bind(&paths.socket).with_context(|| paths.socket.display().to_string())?;
@@ -580,8 +590,7 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
             server.end();
         })?;
     }
-    server.run_until_done(print);
-    drop(removed);
+    server.run_until_done(print, move || drop((removed, held)));
     Ok(())
 }
 
@@ -677,7 +686,9 @@ mod tests {
             ["farming"]
         );
         assert!(server.done(), "after down, an idle session is done");
-        let ended = thread::spawn(move || server.run_until_done(Print::Quiet));
+        let config_lock = dir.join("mira.lock");
+        let held = lock(&config_lock, Duration::ZERO).unwrap();
+        let ended = thread::spawn(move || server.run_until_done(Print::Quiet, move || drop(held)));
         let deadline = Instant::now() + Duration::from_secs(5);
         while !watcher.source().frame(&want).unwrap().ending {
             assert!(
@@ -690,6 +701,16 @@ mod tests {
             watcher.last_lines().unwrap().len(),
             2,
             "a watcher can still read the last lines"
+        );
+        assert!(
+            lock(&config_lock, Duration::ZERO).is_ok() && !ended.is_finished(),
+            "a new session can start while watchers finish"
+        );
+        std::fs::write(&socket, "").unwrap();
+        watcher.down().unwrap();
+        assert!(
+            socket.exists(),
+            "a late down leaves the next session's socket"
         );
         ended.join().unwrap();
     }
