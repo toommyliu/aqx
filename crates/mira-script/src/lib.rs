@@ -1,5 +1,6 @@
 mod act;
 mod args;
+mod check;
 mod engine;
 mod events;
 mod native;
@@ -20,6 +21,7 @@ use rquickjs::{Context, Runtime};
 use serde_json::{Map, Value};
 
 pub use args::{Arg, ArgKind, Scalar};
+pub use check::check;
 
 pub const MIRA_VERSION: &str = env!("CARGO_PKG_VERSION");
 

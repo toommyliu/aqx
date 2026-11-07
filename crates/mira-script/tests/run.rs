@@ -760,6 +760,63 @@ fn a_stop_that_lands_while_paused_before_the_run_still_stops_it() {
 }
 
 #[test]
+fn check_compiles_a_script_and_its_imports_without_running_them() {
+    let dir = Dir::new();
+    std::fs::create_dir_all(dir.0.join("lib")).unwrap();
+    dir.file(
+        "lib/util.ts",
+        "export const double = (n: number): number => n * 2;\n",
+    );
+    let main = dir.file(
+        "main.ts",
+        r#"
+        import { script } from "mira";
+        import { double } from "./lib/util.ts";
+        throw new Error("top-level code ran");
+        export default function* () {
+          const { n } = script.args<{ n: number }>();
+          script.log(double(n));
+        }
+        "#,
+    );
+    assert_eq!(mira_script::check(&main), Ok(()));
+
+    dir.file("lib/util.ts", "export const double = (n: number) => n *;\n");
+    let broken = mira_script::check(&main).unwrap_err();
+    assert!(
+        broken.contains("util.ts"),
+        "an import's syntax error names the file: {broken}"
+    );
+
+    let bare = dir.file(
+        "bare.ts",
+        "import _ from \"lodash\";\nexport default function* () {}\n",
+    );
+    assert!(
+        mira_script::check(&bare)
+            .unwrap_err()
+            .contains("only \"mira\" and relative paths")
+    );
+    let missing = dir.file(
+        "missing.ts",
+        "import { x } from \"./nowhere.ts\";\nexport default function* () {}\n",
+    );
+    assert!(
+        mira_script::check(&missing)
+            .unwrap_err()
+            .contains("nowhere.ts")
+    );
+    let typed = dir.file(
+        "typed.ts",
+        "import { script } from \"mira\";\nexport default function* () { script.args<{ when: Date }>(); }\n",
+    );
+    assert!(
+        mira_script::check(&typed).is_err(),
+        "an arg type mira can't parse fails the check"
+    );
+}
+
+#[test]
 fn cancelling_interrupts_a_script_stuck_in_a_loop() {
     let dir = Dir::new();
     let path = dir.file("main.ts", "export default function* () { while (true) {} }");
