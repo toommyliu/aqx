@@ -121,6 +121,9 @@ public class AccountAndPotion
         item.sLink = bot.Flash.GetGameObject<string>($"world.invTree.{potion.ID}.sLink");
         bot.Flash.CallGameFunction("toggleItemEquip", item);
         bot.Log($"equipped {bot.Inventory.IsEquipped(11857)}");
+        bot.Inventory.EquipItem(500);
+        bot.Inventory.EquipItem(404);
+        bot.Log($"cape equipped {bot.Inventory.IsEquipped(500)}");
 
         var skill = bot.Flash.GetArrayObject<dynamic>("world.actions.active", 5);
         bot.Log($"item skill {skill.slot} {skill.nam}");
@@ -308,11 +311,16 @@ fn logging_out_without_auto_relogin_keeps_the_script_running() {
 #[test]
 #[ignore = "run with npm run skua:test"]
 fn core_bots_reads_the_account_equips_and_drinks_a_potion_and_hears_afk() {
-    let items = json!([{"ItemID":11857,"CharItemID":11,"sName":"Health Potion","iQty":3,"iStk":10,"sType":"Item","sES":"None","sMeta":"457","sLink":"potion","sFile":"items/potion.swf"}]);
+    let items = json!([
+        {"ItemID":11857,"CharItemID":11,"sName":"Health Potion","iQty":3,"iStk":10,"sType":"Item","sES":"None","sMeta":"457","sLink":"potion","sFile":"items/potion.swf"},
+        {"ItemID":500,"CharItemID":12,"sName":"Bare Cape","iQty":1,"iStk":1,"sType":"Cape","sES":"ba"}
+    ]);
     let data = json!({"CharID":42,"intAQ":1,"intActivationFlag":5});
     let (outcome, logs, sent) = Fake::start_config(FARM, items, json!([]), data, |m, w| {
         if m.contains("%geia%") {
             w.object(r#"{"cmd":"seia","o":{"id":457,"cd":60000,"tgt":"f"},"iRes":1}"#);
+        } else if m.contains("%equipItem%") {
+            w.object(r#"{"cmd":"equipItem","uid":1001,"ItemID":500,"strES":"ba"}"#);
         } else if m.contains("%gar%") {
             let act = m.split('%').nth(5).unwrap();
             w.object(&format!(
@@ -328,6 +336,7 @@ fn core_bots_reads_the_account_equips_and_drinks_a_potion_and_hears_afk() {
         "char 42, aq 1, verified True",
         "potion None 457 potion items/potion.swf",
         "equipped True",
+        "cape equipped True",
         "item skill 5 Item",
         "afk True",
     ] {

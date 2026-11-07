@@ -3089,6 +3089,8 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
         peer.send(&json_message(
             json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}),
         ));
+        peer.expect(&packet::equip_item(AreaId(42), ItemId(5)));
+        peer.send(&worn("equipItem", 5));
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
@@ -3133,6 +3135,7 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
         session.equip(ItemId(3)).wait(),
         Err(ActionError::InCombat)
     ));
+    session.equip_unchecked(ItemId(5)).wait().unwrap();
     session.logout();
     harness.finish();
 }

@@ -29,6 +29,7 @@ namespace Mira.Skua;
 [JsonDerivedType(typeof(BuyCall), "buy")]
 [JsonDerivedType(typeof(SellCall), "sell")]
 [JsonDerivedType(typeof(EquipCall), "equip")]
+[JsonDerivedType(typeof(EquipUncheckedCall), "equip_unchecked")]
 [JsonDerivedType(typeof(UnequipCall), "unequip")]
 [JsonDerivedType(typeof(UseItemCall), "use_item")]
 [JsonDerivedType(typeof(SendCall), "send")]
@@ -71,6 +72,7 @@ public sealed record LoadShopCall(long Shop) : Request;
 public sealed record BuyCall(long Listing, uint Quantity) : Request;
 public sealed record SellCall(long Item, uint Quantity) : Request;
 public sealed record EquipCall(long Item) : Request;
+public sealed record EquipUncheckedCall(long Item) : Request;
 public sealed record UnequipCall(long Item) : Request;
 public sealed record UseItemCall(long Item) : Request;
 public sealed record SendCall(string Text) : Request;

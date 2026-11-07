@@ -121,6 +121,11 @@
     "item": 1
   },
   {
+    "id": 22,
+    "call": "equip_unchecked",
+    "item": 1
+  },
+  {
     "id": 23,
     "call": "unequip",
     "item": 1
