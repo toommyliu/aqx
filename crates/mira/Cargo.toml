@@ -6,8 +6,20 @@ publish.workspace = true
 
 [dependencies]
 mira-client.workspace = true
+mira-protocol.workspace = true
 mira-script.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ctrlc.workspace = true
+dirs.workspace = true
+libc.workspace = true
+ratatui.workspace = true
+schemars.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
+tui-input.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+mira-client = { workspace = true, features = ["test-support"] }

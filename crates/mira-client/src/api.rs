@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use ureq::config::AutoHeaderValue;
 
+pub const DEFAULT_HOST: &str = "https://game.aq.com";
 const API_BASE: &str = "https://game.aq.com/game/api";
 const TIMEOUT: Duration = Duration::from_secs(15);
 const USER_AGENT: &str = "Ruffle/0.7.1 (https://ruffle.rs)";
@@ -155,7 +156,28 @@ fn request<B>(request: ureq::RequestBuilder<B>, device: &DeviceId) -> ureq::Requ
 }
 
 pub fn servers(device: &DeviceId) -> Result<Vec<Server>, ApiError> {
-    let body = request(ureq::get(format!("{API_BASE}/data/servers")), device)
+    servers_at(API_BASE, device)
+}
+
+pub fn servers_on(host: &str, device: &DeviceId) -> Result<Vec<Server>, ApiError> {
+    servers_at(&api_base(host), device)
+}
+
+pub fn login_on(
+    host: &str,
+    device: &DeviceId,
+    username: &str,
+    password: &str,
+) -> Result<Account, ApiError> {
+    login_at(&api_base(host), device, username, password)
+}
+
+fn api_base(host: &str) -> String {
+    format!("{}/game/api", host.trim_end_matches('/'))
+}
+
+fn servers_at(base: &str, device: &DeviceId) -> Result<Vec<Server>, ApiError> {
+    let body = request(ureq::get(format!("{base}/data/servers")), device)
         .header("content-type", "")
         .call()
         .and_then(|mut reply| reply.body_mut().read_to_string())
@@ -404,6 +426,15 @@ mod tests {
         let err = DeviceId::load_or_create(&path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_host_names_its_api() {
+        assert_eq!(api_base(DEFAULT_HOST), API_BASE);
+        assert_eq!(
+            api_base("http://127.0.0.1:8787/"),
+            "http://127.0.0.1:8787/game/api"
+        );
     }
 
     #[test]

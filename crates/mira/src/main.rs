@@ -10,11 +10,26 @@ use std::time::{Duration, Instant};
 use clap::{Parser, Subcommand};
 use mira_client::{
     ActionError, Aggro, Aim, Auras, BoostKind, CombatState, CounterHold,
-    DEFAULT_RECONNECT_ATTEMPTS, DeviceId, Direction, Disconnect, Event, Handle, Item, ItemId, Load,
-    MapItemId, Me, MonMapId, Monster, NoticeKind, Options, Pending, Phase, Place, QuestId,
-    QuestStatus, Readiness, Reconnect, Room, Server, ShopId, ShopItemId, SkillTarget, World, api,
+    DEFAULT_RECONNECT_ATTEMPTS, DeviceId, Disconnect, Event, Handle, Item, ItemId, MapItemId, Me,
+    MonMapId, Monster, Options, Pending, Phase, QuestId, QuestStatus, Readiness, Reconnect, Room,
+    Server, ShopId, ShopItemId, SkillTarget, World, api,
 };
-use mira_script::{AutoRelogin, Cancel, Level, Outcome, Output, Script, Start};
+use mira_script::{Cancel, Level, Outcome, Output};
+
+mod commands;
+mod config;
+mod control;
+mod daemon;
+mod describe;
+mod fleet;
+mod init;
+mod record;
+mod runner;
+mod tui;
+mod view;
+
+use describe::describe;
+use runner::{Job, Login, Note};
 
 const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster|player], \
@@ -24,10 +39,20 @@ const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <mons
      swap <#inventory item> <#bank item>, equip <item>, unequip <item>, use <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, spawnpoint <cell> [pad], room <number>|random, antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout";
 
 #[derive(Parser)]
-#[command(name = "mira", version, about = "A headless AQW client")]
+#[command(
+    name = "mira",
+    version,
+    about = "A headless AQW client. Without a command, opens the TUI",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    #[command(flatten)]
+    open: commands::Open,
+    /// Show accounts as "account 1", "account 2" and the home folder as ~, for screenshots.
+    #[arg(long)]
+    redact: bool,
 }
 
 #[derive(Subcommand)]
@@ -72,27 +97,112 @@ enum Command {
         #[arg(long, value_name = "N", default_value_t = DEFAULT_RECONNECT_ATTEMPTS, requires = "reconnect")]
         reconnect_attempts: u32,
     },
+    /// Set up a folder for scripts: mira.d.ts, tsconfig.json, a sample script and mira.toml.
+    Init {
+        /// Where to write. Defaults to the folder of the config mira tui would read, else $MIRA_HOME or ~/mira.
+        dir: Option<PathBuf>,
+    },
+    /// Open the TUI, the same as mira without a command.
+    Tui {
+        #[command(flatten)]
+        open: commands::Open,
+        /// Show accounts as "account 1", "account 2" and the home folder as ~, for screenshots.
+        #[arg(long)]
+        redact: bool,
+    },
+    /// Start a session in the background without opening the TUI.
+    Up {
+        #[command(flatten)]
+        open: commands::Open,
+    },
+    /// Run a session in the foreground, for systemd. mira starts one in the background on its own.
+    Serve {
+        #[command(flatten)]
+        open: commands::Open,
+        /// Print the log as JSON lines.
+        #[arg(long)]
+        json: bool,
+        /// Print nothing; read the log with mira logs or the TUI.
+        #[arg(long, conflicts_with = "json")]
+        quiet: bool,
+    },
+    /// Log out every account and end the session.
+    Down {
+        /// The config whose session to end, instead of ./mira.toml or ~/mira/mira.toml.
+        #[arg(short, long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
+    /// List the running sessions and their accounts.
+    Ps {
+        /// Print one JSON object per account.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print an account's recent log.
+    Logs {
+        /// Only this account, by name or user.
+        account: Option<String>,
+        /// Keep printing new lines.
+        #[arg(short, long)]
+        follow: bool,
+        /// Include game lines: moves, kills, drops, items and quests.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Drive an account in a running session.
+    Ctl {
+        /// The account, by name or user.
+        account: String,
+        #[command(subcommand)]
+        action: commands::Ctl,
+    },
+    /// Compile scripts and the files they import, without logging in or running them.
+    Check {
+        #[arg(required = true)]
+        scripts: Vec<PathBuf>,
+    },
+    /// Print the JSON Schema of mira.toml, for editor completion and checks.
+    Schema,
+    /// Print a run --record file one packet per line.
+    View {
+        file: PathBuf,
+        /// Only show these commands, like --cmd moveToArea --cmd goto.
+        #[arg(long, value_name = "NAME")]
+        cmd: Vec<String>,
+        /// Don't cut lines at 160 characters.
+        #[arg(long)]
+        full: bool,
+    },
     /// Log in, run a script until it ends, then log out.
     Run {
-        /// The script, a .ts or .js file.
-        script: PathBuf,
-        #[arg(long)]
-        user: String,
-        #[arg(long)]
-        pass: String,
-        /// Server name, as `mira servers` lists it.
-        #[arg(long)]
-        server: String,
+        /// The script, a .ts, .js or .cs file. With --account, defaults to the account's own script.
+        script: Option<PathBuf>,
+        /// The [[account]] to log in as, by name or user, instead of --user and --pass.
+        #[arg(short, long, value_name = "NAME", conflicts_with_all = ["user", "pass"])]
+        account: Option<String>,
+        /// The config to read the account from.
+        #[arg(short, long, value_name = "PATH", requires = "account")]
+        config: Option<PathBuf>,
+        #[arg(long, required_unless_present = "account", requires = "pass")]
+        user: Option<String>,
+        #[arg(long, required_unless_present = "account")]
+        pass: Option<String>,
+        /// Server name, as `mira servers` lists it. With --account, defaults to the account's server.
+        #[arg(long, required_unless_present = "account")]
+        server: Option<String>,
         /// Log in with exactly this client version instead of following the server's minimum.
         #[arg(long, value_name = "VERSION")]
         client_version: Option<String>,
         /// A script argument. C# accepts Name=value or Group:Name=value. Repeatable.
         #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = parse_arg)]
         args: Vec<(String, String)>,
+        /// Write every packet sent and received to FILE as JSON lines, with the token and personal fields redacted.
+        #[arg(long, value_name = "FILE")]
+        record: Option<PathBuf>,
     },
 }
 
-fn parse_arg(text: &str) -> Result<(String, String), String> {
+pub(crate) fn parse_arg(text: &str) -> Result<(String, String), String> {
     text.split_once('=')
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .filter(|(key, _)| !key.is_empty())
@@ -100,7 +210,11 @@ fn parse_arg(text: &str) -> Result<(String, String), String> {
 }
 
 fn main() -> ExitCode {
-    let result = match Cli::parse().command {
+    let cli = Cli::parse();
+    let Some(command) = cli.command else {
+        return finish(commands::open(&cli.open, cli.redact));
+    };
+    finish(match command {
         Command::Servers { json } => servers(json),
         Command::Login {
             user,
@@ -126,29 +240,132 @@ fn main() -> ExitCode {
                 reconnect,
             )
         }
+        Command::Init { dir } => commands::init(dir),
+        Command::Tui { open, redact } => commands::open(&open, redact),
+        Command::Up { open } => commands::up(&open),
+        Command::Serve { open, json, quiet } => commands::serve(&open, json, quiet),
+        Command::Down { config } => commands::down(config.as_deref()),
+        Command::Ps { json } => commands::ps(json),
+        Command::Logs {
+            account,
+            follow,
+            all,
+        } => commands::logs(account.as_deref(), follow, all),
+        Command::Ctl { account, action } => commands::ctl(&account, action),
+        Command::Check { scripts } => commands::check(&scripts),
+        Command::Schema => {
+            println!("{}", config::schema());
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::View { file, cmd, full } => {
+            record::view(&file, &cmd, full).map(|()| ExitCode::SUCCESS)
+        }
         Command::Run {
             script,
+            account,
+            config,
             user,
             pass,
             server,
             client_version,
             args,
-        } => DeviceId::load()
-            .map_err(anyhow::Error::from)
-            .and_then(|device| {
-                let login = Login {
-                    device,
-                    user,
-                    pass,
-                    client_version,
-                };
-                run(&script, login, &server, &args)
-            }),
-    };
+            record,
+        } => run_from(RunWith {
+            script,
+            account,
+            config,
+            user,
+            pass,
+            server,
+            client_version,
+            args,
+            record,
+        }),
+    })
+}
+
+fn finish(result: anyhow::Result<ExitCode>) -> ExitCode {
     result.unwrap_or_else(|e| {
         eprintln!("mira: {e:#}");
         ExitCode::FAILURE
     })
+}
+
+struct RunWith {
+    script: Option<PathBuf>,
+    account: Option<String>,
+    config: Option<PathBuf>,
+    user: Option<String>,
+    pass: Option<String>,
+    server: Option<String>,
+    client_version: Option<String>,
+    args: Vec<(String, String)>,
+    record: Option<PathBuf>,
+}
+
+fn run_from(with: RunWith) -> anyhow::Result<ExitCode> {
+    let device = DeviceId::load()?;
+    let recorder = |path: &Option<PathBuf>| -> anyhow::Result<Option<record::Recorder>> {
+        path.as_deref()
+            .map(|path| {
+                record::Recorder::create(path)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
+            })
+            .transpose()
+    };
+    let Some(name) = with.account else {
+        let login = Login {
+            device,
+            user: with.user.expect("clap requires --user"),
+            pass: with.pass.expect("clap requires --pass"),
+            client_version: with.client_version,
+            reconnect: None,
+            api: None,
+            record: recorder(&with.record)?,
+        };
+        let script = with
+            .script
+            .ok_or_else(|| anyhow::anyhow!("name the script to run"))?;
+        return run(
+            &script,
+            login,
+            &with.server.expect("clap requires --server"),
+            &with.args,
+        );
+    };
+    let path = config::find(with.config.as_deref()).map_err(anyhow::Error::msg)?;
+    let accounts = config::load(&path).map_err(anyhow::Error::msg)?;
+    let account = accounts
+        .into_iter()
+        .find(|a| a.name.eq_ignore_ascii_case(&name) || a.user.eq_ignore_ascii_case(&name))
+        .ok_or_else(|| anyhow::anyhow!("{}: no account {name}", path.display()))?;
+    let (script, args) = match (with.script, account.script) {
+        (Some(script), _) => (script, with.args),
+        (None, Some(own)) => {
+            let mut args = own.args;
+            for (key, value) in with.args {
+                args.retain(|(k, _)| *k != key);
+                args.push((key, value));
+            }
+            (own.path, args)
+        }
+        (None, None) => anyhow::bail!("account {} has no script; name one to run", account.name),
+    };
+    let login = Login {
+        device,
+        user: account.user,
+        pass: account.password,
+        client_version: with.client_version.or(account.client_version),
+        reconnect: None,
+        api: account.api,
+        record: recorder(&with.record)?,
+    };
+    run(
+        &script,
+        login,
+        &with.server.unwrap_or(account.server),
+        &args,
+    )
 }
 
 fn servers(json: bool) -> anyhow::Result<ExitCode> {
@@ -240,68 +457,6 @@ fn login(
     })
 }
 
-struct Login {
-    device: DeviceId,
-    user: String,
-    pass: String,
-    client_version: Option<String>,
-}
-
-impl Login {
-    fn connect(&self, server: &str) -> anyhow::Result<Handle> {
-        self.connect_as(server, &self.user, &self.pass)
-    }
-
-    fn connect_as(&self, server: &str, user: &str, pass: &str) -> anyhow::Result<Handle> {
-        let account = api::login(&self.device, user, pass)?;
-        let server = account.pick_server(server)?.clone();
-        let options = Options {
-            client_version: self.client_version.clone(),
-            ..Options::default()
-        };
-        let (session, events) = mira_client::spawn(&account, server, options)?;
-        drop(events);
-        session.ready().wait()?;
-        Ok(session)
-    }
-}
-
-impl mira_script::Account for Login {
-    fn servers(&self) -> Result<Vec<Server>, String> {
-        api::servers(&self.device).map_err(|e| e.to_string())
-    }
-
-    fn login(&self, server: &str) -> Result<Handle, String> {
-        self.connect(server).map_err(|e| format!("{e:#}"))
-    }
-    fn login_as(&self, server: &str, username: &str, password: &str) -> Result<Handle, String> {
-        self.connect_as(server, username, password)
-            .map_err(|e| format!("{e:#}"))
-    }
-}
-
-enum RunScript {
-    JavaScript(Script),
-    Skua(mira_script::skua::SkuaScript),
-}
-impl RunScript {
-    fn parse_args(
-        &self,
-        given: &[(String, String)],
-    ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-        match self {
-            Self::JavaScript(script) => script.parse_args(given),
-            Self::Skua(script) => script.parse_args(given),
-        }
-    }
-    fn run(self, start: Start) -> mira_script::Ended {
-        match self {
-            Self::JavaScript(script) => script.run(start),
-            Self::Skua(script) => script.run(start),
-        }
-    }
-}
-
 fn run(
     path: &Path,
     login: Login,
@@ -310,26 +465,16 @@ fn run(
 ) -> anyhow::Result<ExitCode> {
     let started = Instant::now();
     let cancel = Cancel::default();
-    let skua = path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("cs"));
-    let load = || {
-        if skua {
-            mira_script::skua::SkuaScript::load(path, move |out| show(started, &out), &cancel)
-                .map(RunScript::Skua)
-        } else {
-            Script::load(path, move |out| show(started, &out), &cancel).map(RunScript::JavaScript)
-        }
-    };
-    let mut script = load()?;
+    let job = Job::new(path, &cancel, move |out| show(started, &out));
+    let script = job.load()?;
     let args = script.parse_args(given).map_err(anyhow::Error::msg)?;
-    let login = Arc::new(login);
-    let mut server = server.to_owned();
-    let mut session = login.connect(&server)?;
+    let login: Arc<dyn mira_script::Account> = Arc::new(login);
+    let session = login.login(server).map_err(anyhow::Error::msg)?;
 
     let current = Arc::new(Mutex::new(session.clone()));
     let interrupt = (cancel.clone(), Arc::clone(&current));
     let interrupted = AtomicBool::new(false);
+    let skua = job.is_skua();
     ctrlc::set_handler(move || {
         if interrupted.swap(true, Ordering::SeqCst) {
             std::process::exit(130);
@@ -344,40 +489,39 @@ fn run(
         }
     })?;
 
-    let outcome = loop {
-        let account: Arc<dyn mira_script::Account> = Arc::clone(&login) as _;
-        let ended = script.run(Start {
-            session,
-            server: server.clone(),
-            args: args.clone(),
-            account,
-        });
-        (session, server) = (ended.session, ended.server);
-        *current.lock().unwrap_or_else(PoisonError::into_inner) = session.clone();
-        match ended.outcome {
-            Outcome::Restart => {
-                println!("{}restarting the script", stamp(started));
+    let ran = runner::drive(
+        &job,
+        script,
+        &args,
+        &login,
+        session,
+        server.to_owned(),
+        |note| match note {
+            Note::Session(session) => {
+                *current.lock().unwrap_or_else(PoisonError::into_inner) = session.clone();
             }
-            Outcome::Relogin(policy) => {
-                let target = policy.server.clone().unwrap_or_else(|| server.clone());
-                let Some(relogged) = relogin(&login, &target, &policy, &cancel, started) else {
-                    break Outcome::Disconnected("couldn't log back in".into());
-                };
-                *current.lock().unwrap_or_else(PoisonError::into_inner) = relogged.clone();
-                (session, server) = (relogged, target);
-            }
-            outcome => break outcome,
-        }
-        script = load()?;
-    };
-    let closing = session.subscribe();
-    session.logout();
+            Note::Restarting => println!("{}restarting the script", stamp(started)),
+            Note::Relogging {
+                server,
+                delay,
+                attempt,
+                attempts,
+            } => println!(
+                "{}the session closed; logging back in to {server} in {:.1} s (attempt {attempt} of {attempts})",
+                stamp(started),
+                delay.as_secs_f64(),
+            ),
+            Note::ReloginFailed(e) => eprintln!("mira: couldn't log back in: {e}"),
+        },
+    );
+    let closing = ran.session.subscribe();
+    ran.session.logout();
     for event in closing {
         if matches!(event, Event::Phase(Phase::Closed { .. })) {
             break;
         }
     }
-    Ok(match outcome {
+    Ok(match ran.outcome {
         Outcome::Finished => {
             println!("{}the script finished", stamp(started));
             ExitCode::SUCCESS
@@ -403,39 +547,8 @@ fn run(
             eprintln!("mira: {why}");
             ExitCode::FAILURE
         }
-        Outcome::Restart | Outcome::Relogin(_) => unreachable!("handled in the run loop"),
+        Outcome::Restart | Outcome::Relogin(_) => unreachable!("handled by the runner"),
     })
-}
-
-fn relogin(
-    login: &Login,
-    server: &str,
-    policy: &AutoRelogin,
-    cancel: &Cancel,
-    started: Instant,
-) -> Option<Handle> {
-    let mut delay = policy.delay;
-    for attempt in 1..=policy.attempts {
-        println!(
-            "{}the session closed; logging back in to {server} in {:.1} s (attempt {attempt} of {})",
-            stamp(started),
-            delay.as_secs_f64(),
-            policy.attempts
-        );
-        let until = Instant::now() + delay;
-        while Instant::now() < until {
-            if cancel.is_cancelled() {
-                return None;
-            }
-            thread::sleep(Duration::from_millis(100).min(until - Instant::now()));
-        }
-        match login.connect(server) {
-            Ok(session) => return Some(session),
-            Err(e) => eprintln!("mira: couldn't log back in: {e:#}"),
-        }
-        delay = delay.saturating_mul(2);
-    }
-    None
 }
 
 fn show(started: Instant, output: &Output) {
@@ -1084,105 +1197,4 @@ fn describe_monsters(monsters: &[&Monster]) -> String {
 
 fn stamp(started: Instant) -> String {
     format!("[{:>8.3}] ", started.elapsed().as_secs_f64())
-}
-
-fn describe(event: &Event) -> Option<String> {
-    Some(match event {
-        Event::Phase(phase) => match phase {
-            Phase::Connecting { server, version } => {
-                format!("connecting to {server} as client {version}")
-            }
-            Phase::Handshaking => "handshaking".into(),
-            Phase::LoggingIn => "logging in".into(),
-            Phase::Loading {
-                step: Load::Joining,
-            } => "joining the first map".into(),
-            Phase::Loading {
-                step: Load::Character,
-            } => "loading the character".into(),
-            Phase::Loading {
-                step: Load::Inventory,
-            } => "loading the inventory".into(),
-            Phase::Ready => return None,
-            Phase::Reconnecting {
-                reason,
-                attempt,
-                wait_ms,
-            } => format!(
-                "disconnected: {reason}; reconnecting in {:.0} s (attempt {attempt})",
-                Duration::from_millis(*wait_ms).as_secs_f64()
-            ),
-            Phase::Closed { reason } => format!("disconnected: {reason}"),
-        },
-        Event::Joined {
-            map,
-            cell,
-            pad,
-            players,
-        } => {
-            format!("joined {map} at {cell}/{pad}, {players} other players")
-        }
-        Event::Moved { cell, pad } => format!("moved to {cell}/{pad}"),
-        Event::PlayerEntered { name } => format!("{name} entered"),
-        Event::PlayerLeft { name } => format!("{name} left"),
-        Event::PlayerJumped { .. } | Event::PlayerWalked { .. } => return None,
-        Event::Zone { zone: Some(zone) } => format!("the boss marked floor zone {zone}"),
-        Event::Zone { zone: None } => "the boss cleared the floor zone".into(),
-        Event::Ready { level, gold, items } => {
-            format!("ready: level {level}, {gold} gold, {items} items")
-        }
-        Event::Chat {
-            channel,
-            sender,
-            text,
-        } => format!("[{channel}] {sender}: {text}"),
-        Event::Whisper { sender, text } => format!("[whisper] {sender}: {text}"),
-        Event::Notice { kind, text } => {
-            let kind = match kind {
-                NoticeKind::Server => "server",
-                NoticeKind::Notify => "notice",
-                NoticeKind::Warning => "warning",
-            };
-            format!("{kind}: {text}")
-        }
-        Event::Killed {
-            name, gold, exp, ..
-        } => format!("killed {name}, +{gold} gold, +{exp} xp"),
-        Event::Died => "died".into(),
-        Event::Respawned => "respawned".into(),
-        Event::LeveledUp { level } => format!("reached level {level}"),
-        Event::DropOffered { name, qty, .. } => format!("drop offered: {name} x{qty}"),
-        Event::ItemChanged {
-            name, qty, place, ..
-        } => {
-            let place = match place {
-                Place::Inventory => "inventory",
-                Place::Temp => "temp",
-                Place::Bank => "the bank",
-            };
-            format!("{name}: {qty} in {place}")
-        }
-        Event::QuestAccepted { id } => format!("accepted quest {id}"),
-        Event::QuestCompleted { id } => format!("completed quest {id}"),
-        Event::CounterStarted { monster } => format!("monster #{monster} is countering"),
-        Event::CounterEnded { monster } => format!("monster #{monster} stopped countering"),
-        Event::BankLoaded
-        | Event::ItemPickedUp { .. }
-        | Event::ItemReceived { .. }
-        | Event::ItemBought { .. }
-        | Event::ItemSold { .. }
-        | Event::AuraAdded { .. }
-        | Event::AuraRemoved { .. }
-        | Event::AwayChanged { .. } => {
-            return None;
-        }
-        Event::Unreadable { error } => format!("unreadable message: {error}"),
-        Event::Packet { direction, text } => {
-            let arrow = match direction {
-                Direction::In => "<",
-                Direction::Out => ">",
-            };
-            format!("{arrow} {text}")
-        }
-    })
 }

@@ -131,7 +131,7 @@ impl fmt::Display for Disconnect {
 }
 
 impl Disconnect {
-    fn retryable(&self) -> bool {
+    pub fn retryable(&self) -> bool {
         matches!(
             self,
             Disconnect::ConnectionLost(_)

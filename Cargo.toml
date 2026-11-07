@@ -18,8 +18,11 @@ ctrlc = { version = "3", features = ["termination"] }
 dirs = "6"
 flate2 = "1"
 getrandom = "0.2"
+libc = "0.2"
 mio = { version = "1", features = ["net", "os-poll"] }
 quick-xml = "0.38"
+ratatui = "0.30"
+schemars = "1"
 rquickjs = { version = "0.14", features = ["loader"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
@@ -30,4 +33,7 @@ swc_ecma_parser = "47"
 swc_ecma_visit = "30"
 swc_ts_fast_strip = "60"
 thiserror = "2"
+toml = "1"
+tui-input = "0.15"
+unicode-width = "0.2"
 ureq = "3"

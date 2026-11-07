@@ -261,6 +261,10 @@ impl Drop for Peer {
     }
 }
 
+pub fn device_id() -> DeviceId {
+    DeviceId::for_tests()
+}
+
 pub fn json_message(o: Value) -> String {
     json!({"t": "xt", "b": {"r": -1, "o": o}}).to_string()
 }

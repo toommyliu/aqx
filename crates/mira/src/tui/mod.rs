@@ -1,0 +1,929 @@
+mod ask;
+mod draw;
+mod mask;
+mod prompt;
+#[cfg(test)]
+mod tests;
+
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use mira_client::ItemId;
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event as Input, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use ratatui::crossterm::execute;
+use ratatui::layout::{Position, Rect};
+use tui_input::backend::crossterm::EventHandler;
+use tui_input::{Input as TextInput, InputRequest};
+
+use crate::control::{Action, Source, Want};
+use crate::fleet::{Channel, Line, Log};
+use crate::view::{self, Shown, order};
+use ask::{Ask, Remembered};
+use mask::Mask;
+use prompt::{History, Prompt, Recent};
+
+const NOTE_FOR: Duration = Duration::from_secs(4);
+const OPENING_NOTE_FOR: Duration = Duration::from_secs(10);
+const WHEEL_LINES: usize = 3;
+const PAGE_LINES: usize = 10;
+const SIDEBAR_STEP: u16 = 4;
+const FRAME: Duration = Duration::from_millis(125);
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Section {
+    Players,
+    Drops,
+    Quests,
+    Temp,
+    Inventory,
+    Bank,
+    Factions,
+}
+
+impl Section {
+    const ALL: [Section; 7] = [
+        Section::Players,
+        Section::Drops,
+        Section::Quests,
+        Section::Temp,
+        Section::Inventory,
+        Section::Bank,
+        Section::Factions,
+    ];
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum View {
+    #[default]
+    Log,
+    List(Section),
+}
+
+impl View {
+    const ALL: [View; 8] = [
+        View::Log,
+        View::List(Section::Players),
+        View::List(Section::Drops),
+        View::List(Section::Quests),
+        View::List(Section::Temp),
+        View::List(Section::Inventory),
+        View::List(Section::Bank),
+        View::List(Section::Factions),
+    ];
+
+    fn key(self) -> char {
+        let at = View::ALL
+            .iter()
+            .position(|&v| v == self)
+            .expect("every view is listed");
+        char::from(b'1' + at as u8)
+    }
+
+    fn of_key(key: char) -> Option<View> {
+        let at = key.to_digit(10)?.checked_sub(1)?;
+        View::ALL.get(at as usize).copied()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Filter {
+    #[default]
+    Main,
+    All,
+    Only(Channel),
+}
+
+impl Filter {
+    const ALL: [Filter; 7] = [
+        Filter::Main,
+        Filter::All,
+        Filter::Only(Channel::Mira),
+        Filter::Only(Channel::Script),
+        Filter::Only(Channel::Server),
+        Filter::Only(Channel::Chat),
+        Filter::Only(Channel::Game),
+    ];
+
+    fn shows(self, line: &Line) -> bool {
+        match self {
+            Filter::Main => !matches!(line.channel, Channel::Chat | Channel::Game),
+            Filter::All => true,
+            Filter::Only(channel) => line.channel == channel,
+        }
+    }
+
+    fn tagged(self) -> bool {
+        matches!(self, Filter::Main | Filter::All)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Filter::Main => "main",
+            Filter::All => "all",
+            Filter::Only(channel) => channel.label(),
+        }
+    }
+
+    fn step(self, by: isize) -> Filter {
+        let at = Filter::ALL.iter().position(|&f| f == self).unwrap_or(0) as isize;
+        Filter::ALL[(at + by).clamp(0, Filter::ALL.len() as isize - 1) as usize]
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Hit {
+    View(View),
+    Filter(Filter),
+    Jump,
+    Account(usize),
+}
+
+#[derive(Default)]
+struct App {
+    home: PathBuf,
+    selected: usize,
+    marked: BTreeSet<usize>,
+    details: bool,
+    grid: bool,
+    keys: bool,
+    sidebar_hidden: bool,
+    rail_hidden: bool,
+    sidebar_width: Option<u16>,
+    sidebar: Cell<Option<Rect>>,
+    dragging: bool,
+    frame: usize,
+    view: View,
+    filter: Filter,
+    scroll: usize,
+    max_scroll: Cell<usize>,
+    log_width: Cell<usize>,
+    list_at: Cell<usize>,
+    list_max: Cell<usize>,
+    list_len: Cell<usize>,
+    cursor: usize,
+    picked: HashSet<ItemId>,
+    unseen_from: Option<u64>,
+    sidebar_top: Cell<usize>,
+    grid_top: Cell<usize>,
+    grid_cols: Cell<usize>,
+    hits: RefCell<Vec<(Rect, Hit)>>,
+    prompt: Option<Prompt>,
+    query: TextInput,
+    querying: bool,
+    ending: bool,
+    closing: bool,
+    recent: Recent,
+    history: History,
+    ask: Option<Ask>,
+    share_args: bool,
+    remembered: Remembered,
+    mask: Mask,
+    redact: bool,
+    names: Vec<String>,
+    note: Option<(String, Instant)>,
+    log: Log,
+    log_of: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leave {
+    Detach,
+    Ended,
+}
+
+pub fn run(
+    source: &dyn Source,
+    home: &Path,
+    redact: bool,
+    note: Option<String>,
+) -> std::io::Result<Leave> {
+    let mut terminal = ratatui::init();
+    execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
+    let restore = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(
+            std::io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
+        restore(info);
+    }));
+    let mut app = App::new(&source.configured(), home, History::in_data_dir(), redact);
+    if let Some(note) = note {
+        app.note = Some((note, Instant::now() + OPENING_NOTE_FOR));
+    }
+    let started = Instant::now();
+    let result = loop {
+        app.frame = (started.elapsed().as_millis() / FRAME.as_millis()) as usize;
+        let shown = match gather(source, &mut app) {
+            Ok(Some(shown)) => shown,
+            Ok(None) => break Ok(Leave::Ended),
+            Err(e) => break Err(std::io::Error::other(e)),
+        };
+        if let Err(e) = terminal.draw(|f| draw::draw(f, &app, &shown)) {
+            break Err(e);
+        }
+        match event::poll(FRAME) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => break Err(e),
+        }
+        match app.take_input(source, &shown) {
+            Ok(None) => {}
+            Ok(Some(leave)) => break Ok(leave),
+            Err(e) => break Err(e),
+        }
+    };
+    let _ = execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
+    ratatui::restore();
+    result
+}
+
+fn mask(accounts: &[(String, String)], redact: bool) -> Mask {
+    if !redact {
+        return Mask::default();
+    }
+    let names = accounts.iter().enumerate().flat_map(|(i, (name, user))| {
+        let alias = format!("account {}", i + 1);
+        [name.clone(), user.clone()].map(|name| (name, alias.clone()))
+    });
+    Mask::new(std::env::var("HOME").ok(), names)
+}
+
+pub fn last_words(accounts: &[crate::fleet::LastLines], redact: bool) -> Vec<String> {
+    let names: Vec<(String, String)> = accounts
+        .iter()
+        .map(|a| (a.name.clone(), a.user.clone()))
+        .collect();
+    let mask = mask(&names, redact);
+    let tail = if accounts.len() == 1 { 10 } else { 3 };
+    let shown: Vec<String> = accounts.iter().map(|a| mask.hide(&a.name)).collect();
+    let width = shown
+        .iter()
+        .map(|name| name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = Vec::new();
+    for (account, name) in accounts.iter().zip(&shown) {
+        let who = if accounts.len() == 1 {
+            String::new()
+        } else {
+            format!("{name:<width$}  ")
+        };
+        let lines = &account.lines[account.lines.len().saturating_sub(tail)..];
+        for line in lines {
+            out.push(format!(
+                "{}  {who}{:<6}  {}",
+                crate::view::time_of_day(line.at_ms),
+                line.channel.label(),
+                mask.hide(&line.text)
+            ));
+        }
+    }
+    out
+}
+
+fn gather(source: &dyn Source, app: &mut App) -> Result<Option<Vec<Shown>>, String> {
+    if app.log_of != Some(app.selected) {
+        app.log = Log::default();
+        app.log_of = Some(app.selected);
+        app.scroll = 0;
+    }
+    if app.scroll == 0 {
+        app.unseen_from = None;
+    }
+    let frame = source.frame(&Want {
+        selected: app.selected,
+        since: app.log.next_seq(),
+        full: !app.grid,
+    })?;
+    if frame.ending {
+        return Ok(None);
+    }
+    if frame.accounts.len() != app.names.len() {
+        let names: Vec<(String, String)> = frame
+            .accounts
+            .iter()
+            .map(|s| (s.name.clone(), s.user.clone()))
+            .collect();
+        app.mask = mask(&names, app.redact);
+    }
+    for line in frame.log {
+        app.receive(line);
+    }
+    for script in frame.accounts.iter().filter_map(|s| s.script.as_deref()) {
+        app.recent.offer(crate::config::Script {
+            path: PathBuf::from(script),
+            args: Vec::new(),
+        });
+    }
+    let shown: Vec<Shown> = frame.accounts.into_iter().map(|s| app.masked(s)).collect();
+    app.names = shown.iter().map(|s| s.name.clone()).collect();
+    if shown.get(app.selected).is_none_or(|s| s.game.is_none()) && app.view != View::Log {
+        app.show(View::Log);
+    }
+    Ok(Some(shown))
+}
+
+impl App {
+    fn take_input(
+        &mut self,
+        source: &dyn Source,
+        shown: &[Shown],
+    ) -> std::io::Result<Option<Leave>> {
+        loop {
+            match event::read()? {
+                Input::Key(key) if key.kind == KeyEventKind::Press => {
+                    if let Some(leave) = self.handle(key, source, shown) {
+                        return Ok(Some(leave));
+                    }
+                }
+                Input::Mouse(mouse) => self.mouse(mouse, shown),
+                Input::Paste(text) => self.paste(&text, shown),
+                _ => {}
+            }
+            if !event::poll(Duration::ZERO)? {
+                return Ok(None);
+            }
+        }
+    }
+
+    fn paste(&mut self, text: &str, shown: &[Shown]) {
+        let insert = |input: &mut TextInput| {
+            for c in text.chars().filter(|c| !c.is_control()) {
+                input.handle(InputRequest::InsertChar(c));
+            }
+        };
+        if let Some(prompt) = &mut self.prompt {
+            insert(&mut prompt.input);
+            prompt.edited();
+            prompt.find_matches(&self.home);
+        } else if let Some(ask) = &mut self.ask {
+            ask.edit();
+            insert(&mut ask.input);
+            ask.recalled = false;
+        } else if self.querying {
+            insert(&mut self.query);
+            self.refilter(shown);
+        }
+    }
+
+    fn masked(&self, mut s: Shown) -> Shown {
+        s.name = self.mask.hide(&s.name);
+        s.user = self.mask.hide(&s.user);
+        s.script = s.script.map(|script| self.mask.hide(&script));
+        s.status = self.mask.hide(&s.status);
+        if let view::State::Offline { why: Some(why) } = &mut s.state {
+            *why = self.mask.hide(why);
+        }
+        if let Some(game) = &mut s.game {
+            for player in &mut game.players {
+                player.name = self.mask.hide(&player.name);
+            }
+        }
+        s
+    }
+
+    fn receive(&mut self, mut line: Line) {
+        line.text = self.mask.hide(&line.text);
+        if self.scroll > 0 && self.filter.shows(&line) {
+            self.scroll += draw::log_rows(&line, self.log_width.get(), self.filter.tagged()).len();
+            self.unseen_from.get_or_insert(line.seq);
+        }
+        self.log.insert(line);
+    }
+
+    fn new(
+        configured: &[crate::config::Script],
+        home: &Path,
+        history: History,
+        redact: bool,
+    ) -> App {
+        let mut recent = Recent::default();
+        for script in configured {
+            recent.offer(script.clone());
+        }
+        history.load(&mut recent);
+        App {
+            home: home.to_path_buf(),
+            recent,
+            history,
+            redact,
+            ..App::default()
+        }
+    }
+
+    fn targets(&self) -> Vec<usize> {
+        if self.marked.is_empty() {
+            vec![self.selected]
+        } else {
+            self.marked.iter().copied().collect()
+        }
+    }
+
+    fn all(&self, shown: &[Shown], test: impl Fn(&Shown) -> bool) -> bool {
+        self.targets()
+            .iter()
+            .all(|&i| shown.get(i).is_some_and(&test))
+    }
+
+    fn who(&self, shown: &[Shown], room: usize) -> String {
+        let targets = self.targets();
+        let names = targets
+            .iter()
+            .filter_map(|&i| shown.get(i))
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if names.chars().count() <= room {
+            names
+        } else {
+            format!("{} accounts", targets.len())
+        }
+    }
+
+    fn step(&mut self, shown: &[Shown], by: isize, wrap: bool) {
+        let order = order(shown, self.query.value());
+        let Some(at) = order.iter().position(|&i| i == self.selected) else {
+            return;
+        };
+        let (at, n) = (at as isize + by, order.len() as isize);
+        let at = if wrap {
+            at.rem_euclid(n)
+        } else {
+            at.clamp(0, n - 1)
+        };
+        self.pick(order[at as usize]);
+    }
+
+    fn jump(&mut self, shown: &[Shown], by: isize) {
+        let order = order(shown, self.query.value());
+        let offline = |i: usize| shown[i].offline();
+        let starts: Vec<usize> = (0..order.len())
+            .filter(|&at| at == 0 || offline(order[at]) != offline(order[at - 1]))
+            .collect();
+        let Some(at) = order.iter().position(|&i| i == self.selected) else {
+            return;
+        };
+        let group = starts.iter().rposition(|&start| start <= at).unwrap_or(0) as isize;
+        self.pick(order[starts[(group + by).rem_euclid(starts.len() as isize) as usize]]);
+    }
+
+    fn refilter(&mut self, shown: &[Shown]) {
+        let order = order(shown, self.query.value());
+        if let Some(&first) = order.first().filter(|_| !order.contains(&self.selected)) {
+            self.pick(first);
+        }
+    }
+
+    fn pick(&mut self, i: usize) {
+        if i != self.selected {
+            self.selected = i;
+            self.reset_list();
+        }
+    }
+
+    fn show(&mut self, view: View) {
+        if view != self.view {
+            self.view = view;
+            self.reset_list();
+        }
+    }
+
+    fn set_filter(&mut self, filter: Filter) {
+        self.show(View::Log);
+        if filter != self.filter {
+            self.filter = filter;
+            self.scroll = 0;
+        }
+    }
+
+    fn reset_list(&mut self) {
+        self.list_at.set(0);
+        self.cursor = 0;
+        self.picked.clear();
+    }
+
+    fn picking(&self) -> bool {
+        self.view == View::List(Section::Drops) && !self.grid
+    }
+
+    fn up(&mut self, lines: usize) {
+        let last = self.list_len.get().saturating_sub(1);
+        match self.view {
+            View::List(Section::Drops) => self.cursor = self.cursor.min(last).saturating_sub(lines),
+            View::List(_) => self.list_at.set(
+                self.list_at
+                    .get()
+                    .min(self.list_max.get())
+                    .saturating_sub(lines),
+            ),
+            View::Log => self.scroll = self.scroll.saturating_add(lines).min(self.max_scroll.get()),
+        }
+    }
+
+    fn down(&mut self, lines: usize) {
+        match self.view {
+            View::List(Section::Drops) => {
+                self.cursor = self
+                    .cursor
+                    .saturating_add(lines)
+                    .min(self.list_len.get().saturating_sub(1));
+            }
+            View::List(_) => self.list_at.set(
+                self.list_at
+                    .get()
+                    .saturating_add(lines)
+                    .min(self.list_max.get()),
+            ),
+            View::Log => self.scroll = self.scroll.saturating_sub(lines),
+        }
+    }
+
+    fn drops<'a>(&self, shown: &'a [Shown]) -> &'a [view::Stack] {
+        shown
+            .get(self.selected)
+            .and_then(|s| s.game.as_ref())
+            .map_or(&[], |g| g.drops.as_slice())
+    }
+
+    fn pick_up(&mut self, source: &dyn Source, shown: &[Shown]) {
+        let drops = self.drops(shown);
+        let wanted: Vec<&view::Stack> = if self.picked.is_empty() {
+            drops
+                .get(self.cursor.min(drops.len().saturating_sub(1)))
+                .into_iter()
+                .collect()
+        } else {
+            drops
+                .iter()
+                .filter(|d| self.picked.contains(&d.id))
+                .collect()
+        };
+        let done = match wanted.as_slice() {
+            [] => return,
+            [only] => format!("picking up {}", only.name),
+            many => format!("picking up {} drops", many.len()),
+        };
+        let ids: Vec<i64> = wanted.iter().map(|d| d.id.0).collect();
+        self.picked.clear();
+        let selected = self.selected;
+        self.act_on(source, vec![selected], &done, |_| {
+            Action::PickUp(ids.clone())
+        });
+    }
+
+    fn mouse(&mut self, mouse: MouseEvent, shown: &[Shown]) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.click(mouse.column, mouse.row, shown),
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
+                self.sidebar_width = Some(mouse.column + 1);
+            }
+            MouseEventKind::Up(_) => self.dragging = false,
+            _ if self.grid => {}
+            MouseEventKind::ScrollUp => self.up(WHEEL_LINES),
+            MouseEventKind::ScrollDown => self.down(WHEEL_LINES),
+            _ => {}
+        }
+    }
+
+    fn click(&mut self, column: u16, row: u16, shown: &[Shown]) {
+        let at = Position::new(column, row);
+        self.dragging = self
+            .sidebar
+            .get()
+            .is_some_and(|s| column + 1 == s.right() || column == s.right());
+        if self.dragging {
+            return;
+        }
+        let hit = self
+            .hits
+            .borrow()
+            .iter()
+            .find(|(rect, _)| rect.contains(at))
+            .map(|&(_, hit)| hit);
+        match hit {
+            Some(Hit::View(view)) if view == self.view => self.show(View::Log),
+            Some(Hit::View(view)) => self.show(view),
+            Some(Hit::Filter(filter)) => self.set_filter(filter),
+            Some(Hit::Jump) => self.scroll = 0,
+            Some(Hit::Account(i)) if i < shown.len() => self.pick(i),
+            Some(Hit::Account(_)) | None => {}
+        }
+    }
+
+    fn resize_sidebar(&mut self, by: impl Fn(u16) -> u16) {
+        if let Some(sidebar) = self.sidebar.get() {
+            self.sidebar_width = Some(by(sidebar.width));
+        }
+    }
+
+    fn say(&mut self, text: impl Into<String>) {
+        self.note = Some((self.mask.hide(&text.into()), Instant::now() + NOTE_FOR));
+    }
+
+    fn act(&mut self, source: &dyn Source, done: &str, action: Action) {
+        self.act_on(source, self.targets(), done, |_| action.clone());
+    }
+
+    fn act_on(
+        &mut self,
+        source: &dyn Source,
+        targets: Vec<usize>,
+        done: &str,
+        action: impl Fn(usize) -> Action,
+    ) {
+        let (mut sent, mut skipped) = (Vec::new(), Vec::<(String, String)>::new());
+        for i in targets {
+            let name = self
+                .names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| format!("account {}", i + 1));
+            match source.act(i, action(i)) {
+                Ok(()) => sent.push(name),
+                Err(why) => skipped.push((name, why)),
+            }
+        }
+        let mut said = Vec::new();
+        if !sent.is_empty() {
+            said.push(format!("{}: {done}", sent.join(", ")));
+        }
+        let mut reasons: Vec<&str> = skipped.iter().map(|(_, why)| why.as_str()).collect();
+        reasons.dedup();
+        for why in reasons {
+            let names: Vec<&str> = skipped
+                .iter()
+                .filter(|(_, w)| w == why)
+                .map(|(n, _)| n.as_str())
+                .collect();
+            said.push(format!("{}: {why}", names.join(", ")));
+        }
+        self.say(said.join("; "));
+    }
+
+    fn handle(&mut self, key: KeyEvent, source: &dyn Source, shown: &[Shown]) -> Option<Leave> {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.ending {
+                return Some(Leave::Detach);
+            }
+            self.ending = true;
+            return None;
+        }
+        if self.keys {
+            self.keys = false;
+            return None;
+        }
+        if self.ending {
+            match key.code {
+                KeyCode::Enter => {
+                    self.ending = false;
+                    self.closing = true;
+                    if let Err(why) = source.end() {
+                        self.say(why);
+                    }
+                }
+                KeyCode::Char('q') => return Some(Leave::Detach),
+                KeyCode::Esc => self.ending = false,
+                _ => {}
+            }
+            return None;
+        }
+        if let Some(prompt) = &mut self.prompt {
+            match key.code {
+                KeyCode::Esc => self.prompt = None,
+                KeyCode::Enter => {
+                    let prompt = self.prompt.take().expect("a prompt is open");
+                    self.submit(prompt.input.value(), source);
+                }
+                KeyCode::Up | KeyCode::Down => {
+                    prompt.recall(&self.recent.typed(&self.home), key.code == KeyCode::Up);
+                }
+                KeyCode::Tab => prompt.complete(),
+                _ => {
+                    if prompt
+                        .input
+                        .handle_event(&Input::Key(key))
+                        .is_some_and(|changed| changed.value)
+                    {
+                        prompt.edited();
+                    }
+                }
+            }
+            if let Some(prompt) = &mut self.prompt {
+                prompt.find_matches(&self.home);
+            }
+            return None;
+        }
+        if let Some(ask) = &mut self.ask {
+            match key.code {
+                KeyCode::Esc => self.ask = None,
+                KeyCode::Tab if ask.can_share() => {
+                    ask.toggle_share(&self.remembered);
+                    self.share_args = ask.shared;
+                }
+                KeyCode::Enter => {
+                    if let Some(runs) = ask.answer(&mut self.remembered) {
+                        let ask = self.ask.take().expect("an ask is open");
+                        self.run(source, &ask.script, runs);
+                    }
+                }
+                KeyCode::Backspace | KeyCode::Delete if ask.recalled => ask.edit(),
+                _ => {
+                    let typing = matches!(key.code, KeyCode::Char(_))
+                        && key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+                    if typing {
+                        ask.edit();
+                    }
+                    if ask.input.handle_event(&Input::Key(key)).is_some() {
+                        ask.recalled = false;
+                        ask.error = None;
+                    }
+                }
+            }
+            return None;
+        }
+        if self.querying {
+            match key.code {
+                KeyCode::Esc => {
+                    self.query.reset();
+                    self.querying = false;
+                }
+                KeyCode::Enter => self.querying = false,
+                KeyCode::Up => self.step(shown, -1, false),
+                KeyCode::Down => self.step(shown, 1, false),
+                KeyCode::Tab => {
+                    let names: Vec<&str> = order(shown, self.query.value())
+                        .into_iter()
+                        .map(|i| shown[i].name.as_str())
+                        .collect();
+                    self.query = TextInput::new(complete(self.query.value(), &names));
+                }
+                _ => {
+                    self.query.handle_event(&Input::Key(key));
+                }
+            }
+            self.refilter(shown);
+            return None;
+        }
+        let visible = order(shown, self.query.value());
+        let cols = self.grid_cols.get().max(1) as isize;
+        let line = shown.len() < 2 || key.modifiers.contains(KeyModifiers::SHIFT);
+        let picking = self.picking();
+        match key.code {
+            KeyCode::Char('q') => return Some(Leave::Detach),
+            KeyCode::Char('Q') => self.ending = true,
+            KeyCode::Char('?') => self.keys = true,
+            KeyCode::Char('g') if shown.len() > 1 => self.grid = !self.grid,
+            KeyCode::Char('d' | '[' | ']' | '1'..='8')
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
+                if self.grid => {}
+            KeyCode::Enter if self.grid => self.grid = false,
+            KeyCode::Left if self.grid => self.step(shown, -1, false),
+            KeyCode::Right if self.grid => self.step(shown, 1, false),
+            KeyCode::Up if self.grid => self.step(shown, -cols, false),
+            KeyCode::Down if self.grid => self.step(shown, cols, false),
+            KeyCode::Up if picking => self.up(1),
+            KeyCode::Down if picking => self.down(1),
+            KeyCode::Char(' ') if picking => {
+                if let Some(drop) = self.drops(shown).get(self.cursor)
+                    && !self.picked.remove(&drop.id)
+                {
+                    self.picked.insert(drop.id);
+                }
+            }
+            KeyCode::Char('a') if picking => {
+                let ids: Vec<ItemId> = self.drops(shown).iter().map(|d| d.id).collect();
+                if ids.iter().all(|id| self.picked.contains(id)) {
+                    self.picked.clear();
+                } else {
+                    self.picked.extend(ids);
+                }
+            }
+            KeyCode::Enter if picking => self.pick_up(source, shown),
+            KeyCode::Esc if !self.picked.is_empty() => self.picked.clear(),
+            KeyCode::Esc if self.view != View::Log => self.show(View::Log),
+            KeyCode::Esc => self.marked.clear(),
+            KeyCode::Up if line => self.up(1),
+            KeyCode::Down if line => self.down(1),
+            KeyCode::Up => self.step(shown, -1, false),
+            KeyCode::Down => self.step(shown, 1, false),
+            KeyCode::Tab => self.step(shown, 1, true),
+            KeyCode::BackTab => self.step(shown, -1, true),
+            KeyCode::Char('}') => self.jump(shown, 1),
+            KeyCode::Char('{') => self.jump(shown, -1),
+            KeyCode::Char(' ') => {
+                if !self.marked.remove(&self.selected) {
+                    self.marked.insert(self.selected);
+                }
+            }
+            KeyCode::Char('a') if visible.iter().all(|i| self.marked.contains(i)) => {
+                self.marked.retain(|i| !visible.contains(i));
+            }
+            KeyCode::Char('a') => self.marked.extend(visible),
+            KeyCode::Char('/') => self.querying = true,
+            KeyCode::Char(c @ '1'..='8') => {
+                let view = View::of_key(c).expect("1 to 8 name views");
+                let open = shown.get(self.selected).is_some_and(|s| s.game.is_some());
+                if open || view == View::Log {
+                    self.show(view);
+                }
+            }
+            KeyCode::Char('[') => self.set_filter(self.filter.step(-1)),
+            KeyCode::Char(']') => self.set_filter(self.filter.step(1)),
+            KeyCode::PageUp => self.up(PAGE_LINES),
+            KeyCode::PageDown => self.down(PAGE_LINES),
+            KeyCode::Home => self.up(usize::MAX),
+            KeyCode::End => self.down(usize::MAX),
+            KeyCode::Char('d') => self.details = !self.details,
+            KeyCode::Char('b') => self.sidebar_hidden = !self.sidebar_hidden,
+            KeyCode::Char('B') => self.rail_hidden = !self.rail_hidden,
+            KeyCode::Char('<') => self.resize_sidebar(|w| w.saturating_sub(SIDEBAR_STEP)),
+            KeyCode::Char('>') => self.resize_sidebar(|w| w + SIDEBAR_STEP),
+            KeyCode::Char('o') => self.prompt = Some(Prompt::new(&self.home)),
+            KeyCode::Char('i') => self.act(source, "logging in", Action::Login),
+            KeyCode::Char('x') => self.act(source, "logging out", Action::Logout),
+            KeyCode::Char('s') => self.act(source, "stopping the script", Action::Stop),
+            KeyCode::Char('r') => self.act(source, "restarting the script", Action::Restart),
+            KeyCode::Char('p') if self.all(shown, Shown::paused) => {
+                self.act(source, "resumed", Action::Resume);
+            }
+            KeyCode::Char('p') => self.act(source, "paused", Action::Pause),
+            _ => {}
+        }
+        None
+    }
+
+    fn submit(&mut self, typed: &str, source: &dyn Source) {
+        if typed.trim().is_empty() {
+            return;
+        }
+        let script = match prompt::parse(typed, &self.home) {
+            Ok(script) => script,
+            Err(e) => return self.say(e),
+        };
+        self.recent.add(script.clone());
+        if let Err(e) = self.history.save(&self.recent) {
+            self.say(format!("couldn't save the run history: {e}"));
+        }
+        let targets = self.targets();
+        let asked = ask::missing(&script);
+        if asked.is_empty() {
+            let runs = targets.into_iter().map(|i| (i, script.clone())).collect();
+            return self.run(source, &script, runs);
+        }
+        let accounts = targets
+            .into_iter()
+            .filter_map(|i| Some((i, self.names.get(i)?.clone())))
+            .collect();
+        self.ask = Some(Ask::new(
+            script,
+            asked,
+            accounts,
+            self.share_args,
+            &self.remembered,
+        ));
+    }
+
+    fn run(
+        &mut self,
+        source: &dyn Source,
+        script: &crate::config::Script,
+        runs: Vec<(usize, crate::config::Script)>,
+    ) {
+        let shown = prompt::shown_path(&self.home, &script.path);
+        let targets = runs.iter().map(|(i, _)| *i).collect();
+        let script_for = |i: usize| {
+            let script = runs.iter().find(|(at, _)| *at == i).map(|(_, s)| s.clone());
+            Action::Run(script.expect("each target has its run"))
+        };
+        self.act_on(source, targets, &format!("running {shown}"), script_for);
+    }
+}
+
+fn complete(query: &str, names: &[&str]) -> String {
+    if let [only] = names {
+        return (*only).to_owned();
+    }
+    let mut lower: Vec<String> = names.iter().map(|name| name.to_lowercase()).collect();
+    lower.sort();
+    let prefix = prompt::shared_prefix(&lower);
+    if prefix.contains(&query.to_lowercase()) {
+        prefix.to_owned()
+    } else {
+        query.to_owned()
+    }
+}
