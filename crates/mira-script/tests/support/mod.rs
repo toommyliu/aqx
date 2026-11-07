@@ -269,7 +269,11 @@ impl Fake {
 fn map_swf() -> Vec<u8> {
     use mira_client::testing::MapCell;
     mira_client::testing::map_swf_with(&[
-        MapCell::named("Enter"),
+        MapCell {
+            name: "Enter",
+            pads: &[],
+            doors: &[(5, "r2", "Left")],
+        },
         MapCell::named("r1"),
         MapCell {
             name: "r2",
