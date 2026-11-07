@@ -7,6 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::aura::{AuraChange, AuraDelta, Auras};
 use crate::combat::ActionResult;
 use crate::event::Event;
+use crate::map::MapFile;
 
 pub(crate) const SPAWN: (&str, &str) = ("Enter", "Spawn");
 
@@ -259,6 +260,11 @@ impl Room {
             name: p.name,
         });
         (room, mine)
+    }
+
+    pub(crate) fn load_map(&mut self, map: &MapFile) {
+        self.cells = map.cells.iter().map(|cell| cell.name.clone()).collect();
+        self.cells_loaded = true;
     }
 
     pub(crate) fn is_in(&self, map: &str) -> bool {
