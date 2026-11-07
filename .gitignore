@@ -3,3 +3,4 @@
 /skua/**/bin/
 /skua/**/obj/
 /skua/Host/artifacts/
+.DS_Store
