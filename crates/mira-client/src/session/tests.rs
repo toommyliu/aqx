@@ -1958,6 +1958,47 @@ fn wait_until(session: &Handle, done: impl Fn(&Me) -> bool) {
 }
 
 #[test]
+fn a_cell_locked_by_kill_count_opens_once_enough_monsters_die() {
+    let (tried, tried_jump) = mpsc::channel();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "farm-1"));
+        peer.send(&json_message(json!({
+            "cmd": "moveToArea", "areaId": 43, "areaName": "farm-1",
+            "intKillCount": 1, "objLock": {"r2": "2"},
+            "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "Enter"}],
+            "mondef": [{"MonID": 10, "strMonName": "Mosquito"}],
+            "monmap": [{"MonMapID": 1, "MonID": 10, "strFrame": "Enter", "bRed": 0}],
+            "monBranch": [{"MonMapID": 1, "MonID": 10, "intHP": 500, "intHPMax": 500, "intState": 1}],
+        })));
+        peer.send("%xt%server%-1%You joined \"farm-1\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        tried_jump.recv_timeout(Duration::from_secs(5)).unwrap();
+        peer.expect_silence(Duration::from_millis(50));
+        peer.send(&json_message(
+            json!({"cmd": "mtls", "id": 1, "o": {"intHP": 0}}),
+        ));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("farm-1").wait().unwrap();
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    assert_eq!(session.snapshot().room.as_ref().unwrap().cell, "Enter");
+    tried.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while session.snapshot().room.as_ref().unwrap().monsters[0].hp != 0 {
+        assert!(Instant::now() < deadline, "the monster never died");
+        thread::sleep(Duration::from_millis(5));
+    }
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    assert_eq!(session.snapshot().room.as_ref().unwrap().cell, "r2");
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn leaving_combat_interrupts_the_fight_moves_away_from_aggressive_monsters_and_waits_for_the_server()
  {
     let harness = Harness::start(Options::default(), |listener| {

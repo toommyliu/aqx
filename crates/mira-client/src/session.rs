@@ -2262,6 +2262,9 @@ impl Session {
         client_only: bool,
     ) -> Result<(), ActionError> {
         self.ensure_ready()?;
+        if self.room.as_ref().is_some_and(|room| room.locked(cell)) {
+            return Ok(());
+        }
         let arrival = self
             .loaded_map()
             .map_or((0, 0), |map| map.arrival(cell, pad));

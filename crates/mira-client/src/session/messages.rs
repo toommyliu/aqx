@@ -164,7 +164,7 @@ impl Session {
         let Some((cell, pad)) = self.room.as_ref().and_then(|room| {
             let cell = self.loaded_map()?.cell(&room.cell)?;
             let door = cell.doors.iter().find(|door| door.id == id)?;
-            Some((door.cell.clone(), door.pad.clone()))
+            (!room.locked(&door.cell)).then(|| (door.cell.clone(), door.pad.clone()))
         }) else {
             return;
         };

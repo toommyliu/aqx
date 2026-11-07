@@ -28,6 +28,10 @@ pub struct Room {
     pub zone: Option<String>,
     #[serde(skip)]
     pub(crate) spawn_point: (String, String),
+    #[serde(skip)]
+    kill_locks: HashMap<String, i64>,
+    #[serde(skip)]
+    kills: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -253,6 +257,8 @@ impl Room {
             monsters: monsters(area.monster_types, area.monster_spots, area.monsters),
             zone: None,
             spawn_point: (SPAWN.0.to_owned(), SPAWN.1.to_owned()),
+            kill_locks: area.kill_locks,
+            kills: area.kills,
         };
         let mine = mine.into_iter().next().map(|p| Mine {
             vitals: p.vitals,
@@ -268,6 +274,12 @@ impl Room {
         if (self.x, self.y) == (0, 0) {
             (self.x, self.y) = map.arrival(&self.cell, &self.pad);
         }
+    }
+
+    pub(crate) fn locked(&self, cell: &str) -> bool {
+        self.kill_locks
+            .get(cell)
+            .is_some_and(|needed| *needed > self.kills)
     }
 
     pub(crate) fn is_in(&self, map: &str) -> bool {
@@ -367,6 +379,9 @@ impl Room {
         monster.max_hp = patch.max_hp.unwrap_or(monster.max_hp);
         if let Some(hp) = patch.hp {
             monster.hp = hp;
+            if hp == 0 {
+                self.kills += 1;
+            }
             if hp == 0 && monster.cell == self.cell {
                 monster.auras.clear();
                 monster.counter = None;
@@ -454,6 +469,28 @@ pub(crate) struct MoveToArea {
     monster_spots: Vec<MonsterSpot>,
     #[serde(rename = "monBranch", default)]
     monsters: Vec<MonsterBranch>,
+    #[serde(rename = "objLock", default, deserialize_with = "kill_locks")]
+    kill_locks: HashMap<String, i64>,
+    #[serde(rename = "intKillCount", default, deserialize_with = "kill_count")]
+    kills: i64,
+}
+
+fn count(value: &serde_json::Value) -> Option<i64> {
+    value.as_i64().or_else(|| value.as_str()?.parse().ok())
+}
+
+fn kill_locks<'de, D: Deserializer<'de>>(d: D) -> Result<HashMap<String, i64>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Object(locks) => locks
+            .into_iter()
+            .filter_map(|(cell, needed)| Some((cell, count(&needed)?)))
+            .collect(),
+        _ => HashMap::new(),
+    })
+}
+
+fn kill_count<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+    Ok(count(&serde_json::Value::deserialize(d)?).unwrap_or(0))
 }
 
 pub(crate) struct Mine {

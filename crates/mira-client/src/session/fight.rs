@@ -176,7 +176,7 @@ impl Session {
         }
         let cell = std::iter::once(SPAWN.0)
             .chain(room.monsters.iter().map(|m| m.cell.as_str()))
-            .find(|cell| calm(cell))?;
+            .find(|cell| calm(cell) && !room.locked(cell))?;
         let pad = if cell == SPAWN.0 { SPAWN.1 } else { CELL_PAD };
         Some((cell.to_owned(), pad.to_owned()))
     }
