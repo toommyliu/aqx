@@ -1165,6 +1165,118 @@ fn combat_refuses_slots_and_targets_it_cannot_use() {
     );
 }
 
+fn follower_items() -> serde_json::Value {
+    json!([
+        {"ItemID": 100, "CharItemID": 5000, "sName": "Default Sword", "iQty": 1, "iStk": 1,
+         "sType": "Sword", "sES": "Weapon", "bEquip": 1},
+        {"ItemID": 50, "CharItemID": 5050, "sName": "Necromancer", "iQty": 302500, "iStk": 1,
+         "sType": "Class", "sES": "ar", "EnhID": 5, "EnhLvl": 1},
+    ])
+}
+
+fn follower() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/follower.ts")
+}
+
+#[test]
+fn the_follower_example_equips_its_class_and_keeps_to_the_leaders_cell() {
+    let (sent, frames) = mpsc::channel();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_with_items(follower_items());
+        peer.expect(&packet::equip_item(AreaId(42), ItemId(50)));
+        peer.send(&json_message(
+            json!({"cmd": "equipItem", "uid": 7, "ItemID": 50}),
+        ));
+        peer.expect(&packet::move_to_cell(AreaId(42), "r2", "Left"));
+        peer.send("%xt%uotls%-1%player3%strFrame:r6,strPad:Up%");
+        loop {
+            let frame = peer.recv();
+            let done = frame == packet::logout();
+            sent.send(frame).unwrap();
+            if done {
+                break;
+            }
+        }
+    });
+    harness.session.ready().wait().unwrap();
+    let cancel = Cancel::default();
+    let canceller = cancel.clone();
+    let watcher = thread::spawn(move || {
+        let followed = packet::move_to_cell(AreaId(42), "r6", "Up");
+        let seen: Vec<String> = frames
+            .iter()
+            .take_while(|frame| {
+                if *frame == followed {
+                    canceller.cancel();
+                }
+                *frame != packet::logout()
+            })
+            .collect();
+        seen
+    });
+    let (outcome, outputs) = run_with(
+        &harness,
+        &follower(),
+        &cancel,
+        &[("target", "Player3"), ("class", "necromancer")],
+        Arc::new(NoAccount),
+        |_| {},
+    );
+    finish(harness);
+    let seen = watcher.join().unwrap();
+    assert_eq!(outcome, Ok(Outcome::Cancelled));
+    assert!(
+        seen.contains(&packet::move_to_cell(AreaId(42), "r6", "Up")),
+        "the follower jumps to the leader's new cell: {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|f| f.contains("%goto%")),
+        "a leader in the same map needs no goto packet: {seen:?}"
+    );
+    let statuses: Vec<&str> = outputs
+        .iter()
+        .filter_map(|o| match o {
+            Output::Status(text) => Some(text.as_str()),
+            Output::Log { .. } => None,
+        })
+        .collect();
+    assert_eq!(statuses[0], "equipping Necromancer", "{statuses:?}");
+    assert!(
+        statuses.windows(2).all(|pair| pair[0] != pair[1]),
+        "a status is set only when it changes: {statuses:?}"
+    );
+    assert!(statuses.contains(&"going to Player3"), "{statuses:?}");
+    assert!(
+        statuses.contains(&"with Player3 in r2"),
+        "nothing to fight in town: {statuses:?}"
+    );
+}
+
+#[test]
+fn the_follower_example_stops_without_the_class() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_with_items(follower_items());
+        peer.expect_logout();
+    });
+    harness.session.ready().wait().unwrap();
+    let args = [("target", "player3"), ("class", "Paladin")];
+    let (outcome, _) = run_with(
+        &harness,
+        &follower(),
+        &Cancel::default(),
+        &args,
+        Arc::new(NoAccount),
+        |_| {},
+    );
+    finish(harness);
+    assert_eq!(
+        outcome,
+        Ok(Outcome::Stopped(Some("no Paladin in the inventory".into())))
+    );
+}
+
 #[test]
 fn map_moves_follow_players_and_collect_items() {
     let (sent, frames) = mpsc::channel();
