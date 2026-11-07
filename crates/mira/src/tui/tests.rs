@@ -989,3 +989,196 @@ fn a_match_split_by_wrapping_lights_up_on_both_rows() {
     assert_eq!(lit(&app, &shown, 72, 20, "Moonstone"), ["Moonstone"]);
     assert_eq!(lit(&app, &shown, 72, 20, "Shard"), ["Sh"]);
 }
+
+fn setting(
+    group: &str,
+    name: &str,
+    kind: mira_script::skua::Kind,
+    value: Option<&str>,
+) -> mira_script::skua::Setting {
+    mira_script::skua::Setting {
+        group: group.into(),
+        name: name.into(),
+        label: format!("{name} label"),
+        description: format!("what {name} does"),
+        kind,
+        choices: match kind {
+            mira_script::skua::Kind::Choice => vec!["Base".into(), "Solo".into(), "Farm".into()],
+            _ => Vec::new(),
+        },
+        value: value.map(Into::into),
+    }
+}
+
+fn skua_options() -> skua::Skua {
+    use mira_script::skua::{Kind, Settings};
+    let mut skua = skua::Skua::new(0, "Player1".into(), "/srv/farm/doall.cs".into());
+    skua.loaded(
+        skua::Tab::CoreBots,
+        false,
+        Ok(Settings {
+            storage: None,
+            options: vec![
+                setting("Options", "PrivateRooms", Kind::Bool, None),
+                setting("Options", "HuntDelayNr", Kind::Number, Some("100")),
+                setting("Loadout", "SoloModeSelect", Kind::Choice, None),
+            ],
+        }),
+    );
+    skua.loaded(
+        skua::Tab::Script,
+        false,
+        Ok(Settings {
+            storage: Some("DoAll".into()),
+            options: vec![
+                setting("Options", "Fast", Kind::Bool, Some("True")),
+                setting("Extra_Group", "Tries", Kind::Number, Some("3")),
+            ],
+        }),
+    );
+    skua
+}
+
+fn saved(tab: skua::Tab, key: &str, value: &str) -> skua::Outcome {
+    skua::Outcome::Save(skua::Save {
+        tab,
+        changes: vec![(key.into(), value.into())],
+    })
+}
+
+#[test]
+fn c_offers_skua_options_only_for_a_skua_script() {
+    let skua = Shown {
+        script: Some("/srv/farm/doall.cs".into()),
+        ..farmer("player1")
+    };
+    let app = App::default();
+    assert!(!screen(&app, &[farmer("player1")], 150, 30).contains("c skua options"));
+    assert!(screen(&app, &[skua], 150, 30).contains("c skua options"));
+}
+
+#[test]
+fn skua_options_change_one_value_at_a_time() {
+    use skua::{Outcome, Tab};
+    let key = |skua: &mut skua::Skua, code| skua.key(KeyEvent::from(code), true);
+    let mut skua = skua_options();
+    assert_eq!(
+        key(&mut skua, KeyCode::Enter),
+        saved(Tab::CoreBots, "PrivateRooms", "True")
+    );
+    assert_eq!(
+        key(&mut skua, KeyCode::Delete),
+        Outcome::Nothing,
+        "an unset key has nothing to clear"
+    );
+    key(&mut skua, KeyCode::Down);
+    assert_eq!(
+        key(&mut skua, KeyCode::Delete),
+        saved(Tab::CoreBots, "HuntDelayNr", "")
+    );
+    assert_eq!(key(&mut skua, KeyCode::Enter), Outcome::Nothing);
+    assert_eq!(
+        skua.key(KeyEvent::from(KeyCode::Enter), false),
+        Outcome::Nothing,
+        "a script that started while typing keeps the edit unsaved"
+    );
+    assert!(skua.editing.is_some() && skua.error.is_some());
+    for c in "\u{8}\u{8}\u{8}250".chars() {
+        let code = if c == '\u{8}' {
+            KeyCode::Backspace
+        } else {
+            KeyCode::Char(c)
+        };
+        key(&mut skua, code);
+    }
+    assert_eq!(
+        key(&mut skua, KeyCode::Enter),
+        saved(Tab::CoreBots, "HuntDelayNr", "250")
+    );
+    key(&mut skua, KeyCode::Down);
+    assert_eq!(
+        key(&mut skua, KeyCode::Left),
+        saved(Tab::CoreBots, "SoloModeSelect", "Farm")
+    );
+    assert_eq!(
+        key(&mut skua, KeyCode::Right),
+        saved(Tab::CoreBots, "SoloModeSelect", "Base")
+    );
+    key(&mut skua, KeyCode::Tab);
+    assert_eq!(
+        key(&mut skua, KeyCode::Enter),
+        saved(Tab::Script, "Fast", "False")
+    );
+    key(&mut skua, KeyCode::Down);
+    assert_eq!(
+        key(&mut skua, KeyCode::Delete),
+        Outcome::Nothing,
+        "script options have no unset state"
+    );
+    key(&mut skua, KeyCode::Enter);
+    key(&mut skua, KeyCode::Char('0'));
+    assert_eq!(
+        key(&mut skua, KeyCode::Enter),
+        saved(Tab::Script, "Extra_Group:Tries", "30")
+    );
+    assert_eq!(key(&mut skua, KeyCode::Esc), Outcome::Close);
+}
+
+#[test]
+fn skua_options_are_read_only_while_the_script_runs() {
+    let mut app = App::default();
+    let shown = [Shown {
+        script: Some("/srv/farm/doall.cs".into()),
+        ..farmer("player1")
+    }];
+    app.skua = Some(skua_options());
+    let s = screen(&app, &shown, 150, 30);
+    assert!(s.contains("CBO_Storage(player1).txt"), "{s}");
+    assert!(row(&s, "PrivateRooms label").contains("default"), "{s}");
+    assert!(s.contains("while the account is offline or idle"), "{s}");
+    press(&mut app, &shown, KeyCode::Enter);
+    let skua = app.skua.as_ref().unwrap();
+    assert_eq!(skua.saving, None);
+    assert!(skua.error.is_some());
+    press(&mut app, &shown, KeyCode::Tab);
+    let s = screen(&app, &shown, 150, 30);
+    assert!(s.contains("DoAll.cfg, shared by every account"), "{s}");
+    assert!(s.contains("Extra Group"), "{s}");
+    press(&mut app, &shown, KeyCode::Esc);
+    assert!(app.skua.is_none());
+    let relogging = [Shown {
+        state: State::Reconnecting("in 5 s: kicked".into()),
+        ..shown[0].clone()
+    }];
+    app.skua = Some(skua_options());
+    press(&mut app, &relogging, KeyCode::Enter);
+    let skua = app.skua.as_ref().unwrap();
+    assert!(
+        skua.saving.is_none() && skua.error.is_some(),
+        "a relogging script keeps its options"
+    );
+}
+
+#[test]
+fn redacted_skua_options_edit_the_real_account_and_show_its_alias() {
+    let mut app = App::default();
+    app.mask = mask(&[("player_one".into(), "Player_One".into())], true);
+    app.targets = vec![("Player_One".into(), Some("/srv/farm/doall.cs".into()))];
+    assert_eq!(
+        app.skua_target(),
+        Some(("Player_One".into(), PathBuf::from("/srv/farm/doall.cs")))
+    );
+    let shown = [offline("account 1")];
+    let mut skua = skua_options();
+    skua.user = "Player_One".into();
+    if let skua::Pane::Ready(settings) = &mut skua.panes[0] {
+        settings.options[0].value = Some("follow Player_One".into());
+    }
+    app.skua = Some(skua);
+    let s = screen(&app, &shown, 150, 30);
+    assert!(s.contains("CBO_Storage(account 1).txt"), "{s}");
+    assert!(
+        !s.to_lowercase().contains("player_one") && !s.to_lowercase().contains("player one"),
+        "{s}"
+    );
+}

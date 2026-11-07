@@ -2,6 +2,7 @@ mod ask;
 mod draw;
 mod mask;
 mod prompt;
+mod skua;
 #[cfg(test)]
 mod tests;
 
@@ -27,6 +28,7 @@ use crate::view::{self, Game, Shown, order};
 use ask::{Ask, Remembered};
 use mask::Mask;
 use prompt::{History, Prompt, Recent};
+use skua::Skua;
 
 const NOTE_FOR: Duration = Duration::from_secs(4);
 const OPENING_NOTE_FOR: Duration = Duration::from_secs(10);
@@ -188,6 +190,8 @@ struct App {
     recent: Recent,
     history: History,
     ask: Option<Ask>,
+    skua: Option<Skua>,
+    targets: Vec<(String, Option<String>)>,
     share_args: bool,
     remembered: Remembered,
     mask: Mask,
@@ -228,6 +232,9 @@ pub fn run(
     let started = Instant::now();
     let result = loop {
         app.frame = (started.elapsed().as_millis() / FRAME.as_millis()) as usize;
+        if let Some(skua) = &mut app.skua {
+            skua.poll();
+        }
         let shown = match gather(source, &mut app) {
             Ok(Some(shown)) => shown,
             Ok(None) => break Ok(Leave::Ended),
@@ -334,6 +341,11 @@ fn gather(source: &dyn Source, app: &mut App) -> Result<Option<Vec<Shown>>, Stri
             args: Vec::new(),
         });
     }
+    app.targets = frame
+        .accounts
+        .iter()
+        .map(|s| (s.user.clone(), s.script.clone()))
+        .collect();
     let shown: Vec<Shown> = frame.accounts.into_iter().map(|s| app.masked(s)).collect();
     app.names = shown.iter().map(|s| s.name.clone()).collect();
     if shown.get(app.selected).is_none_or(|s| s.game.is_none()) && app.view != View::Log {
@@ -804,6 +816,15 @@ impl App {
             }
             return None;
         }
+        if let Some(skua) = &mut self.skua {
+            let editable = shown.get(skua.account).is_some_and(skua::editable);
+            match skua.key(key, editable) {
+                skua::Outcome::Close => self.skua = None,
+                skua::Outcome::Save(save) => skua.save(save),
+                skua::Outcome::Nothing => {}
+            }
+            return None;
+        }
         if self.querying {
             let accounts = self.scope() == Scope::Accounts;
             let changed = match key.code {
@@ -937,6 +958,11 @@ impl App {
             KeyCode::Char('<') => self.resize_sidebar(|w| w.saturating_sub(SIDEBAR_STEP)),
             KeyCode::Char('>') => self.resize_sidebar(|w| w + SIDEBAR_STEP),
             KeyCode::Char('o') => self.prompt = Some(Prompt::new(&self.home)),
+            KeyCode::Char('c') => {
+                if let Some((user, script)) = self.skua_target() {
+                    self.skua = Some(Skua::open(self.selected, user, script));
+                }
+            }
             KeyCode::Char('i') => self.act(source, "logging in", Action::Login),
             KeyCode::Char('x') => self.act(source, "logging out", Action::Logout),
             KeyCode::Char('s') => self.act(source, "stopping the script", Action::Stop),
@@ -948,6 +974,12 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    fn skua_target(&self) -> Option<(String, PathBuf)> {
+        let (user, script) = self.targets.get(self.selected)?;
+        let script = skua_script(script.as_deref())?;
+        Some((user.clone(), self.home.join(script)))
     }
 
     fn submit(&mut self, typed: &str, source: &dyn Source) {
@@ -995,6 +1027,14 @@ impl App {
         };
         self.act_on(source, targets, &format!("running {shown}"), script_for);
     }
+}
+
+fn skua_script(script: Option<&str>) -> Option<&Path> {
+    let script = Path::new(script?);
+    script
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("cs"))
+        .then_some(script)
 }
 
 fn complete(query: &str, names: &[&str]) -> String {

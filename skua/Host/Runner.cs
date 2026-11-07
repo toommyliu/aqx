@@ -7,6 +7,9 @@ namespace Mira.Skua;
 
 public static class Runner
 {
+    public static MethodInfo ScriptMain(Assembly assembly) =>
+        assembly.GetExportedTypes().SelectMany(t => t.GetMethods()).FirstOrDefault(m => m.Name == "ScriptMain" && m.GetParameters() is [{ ParameterType: var type }] && type == typeof(IScriptInterface)) ?? throw new InvalidOperationException("the script has no ScriptMain(IScriptInterface)");
+
     public static int Run(ScriptCompiler compiler, string path, IReadOnlyDictionary<string, string> options)
     {
         Stream output = Console.OpenStandardOutput();
@@ -34,7 +37,7 @@ public static class Runner
                 Built built = compiler.Build(path);
                 var context = new AssemblyLoadContext("script", isCollectible: true);
                 var assembly = context.LoadFromStream(new MemoryStream(built.Image));
-                var main = assembly.GetExportedTypes().SelectMany(t => t.GetMethods()).FirstOrDefault(m => m.Name == "ScriptMain" && m.GetParameters() is [{ ParameterType: var type }] && type == typeof(IScriptInterface)) ?? throw new InvalidOperationException("the script has no ScriptMain(IScriptInterface)");
+                var main = ScriptMain(assembly);
                 bot.Config = new ScriptConfig(options);
                 Exception? error = null;
                 Thread script = new(() => {

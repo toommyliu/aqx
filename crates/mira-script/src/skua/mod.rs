@@ -117,7 +117,67 @@ fn newest_source(dir: &Path) -> Option<std::time::SystemTime> {
         })
         .max()
 }
-fn command(mode: &str, path: &Path, building: &mut dyn FnMut()) -> Result<Command, LoadError> {
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Settings {
+    pub storage: Option<String>,
+    pub options: Vec<Setting>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Setting {
+    pub group: String,
+    pub name: String,
+    pub label: String,
+    pub description: String,
+    pub kind: Kind,
+    pub choices: Vec<String>,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Bool,
+    Number,
+    Text,
+    Choice,
+}
+
+pub fn script_options(path: &Path, changes: &[(String, String)]) -> Result<Settings, LoadError> {
+    let path = std::path::absolute(path).map_err(|e| LoadError(e.to_string()))?;
+    settings("options", path.as_os_str(), changes)
+}
+
+pub fn core_bots_options(user: &str, changes: &[(String, String)]) -> Result<Settings, LoadError> {
+    settings("cbo", user.as_ref(), changes)
+}
+
+fn settings(
+    mode: &str,
+    arg: &std::ffi::OsStr,
+    changes: &[(String, String)],
+) -> Result<Settings, LoadError> {
+    let mut command = command(mode, arg, &mut || {})?;
+    for (key, value) in changes {
+        command.arg("--set").arg(format!("{key}={value}"));
+    }
+    let out = command
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| LoadError(format!("couldn't run the Skua worker: {e}")))?;
+    if !out.status.success() {
+        return Err(LoadError(
+            String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+        ));
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| LoadError(format!("the Skua worker sent {e}")))
+}
+
+fn command(
+    mode: &str,
+    arg: &std::ffi::OsStr,
+    building: &mut dyn FnMut(),
+) -> Result<Command, LoadError> {
     let data = match std::env::var_os("MIRA_SKUA_DATA") {
         Some(path) => PathBuf::from(path),
         None => dirs::data_local_dir()
@@ -125,7 +185,7 @@ fn command(mode: &str, path: &Path, building: &mut dyn FnMut()) -> Result<Comman
             .join("mira/skua"),
     };
     let mut command = Command::new(find_worker(building)?);
-    command.arg(mode).arg(path).env("MIRA_SKUA_DATA", data);
+    command.arg(mode).arg(arg).env("MIRA_SKUA_DATA", data);
     Ok(command)
 }
 impl SkuaScript {
@@ -141,7 +201,7 @@ impl SkuaScript {
                 text: "building the Skua worker".into(),
             });
         };
-        let checked = command("check", &path, &mut building)?
+        let checked = command("check", path.as_os_str(), &mut building)?
             .output()
             .map_err(|e| LoadError(format!("couldn't check the C# script: {e}")))?;
         if !checked.status.success() {
@@ -203,7 +263,8 @@ impl SkuaScript {
                 text: "building the Skua worker".into(),
             });
         };
-        let mut command = command("serve", &self.path, &mut building).map_err(io::Error::other)?;
+        let mut command =
+            command("serve", self.path.as_os_str(), &mut building).map_err(io::Error::other)?;
         for (key, value) in args {
             command.arg("--arg").arg(format!(
                 "{key}={}",

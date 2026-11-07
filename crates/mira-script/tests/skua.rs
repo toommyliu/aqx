@@ -1,6 +1,6 @@
 mod support;
 
-use mira_script::skua::{SkuaScript, worker};
+use mira_script::skua::{self, Kind, SkuaScript, worker};
 use mira_script::{Cancel, Outcome};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -333,6 +333,128 @@ public class Configured {
         logs.contains(&"first=value second:value".into()),
         "{logs:?}"
     );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn script_options_list_and_save_without_running_the_script() {
+    let dir = Dir::new();
+    let storage = format!("settings-{}", std::process::id());
+    let path = dir.script(
+        &r#"
+using Skua.Core.Interfaces;
+using Skua.Core.Options;
+public enum Pick { First_One, Second }
+public class Configured {
+    public string OptionsStorage = "STORAGE";
+    public bool DontPreconfigure = true;
+    public List<IOption> Options = new() {
+        new Option<bool>("Fast", "Go fast", "Skips the slow parts", true),
+        new Option<Pick>("Pick", "Pick one", ""),
+        new Option<string>("Once", "Once", "", "x", transient: true),
+    };
+    public string[] MultiOptions = new[] { "Extra_Group" };
+    public List<IOption> Extra_Group = new() { new Option<int>("Tries", "Tries", "", 3) };
+    public void ScriptMain(IScriptInterface bot) => throw new Exception("ran the script");
+}
+"#
+        .replace("STORAGE", &storage),
+    );
+    let listed = skua::script_options(&path, &[]).unwrap();
+    assert_eq!(listed.storage.as_deref(), Some(storage.as_str()));
+    let values: Vec<_> = listed
+        .options
+        .iter()
+        .map(|o| {
+            (
+                o.group.as_str(),
+                o.name.as_str(),
+                o.kind,
+                o.value.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        values,
+        [
+            ("Options", "Fast", Kind::Bool, Some("True")),
+            ("Options", "Pick", Kind::Choice, Some("First_One")),
+            ("Extra_Group", "Tries", Kind::Number, Some("3")),
+        ]
+    );
+    assert_eq!(listed.options[1].choices, ["First_One", "Second"]);
+    let changes = [
+        ("Fast".to_owned(), "false".to_owned()),
+        ("Pick".to_owned(), "Second".to_owned()),
+        ("Extra_Group:Tries".to_owned(), "5".to_owned()),
+    ];
+    let saved = skua::script_options(&path, &changes).unwrap();
+    assert_eq!(
+        saved
+            .options
+            .iter()
+            .map(|o| o.value.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("False"), Some("Second"), Some("5")]
+    );
+    let file = PathBuf::from(std::env::var("MIRA_SKUA_DATA").unwrap())
+        .join("options")
+        .join(format!("{storage}.cfg"));
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "Options:Fast=False\nOptions:Pick=Second\nExtra_Group:Tries=5\n"
+    );
+    let wrong = skua::script_options(&path, &[("Extra_Group:Tries".into(), "many".into())])
+        .unwrap_err()
+        .to_string();
+    assert!(wrong.contains("Tries must be a number"), "{wrong}");
+    let missing = skua::script_options(&path, &[("Once".into(), "y".into())])
+        .unwrap_err()
+        .to_string();
+    assert!(missing.contains("no option Once"), "{missing}");
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn core_bots_options_edit_only_the_given_keys_in_the_lowercase_users_file() {
+    let user = format!("Player{}", std::process::id());
+    let file = PathBuf::from(std::env::var("MIRA_SKUA_DATA").unwrap())
+        .join("options")
+        .join(format!("CBO_Storage({}).txt", user.to_lowercase()));
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &file,
+        "Unknown: kept\nPrivateRooms: False\nHuntDelayNr: 100\n",
+    )
+    .unwrap();
+    let changes = [
+        ("PrivateRooms".to_owned(), "true".to_owned()),
+        ("HuntDelayNr".to_owned(), String::new()),
+        ("SoloModeSelect".to_owned(), "Farm".to_owned()),
+    ];
+    let saved = skua::core_bots_options(&user, &changes).unwrap();
+    let value = |name: &str| {
+        saved
+            .options
+            .iter()
+            .find(|o| o.name == name)
+            .unwrap()
+            .value
+            .clone()
+    };
+    assert_eq!(value("PrivateRooms").as_deref(), Some("True"));
+    assert_eq!(value("HuntDelayNr"), None);
+    assert_eq!(value("SoloModeSelect").as_deref(), Some("Farm"));
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "Unknown: kept\nPrivateRooms: True\nSoloModeSelect: Farm\n"
+    );
+    let wrong = skua::core_bots_options(&user, &[("SoloModeSelect".into(), "farm".into())])
+        .unwrap_err()
+        .to_string();
+    assert!(wrong.contains("SoloModeSelect must be one of"), "{wrong}");
+    let _ = std::fs::remove_file(file);
 }
 
 #[test]

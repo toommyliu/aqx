@@ -9,7 +9,8 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use tui_input::Input as TextInput;
 use unicode_width::UnicodeWidthChar;
 
-use super::{App, Filter, Hit, Scope, Section, View};
+use super::skua::{Pane, Skua, Tab};
+use super::{App, Filter, Hit, Scope, Section, View, skua_script};
 use crate::fleet::{Channel, Line as LogLine};
 use crate::view::{Game, QuestProgress, Shown, Stack, Standing, State, found, matches, order};
 
@@ -30,7 +31,7 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 type Field = Vec<Span<'static>>;
 
-const ACCOUNT_KEYS: [(&str, &str); 15] = [
+const ACCOUNT_KEYS: [(&str, &str); 16] = [
     ("", "Accounts"),
     ("↑ ↓", "pick"),
     ("tab", "next"),
@@ -44,11 +45,12 @@ const ACCOUNT_KEYS: [(&str, &str); 15] = [
     ("o", "run a script"),
     ("s r", "stop / restart"),
     ("p", "pause / resume"),
+    ("c", "Skua script options"),
     ("q", "detach, leaving them running"),
     ("Q", "log out all and end"),
 ];
 
-const VIEW_KEYS: [(&str, &str); 15] = [
+const VIEW_KEYS: [(&str, &str); 16] = [
     ("", "View"),
     ("1", "log"),
     ("2-8", "players … factions"),
@@ -62,6 +64,7 @@ const VIEW_KEYS: [(&str, &str); 15] = [
     ("⇧↑ ⇧↓", "scroll a line"),
     ("PgUp PgDn", "scroll a page"),
     ("End", "newest lines"),
+    ("", ""),
     ("", ""),
     ("", ""),
 ];
@@ -303,6 +306,9 @@ pub(super) fn draw(f: &mut Frame, app: &App, shown: &[Shown]) {
         draw_account(f, pane, account, app);
     }
     draw_footer(f, footer, app, shown);
+    if let Some(skua) = &app.skua {
+        draw_skua(f, body, app, skua, shown.get(skua.account));
+    }
     if app.keys {
         draw_keys(f, body);
     }
@@ -539,6 +545,31 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
             area,
         );
     }
+    if let Some(skua) = &app.skua {
+        let keys: &[(&str, &str)] = match (&skua.editing, skua.tab) {
+            (Some(_), _) => &[("enter", "save"), ("esc", "cancel")],
+            (None, Tab::CoreBots) => &[
+                ("↑↓", "pick"),
+                ("enter ← →", "change"),
+                ("del", "use the default"),
+                ("tab", "script options"),
+                ("esc", "close"),
+            ],
+            (None, Tab::Script) => &[
+                ("↑↓", "pick"),
+                ("enter ← →", "change"),
+                ("tab", "CoreBots options"),
+                ("esc", "close"),
+            ],
+        };
+        return f.render_widget(
+            Paragraph::new(Line::from(clip(
+                [vec![Span::raw(" ")], hints(keys)].concat(),
+                width,
+            ))),
+            area,
+        );
+    }
     if let Some(prompt) = &app.prompt {
         let keys = hints(&[("tab", "complete"), ("↑↓", "recent"), ("esc", "cancel")]);
         let typed = [
@@ -686,6 +717,9 @@ fn account_keys(app: &App, shown: &[Shown]) -> Vec<(&'static str, &'static str)>
             ("x", "log out"),
         ]
     };
+    if skua_script(shown.get(app.selected).and_then(|s| s.script.as_deref())).is_some() {
+        keys.push(("c", "skua options"));
+    }
     keys.push(("space", "mark"));
     match (app.grid, offline) {
         (true, _) => keys.push(("enter", "open")),
@@ -1758,6 +1792,117 @@ fn draw_ending(f: &mut Frame, area: Rect, online: usize) {
         .title(" end session ")
         .padding(Padding::horizontal(1));
     f.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
+fn draw_skua(f: &mut Frame, area: Rect, app: &App, skua: &Skua, account: Option<&Shown>) {
+    let frame = app.frame;
+    f.buffer_mut()
+        .set_style(area, Style::new().fg(Color::DarkGray));
+    let rect = centered(area, 84, area.height.saturating_sub(2).max(8));
+    f.render_widget(Clear, rect);
+    let name = account.map_or("", |a| a.name.as_str());
+    let block = Block::bordered()
+        .title(format!(" Skua options · {name} "))
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let width = inner.width as usize;
+    let mut tabs = Vec::new();
+    for tab in Tab::ALL {
+        if !tabs.is_empty() {
+            tabs.push(Span::raw("   "));
+        }
+        tabs.push(if tab == skua.tab {
+            Span::raw(tab.label()).bold().fg(ACCENT).underlined()
+        } else {
+            Span::raw(tab.label()).dark_gray()
+        });
+    }
+    let about = match (skua.tab, skua.pane()) {
+        (Tab::CoreBots, _) => format!(
+            "CBO_Storage({}).txt, read when CoreBots starts",
+            skua.user.to_lowercase()
+        ),
+        (Tab::Script, Pane::Ready(settings)) => format!(
+            "{}.cfg, shared by every account that runs it",
+            settings.storage.as_deref().unwrap_or("default")
+        ),
+        (Tab::Script, _) => skua.script.display().to_string(),
+    };
+    let mut lines = vec![
+        Line::from(tabs),
+        fit(vec![Span::raw(app.mask.hide(&about)).dark_gray()], width),
+        Line::default(),
+    ];
+    let height = (inner.height as usize).saturating_sub(lines.len() + 2);
+    match skua.pane() {
+        Pane::Loading => lines.push(Line::from(vec![
+            Span::raw(SPINNER[frame % SPINNER.len()]).yellow(),
+            Span::raw(match skua.tab {
+                Tab::CoreBots => " loading",
+                Tab::Script => " compiling the script",
+            }),
+        ])),
+        Pane::Failed(why) => lines.extend(
+            why.lines()
+                .take(height)
+                .map(|l| fit(vec![Span::raw(app.mask.hide(l)).red()], width)),
+        ),
+        Pane::Ready(settings) if settings.options.is_empty() => {
+            lines.push(Line::raw("This script has no options.").dark_gray());
+        }
+        Pane::Ready(settings) => {
+            let mut rows = Vec::new();
+            let mut at = 0;
+            for (i, setting) in settings.options.iter().enumerate() {
+                if rows.is_empty() || settings.options[i - 1].group != setting.group {
+                    rows.push(Line::raw(setting.group.replace('_', " ")).bold());
+                }
+                let selected = i == skua.cursor();
+                if selected {
+                    at = rows.len();
+                }
+                let label = if setting.label.is_empty() {
+                    &setting.name
+                } else {
+                    &setting.label
+                };
+                let value = match (&skua.editing, &setting.value) {
+                    (Some(input), _) if selected => typed_spans(input),
+                    (_, None) => vec![Span::raw("default").dark_gray()],
+                    (_, Some(value)) => vec![Span::raw(app.mask.hide(value).replace('_', " "))],
+                };
+                let mut row = spread(vec![Span::raw(format!("  {label}"))], value, width);
+                if selected && skua.editing.is_none() {
+                    row = row.reversed();
+                }
+                rows.push(row);
+            }
+            let start = (at + 1).saturating_sub(height.max(1));
+            lines.extend(rows.into_iter().skip(start).take(height));
+        }
+    }
+    let note = if let Some(why) = &skua.error {
+        Span::raw(app.mask.hide(why)).red()
+    } else if skua.saving.is_some() {
+        Span::raw(format!("{} saving", SPINNER[frame % SPINNER.len()])).yellow()
+    } else if !account.is_some_and(super::skua::editable) {
+        Span::raw(super::skua::BUSY).yellow()
+    } else {
+        Span::raw(
+            skua.selected()
+                .map_or_else(String::new, |s| s.description.clone()),
+        )
+        .dark_gray()
+    };
+    let [top, _, bottom] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    f.render_widget(Paragraph::new(lines), top);
+    f.render_widget(Paragraph::new(fit(vec![note], width)), bottom);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
