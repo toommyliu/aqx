@@ -2197,6 +2197,54 @@ fn untargeting_ends_the_fight_and_the_auto_attack_without_moving() {
 }
 
 #[test]
+fn a_death_keeps_the_target_and_stops_the_auto_attack_until_the_respawn_move() {
+    let (retargeted, next) = mpsc::channel::<()>();
+    let (cleared, respawned) = mpsc::channel::<()>();
+    let (quiet, checked) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.expect(&gar(0, "aa", &[ONE]));
+        peer.answer(0, 1);
+        peer.send(&json_message(
+            json!({"cmd": "ct", "p": {"player1": {"intHP": 0, "intState": 0}}}),
+        ));
+        next.recv().unwrap();
+        peer.expect_silence(Duration::from_millis(1500));
+        peer.send(&json_message(
+            json!({"cmd": "uotls", "unm": "player1", "o": {"intHP": 1000, "intState": 1}}),
+        ));
+        peer.send("%xt%resTimed%-1%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
+        respawned.recv().unwrap();
+        peer.expect_silence(Duration::from_millis(1500));
+        quiet.send(()).unwrap();
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    session.attack(MonMapId(1)).wait().unwrap();
+    wait_until(session, |me| me.state == CombatState::Dead);
+    assert_eq!(session.snapshot().target, Some(MonMapId(1)));
+    session.attack(MonMapId(2)).wait().unwrap();
+    assert_eq!(session.snapshot().target, Some(MonMapId(2)));
+    retargeted.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while session.snapshot().target.is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "the respawn move kept the target"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    cleared.send(()).unwrap();
+    checked.recv().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn cancelling_a_queued_action_or_the_fight_leaves_the_rest_alone() {
     let (fighting, started) = mpsc::channel::<()>();
     let (cancelled, next) = mpsc::channel::<()>();

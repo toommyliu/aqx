@@ -593,6 +593,40 @@ fn counter_handler_cancels_restores_and_resets_on_death_and_stop() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn the_target_survives_a_death_until_the_respawn_move() {
+    let (outcome, logs, _) = Fake::start(|m, w| match m {
+        "die" => w.object(r#"{"cmd":"ct","p":{"player1":{"intHP":0,"intState":0}}}"#),
+        "revive" => {
+            w.object(r#"{"cmd":"uotls","unm":"player1","o":{"intHP":3000,"intState":1}}"#);
+            w.send("%xt%resTimed%-1%r2%Left%");
+        }
+        _ => {}
+    })
+    .run(
+        r#"
+        using Skua.Core.Interfaces;
+        public class DeathTarget {
+            public void ScriptMain(IScriptInterface bot) {
+                bot.Map.Jump("r2", "Left");
+                bot.Combat.Attack("Treeant");
+                bot.Send.Packet("die");
+                bot.Sleep(200);
+                bot.Log($"dead {bot.Player.HasTarget} {bot.Combat.Attack("Treeant")} {bot.Player.Target?.MapID}");
+                bot.Send.Packet("revive");
+                bot.Sleep(300);
+                bot.Log($"respawned {bot.Player.Cell} {bot.Player.HasTarget}");
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    for expected in ["dead True True 2", "respawned r2 False"] {
+        assert!(logs.contains(&expected.into()), "{logs:?}");
+    }
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn skill_readiness_checks_targets_and_reports_real_cooldown_deadlines() {
     let (outcome, logs, _) = Fake::start(|m,w| {
         if m.contains("%gar%") {
