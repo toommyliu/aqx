@@ -19,6 +19,10 @@ pub struct SkuaScript {
     cancel: Cancel,
 }
 pub fn worker() -> Result<PathBuf, LoadError> {
+    find_worker(&mut || eprintln!("mira: building the Skua worker"))
+}
+
+fn find_worker(building: &mut dyn FnMut()) -> Result<PathBuf, LoadError> {
     if let Some(path) = std::env::var_os("MIRA_SKUA") {
         return Ok(path.into());
     }
@@ -28,10 +32,10 @@ pub fn worker() -> Result<PathBuf, LoadError> {
             return Ok(path);
         }
     }
-    development_worker()
+    development_worker(building)
 }
 
-fn development_worker() -> Result<PathBuf, LoadError> {
+fn development_worker(building: &mut dyn FnMut()) -> Result<PathBuf, LoadError> {
     let skua = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skua");
     let artifacts = skua.join("Host/artifacts");
     let worker = artifacts.join("publish/mira-skua");
@@ -42,7 +46,7 @@ fn development_worker() -> Result<PathBuf, LoadError> {
     {
         return Ok(worker);
     }
-    eprintln!("mira: building the Skua worker");
+    building();
     let published = Command::new("dotnet")
         .arg("publish")
         .arg(skua.join("Host/Host.csproj"))
@@ -90,25 +94,31 @@ fn newest_source(dir: &Path) -> Option<std::time::SystemTime> {
         })
         .max()
 }
-fn command(mode: &str, path: &Path) -> Result<Command, LoadError> {
+fn command(mode: &str, path: &Path, building: &mut dyn FnMut()) -> Result<Command, LoadError> {
     let data = match std::env::var_os("MIRA_SKUA_DATA") {
         Some(path) => PathBuf::from(path),
         None => dirs::data_local_dir()
             .ok_or_else(|| LoadError("couldn't find the application data directory".into()))?
             .join("mira/skua"),
     };
-    let mut command = Command::new(worker()?);
+    let mut command = Command::new(find_worker(building)?);
     command.arg(mode).arg(path).env("MIRA_SKUA_DATA", data);
     Ok(command)
 }
 impl SkuaScript {
     pub fn load(
         path: &Path,
-        output: impl FnMut(Output) + 'static,
+        mut output: impl FnMut(Output) + 'static,
         cancel: &Cancel,
     ) -> Result<Self, LoadError> {
         let path = std::path::absolute(path).map_err(|e| LoadError(e.to_string()))?;
-        let checked = command("check", &path)?
+        let mut building = || {
+            output(Output::Log {
+                level: Level::Log,
+                text: "building the Skua worker".into(),
+            });
+        };
+        let checked = command("check", &path, &mut building)?
             .output()
             .map_err(|e| LoadError(format!("couldn't check the C# script: {e}")))?;
         if !checked.status.success() {
@@ -163,7 +173,14 @@ impl SkuaScript {
         args: serde_json::Map<String, Value>,
         account: Arc<dyn crate::Account>,
     ) -> io::Result<Outcome> {
-        let mut command = command("serve", &self.path).map_err(io::Error::other)?;
+        let output = &mut self.output;
+        let mut building = || {
+            output(Output::Log {
+                level: Level::Log,
+                text: "building the Skua worker".into(),
+            });
+        };
+        let mut command = command("serve", &self.path, &mut building).map_err(io::Error::other)?;
         for (key, value) in args {
             command.arg("--arg").arg(format!(
                 "{key}={}",
