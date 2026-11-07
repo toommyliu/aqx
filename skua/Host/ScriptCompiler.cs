@@ -35,7 +35,14 @@ public sealed class ScriptCompiler(string root)
         }
         Read(path);
         string host = string.Join("\n", Directory.EnumerateFiles(AppContext.BaseDirectory, "*.dll").Order().Select(p => { var f = new FileInfo(p); return $"{f.Name}:{f.Length}:{f.LastWriteTimeUtc.Ticks}"; }));
-        string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(host + string.Join("\n", sources.Select(s => s.Key + "\n" + s.Value)))));
+        using SHA256 sha = SHA256.Create();
+        using (StreamWriter hashed = new(new CryptoStream(Stream.Null, sha, CryptoStreamMode.Write), new UTF8Encoding(false)))
+        {
+            hashed.Write(host);
+            hashed.Write('\n');
+            foreach (var (file, text) in sources) { hashed.Write(file); hashed.Write('\n'); hashed.Write(text); hashed.Write('\n'); }
+        }
+        string key = Convert.ToHexString(sha.Hash!);
         string cache = Path.Combine(ClientFileSources.SkuaDIR, "cache", key + ".dll");
         if (File.Exists(cache)) return new(File.ReadAllBytes(cache), path);
         byte[] image = Emit(sources, key);
