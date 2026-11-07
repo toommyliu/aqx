@@ -685,6 +685,30 @@ fn skill_readiness_checks_targets_and_reports_real_cooldown_deadlines() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn using_the_auto_attack_slot_starts_the_auto_attack() {
+    let (outcome, logs, sent) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        public class AutoAttackSlot {
+            public void ScriptMain(IScriptInterface bot) {
+                bot.Map.Jump("r2", "Left");
+                bot.Log($"aa {bot.Skills.UseSkill(0)} {bot.Player.Target?.MapID}");
+                bot.Sleep(300);
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    assert!(logs.contains(&"aa True 2".into()), "{logs:?}");
+    assert!(
+        sent.iter()
+            .any(|m| m.contains("%gar%") && m.contains("aa>m:2")),
+        "{sent:?}"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn action_cooldown_waits_until_the_engine_lock_expires() {
     let (outcome, logs, _) = Fake::start(|_,_| {}).run(r#"
         using System.Diagnostics;
