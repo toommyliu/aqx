@@ -657,6 +657,109 @@ fn cancelling_a_waiting_script_runs_its_finally_blocks() {
 }
 
 #[test]
+fn pausing_holds_the_script_between_steps_until_it_resumes() {
+    let dir = Dir::new();
+    let path = dir.file(
+        "main.ts",
+        r#"
+        import { script, wait } from "mira";
+        export default function* () {
+          for (let i = 0; i < 4; i++) {
+            script.log(`tick ${i}`);
+            yield* wait.ms(20);
+          }
+        }
+        "#,
+    );
+    let cancel = Cancel::default();
+    let control = cancel.clone();
+    let ticks = Arc::new(std::sync::Mutex::new(0usize));
+    let counted = Arc::clone(&ticks);
+    let held = thread::spawn(move || {
+        while *counted.lock().unwrap() < 2 {
+            thread::sleep(Duration::from_millis(1));
+        }
+        control.pause();
+        thread::sleep(Duration::from_millis(30));
+        let paused_at = *counted.lock().unwrap();
+        thread::sleep(Duration::from_millis(200));
+        let still = *counted.lock().unwrap();
+        assert!(control.is_paused());
+        control.resume();
+        (paused_at, still)
+    });
+    let harness = serve(|_| {});
+    let seen = Arc::clone(&ticks);
+    let (outcome, outputs) = run_in(&harness, &path, &cancel, move |_| {
+        *seen.lock().unwrap() += 1
+    });
+    finish(harness);
+    let (paused_at, still) = held.join().unwrap();
+    assert_eq!(paused_at, still, "no step runs while paused");
+    assert!(paused_at < 4, "the pause landed before the script ended");
+    assert_eq!(outcome, Ok(Outcome::Finished));
+    assert_eq!(logs(&outputs), ["tick 0", "tick 1", "tick 2", "tick 3"]);
+}
+
+#[test]
+fn cancelling_a_paused_script_stops_it() {
+    let dir = Dir::new();
+    let path = dir.file(
+        "main.ts",
+        r#"
+        import { script, wait } from "mira";
+        export default function* () {
+          script.log("started");
+          yield* wait.ms(20);
+          script.log("never");
+        }
+        "#,
+    );
+    let cancel = Cancel::default();
+    cancel.pause();
+    let canceller = cancel.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(80));
+        canceller.cancel();
+    });
+    let (outcome, outputs) = run_path(&path, &cancel);
+    assert_eq!(outcome, Ok(Outcome::Cancelled));
+    assert!(!logs(&outputs).contains(&"never"), "{outputs:?}");
+}
+
+#[test]
+fn a_stop_that_lands_while_paused_before_the_run_still_stops_it() {
+    let dir = Dir::new();
+    let path = dir.file(
+        "main.ts",
+        r#"
+        import { wait } from "mira";
+        export default function* () {
+          yield* wait.ms(60_000);
+        }
+        "#,
+    );
+    let cancel = Cancel::default();
+    let harness = serve(|_| {});
+    let script = Script::load(&path, |_| {}, &cancel).unwrap();
+    cancel.pause();
+    cancel.cancel();
+    let started = Instant::now();
+    let ended = script.run(Start {
+        session: harness.session.clone(),
+        server: "Test".into(),
+        args: serde_json::Map::new(),
+        account: Arc::new(NoAccount),
+    });
+    assert_eq!(ended.outcome, Outcome::Cancelled);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the run doesn't wait for a resume"
+    );
+    finish(harness);
+}
+
+#[test]
 fn cancelling_interrupts_a_script_stuck_in_a_loop() {
     let dir = Dir::new();
     let path = dir.file("main.ts", "export default function* () { while (true) {} }");

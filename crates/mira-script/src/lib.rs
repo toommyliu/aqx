@@ -96,13 +96,16 @@ pub struct Cancel(Arc<Signal>);
 struct Signal {
     cancelled: AtomicBool,
     interrupt: AtomicBool,
+    paused: AtomicBool,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
+    resumed: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 enum Wake {
     Update(u64, Update),
     External(u64, External),
     Cancel,
+    Resume,
 }
 
 enum External {
@@ -153,10 +156,42 @@ impl Cancel {
         self.0.cancelled.load(Ordering::SeqCst)
     }
 
+    pub fn pause(&self) {
+        self.0.paused.store(true, Ordering::SeqCst);
+    }
+
+    pub fn resume(&self) {
+        self.0.paused.store(false, Ordering::SeqCst);
+        if let Some(wake) = &*self
+            .0
+            .resumed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            wake();
+        }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.0.paused.load(Ordering::SeqCst)
+    }
+
     fn listen(&self, wake: mpsc::Sender<Wake>) {
+        let resumed = wake.clone();
+        *self
+            .0
+            .resumed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(move || {
+            let _ = resumed.send(Wake::Resume);
+        }));
+        let cancelled = wake.clone();
         self.on_cancel(move || {
-            let _ = wake.send(Wake::Cancel);
+            let _ = cancelled.send(Wake::Cancel);
         });
+        if self.is_cancelled() {
+            let _ = wake.send(Wake::Cancel);
+        }
     }
 
     fn on_cancel(&self, wake: impl Fn() + Send + 'static) {

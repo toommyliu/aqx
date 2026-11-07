@@ -262,7 +262,29 @@ impl<'js> Engine<'js> {
 
     fn drive(&mut self, inbox: &mpsc::Receiver<Wake>, cancel: &Cancel) -> rquickjs::Result<()> {
         let mut seen = self.session.snapshot();
+        let mut held = VecDeque::new();
         loop {
+            if cancel.is_cancelled() {
+                return Ok(());
+            }
+            if cancel.is_paused() {
+                match inbox.recv() {
+                    Ok(Wake::Cancel) | Err(_) => return Ok(()),
+                    Ok(Wake::Resume) => {}
+                    Ok(Wake::Update(_, Update::State | Update::Packet(Direction::Out, _))) => {}
+                    Ok(Wake::Update(_, Update::Packet(Direction::In, _)))
+                        if !self.wants_packets() => {}
+                    Ok(Wake::Update(
+                        generation,
+                        Update::Event(Event::Phase(Phase::Closed { reason })),
+                    )) if generation == self.generation => {
+                        self.closed = Some(reason.to_string());
+                        return Ok(());
+                    }
+                    Ok(wake) => held.push_back(wake),
+                }
+                continue;
+            }
             self.run_ready()?;
             if self.over() || cancel.is_cancelled() {
                 return Ok(());
@@ -270,13 +292,20 @@ impl<'js> Engine<'js> {
             let poll = self
                 .predicates_waiting()
                 .then(|| Instant::now() + PREDICATE_POLL);
-            let wake = match self.next_deadline().into_iter().chain(poll).min() {
-                Some(at) => inbox.recv_timeout(at.saturating_duration_since(Instant::now())),
-                None => inbox.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            let wake = match (
+                held.pop_front(),
+                self.next_deadline().into_iter().chain(poll).min(),
+            ) {
+                (Some(wake), _) => Ok(wake),
+                (None, Some(at)) => {
+                    inbox.recv_timeout(at.saturating_duration_since(Instant::now()))
+                }
+                (None, None) => inbox.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
             let mut changed = true;
             match wake {
                 Ok(Wake::Cancel) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
+                Ok(Wake::Resume) => continue,
                 Ok(Wake::Update(generation, _)) if generation != self.generation => continue,
                 Ok(Wake::Update(_, Update::Event(Event::Phase(Phase::Closed { reason })))) => {
                     self.closed = Some(reason.to_string());
@@ -396,16 +425,20 @@ impl<'js> Engine<'js> {
         self.settle_js()
     }
 
-    fn on_packet(&mut self, text: &str) -> rquickjs::Result<()> {
+    fn wants_packets(&self) -> bool {
         let waited = self
             .tasks
             .values()
             .any(|task| matches!(task.wait, Wait::Packet(..)));
-        let watched = self
-            .ctx
-            .userdata::<Host>()
-            .is_some_and(|host| host.watches_packets());
-        if !waited && !watched {
+        waited
+            || self
+                .ctx
+                .userdata::<Host>()
+                .is_some_and(|host| host.watches_packets())
+    }
+
+    fn on_packet(&mut self, text: &str) -> rquickjs::Result<()> {
+        if !self.wants_packets() {
             return Ok(());
         }
         let Some((topic, packet)) = self.parse_packet(text)? else {
