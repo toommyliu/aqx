@@ -325,6 +325,34 @@ fn rest_packets_and_aggro_all_monsters_send_in_the_background() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn aggro_monsters_pulls_the_cell_and_outlasts_aggro_all_monsters() {
+    let (outcome, logs, sent) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        public class AggroCell {
+            public void ScriptMain(IScriptInterface bot) {
+                bot.Map.Jump("r2", "Left");
+                bot.Options.AggroMonsters = true;
+                bot.Options.AggroAllMonsters = true;
+                bot.Options.AggroAllMonsters = false;
+                bot.Sleep(1300);
+                bot.Options.AggroMonsters = false;
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    assert!(
+        sent.iter()
+            .filter(|m| m.ends_with("%aggroMon%5%2%"))
+            .count()
+            >= 2,
+        "{sent:?}"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn resting_sends_once_and_waits_for_full_only_briefly() {
     let map = FARM.replace("\"intHP\":3000", "\"intHP\":100");
     let (outcome, logs, sent) = Fake::start_with(&map, json!([]), json!([]), |_, _| {}).run(REST);

@@ -30,10 +30,15 @@ public sealed class MiraOption : IScriptOption
     public bool AggroAllMonsters
     {
         get => aggroAllMonsters;
-        set { aggroAllMonsters = value; protocol.Call(new SetAggroCall(new(value ? "all" : "off"))); }
+        set { aggroAllMonsters = value; SendAggro(); }
     }
     bool aggroMonsters;
-    public bool AggroMonsters { get => aggroMonsters; set => Set(ref aggroMonsters, value); }
+    public bool AggroMonsters
+    {
+        get => aggroMonsters;
+        set { if (aggroMonsters == value) return; Set(ref aggroMonsters, value); SendAggro(); }
+    }
+    void SendAggro() => protocol.Call(new SetAggroCall(new(aggroAllMonsters ? "all" : aggroMonsters ? "cell" : "off")));
     bool attackWithoutTarget;
     public bool AttackWithoutTarget { get => attackWithoutTarget; set => Set(ref attackWithoutTarget, value); }
     bool autoRelogin;
