@@ -40,6 +40,10 @@ pub fn float<'de, D: Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
     }
 }
 
+pub fn opt_float<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    float(d).map(Some)
+}
+
 pub fn opt_int<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,

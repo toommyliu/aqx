@@ -18,6 +18,20 @@ pub struct Aura {
     pub effects: Vec<StatEffect>,
     #[serde(skip)]
     pub expires: Option<Instant>,
+    #[serde(skip)]
+    pub applied: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HudAura {
+    pub name: String,
+    pub icon: String,
+    pub description: String,
+    pub stacks: u32,
+    pub persist: bool,
+    pub duration: f64,
+    #[serde(skip)]
+    pub expires: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,6 +55,7 @@ pub enum Caster {
 pub struct Auras {
     pub active: Vec<Aura>,
     pub passive: Vec<Aura>,
+    pub hud: Vec<HudAura>,
 }
 
 pub(crate) enum Target {
@@ -52,9 +67,17 @@ impl Auras {
     pub(crate) fn apply(&mut self, change: AuraChange, now: Instant) -> Vec<AuraDelta> {
         let caster = change.caster.as_deref().and_then(caster);
         let mut deltas = Vec::new();
+        let entries = match (change.auras, change.aura) {
+            (Some(auras), _) => auras,
+            (None, Some(aura)) => vec![aura],
+            (None, None) => Vec::new(),
+        };
+        for data in &entries {
+            self.sync_hud(&change.cmd, data, now);
+        }
         match change.cmd.as_str() {
             "aura+" | "aura++" => {
-                for data in change.auras.into_iter().flatten() {
+                for data in entries {
                     let is_new = data.is_new;
                     let aura = data.into_aura(caster, now);
                     if is_new {
@@ -77,21 +100,11 @@ impl Auras {
                 }
             }
             "aura+p" => {
-                self.passive.extend(
-                    change
-                        .auras
-                        .into_iter()
-                        .flatten()
-                        .map(|data| data.into_aura(caster, now)),
-                );
+                self.passive
+                    .extend(entries.into_iter().map(|data| data.into_aura(caster, now)));
             }
             "aura-" | "aura--" => {
-                let names: Vec<String> = match (change.auras, change.aura) {
-                    (Some(auras), _) => auras.into_iter().map(|a| a.name).collect(),
-                    (None, Some(removed)) => vec![removed.name],
-                    (None, None) => Vec::new(),
-                };
-                for name in names {
+                for AuraData { name, .. } in entries {
                     remove_first(&mut self.passive, &name);
                     if remove_first(&mut self.active, &name) {
                         deltas.push(AuraDelta::Removed { name });
@@ -103,17 +116,88 @@ impl Auras {
         deltas
     }
 
+    fn sync_hud(&mut self, cmd: &str, data: &AuraData, now: Instant) {
+        if data.name.is_empty() {
+            return;
+        }
+        let at = self.hud.iter().position(|hud| hud.name == data.name);
+        match (cmd, at) {
+            ("aura=", Some(at)) => {
+                if let Some(stacks) = data.stacks {
+                    self.hud[at].stacks = stacks.max(1);
+                }
+            }
+            ("aura-" | "aura--", Some(at)) => match data.stacks.filter(|stacks| *stacks > 0) {
+                Some(stacks) => {
+                    let hud = &mut self.hud[at];
+                    hud.stacks = stacks;
+                    if let (Some(duration), Some(_)) = (data.duration, hud.expires) {
+                        hud.expires = expiry(duration, now);
+                        hud.duration = hud.duration.max(duration);
+                    }
+                }
+                None => {
+                    self.hud.remove(at);
+                }
+            },
+            ("aura+" | "aura++", at) => {
+                let at = at.unwrap_or_else(|| {
+                    self.hud.push(HudAura {
+                        name: data.name.clone(),
+                        icon: String::new(),
+                        description: String::new(),
+                        stacks: 1,
+                        persist: false,
+                        duration: 0.0,
+                        expires: None,
+                    });
+                    self.hud.len() - 1
+                });
+                let hud = &mut self.hud[at];
+                hud.stacks = data.stacks.unwrap_or(1);
+                if !data.icon.is_empty() {
+                    hud.icon = data.icon.clone();
+                }
+                if !data.description.is_empty() {
+                    hud.description = data.description.clone();
+                }
+                hud.persist = data.persist;
+                let duration = data.duration.unwrap_or(0.0);
+                let timed = data.timing.as_ref().and_then(Value::as_str) == Some("s");
+                if timed && duration > 0.0 {
+                    if data.is_new || hud.duration <= duration {
+                        hud.duration = duration;
+                    }
+                    hud.expires = expiry(duration, now);
+                } else {
+                    hud.duration = 0.0;
+                    hud.expires = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn clear_passives(&mut self) {
         self.passive.clear();
     }
 
     pub(crate) fn clear(&mut self) {
         self.active.clear();
+        self.hud.clear();
     }
 
     pub(crate) fn clear_unless_persistent(&mut self) {
         self.active.retain(|aura| aura.persist);
+        self.hud.retain(|hud| hud.persist);
     }
+}
+
+fn expiry(secs: f64, now: Instant) -> Option<Instant> {
+    Some(secs)
+        .filter(|secs| *secs > 0.0)
+        .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
+        .and_then(|lasts| now.checked_add(lasts))
 }
 
 fn remove_first(auras: &mut Vec<Aura>, name: &str) -> bool {
@@ -154,7 +238,7 @@ pub(crate) struct AuraChange {
     #[serde(default)]
     auras: Option<Vec<AuraData>>,
     #[serde(default)]
-    aura: Option<AuraName>,
+    aura: Option<AuraData>,
 }
 
 #[derive(Deserialize)]
@@ -165,8 +249,10 @@ struct AuraData {
     icon: String,
     #[serde(rename = "desc", default)]
     description: String,
-    #[serde(rename = "dur", default, deserialize_with = "flex::float")]
-    duration: f64,
+    #[serde(rename = "dur", default, deserialize_with = "flex::opt_float")]
+    duration: Option<f64>,
+    #[serde(rename = "t", default)]
+    timing: Option<Value>,
     #[serde(rename = "stk", default, deserialize_with = "flex::opt_int")]
     stacks: Option<u32>,
     #[serde(rename = "val", default)]
@@ -194,16 +280,14 @@ impl AuraChange {
 
 impl AuraData {
     fn into_aura(self, caster: Option<Caster>, now: Instant) -> Aura {
-        let expires = Some(self.duration)
-            .filter(|secs| *secs > 0.0)
-            .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
-            .and_then(|lasts| now.checked_add(lasts));
+        let duration = self.duration.unwrap_or(0.0);
         Aura {
-            expires,
+            expires: expiry(duration, now),
+            applied: now,
             name: self.name,
             icon: self.icon,
             description: self.description,
-            duration: self.duration,
+            duration,
             stacks: self.stacks.unwrap_or(1),
             value: self.value.and_then(|v| flex::float(v).ok()),
             category: self.category,
@@ -212,12 +296,6 @@ impl AuraData {
             effects: self.effects,
         }
     }
-}
-
-#[derive(Deserialize)]
-struct AuraName {
-    #[serde(rename = "nam")]
-    name: String,
 }
 
 #[cfg(test)]
@@ -242,6 +320,7 @@ mod tests {
             t0 + Duration::from_secs(1),
         );
         assert_eq!(auras.active[0].expires, Some(t0 + Duration::from_secs(11)));
+        assert_eq!(auras.active[0].applied, t0);
         assert_eq!(auras.active[0].icon, "burn");
         assert_eq!(auras.active[0].description, "Burn description");
         auras.apply(
@@ -250,5 +329,58 @@ mod tests {
             t0,
         );
         assert_eq!(auras.active[0].expires, None);
+    }
+
+    #[test]
+    fn the_hud_keeps_one_entry_per_name_with_the_latest_stacks() {
+        let change =
+            |json: serde_json::Value| -> AuraChange { serde_json::from_value(json).unwrap() };
+        let stacks = |auras: &Auras| -> Vec<(String, u32)> {
+            auras
+                .hud
+                .iter()
+                .map(|hud| (hud.name.clone(), hud.stacks))
+                .collect()
+        };
+        let t0 = Instant::now();
+        let mut auras = Auras::default();
+        auras.apply(
+            change(serde_json::json!({"cmd": "aura+", "cInf": "p:1",
+                "auras": [{"nam": "Feeding", "dur": 10, "t": "s", "stk": 2, "isNew": true},
+                          {"nam": "Doom", "dur": 0, "isNew": true}]})),
+            t0,
+        );
+        auras.apply(
+            change(serde_json::json!({"cmd": "aura+", "cInf": "p:2",
+                "auras": [{"nam": "Feeding", "dur": 10, "t": "s", "stk": 5, "isNew": true}]})),
+            t0,
+        );
+        assert_eq!(auras.active.len(), 3);
+        assert_eq!(stacks(&auras), [("Feeding".into(), 5), ("Doom".into(), 1)]);
+        auras.apply(
+            change(serde_json::json!({"cmd": "aura+", "cInf": "p:1",
+                "auras": [{"nam": "Feeding", "dur": 10, "t": "s", "stk": 7}]})),
+            t0,
+        );
+        assert_eq!(stacks(&auras)[0], ("Feeding".into(), 7));
+        auras.apply(
+            change(serde_json::json!({"cmd": "aura=", "auras": [{"nam": "Doom", "stk": 9}]})),
+            t0,
+        );
+        assert_eq!(stacks(&auras)[1], ("Doom".into(), 9));
+        auras.apply(
+            change(
+                serde_json::json!({"cmd": "aura-", "aura": {"nam": "Feeding", "stk": 3, "dur": 4}}),
+            ),
+            t0 + Duration::from_secs(1),
+        );
+        assert_eq!(stacks(&auras), [("Feeding".into(), 3), ("Doom".into(), 9)]);
+        assert_eq!(auras.hud[0].expires, Some(t0 + Duration::from_secs(5)));
+        assert_eq!(auras.hud[0].duration, 10.0);
+        auras.apply(
+            change(serde_json::json!({"cmd": "aura-", "aura": {"nam": "Feeding"}})),
+            t0,
+        );
+        assert_eq!(stacks(&auras), [("Doom".into(), 9)]);
     }
 }

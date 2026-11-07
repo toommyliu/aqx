@@ -152,8 +152,9 @@ public sealed record FactionsSnapshot(ImmutableList<FactionSnapshot> Items)
     public List<Faction> ScriptItems { get; } = Items.Select(f => new Faction { ID = (int)f.Id, Name = f.Name, Rank = f.Rank, TotalRep = f.Rep, Rep = f.RankProgress, RequiredRep = f.RankProgressMax ?? 0 }).ToList();
 }
 public sealed record FactionSnapshot(long Id, string Name, int Rep, int Rank, int RankProgress, int? RankProgressMax);
-public sealed record AuraState(string Name, double Duration, int Stacks, double? Value, string? Category, bool Persist, AuraCaster? Caster, ImmutableArray<StatEffectSnapshot> Effects, ulong? Expires, string Icon = "", string Description = "");
-public sealed record AurasSnapshot(ImmutableArray<AuraState> Active, ImmutableArray<AuraState> Passive);
+public sealed record AuraState(string Name, double Duration, int Stacks, double? Value, string? Category, bool Persist, AuraCaster? Caster, ImmutableArray<StatEffectSnapshot> Effects, ulong? Expires, ulong Applied, string Icon = "", string Description = "");
+public sealed record HudAuraState(string Name, string Icon, string Description, int Stacks, bool Persist, double Duration, ulong? Expires);
+public sealed record AurasSnapshot(ImmutableArray<AuraState> Active, ImmutableArray<HudAuraState> Hud);
 public sealed record StatEffectSnapshot(string Stat, string Op, double Value);
 public sealed record EnhancementSnapshot(long Id, int Level, int Pattern, int ProcId, int Plus);
 public sealed record QuestProgressSnapshot(ImmutableArray<string?> Strings, ImmutableDictionary<string, long> Achievements);

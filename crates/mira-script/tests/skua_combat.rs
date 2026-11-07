@@ -47,6 +47,7 @@ public class AuraTime
         var seal = bot.Self.GetAura("Righteous Seal");
         bot.Log($"seal stacks {bot.Self.GetAuraStacks("Righteous Seal")}, rule stacks {bot.Self.GetAuraRuleStacks("Righteous Seal")}");
         bot.Log($"seal x{seal?.Value} with {(seal?.RemainingTime is > 60 and <= 120 ? "minutes" : $"{seal?.RemainingTime} s")} left");
+        bot.Log($"doom stacks {bot.Self.GetAuraStacks("Doom")}, rule stacks {bot.Self.GetAuraRuleStacks("Doom")}, active {bot.Self.HasActiveAura("Doom")}, {bot.Self.Auras.Count} auras, {bot.Self.Snapshots.Count} snapshots");
     }
 }
 "#;
@@ -208,15 +209,23 @@ fn a_monster_in_combat_reads_as_state_2() {
 #[test]
 #[ignore = "run with npm run skua:test"]
 fn an_aura_reports_the_time_it_has_left() {
-    let source = AURA_TIME.replace("var seal", "bot.Map.Jump(\"r2\", \"Left\"); bot.Wait.ForTrue(() => bot.Self.HasActiveAura(\"Righteous Seal\"), 20); var seal");
+    let source = AURA_TIME.replace("var seal", "bot.Map.Jump(\"r2\", \"Left\"); bot.Wait.ForTrue(() => bot.Self.GetAuraStacks(\"Doom\") == 8, 20); var seal");
     let (outcome, logs, _) = Fake::start(|message, wire| {
         if message.contains("%moveToCell%") {
-            wire.object(r#"{"cmd":"aura+","auras":[{"nam":"Righteous Seal","dur":120,"val":7,"stk":2,"isNew":true}],"tInf":"p:1001"}"#);
+            wire.object(r#"{"cmd":"aura+","auras":[{"nam":"Righteous Seal","dur":120,"val":7,"stk":2,"isNew":true},{"nam":"Doom","dur":0,"stk":9,"isNew":true}],"tInf":"p:1001"}"#);
+            wire.object(r#"{"cmd":"aura+p","auras":[{"nam":"Righteous Seal","val":50}],"tInf":"p:1001"}"#);
+            wire.object(r#"{"cmd":"aura+","auras":[{"nam":"Righteous Seal","dur":120,"val":7,"stk":5}],"tInf":"p:1001"}"#);
+            wire.object(r#"{"cmd":"aura=","auras":[{"nam":"Righteous Seal","stk":3}],"tInf":"p:1001"}"#);
+            wire.object(r#"{"cmd":"aura-","aura":{"nam":"Doom","stk":8},"tInf":"p:1001"}"#);
         }
     }).run(&source);
     assert_finished(outcome, &logs);
     assert!(
-        logs.contains(&"seal stacks 2, rule stacks 7".into()),
+        logs.contains(&"seal stacks 3, rule stacks 7".into()),
+        "{logs:?}"
+    );
+    assert!(
+        logs.contains(&"doom stacks 8, rule stacks 8, active False, 1 auras, 2 snapshots".into()),
         "{logs:?}"
     );
     assert!(
