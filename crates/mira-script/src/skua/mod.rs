@@ -23,7 +23,7 @@ pub fn worker() -> Result<PathBuf, LoadError> {
 }
 
 fn find_worker(building: &mut dyn FnMut()) -> Result<PathBuf, LoadError> {
-    if let Some(path) = std::env::var_os("MIRA_SKUA") {
+    if let Some(path) = std::env::var_os("MIRA_SKUA_WORKER") {
         return Ok(path.into());
     }
     if let Ok(exe) = std::env::current_exe() {
@@ -55,7 +55,13 @@ fn development_worker(building: &mut dyn FnMut()) -> Result<PathBuf, LoadError> 
         .arg("-o")
         .arg(artifacts.join("publish"))
         .output()
-        .map_err(|e| LoadError(format!("couldn't run dotnet to build the Skua worker: {e}")))?;
+        .map_err(|e| {
+            LoadError(if e.kind() == io::ErrorKind::NotFound {
+                "couldn't find dotnet to build the Skua worker. Install the .NET SDK, or set MIRA_SKUA_WORKER to a built mira-skua".into()
+            } else {
+                format!("couldn't run dotnet to build the Skua worker: {e}")
+            })
+        })?;
     if !published.status.success() {
         return Err(LoadError(format!(
             "couldn't build the Skua worker:\n{}{}",
