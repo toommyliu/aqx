@@ -52,7 +52,12 @@ public sealed class MiraMap(Protocol protocol, State state) : IScriptMap
     {
         var bot = (MiraBot)IScriptInterface.Instance;
         bot.ThrowIfStopped();
-        protocol.Call(new JumpCall(cell, pad, clientOnly));
+        if (autoCorrect && state.Room is { CellsLoaded: false })
+        {
+            try { protocol.Call(new LoadCellsCall()); }
+            catch (InvalidOperationException) { }
+        }
+        protocol.Call(new JumpCall(cell, pad, clientOnly, autoCorrect));
         bot.Sleep(bot.Options.ActionDelay);
         bot.Wait.ForCellChange(cell);
     }

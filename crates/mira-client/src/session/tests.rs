@@ -4797,6 +4797,56 @@ fn the_player_stands_on_the_pad_after_a_join_or_a_jump() {
 }
 
 #[test]
+fn a_corrected_jump_swaps_a_pad_the_cell_lacks_for_left_or_its_first_pad() {
+    let (http, base) = map_http();
+    let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "arena-1"));
+        join_map(&mut peer, 43, "arena-1", "arena.swf");
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(9)]));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r3", "Top"));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r3", "Right"));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r3", "Bottom"));
+        peer.expect(&packet::move_to_cell(AreaId(43), "Blank", "Bottom"));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("arena-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let loading = session.load_cells();
+    reply_map_with(
+        &mut stream,
+        &[
+            MapCell {
+                name: "r2",
+                pads: &[("Right", 788, 350), ("Left", 190, 340)],
+                doors: &[],
+            },
+            MapCell {
+                name: "r3",
+                pads: &[("Top", 480, 300), ("Right", 788, 350)],
+                doors: &[],
+            },
+            MapCell::named("Blank"),
+        ],
+    );
+    loading.wait().unwrap();
+    let corrected = Jump {
+        client_only: false,
+        correct_pad: true,
+    };
+    session.jump("r2", "Bottom", corrected).wait().unwrap();
+    session.jump("r3", "Bottom", corrected).wait().unwrap();
+    session.jump("r3", "Right", corrected).wait().unwrap();
+    session.move_to_cell("r3", "Bottom").wait().unwrap();
+    session.jump("Blank", "Bottom", corrected).wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn map_cells_wait_for_the_join_to_finish() {
     let (http, base) = map_http();
     let (joining, continue_join) = mpsc::channel();
@@ -4996,7 +5046,17 @@ fn local_cell_movement_updates_state_without_sending_a_packet() {
     });
     let session = &harness.session;
     session.ready().wait().unwrap();
-    session.move_to_cell_local("r1", "Right").wait().unwrap();
+    session
+        .jump(
+            "r1",
+            "Right",
+            Jump {
+                client_only: true,
+                correct_pad: false,
+            },
+        )
+        .wait()
+        .unwrap();
     let world = session.snapshot();
     let room = world.room.as_ref().unwrap();
     assert_eq!((&*room.cell, &*room.pad), ("r1", "Right"));

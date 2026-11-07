@@ -399,6 +399,12 @@ fn latest(slot: &Slot) -> Arc<World> {
     Arc::clone(&slot.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Jump {
+    pub client_only: bool,
+    pub correct_pad: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Aggro {
     All,
@@ -452,7 +458,7 @@ enum Action {
     MoveToCell {
         cell: String,
         pad: String,
-        client_only: bool,
+        jump: Jump,
     },
     Attack {
         target: MonMapId,
@@ -743,18 +749,14 @@ impl Handle {
     }
 
     pub fn move_to_cell(&self, cell: &str, pad: &str) -> Pending {
-        self.act(Action::MoveToCell {
-            cell: cell.to_owned(),
-            pad: pad.to_owned(),
-            client_only: false,
-        })
+        self.jump(cell, pad, Jump::default())
     }
 
-    pub fn move_to_cell_local(&self, cell: &str, pad: &str) -> Pending {
+    pub fn jump(&self, cell: &str, pad: &str, jump: Jump) -> Pending {
         self.act(Action::MoveToCell {
             cell: cell.to_owned(),
             pad: pad.to_owned(),
-            client_only: true,
+            jump,
         })
     }
 
@@ -1454,11 +1456,13 @@ impl Session {
             Action::AbandonQuest(id) => self.ensure_ready().map(|()| {
                 self.accepted_quests.remove(&id);
             }),
-            Action::MoveToCell {
-                cell,
-                pad,
-                client_only,
-            } => self.move_to_cell_with(&cell, &pad, client_only),
+            Action::MoveToCell { cell, pad, jump } => {
+                let pad = match self.loaded_map() {
+                    Some(map) if jump.correct_pad => map.pad_in(&cell, &pad).to_owned(),
+                    _ => pad,
+                };
+                self.move_to_cell_with(&cell, &pad, jump.client_only)
+            }
             Action::UseItem(item) => self.use_item(item),
             Action::Send(text) => self.ensure_ready().map(|()| self.send(&text)),
             Action::Walk { x, y } => {

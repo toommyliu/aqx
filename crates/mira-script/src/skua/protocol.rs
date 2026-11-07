@@ -38,6 +38,8 @@ pub enum Call {
         pad: String,
         #[serde(default)]
         client_only: bool,
+        #[serde(default)]
+        auto_correct: bool,
     },
     Walk {
         x: i32,

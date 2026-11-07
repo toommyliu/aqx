@@ -35,6 +35,20 @@ impl MapFile {
         self.cells.iter().find(|cell| cell.name == name)
     }
 
+    pub(crate) fn pad_in<'a>(&'a self, cell: &str, pad: &'a str) -> &'a str {
+        let Some(pads) = self.cell(cell).map(|cell| &cell.pads) else {
+            return pad;
+        };
+        if pads.is_empty() || pads.iter().any(|p| p.name == pad) {
+            return pad;
+        }
+        pads.iter()
+            .find(|p| p.name == "Left")
+            .unwrap_or(&pads[0])
+            .name
+            .as_str()
+    }
+
     pub(crate) fn arrival(&self, cell: &str, pad: &str) -> (i32, i32) {
         self.cell(cell)
             .and_then(|cell| cell.pads.iter().find(|p| p.name == pad))
