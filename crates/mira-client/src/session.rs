@@ -795,7 +795,11 @@ impl Handle {
     }
 
     pub fn accept_quest(&self, id: QuestId) -> Pending {
-        self.act(Action::Quest(QuestAction::Accept(id)))
+        self.act(Action::Quest(QuestAction::Accept { id, checked: true }))
+    }
+
+    pub fn accept_quest_unchecked(&self, id: QuestId) -> Pending {
+        self.act(Action::Quest(QuestAction::Accept { id, checked: false }))
     }
 
     pub fn load_shop(&self, id: ShopId) -> Pending {
@@ -875,14 +879,20 @@ impl Handle {
     }
 
     pub fn complete_quest(&self, id: QuestId, reward: Option<ItemId>, times: u32) -> Pending {
-        self.complete_quest_special(id, reward, times, false)
+        self.act(Action::Quest(QuestAction::TurnIn {
+            id,
+            reward,
+            times: i64::from(times),
+            special: false,
+            checked: true,
+        }))
     }
 
-    pub fn complete_quest_special(
+    pub fn complete_quest_unchecked(
         &self,
         id: QuestId,
         reward: Option<ItemId>,
-        times: u32,
+        times: i64,
         special: bool,
     ) -> Pending {
         self.act(Action::Quest(QuestAction::TurnIn {
@@ -890,6 +900,7 @@ impl Handle {
             reward,
             times,
             special,
+            checked: false,
         }))
     }
 

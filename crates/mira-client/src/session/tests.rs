@@ -2355,7 +2355,7 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
     assert!(session.snapshot().accepted_quests.contains(&QuestId(30)));
     session.accept_quest(QuestId(30)).wait().unwrap();
     session
-        .complete_quest_special(QuestId(30), Some(ItemId(600)), 2, true)
+        .complete_quest_unchecked(QuestId(30), Some(ItemId(600)), 2, true)
         .wait()
         .unwrap();
     let world = session.snapshot();

@@ -306,6 +306,8 @@ fn core_bots_reads_item_metadata_and_requires_an_explicit_choice_without_a_rewar
                 );
             } else if msg.starts_with("%xt%zm%acceptQuest%5%13%") {
                 wire.object(r#"{"cmd":"acceptQuest","bSuccess":1,"QuestID":13,"msg":"success"}"#);
+            } else if msg.starts_with("%xt%zm%tryQuestComplete%5%13%-1%") {
+                wire.object(r#"{"cmd":"ccqr","bSuccess":0,"QuestID":13,"sName":"Pick One","msg":"Missing Turn In Item"}"#);
             } else if msg.starts_with("%xt%zm%tryQuestComplete%5%13%") {
                 wire.object(r#"{"cmd":"ccqr","bSuccess":1,"QuestID":13,"sName":"Pick One","rewardObj":{"intGold":0}}"#);
                 wire.object(r#"{"cmd":"addItems","items":{"1027":{"ItemID":1027,"sName":"Twilly Twig","iQty":1,"iStk":1,"CharItemID":10}}}"#);
@@ -318,6 +320,11 @@ fn core_bots_reads_item_metadata_and_requires_an_explicit_choice_without_a_rewar
     assert!(
         logged.iter().any(|l| l.ends_with("sword 77 pattern 2")),
         "{logged:#?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|m| m.starts_with("%xt%zm%tryQuestComplete%5%13%-1%false%1%wvz%")),
+        "{sent:#?}"
     );
     assert!(
         sent.iter()
@@ -577,7 +584,7 @@ public class Pickups {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
-fn a_class_quest_is_unavailable_until_the_class_has_the_points() {
+fn a_class_quest_is_unavailable_until_the_class_has_the_points_and_its_accept_is_sent_once() {
     let fake = Fake::start_with(
         FARM,
         json!([{"ItemID":15652,"CharItemID":78,"sName":"Rogue","iQty":900,"iStk":1,"sType":"Class","sES":"ar","bEquip":true}]),
@@ -591,6 +598,8 @@ fn a_class_quest_is_unavailable_until_the_class_has_the_points() {
                     "18":{"QuestID":18,"sName":"Rank Two","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,"iClass":15652,"iReqCP":900,
                           "turnin":[],"oItems":{},"oRewards":{},"reward":[]}}}"#,
                 );
+            } else if msg.starts_with("%xt%zm%acceptQuest%5%17%") {
+                wire.object(r#"{"cmd":"acceptQuest","bSuccess":0,"QuestID":17,"msg":"Requirements not met"}"#);
             }
         },
     );
@@ -608,11 +617,14 @@ fn a_class_quest_is_unavailable_until_the_class_has_the_points() {
         "{logged:#?}"
     );
     assert!(
-        logged.contains(&"accepted the locked one False".to_string()),
+        logged.contains(&"accepted the locked one True".to_string()),
         "{logged:#?}"
     );
-    assert!(
-        !sent.iter().any(|m| m.contains("%acceptQuest%5%17%")),
+    assert_eq!(
+        sent.iter()
+            .filter(|m| m.contains("%acceptQuest%5%17%"))
+            .count(),
+        1,
         "{sent:#?}"
     );
 }
@@ -640,6 +652,7 @@ public class Reaccept {
         bot.Log($"accepted again {bot.Quests.IsInProgress(19)}");
         bot.Lite.ReacceptQuest = false;
         bot.Log($"completed {bot.Quests.Complete(19)} absent {bot.Quests.Complete(19)}");
+        bot.Quests.Complete(19, 1027);
     }
 }
 "#);
@@ -647,6 +660,11 @@ public class Reaccept {
     assert!(
         sent.iter()
             .any(|m| m.contains("%tryQuestComplete%5%19%-1%true%1%wvz%")),
+        "{sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|m| m.contains("%tryQuestComplete%5%19%1027%false%1%wvz%")),
         "{sent:?}"
     );
     assert!(logs.contains(&"accepted again True".into()), "{logs:?}");

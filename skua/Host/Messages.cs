@@ -58,7 +58,7 @@ public sealed record SetSkillLastUseCall(string Slot, long At) : Request;
 public sealed record UseSkillCall(string Slot, SkillTarget? Target) : Request;
 public sealed record LoadQuestsCall(long[] Ids) : Request;
 public sealed record AcceptCall(long Quest) : Request;
-public sealed record CompleteCall(long Quest, long? Reward, uint Times, bool Special = false) : Request;
+public sealed record CompleteCall(long Quest, long? Reward, int Times, bool Special = false) : Request;
 public sealed record AbandonCall(long Quest) : Request;
 public sealed record PickupCall(long Item) : Request;
 public sealed record GetMapItemCall(long Item) : Request;
@@ -127,6 +127,10 @@ public enum ErrorKind
     Http, Closed, Stopped, Cancelled
 }
 public sealed record Error(ErrorKind Kind, string Message);
+public sealed class CallFailedException(ErrorKind kind, string message) : InvalidOperationException($"{kind}: {message}")
+{
+    public ErrorKind Kind => kind;
+}
 public sealed record SuccessReply(long Reply, JsonElement Ok);
 public sealed record FailureReply(long Reply, Error Error);
 public sealed record ReplyMessage(long Reply, JsonElement? Ok, Error? Error);

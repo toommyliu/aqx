@@ -83,7 +83,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         ("callGameFunction", ["world.acceptQuest", int quest]) => IScriptInterface.Instance.Quests.Accept(quest),
         ("callGameFunction", ["world.isQuestInProgress", int quest]) => IScriptInterface.Instance.Quests.IsInProgress(quest),
         ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool special]) => IScriptInterface.Instance.Quests.Complete(quest, reward, special),
-        ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool special, int times]) => Act(new CompleteCall(quest, reward < 0 ? null : reward, (uint)times, special)),
+        ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool special, int times]) => Act(new CompleteCall(quest, reward < 0 ? null : reward, times, special)),
         ("callGameFunction", ["loaderInfo.applicationDomain.hasDefinition", "InvCat"]) => true,
         ("callGameFunction", ["loaderInfo.applicationDomain.getDefinition", "InvCat"]) => new { MISC_SLOTS = state.Me?.BagSlots ?? 0, MISC_TYPES = new[] { "Item", "Note", "Quest Item", "Resource" } },
         ("callGameFunction", ["world.myAvatar.getCPByID", int id]) => state.Inventory.ById.GetValueOrDefault(id)?.Qty ?? -1,
