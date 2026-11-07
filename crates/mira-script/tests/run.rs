@@ -1769,6 +1769,57 @@ fn script_args_are_read_from_the_type_and_parsed_from_text() {
             ("weights", false)
         ]
     );
+    let defaults: Vec<(&str, Option<&str>)> = script
+        .args()
+        .iter()
+        .map(|arg| (arg.name.as_str(), arg.default.as_deref()))
+        .collect();
+    assert_eq!(
+        defaults,
+        [
+            ("monster", None),
+            ("count", Some("3")),
+            ("loud", Some("false")),
+            ("names", None),
+            ("weights", None)
+        ]
+    );
+    assert_eq!(
+        mira_script::script_args(&path).unwrap(),
+        script.args(),
+        "the args read without loading the script"
+    );
+    let defaults_in = |source: &str| -> Vec<Option<String>> {
+        let path = dir.file("defaults.ts", source);
+        mira_script::script_args(&path)
+            .unwrap()
+            .into_iter()
+            .map(|arg| arg.default)
+            .collect()
+    };
+    assert_eq!(
+        defaults_in(
+            r#"import { script } from "mira";
+            export default function* () {
+              script.args<{ names?: string[]; wait?: number; class?: string }>({ names: ["a", "b"], wait: -1.5, class: CLASS });
+            }"#
+        ),
+        [
+            Some(r#"["a","b"]"#.to_owned()),
+            Some("-1.5".to_owned()),
+            None
+        ]
+    );
+    assert_eq!(
+        defaults_in(
+            r#"import { script } from "mira";
+            export default function* () {
+              script.args<{ wait?: number }>({ wait: 5, ...BASE });
+            }"#
+        ),
+        [None],
+        "a spread can replace any default"
+    );
     let parse = |given: &[(&str, &str)]| {
         let given: Vec<(String, String)> = given
             .iter()

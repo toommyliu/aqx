@@ -2,9 +2,9 @@ use serde_json::{Map, Value};
 use swc_common::sync::Lrc;
 use swc_common::{FileName, SourceMap};
 use swc_ecma_ast::{
-    Callee, Expr, ImportSpecifier, MemberProp, Module, ModuleDecl, ModuleExportName, ModuleItem,
-    TsEntityName, TsKeywordTypeKind, TsType, TsTypeElement, TsTypeOperatorOp,
-    TsUnionOrIntersectionType,
+    CallExpr, Callee, Expr, ImportSpecifier, Lit, MemberProp, Module, ModuleDecl, ModuleExportName,
+    ModuleItem, ObjectLit, Prop, PropName, PropOrSpread, TsEntityName, TsKeywordTypeKind, TsType,
+    TsTypeElement, TsTypeOperatorOp, TsUnionOrIntersectionType, UnaryOp,
 };
 use swc_ecma_parser::{Parser, StringInput, Syntax, TsSyntax};
 use swc_ecma_visit::{Visit, VisitWith};
@@ -14,6 +14,7 @@ pub struct Arg {
     pub name: String,
     pub kind: ArgKind,
     pub optional: bool,
+    pub default: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,13 +194,92 @@ impl Visit for Finder {
             return;
         };
         self.found = Some(match params.params.first().map(|t| &**t) {
-            Some(TsType::TsTypeLit(literal)) => literal.members.iter().map(arg_of).collect(),
+            Some(TsType::TsTypeLit(literal)) => {
+                let defaults = defaults(call);
+                literal
+                    .members
+                    .iter()
+                    .map(|member| arg_of(member, &defaults))
+                    .collect()
+            }
             _ => Err("script.args needs its type written inline, as script.args<{ ... }>()".into()),
         });
     }
 }
 
-fn arg_of(member: &TsTypeElement) -> Result<Arg, String> {
+fn defaults(call: &CallExpr) -> Map<String, Value> {
+    let given = call.args.first().filter(|given| given.spread.is_none());
+    let Some(Expr::Object(object)) = given.map(|given| &*given.expr) else {
+        return Map::new();
+    };
+    entries(object)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(name, value)| Some((name, value?)))
+        .collect()
+}
+
+fn entries(object: &ObjectLit) -> Option<Vec<(String, Option<Value>)>> {
+    object
+        .props
+        .iter()
+        .map(|prop| {
+            let PropOrSpread::Prop(prop) = prop else {
+                return None;
+            };
+            match &**prop {
+                Prop::Shorthand(ident) => Some((ident.sym.to_string(), None)),
+                Prop::KeyValue(pair) => {
+                    let name = match &pair.key {
+                        PropName::Ident(ident) => ident.sym.to_string(),
+                        PropName::Str(text) => text.value.to_string_lossy().into_owned(),
+                        _ => return None,
+                    };
+                    Some((name, literal(&pair.value)))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn literal(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::Paren(inner) => literal(&inner.expr),
+        Expr::Lit(Lit::Str(text)) => Some(Value::String(text.value.to_string_lossy().into_owned())),
+        Expr::Lit(Lit::Bool(flag)) => Some(Value::Bool(flag.value)),
+        Expr::Lit(Lit::Num(n)) => number(n.value),
+        Expr::Unary(negated) if negated.op == UnaryOp::Minus => match &*negated.arg {
+            Expr::Lit(Lit::Num(n)) => number(-n.value),
+            _ => None,
+        },
+        Expr::Array(array) => array
+            .elems
+            .iter()
+            .map(|item| {
+                let item = item.as_ref().filter(|item| item.spread.is_none())?;
+                literal(&item.expr)
+            })
+            .collect::<Option<Vec<Value>>>()
+            .map(Value::Array),
+        Expr::Object(object) => entries(object)?
+            .into_iter()
+            .map(|(name, value)| Some((name, value?)))
+            .collect::<Option<Map<String, Value>>>()
+            .map(Value::Object),
+        _ => None,
+    }
+}
+
+fn number(n: f64) -> Option<Value> {
+    const EXACT: f64 = 9_007_199_254_740_992.0;
+    if n.fract() == 0.0 && n.abs() < EXACT {
+        return Some(Value::from(n as i64));
+    }
+    serde_json::Number::from_f64(n).map(Value::Number)
+}
+
+fn arg_of(member: &TsTypeElement, defaults: &Map<String, Value>) -> Result<Arg, String> {
     let TsTypeElement::TsPropertySignature(property) = member else {
         return Err("script.args's type can only list properties".into());
     };
@@ -217,9 +297,13 @@ fn arg_of(member: &TsTypeElement) -> Result<Arg, String> {
     let ty = property.type_ann.as_ref().ok_or_else(unreadable)?;
     let (kind, maybe_undefined) = kind_of(&ty.type_ann).ok_or_else(unreadable)?;
     Ok(Arg {
-        name,
         kind,
         optional: property.optional || maybe_undefined,
+        default: defaults.get(&name).map(|value| match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        }),
+        name,
     })
 }
 

@@ -168,6 +168,12 @@ impl Cancel {
     }
 }
 
+pub fn script_args(path: &Path) -> Result<Vec<Arg>, String> {
+    let name = path.to_string_lossy();
+    let source = std::fs::read_to_string(path).map_err(|e| format!("{name}: {e}"))?;
+    args::schema(&name, &source)
+}
+
 pub struct Script {
     context: Context,
     cancel: Cancel,
