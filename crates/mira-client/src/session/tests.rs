@@ -2037,6 +2037,58 @@ fn a_refused_skill_reports_it_and_keeps_its_old_cooldown() {
 }
 
 #[test]
+fn a_fired_skill_answers_once_sent_and_lets_queued_actions_pass_while_it_waits() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.expect("%xt%zm%afk%1%false%");
+        let moved = peer.expect_at(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
+        let shield = peer.expect_at(&gar(0, "a2", &[Aim::Player(EntityId(7))]));
+        assert!(shield - moved >= Duration::from_millis(700) - SLACK);
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    session.send_now("%xt%zm%afk%1%false%").wait().unwrap();
+    let shield = session.fire_skill("a2", None);
+    assert!(matches!(
+        session.fire_skill("a1", Some(ONE)).wait(),
+        Err(ActionError::Unusable(why)) if why == "another skill is waiting to fire"
+    ));
+    session.move_to_cell("Enter", "Spawn").wait().unwrap();
+    shield.wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn direct_requests_answer_while_a_queued_action_waits_on_the_server() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::get_quests(AreaId(42), &[QuestId(30)]));
+        peer.expect("%xt%zm%afk%1%false%");
+        peer.send(&json_message(
+            json!({"cmd": "getQuests", "quests": {"30": {"QuestID": 30, "sName": "Potion Run"}}}),
+        ));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let loading = session.load_quests(&[QuestId(30)]);
+    session.inject(&json_message(
+        json!({"cmd": "balance", "intGold": 10, "intCoins": 50}),
+    ));
+    session.sync().wait().unwrap();
+    assert_eq!(session.snapshot().me.as_ref().unwrap().gold, 10);
+    session.send_now("%xt%zm%afk%1%false%").wait().unwrap();
+    loading.wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn moves_where_the_respawn_says_and_aggroes_monsters_that_come_back() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);

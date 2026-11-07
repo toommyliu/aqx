@@ -593,6 +593,49 @@ fn counter_handler_cancels_restores_and_resets_on_death_and_stop() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_skill_the_server_never_answers_returns_once_sent_and_holds_up_no_other_call() {
+    let (outcome, logs, sent) = Fake::start(|_, _| {}).run(
+        r#"
+using System.Diagnostics;
+using System.Threading.Tasks;
+using Skua.Core.Interfaces;
+public class Unanswered {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Options.ActionDelay = 0;
+        bot.Map.Jump("r2", "Left");
+        bot.Send.Packet("%xt%zm%afk%1%false%");
+        Stopwatch clock = Stopwatch.StartNew();
+        Task<bool> cast = Task.Run(() => bot.Skills.UseSkill(2));
+        bot.Sleep(50);
+        bot.Map.Jump("r2", "Left");
+        bot.Log($"jump {(clock.ElapsedMilliseconds < 500 ? "went first" : "waited")}");
+        bool used = cast.Result;
+        bot.Log($"skill used {used} {(clock.ElapsedMilliseconds < 2000 ? "once sent" : "after the timeout")}");
+    }
+}
+"#,
+    );
+    assert_finished(outcome, &logs);
+    for expected in ["jump went first", "skill used True once sent"] {
+        assert!(logs.contains(&expected.into()), "{logs:?}");
+    }
+    let jumps: Vec<usize> = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.contains("%moveToCell%5%r2%Left%"))
+        .map(|(i, _)| i)
+        .collect();
+    let gar = sent
+        .iter()
+        .position(|m| m.contains("%gar%") && m.contains("a2>"));
+    assert!(
+        gar.is_some_and(|gar| jumps.len() == 2 && jumps[1] < gar),
+        "{sent:?}"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn skill_readiness_checks_targets_and_reports_real_cooldown_deadlines() {
     let (outcome, logs, _) = Fake::start(|m,w| {
         if m.contains("%gar%") {
