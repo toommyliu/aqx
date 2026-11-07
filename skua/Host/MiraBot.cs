@@ -88,10 +88,5 @@ public sealed class MiraBot(Protocol protocol, State state, string path) : IScri
     public CancellationTokenSource ScriptCts => stop;
     public void RequestStop() { Combat.StopAttacking = false; stop.Cancel(); }
     public void ThrowIfStopped() { if (!cleanup.Value) stop.Token.ThrowIfCancellationRequested(); }
-    public void RaiseStopping(Exception? error)
-    {
-        if (!stoppingHandlers) return;
-        var handlers = Task.Run(() => { cleanup.Value = true; ((MiraEvent)Events).RaiseStopping(error); });
-        try { handlers.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException e) { Console.Error.WriteLine(e.InnerException?.Message); }
-    }
+    public Task RaiseStopping(Exception? error) => stoppingHandlers ? Task.Run(() => { cleanup.Value = true; ((MiraEvent)Events).RaiseStopping(error); }) : Task.CompletedTask;
 }

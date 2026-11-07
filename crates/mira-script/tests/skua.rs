@@ -54,7 +54,7 @@ public class Stops
     {
         bot.Events.ScriptStopping += e =>
         {
-            bot.Sleep(250);
+            bot.Sleep(3000);
             bot.Log($"stopping handler finished, crashed {e is not null}");
             return true;
         };
@@ -142,6 +142,30 @@ fn stopping_from_the_script_unwinds_it_and_lets_its_stopping_handlers_finish() {
     assert!(
         logs.contains(&"stopping handler finished, crashed False".into()),
         "{logs:?}"
+    );
+}
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn a_stopping_handler_that_never_returns_cannot_hold_the_run_open() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class Stuck {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Events.ScriptStopping += _ => { Thread.Sleep(Timeout.Infinite); return true; };
+        bot.Stop();
+    }
+}
+"#;
+    let started = std::time::Instant::now();
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(source);
+    assert!(
+        matches!(outcome, Outcome::Stopped(_)),
+        "{outcome:?} {logs:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
     );
 }
 #[test]
@@ -286,7 +310,8 @@ public class Cancelled {
     public void ScriptMain(IScriptInterface bot) {
         bot.Events.ScriptStopping += error => { bot.Map.Jump("r2", "Left"); bot.Log("cleanup finished"); return true; };
         bot.Log("ready to stop");
-        bot.Sleep(20000);
+        try { bot.Sleep(20000); }
+        finally { Thread.Sleep(1500); bot.Log("script unwound"); }
         bot.Log("still running");
     }
 }
@@ -298,7 +323,14 @@ public class Cancelled {
             }
         });
     assert_eq!(outcome, Outcome::Cancelled, "{logs:?}");
-    assert!(logs.contains(&"cleanup finished".into()), "{logs:?}");
+    let position = |line: &str| logs.iter().position(|s| s == line);
+    assert!(
+        matches!(
+            (position("script unwound"), position("cleanup finished")),
+            (Some(unwound), Some(cleanup)) if unwound < cleanup
+        ),
+        "{logs:?}"
+    );
     assert!(!logs.contains(&"still running".into()), "{logs:?}");
     assert!(
         sent.iter().any(|m| m.contains("%moveToCell%5%r2%Left%")),

@@ -52,6 +52,7 @@ public static class Runner
                 }) { IsBackground = true, Name = "Script thread" };
                 bool recover = false;
                 int delay = 0;
+                Task stopping = Task.CompletedTask;
                 using (MiraBackground background = new(bot, protocol))
                 {
                     background.Start();
@@ -59,8 +60,9 @@ public static class Runner
                     while (!script.Join(20) && !bot.ShouldExit) { }
                     recover = bot.Disconnected && bot.Options.AutoRelogin && !protocol.Stopping.IsCancellationRequested;
                     delay = bot.Options.SafeRelogin || bot.Kicked ? 70000 : bot.Options.ReloginTryDelay;
-                    if (bot.ShouldExit || error is not null) bot.RaiseStopping(error is OperationCanceledException ? null : error);
-                    if (bot.ShouldExit) { script.Join(TimeSpan.FromSeconds(5)); if (script.IsAlive) script.Join(TimeSpan.FromSeconds(3)); }
+                    if (bot.ShouldExit) script.Join(TimeSpan.FromSeconds(8));
+                    if (!script.IsAlive && (bot.ShouldExit || error is not null)) stopping = bot.RaiseStopping(error is OperationCanceledException ? null : error);
+                    if (recover) Await(stopping);
                 }
                 if (recover && !script.IsAlive && bot.PrepareRestart())
                 {
@@ -77,11 +79,16 @@ public static class Runner
                 }
                 context.Unload();
                 protocol.Finish(error is not null && error is not OperationCanceledException ? EndOutcome.Failed : bot.ShouldExit ? EndOutcome.Stopped : EndOutcome.Finished, error is OperationCanceledException ? null : error?.ToString());
+                Await(stopping);
                 return 0;
             }
         }
         catch (OperationCanceledException) { return 0; }
         catch (Exception e) { protocol.Finish(EndOutcome.Failed, e.ToString()); return 1; }
+    }
+    static void Await(Task handlers)
+    {
+        try { handlers.Wait(); } catch (AggregateException e) { Console.Error.WriteLine(e.InnerException?.Message); }
     }
     sealed class Services(MiraBot bot) : IServiceProvider
     {
