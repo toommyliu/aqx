@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use support::{Dir, FARM, Fake};
 
 const HELLO: &str = r#"
+using CommunityToolkit.Mvvm.DependencyInjection;
 using Skua.Core.Interfaces;
 
 public class Hello
@@ -19,6 +20,8 @@ public class Hello
         bot.Options.JoinMapTries = 5;
         bot.Log($"tries {bot.Options.JoinMapTries}, default delay {bot.Options.ActionDelay}, exit {bot.ShouldExit}");
         bot.ShowMessageBox("Continue?", "Question", true);
+        Ioc.Default.GetRequiredService<IThemeService>().ApplyBaseTheme(false);
+        bot.Log($"picked {Ioc.Default.GetRequiredService<IFileDialogService>().OpenFile() ?? "nothing"}");
         bot.Sleep(10);
     }
 }
@@ -91,7 +94,8 @@ fn the_skua_host_runs_a_script_against_the_session() {
         [
             "version unknown",
             "tries 5, default delay 800, exit False",
-            "Question: Continue? (dismissed, as if the window were closed)"
+            "Question: Continue? (dismissed, as if the window were closed)",
+            "picked nothing"
         ]
     );
 }

@@ -88,6 +88,8 @@ public static class Runner
         readonly IGetScriptsService scripts = new MiraGetScriptsService();
         readonly IQuestDataLoaderService quests = new global::Skua.Core.Services.QuestDataLoaderService(bot.Quests, bot.Player, bot.Flash, bot.Wait);
         readonly IDialogService dialogs = new MiraDialogService(bot);
-        public object? GetService(Type type) => type == typeof(IQuestDataLoaderService) ? quests : type == typeof(IGetScriptsService) ? scripts : type == typeof(IScriptInterface) ? bot : type == typeof(IScriptManager) ? bot.Manager : type == typeof(IDialogService) ? dialogs : typeof(MiraBot).GetProperties().FirstOrDefault(p => p.PropertyType == type)?.GetValue(bot);
+        readonly IFileDialogService files = new MiraFileDialogService();
+        readonly IThemeService themes = new MiraThemeService();
+        public object? GetService(Type type) => type == typeof(IQuestDataLoaderService) ? quests : type == typeof(IGetScriptsService) ? scripts : type == typeof(IScriptInterface) ? bot : type == typeof(IScriptManager) ? bot.Manager : type == typeof(IDialogService) ? dialogs : type == typeof(IFileDialogService) ? files : type == typeof(IThemeService) ? themes : typeof(MiraBot).GetProperties().FirstOrDefault(p => p.PropertyType == type)?.GetValue(bot);
     }
 }
