@@ -48,7 +48,7 @@ namespace Mira.Skua;
 [JsonDerivedType(typeof(SetLoginInfoCall), "set_login_info")]
 public abstract record Request { public long Id { get; init; } }
 public sealed record JoinCall(string Map, string Cell = "Enter", string Pad = "Spawn") : Request;
-public sealed record JumpCall(string Cell, string Pad, bool ClientOnly = false) : Request;
+public sealed record JumpCall(string Cell, string Pad, bool ClientOnly = false, bool AutoCorrect = false) : Request;
 public sealed record WalkCall(int X, int Y) : Request;
 public sealed record GotoCall(string Player) : Request;
 public sealed record RestCall() : Request;

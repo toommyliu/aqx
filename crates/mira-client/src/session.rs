@@ -27,6 +27,7 @@ use crate::combat::{self, AUTO_ATTACK, Combat};
 use crate::event::{Direction, Event, Holder};
 use crate::faction::Faction;
 use crate::inventory::{Inventory, Item, Pool};
+use crate::map::MapFile;
 use crate::player::{BoostKind, Me};
 use crate::quest::Quest;
 use crate::room::{CombatState, Monster, Player, Room, Spot, UserEntry, Vitals, names_room};
@@ -398,6 +399,12 @@ fn latest(slot: &Slot) -> Arc<World> {
     Arc::clone(&slot.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Jump {
+    pub client_only: bool,
+    pub correct_pad: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Aggro {
     All,
@@ -452,7 +459,7 @@ enum Action {
     MoveToCell {
         cell: String,
         pad: String,
-        client_only: bool,
+        jump: Jump,
     },
     Attack {
         target: MonMapId,
@@ -753,18 +760,14 @@ impl Handle {
     }
 
     pub fn move_to_cell(&self, cell: &str, pad: &str) -> Pending {
-        self.act(Action::MoveToCell {
-            cell: cell.to_owned(),
-            pad: pad.to_owned(),
-            client_only: false,
-        })
+        self.jump(cell, pad, Jump::default())
     }
 
-    pub fn move_to_cell_local(&self, cell: &str, pad: &str) -> Pending {
+    pub fn jump(&self, cell: &str, pad: &str, jump: Jump) -> Pending {
         self.act(Action::MoveToCell {
             cell: cell.to_owned(),
             pad: pad.to_owned(),
-            client_only: true,
+            jump,
         })
     }
 
@@ -1170,10 +1173,10 @@ pub fn spawn(
 
 enum MapCells {
     Loading(Vec<Reply>),
-    Loaded(Vec<String>),
+    Loaded(MapFile),
 }
 
-type MapResult = (String, Result<Vec<String>, ActionError>);
+type MapResult = (String, Result<MapFile, ActionError>);
 
 const MAP_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 
@@ -1557,11 +1560,13 @@ impl Session {
                 self.quests = Arc::default();
                 self.accepted_quests.clear();
             }),
-            Action::MoveToCell {
-                cell,
-                pad,
-                client_only,
-            } => self.move_to_cell_with(&cell, &pad, client_only),
+            Action::MoveToCell { cell, pad, jump } => {
+                let pad = match self.loaded_map() {
+                    Some(map) if jump.correct_pad => map.pad_in(&cell, &pad).to_owned(),
+                    _ => pad,
+                };
+                self.move_to_cell_with(&cell, &pad, jump.client_only)
+            }
             Action::UseItem(item) => self.use_item(item),
             Action::Send(text) => self.ensure_ready().map(|()| self.send(&text)),
             Action::Walk { x, y } => {
@@ -2357,6 +2362,13 @@ impl Session {
         (now < until).then_some(until)
     }
 
+    fn loaded_map(&self) -> Option<&MapFile> {
+        match self.map_cells.get(&self.room.as_ref()?.file)? {
+            MapCells::Loaded(map) => Some(map),
+            MapCells::Loading(_) => None,
+        }
+    }
+
     fn move_to_cell(&mut self, cell: &str, pad: &str) -> Result<(), ActionError> {
         self.move_to_cell_with(cell, pad, false)
     }
@@ -2368,12 +2380,18 @@ impl Session {
         client_only: bool,
     ) -> Result<(), ActionError> {
         self.ensure_ready()?;
+        if self.room.as_ref().is_some_and(|room| room.locked(cell)) {
+            return Ok(());
+        }
+        let arrival = self
+            .loaded_map()
+            .map_or((0, 0), |map| map.arrival(cell, pad));
         let Some(room) = &mut self.room else {
             return Err(ActionError::NotReady);
         };
         room.cell = cell.to_owned();
         room.pad = pad.to_owned();
-        (room.x, room.y) = (0, 0);
+        (room.x, room.y) = arrival;
         let area = room.area;
         self.combat.disengage();
         if !client_only {
@@ -2691,10 +2709,10 @@ impl Session {
         let waker = self.waker.clone();
         thread::spawn(move || {
             let mut delays = MAP_RETRY_DELAYS.iter();
-            let cells = loop {
+            let map = loop {
                 match crate::api::map_file(&account, &file) {
                     Ok(bytes) => {
-                        break crate::map::labels(&bytes)
+                        break crate::map::read(&bytes)
                             .map_err(|e| ActionError::Http(format!("unreadable map file: {e}")));
                     }
                     Err(e) => match delays.next() {
@@ -2703,29 +2721,28 @@ impl Session {
                     },
                 }
             };
-            let _ = tx.send((file, cells));
+            let _ = tx.send((file, map));
             let _ = waker.wake();
         });
     }
 
     fn take_map_results(&mut self) {
-        while let Ok((file, cells)) = self.map_results.try_recv() {
+        while let Ok((file, map)) = self.map_results.try_recv() {
             let Some(MapCells::Loading(waiters)) = self.map_cells.remove(&file) else {
                 continue;
             };
-            let result = match cells {
-                Ok(cells) => {
+            let result = match map {
+                Ok(map) => {
                     let current = self.room.as_mut().filter(|r| r.file == file);
                     let result = if let Some(room) = current {
-                        room.cells = cells.clone();
-                        room.cells_loaded = true;
+                        room.load_map(&map);
                         Ok(())
                     } else {
                         Err(ActionError::Unusable(
                             "the map changed while loading cells".into(),
                         ))
                     };
-                    self.map_cells.insert(file, MapCells::Loaded(cells));
+                    self.map_cells.insert(file, MapCells::Loaded(map));
                     result
                 }
                 Err(e) => Err(e),
@@ -2736,9 +2753,8 @@ impl Session {
     }
 
     fn enter(&mut self, mut room: Room) {
-        if let Some(MapCells::Loaded(cells)) = self.map_cells.get(&room.file) {
-            room.cells = cells.clone();
-            room.cells_loaded = true;
+        if let Some(MapCells::Loaded(map)) = self.map_cells.get(&room.file) {
+            room.load_map(map);
         }
         let Some(me) = self.me else { return };
         let first = self.phase

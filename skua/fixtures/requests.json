@@ -11,7 +11,8 @@
     "call": "jump",
     "cell": "farm",
     "pad": "farm",
-    "client_only": false
+    "client_only": false,
+    "auto_correct": false
   },
   {
     "id": 3,

@@ -12,7 +12,8 @@ use mira_protocol::{
 use super::*;
 use crate::quest::{QuestItem, QuestReward, QuestStatus, RewardKind};
 use crate::testing::{
-    API_OK, FARM_SKILLS, Harness, JOIN_OK, LOGIN_OK, Peer, TOKEN, json_message, move_to_area,
+    API_OK, FARM_SKILLS, Harness, JOIN_OK, LOGIN_OK, MapCell, Peer, TOKEN, json_message,
+    move_to_area,
 };
 use crate::{
     Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Item, Monster, Readiness, Skill,
@@ -2034,6 +2035,47 @@ fn wait_until(session: &Handle, done: impl Fn(&Me) -> bool) {
         assert!(Instant::now() < deadline, "the player never got there");
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+fn a_cell_locked_by_kill_count_opens_once_enough_monsters_die() {
+    let (tried, tried_jump) = mpsc::channel();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "farm-1"));
+        peer.send(&json_message(json!({
+            "cmd": "moveToArea", "areaId": 43, "areaName": "farm-1",
+            "intKillCount": 1, "objLock": {"r2": "2"},
+            "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "Enter"}],
+            "mondef": [{"MonID": 10, "strMonName": "Mosquito"}],
+            "monmap": [{"MonMapID": 1, "MonID": 10, "strFrame": "Enter", "bRed": 0}],
+            "monBranch": [{"MonMapID": 1, "MonID": 10, "intHP": 500, "intHPMax": 500, "intState": 1}],
+        })));
+        peer.send("%xt%server%-1%You joined \"farm-1\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        tried_jump.recv_timeout(Duration::from_secs(5)).unwrap();
+        peer.expect_silence(Duration::from_millis(50));
+        peer.send(&json_message(
+            json!({"cmd": "mtls", "id": 1, "o": {"intHP": 0}}),
+        ));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("farm-1").wait().unwrap();
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    assert_eq!(session.snapshot().room.as_ref().unwrap().cell, "Enter");
+    tried.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while session.snapshot().room.as_ref().unwrap().monsters[0].hp != 0 {
+        assert!(Instant::now() < deadline, "the monster never died");
+        thread::sleep(Duration::from_millis(5));
+    }
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    assert_eq!(session.snapshot().room.as_ref().unwrap().cell, "r2");
+    session.logout();
+    harness.finish();
 }
 
 #[test]
@@ -4846,7 +4888,12 @@ fn accept_map_request(listener: &TcpListener) -> (TcpStream, Vec<String>) {
 }
 
 fn reply_map(stream: &mut TcpStream, cells: &[&str]) {
-    let body = crate::testing::map_swf(cells);
+    let cells: Vec<_> = cells.iter().map(|name| MapCell::named(name)).collect();
+    reply_map_with(stream, &cells);
+}
+
+fn reply_map_with(stream: &mut TcpStream, cells: &[MapCell]) {
+    let body = crate::testing::map_swf_with(cells);
     write!(
         stream,
         "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
@@ -4908,6 +4955,155 @@ fn map_cells_load_after_each_join_with_the_client_headers_and_cache_by_file() {
     assert!(room.cells_loaded);
     thread::sleep(Duration::from_millis(50));
     assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_door_reply_moves_the_player_into_the_doors_cell_without_a_move_packet() {
+    let (http, base) = map_http();
+    let (replied, reply_seen) = mpsc::channel();
+    let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "arena-1"));
+        join_map(&mut peer, 43, "arena-1", "arena.swf");
+        peer.expect("%xt%zm%mtcid%43%9%");
+        peer.send("%xt%mtcid%-1%9%");
+        peer.expect("%xt%zm%mtcid%43%5%");
+        peer.send("%xt%mtcid%-1%5%3%");
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(9)]));
+        replied.send(()).unwrap();
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("arena-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let loading = session.load_cells();
+    reply_map_with(
+        &mut stream,
+        &[
+            MapCell {
+                name: "Enter",
+                pads: &[],
+                doors: &[(5, "r2", "Left")],
+            },
+            MapCell {
+                name: "r2",
+                pads: &[],
+                doors: &[(9, "Enter", "Right")],
+            },
+        ],
+    );
+    loading.wait().unwrap();
+    let updates = session.updates();
+    session.send_raw("%xt%zm%mtcid%43%9%").wait().unwrap();
+    session.send_raw("%xt%zm%mtcid%43%5%").wait().unwrap();
+    reply_seen.recv_timeout(Duration::from_secs(5)).unwrap();
+    let world = session.snapshot();
+    let room = world.room.as_ref().unwrap();
+    assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r2", "Left"));
+    assert!(updates.try_iter().any(|update| matches!(
+        update,
+        Update::Event(Event::Moved { cell, pad }) if cell == "r2" && pad == "Left"
+    )));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn the_player_stands_on_the_pad_after_a_join_or_a_jump() {
+    let (http, base) = map_http();
+    let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "arena-1"));
+        join_map(&mut peer, 43, "arena-1", "arena.swf");
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(9)]));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Top"));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("arena-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let loading = session.load_cells();
+    reply_map_with(
+        &mut stream,
+        &[
+            MapCell {
+                name: "Enter",
+                pads: &[("Spawn", 322, 350)],
+                doors: &[],
+            },
+            MapCell {
+                name: "r2",
+                pads: &[("Right", 788, 350), ("Left", 190, 340)],
+                doors: &[],
+            },
+        ],
+    );
+    loading.wait().unwrap();
+    let position = || {
+        let world = session.snapshot();
+        let room = world.room.as_ref().unwrap();
+        (room.x, room.y)
+    };
+    assert_eq!(position(), (322, 350));
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    assert_eq!(position(), (190, 340));
+    session.move_to_cell("r2", "Top").wait().unwrap();
+    assert_eq!(position(), (480, 275));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_corrected_jump_swaps_a_pad_the_cell_lacks_for_left_or_its_first_pad() {
+    let (http, base) = map_http();
+    let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "arena-1"));
+        join_map(&mut peer, 43, "arena-1", "arena.swf");
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(9)]));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r3", "Top"));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r3", "Right"));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r3", "Bottom"));
+        peer.expect(&packet::move_to_cell(AreaId(43), "Blank", "Bottom"));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("arena-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let loading = session.load_cells();
+    reply_map_with(
+        &mut stream,
+        &[
+            MapCell {
+                name: "r2",
+                pads: &[("Right", 788, 350), ("Left", 190, 340)],
+                doors: &[],
+            },
+            MapCell {
+                name: "r3",
+                pads: &[("Top", 480, 300), ("Right", 788, 350)],
+                doors: &[],
+            },
+            MapCell::named("Blank"),
+        ],
+    );
+    loading.wait().unwrap();
+    let corrected = Jump {
+        client_only: false,
+        correct_pad: true,
+    };
+    session.jump("r2", "Bottom", corrected).wait().unwrap();
+    session.jump("r3", "Bottom", corrected).wait().unwrap();
+    session.jump("r3", "Right", corrected).wait().unwrap();
+    session.move_to_cell("r3", "Bottom").wait().unwrap();
+    session.jump("Blank", "Bottom", corrected).wait().unwrap();
     session.logout();
     harness.finish();
 }
@@ -5112,7 +5308,17 @@ fn local_cell_movement_updates_state_without_sending_a_packet() {
     });
     let session = &harness.session;
     session.ready().wait().unwrap();
-    session.move_to_cell_local("r1", "Right").wait().unwrap();
+    session
+        .jump(
+            "r1",
+            "Right",
+            Jump {
+                client_only: true,
+                correct_pad: false,
+            },
+        )
+        .wait()
+        .unwrap();
     let world = session.snapshot();
     let room = world.room.as_ref().unwrap();
     assert_eq!((&*room.cell, &*room.pad), ("r1", "Right"));

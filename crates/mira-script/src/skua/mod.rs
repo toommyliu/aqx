@@ -404,11 +404,15 @@ impl SkuaScript {
                             cell,
                             pad,
                             client_only,
-                        } => Some(if client_only {
-                            session.move_to_cell_local(&cell, &pad)
-                        } else {
-                            session.move_to_cell(&cell, &pad)
-                        }),
+                            auto_correct,
+                        } => Some(session.jump(
+                            &cell,
+                            &pad,
+                            mira_client::Jump {
+                                client_only,
+                                correct_pad: auto_correct,
+                            },
+                        )),
                         Call::Walk { x, y } => Some(session.walk(x, y)),
                         Call::Goto { player } => Some(session.goto(&player)),
                         Call::Rest => Some(session.request_rest()),

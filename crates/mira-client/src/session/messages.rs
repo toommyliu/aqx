@@ -141,6 +141,11 @@ impl Session {
                     self.on_player_moved(name, fields);
                 }
             }
+            "mtcid" => {
+                if let Some(id) = xt.field(4).and_then(|id| id.parse().ok()) {
+                    self.follow_door(id);
+                }
+            }
             "respawnMon" => {
                 for id in text().split(',').filter_map(|id| id.parse().ok()) {
                     self.aggro_respawned(MonMapId(id));
@@ -158,6 +163,20 @@ impl Session {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn follow_door(&mut self, id: i64) {
+        let Some((cell, pad)) = self.room.as_ref().and_then(|room| {
+            let cell = self.loaded_map()?.cell(&room.cell)?;
+            let door = cell.doors.iter().find(|door| door.id == id)?;
+            (!room.locked(&door.cell)).then(|| (door.cell.clone(), door.pad.clone()))
+        }) else {
+            return;
+        };
+        if self.move_to_cell_with(&cell, &pad, true).is_ok() {
+            self.fetch_cellmates();
+            self.aggro_cell();
         }
     }
 

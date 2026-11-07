@@ -284,18 +284,20 @@ impl Fake {
 }
 
 fn map_swf() -> Vec<u8> {
-    let mut body = vec![0, 0, 24, 1, 0];
-    for cell in ["Enter", "r1", "r2", "Side1", "Blank"] {
-        body.extend_from_slice(&((43 << 6) | (cell.len() + 1) as u16).to_le_bytes());
-        body.extend_from_slice(cell.as_bytes());
-        body.push(0);
-        body.extend_from_slice(&(1u16 << 6).to_le_bytes());
-    }
-    body.extend_from_slice(&[0, 0]);
-    [
-        b"FWS\x0a".as_slice(),
-        &((body.len() + 8) as u32).to_le_bytes(),
-        &body,
-    ]
-    .concat()
+    use mira_client::testing::MapCell;
+    mira_client::testing::map_swf_with(&[
+        MapCell {
+            name: "Enter",
+            pads: &[],
+            doors: &[(5, "r2", "Left")],
+        },
+        MapCell::named("r1"),
+        MapCell {
+            name: "r2",
+            pads: &[("Top", 480, 300), ("Left", 190, 350)],
+            doors: &[],
+        },
+        MapCell::named("Side1"),
+        MapCell::named("Blank"),
+    ])
 }

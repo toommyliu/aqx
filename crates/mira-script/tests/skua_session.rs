@@ -157,6 +157,35 @@ public class Reconnected {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_door_packet_moves_the_player_once_the_server_answers() {
+    let (outcome, logs, sent) = Fake::start(|message, wire| {
+        if message.contains("%mtcid%") {
+            wire.send("%xt%mtcid%-1%5%");
+        }
+    })
+    .run(
+        r#"
+using Skua.Core.Interfaces;
+public class Door {
+    public void ScriptMain(IScriptInterface bot) {
+        _ = bot.Map.Cells;
+        bot.Send.Packet($"%xt%zm%mtcid%{bot.Map.RoomID}%5%");
+        bot.Wait.ForCellChange("r2");
+        bot.Log($"cell {bot.Player.Cell} {bot.Player.Pad}");
+    }
+}
+"#,
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(logs.contains(&"cell r2 Left".into()), "{logs:?}");
+    assert!(
+        !sent.iter().any(|m| m.contains("%moveToCell%5%r2%")),
+        "{sent:?}"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn an_action_after_the_session_ends_fails_instead_of_hanging() {
     let cancel = Cancel::default();
     let deadline = cancel.clone();
@@ -239,7 +268,7 @@ public class Relogged {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
-fn join_packet_is_nonblocking_and_jump_honors_client_only_and_delay() {
+fn join_packet_is_nonblocking_and_jump_honors_client_only_auto_correct_and_delay() {
     let started = Instant::now();
     let (outcome, logs, sent) = Fake::start(|_, _| {}).run(
         r#"
@@ -254,6 +283,8 @@ public class Movement {
         var clock = System.Diagnostics.Stopwatch.StartNew();
         bot.Map.Jump("r2", "Right", false);
         bot.Log($"delayed {clock.ElapsedMilliseconds >= 100}");
+        bot.Map.Jump("r2", "Bottom");
+        bot.Log($"corrected to {bot.Player.Pad}");
     }
 }
 "#,
@@ -263,6 +294,11 @@ public class Movement {
     assert!(logs.contains(&"join returned".into()));
     assert!(logs.contains(&"local cell r1".into()), "{logs:?}");
     assert!(logs.contains(&"delayed True".into()), "{logs:?}");
+    assert!(logs.contains(&"corrected to Left".into()), "{logs:?}");
+    assert!(
+        sent.iter().any(|m| m.ends_with("%moveToCell%5%r2%Right%")),
+        "{sent:?}"
+    );
     assert!(
         sent.iter().any(|m| m.ends_with("%other-42%r2%Left%")),
         "{sent:?}"
