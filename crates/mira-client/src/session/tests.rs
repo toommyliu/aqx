@@ -1422,6 +1422,7 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
     };
     assert!(removed("Pact") && !removed("Slow"));
     let world = session.snapshot();
+    let applied = Instant::now();
     let aura = |name: &str, duration: f64, value: Option<f64>, caster| Aura {
         name: name.into(),
         icon: String::new(),
@@ -1434,10 +1435,12 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
         caster,
         effects: Vec::new(),
         expires: None,
+        applied,
     };
     let untimed = |auras: &[Aura]| -> Vec<Aura> {
         let drop_time = |a: &Aura| Aura {
             expires: None,
+            applied,
             ..a.clone()
         };
         auras.iter().map(drop_time).collect()
@@ -1449,17 +1452,14 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
     assert!(mine.active[0].expires.is_some_and(|at| at > Instant::now()));
     assert_eq!(mine.passive[0].expires, None);
     assert_eq!(
-        Auras {
-            active: untimed(&mine.active),
-            passive: untimed(&mine.passive),
-        },
-        Auras {
-            active: vec![
+        (untimed(&mine.active), untimed(&mine.passive)),
+        (
+            vec![
                 aura("Stun", 6.0, Some(2.0), from_monster),
                 aura("Slow", 3.0, None, from_monster),
                 aura("Stun", 6.0, Some(2.0), from_monster),
             ],
-            passive: vec![Aura {
+            vec![Aura {
                 persist: false,
                 effects: vec![
                     StatEffect {
@@ -1475,7 +1475,7 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
                 ],
                 ..aura("Hot Headed", 0.0, None, None)
             }],
-        }
+        )
     );
     let monsters = &world.room.as_ref().unwrap().monsters;
     assert!(monsters[0].auras.active.is_empty());
@@ -1493,6 +1493,7 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
             caster: Some(Caster::Player(EntityId(7))),
             effects: Vec::new(),
             expires: None,
+            applied,
         }]
     );
     assert_eq!(

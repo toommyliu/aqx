@@ -288,7 +288,7 @@ impl Session {
                 }
             }
             "sars" => self.settle(&read(&json)?),
-            "aura+" | "aura++" | "aura+p" | "aura-" | "aura--" => {
+            "aura+" | "aura++" | "aura+p" | "aura=" | "aura-" | "aura--" => {
                 self.apply_aura(read(&json)?);
             }
             "clearAuras" => {
