@@ -33,7 +33,7 @@ public sealed class MiraBot(Protocol protocol, State state, string path) : IScri
     public IScriptBank Bank { get; } = new MiraBank(protocol, state);
     public IScriptInventoryHelper InvHelper { get; } = new MiraInventoryHelper();
     public IScriptLite Lite { get; } = new MiraLite();
-    public IScriptOption Options { get; } = new MiraOption(protocol);
+    public IScriptOption Options { get; } = new MiraOption(protocol, state);
     public IScriptMap Map { get; } = new MiraMap(protocol, state);
     public IScriptMonster Monsters { get; } = new MiraMonster(state);
     public IScriptPlayer Player { get; } = new MiraPlayer(protocol, state);

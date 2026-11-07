@@ -1,5 +1,6 @@
 mod support;
 use mira_client::{Handle, Server, testing::Harness};
+use mira_protocol::{AreaId, MonMapId, packet};
 use mira_script::{Account, Cancel, Outcome};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,6 +10,8 @@ use support::Fake;
 struct LoginAccount {
     sessions: Mutex<Vec<Harness>>,
     attempts: Mutex<Vec<String>>,
+    sent: Arc<Mutex<Vec<String>>>,
+    farm: bool,
 }
 impl Account for LoginAccount {
     fn servers(&self) -> Result<Vec<Server>, String> {
@@ -37,10 +40,22 @@ impl Account for LoginAccount {
         if server == "Preferred" {
             return Err("unavailable".into());
         }
-        let session = Harness::start(Default::default(), |listener| {
+        let (sent, farm) = (self.sent.clone(), self.farm);
+        let session = Harness::start(Default::default(), move |listener| {
             let mut peer = mira_client::testing::Peer::accept(&listener);
-            peer.serve_to_ready();
-            peer.expect_logout();
+            if farm {
+                peer.serve_farm();
+            } else {
+                peer.serve_to_ready();
+            }
+            loop {
+                let message = peer.recv();
+                let logout = message == packet::logout();
+                sent.lock().unwrap().push(message);
+                if logout {
+                    break;
+                }
+            }
         });
         let handle = session.session.clone();
         self.sessions.lock().unwrap().push(session);
@@ -168,6 +183,50 @@ public class AfterLogout {
     );
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
     assert!(logs.contains(&"rest failed".into()), "{logs:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn a_relogin_clears_bank_loaded_and_keeps_aggro_all_on() {
+    let account = Arc::new(LoginAccount {
+        farm: true,
+        ..LoginAccount::default()
+    });
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run_account(
+        r#"
+using Skua.Core.Interfaces;
+public class Relogged {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Bank.Load();
+        bot.Log($"before relogin {bot.Bank.Loaded}");
+        bot.Options.AggroAllMonsters = true;
+        bot.Events.CellChanged += (map, cell, pad) => Thread.Sleep(1500);
+        bot.Map.Jump("r2", "Left");
+        bot.Log($"relogged {bot.Servers.Relogin("Fallback")}");
+        bot.Log($"after relogin {bot.Bank.Loaded} {bot.Options.AggroAllMonsters}");
+        bot.Sleep(2500);
+    }
+}
+"#,
+        &Cancel::default(),
+        Default::default(),
+        account.clone(),
+        |_| {},
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    for expected in [
+        "before relogin True",
+        "relogged True",
+        "after relogin False True",
+    ] {
+        assert!(logs.contains(&expected.into()), "{logs:?}");
+    }
+    for session in account.sessions.lock().unwrap().drain(..) {
+        session.finish();
+    }
+    let sent = account.sent.lock().unwrap();
+    let all = packet::aggro_mon(AreaId(43), &[MonMapId(1), MonMapId(2), MonMapId(3)]);
+    assert!(sent.contains(&all), "{sent:?}");
 }
 
 #[test]
