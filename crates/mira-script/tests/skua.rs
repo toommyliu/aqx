@@ -179,6 +179,54 @@ fn a_script_reads_the_players_id_cell_and_combat_stats() {
 }
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_script_reads_the_account_from_the_flash_object_paths() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class ReadAccount
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Log($"days {bot.Flash.GetGameObject("world.myAvatar.objData.iUpgDays")}");
+        bot.Log($"slots {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iBagSlots")} {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iBankSlots")} {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iHouseSlots")}");
+        bot.Log($"hp {bot.Flash.GetGameObject<int>("world.uoTree.player2.intHP")}/{bot.Flash.GetGameObject<int>("world.uoTree.player2.intHPMax")}");
+        bot.Log($"file {bot.Flash.GetGameObject<string>("world.strMapFileName")}");
+        bot.Log($"account {bot.Flash.GetGameObject("world.myAvatar.objData.dCreated")} {bot.Flash.GetGameObject("world.myAvatar.objData.strGender")}");
+        bot.Log($"prefs {string.Join(" ", new[] { "bGoto", "bFriend", "bParty", "bGuild", "bWhisper", "bDuel" }.Select(k => bot.Flash.GetGameObject<bool>($"uoPref.{k}")))}");
+    }
+}
+"#;
+    let mut map: Value = serde_json::from_str(FARM).unwrap();
+    map["uoBranch"].as_array_mut().unwrap().push(json!({"entID":1002,"strUsername":"Player2","strFrame":"r1","intHP":1200,"intHPMax":3000,"intState":1}));
+    let (outcome, logs, _) = Fake::start_config(
+        &map.to_string(),
+        json!([]),
+        json!([]),
+        json!({"iUpgDays":27,"iBagSlots":40,"iBankSlots":50,"iHouseSlots":20,"ia1":(1 << 8) | (1 << 13),"dCreated":"2015-01-01T00:00:00","strGender":"F"}),
+        |_, _| {},
+    )
+    .run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    let [days, slots, hp, file, account, prefs] = &logs[..] else {
+        panic!("{logs:?}")
+    };
+    assert_eq!(
+        [days, slots, hp, file, prefs],
+        [
+            "days 27",
+            "slots 40 50 20",
+            "hp 1200/3000",
+            "file farm/farm.swf",
+            "prefs True True False True True False"
+        ]
+    );
+    assert!(
+        account.starts_with(r#"account "Thu Jan 1 00:00:00 GMT"#)
+            && account.ends_with(r#" 2015" "F""#),
+        "{account}"
+    );
+}
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn jumping_in_place_still_sends_and_joining_the_current_map_does_nothing() {
     let (outcome, logs, sent) = Fake::start(|_, _| {}).run(IN_PLACE);
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
@@ -259,6 +307,54 @@ public class Events {
     );
 }
 
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn unknown_flash_calls_return_null() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class UnknownFlash {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Log($"function {bot.Flash.CallGameFunction("world.myAvatar.loadMovieAtES", "Weapon", "item.swf", "Item") is null}");
+        bot.Log($"path {bot.Flash.GetGameObject("world.ldr_map.contentLoaderInfo.url") is null}");
+        bot.Log($"call {bot.Flash.Call("walkTo", 100, 200, 8) is null}");
+    }
+}
+"#;
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert_eq!(logs, ["function True", "path True", "call True"]);
+}
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn flash_call_handlers_see_sent_and_received_packets() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class FlashCalls {
+    public void ScriptMain(IScriptInterface bot) {
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        bot.Flash.FlashCall += (name, args) => seen.Enqueue($"{name} {args[0]}");
+        bot.Send.Packet("%xt%zm%cmd%1%probe%");
+        for (int i = 0; i < 100 && seen.Count < 3; i++) bot.Sleep(20);
+        foreach (var call in seen) bot.Log(call);
+    }
+}
+"#;
+    let (outcome, logs, _) = Fake::start(|message, wire| {
+        if message.contains("%probe%") {
+            wire.send("%xt%probe%-1%You will not resist!%");
+        }
+    })
+    .run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert_eq!(
+        logs,
+        [
+            "packet %xt%zm%cmd%1%probe%",
+            "packetFromServer %xt%probe%-1%You will not resist!%",
+            r#"pext {"params":{"type":"str","dataObj":["probe","-1","You will not resist!"]}}"#,
+        ]
+    );
+}
 #[test]
 #[ignore = "run with npm run skua:test"]
 fn a_cached_script_does_not_load_the_compiler() {

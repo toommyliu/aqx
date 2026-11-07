@@ -75,8 +75,8 @@ public sealed class MiraEvent : IScriptEvent
     public event RunToAreaHandler? RunToArea;
     void Listen()
     {
-        protocol.Call(new ListenCall(PacketDirection.In, onExtensionPacketReceived is not null));
-        protocol.Call(new ListenCall(PacketDirection.Out, onPacketReceived is not null || onCellChanged is not null || onQuestAccepted is not null || onTryBuyItem is not null || onLogout is not null));
+        protocol.Call(new ListenCall(PacketDirection.In, onExtensionPacketReceived is not null || onFlashCall is not null));
+        protocol.Call(new ListenCall(PacketDirection.Out, onFlashCall is not null || onPacketReceived is not null || onCellChanged is not null || onQuestAccepted is not null || onTryBuyItem is not null || onLogout is not null));
     }
     public void ClearHandlers()
     {
@@ -101,6 +101,12 @@ public sealed class MiraEvent : IScriptEvent
         ReloginTriggered = null;
         Listen();
     }
+    FlashCallHandler? onFlashCall;
+    internal event FlashCallHandler FlashCall
+    {
+        add { lock (subscriptions) { onFlashCall += value; Listen(); } }
+        remove { lock (subscriptions) { onFlashCall -= value; Listen(); } }
+    }
     public void RaiseStopping(Exception? error) => ScriptStopping?.Invoke(error);
     void OnPacket(Packet packet)
     {
@@ -111,9 +117,13 @@ public sealed class MiraEvent : IScriptEvent
                 ['%', ..] => new JObject { ["params"] = new JObject { ["type"] = "str", ["dataObj"] = new JArray(packet.Text[1..^1].Split('%').Skip(1)) } },
                 _ => null
             };
-            if (extension is not null) onExtensionPacketReceived?.Invoke(extension);
+            onFlashCall?.Invoke("packetFromServer", [packet.Text]);
+            if (extension is null) return;
+            onExtensionPacketReceived?.Invoke(extension);
+            onFlashCall?.Invoke("pext", [extension.ToString(Newtonsoft.Json.Formatting.None)]);
             return;
         }
+        if (packet.Text.StartsWith("%xt%zm%")) onFlashCall?.Invoke("packet", [packet.Text.Trim()]);
         string[] fields = packet.Text.Split('%');
         if (fields.Length < 5) { onPacketReceived?.Invoke(packet.Text); return; }
         switch (fields[3])
