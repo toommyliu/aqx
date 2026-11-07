@@ -40,6 +40,10 @@ pub struct QuestItem {
     pub qty: u32,
     pub max_stack: u32,
     pub temp: bool,
+    pub description: String,
+    pub category: String,
+    pub member: bool,
+    pub coins: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -49,6 +53,10 @@ pub struct QuestReward {
     pub qty: u32,
     pub max_stack: u32,
     pub temp: bool,
+    pub description: String,
+    pub category: String,
+    pub member: bool,
+    pub coins: bool,
     pub chance: f64,
     pub kind: RewardKind,
 }
@@ -111,6 +119,20 @@ impl World {
         };
         let accepted = self.accepted_quests.contains(&id);
         Some(turn_in_limit(self.quests.get(&id)?, accepted, held))
+    }
+
+    pub fn holds_turn_in(&self, id: QuestId) -> Option<bool> {
+        let held = Held {
+            items: &self.inventory,
+            temp: &self.temp,
+        };
+        let quest = self.quests.get(&id)?;
+        Some(
+            quest
+                .turn_in
+                .iter()
+                .all(|need| held.qty(need.id).is_some_and(|qty| qty >= need.qty)),
+        )
     }
 }
 
@@ -340,18 +362,21 @@ fn parse(key: &str, value: Value) -> Result<Quest, serde_json::Error> {
     ] {
         collect_items(items, &mut metadata);
     }
-    let name = |id: ItemId| {
-        metadata
-            .get(&id)
-            .map(|item| item.name.clone())
-            .unwrap_or_default()
-    };
-    let item = |need: Need| QuestItem {
-        id: need.id,
-        name: name(need.id),
-        qty: need.qty,
-        max_stack: metadata.get(&need.id).map_or(0, |item| item.max_stack),
-        temp: metadata.get(&need.id).is_some_and(|item| item.temp),
+    let unknown = QuestItemData::default();
+    let meta = |id: ItemId| metadata.get(&id).unwrap_or(&unknown);
+    let item = |need: Need| {
+        let meta = meta(need.id);
+        QuestItem {
+            id: need.id,
+            name: meta.name.clone(),
+            qty: need.qty,
+            max_stack: meta.max_stack,
+            temp: meta.temp,
+            description: meta.description.clone(),
+            category: meta.category.clone(),
+            member: meta.member,
+            coins: meta.coins,
+        }
     };
     Ok(Quest {
         id,
@@ -363,14 +388,21 @@ fn parse(key: &str, value: Value) -> Result<Quest, serde_json::Error> {
         rewards: data
             .reward
             .into_iter()
-            .map(|reward| QuestReward {
-                id: reward.id,
-                name: name(reward.id),
-                qty: reward.qty,
-                max_stack: metadata.get(&reward.id).map_or(0, |item| item.max_stack),
-                temp: metadata.get(&reward.id).is_some_and(|item| item.temp),
-                chance: reward.rate,
-                kind: reward.kind,
+            .map(|reward| {
+                let meta = meta(reward.id);
+                QuestReward {
+                    id: reward.id,
+                    name: meta.name.clone(),
+                    qty: reward.qty,
+                    max_stack: meta.max_stack,
+                    temp: meta.temp,
+                    description: meta.description.clone(),
+                    category: meta.category.clone(),
+                    member: meta.member,
+                    coins: meta.coins,
+                    chance: reward.rate,
+                    kind: reward.kind,
+                }
             })
             .collect(),
         once: data.once,
@@ -391,23 +423,32 @@ fn parse(key: &str, value: Value) -> Result<Quest, serde_json::Error> {
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct QuestItemData {
-    #[serde(rename = "ItemID")]
-    id: ItemId,
     #[serde(rename = "sName", default)]
     name: String,
     #[serde(rename = "iStk", default, deserialize_with = "flex::int")]
     max_stack: u32,
     #[serde(rename = "bTemp", default, deserialize_with = "flex::bool")]
     temp: bool,
+    #[serde(rename = "sDesc", default)]
+    description: String,
+    #[serde(rename = "sType", default)]
+    category: String,
+    #[serde(rename = "bUpg", default, deserialize_with = "flex::bool")]
+    member: bool,
+    #[serde(rename = "bCoins", default, deserialize_with = "flex::bool")]
+    coins: bool,
 }
 
 fn collect_items(value: &Value, items: &mut HashMap<ItemId, QuestItemData>) {
     let Value::Object(map) = value else { return };
-    if map.contains_key("ItemID") {
-        if let Ok(item) = serde_json::from_value::<QuestItemData>(value.clone()) {
-            items.insert(item.id, item);
+    if let Some(id) = map.get("ItemID") {
+        if let (Ok(id), Ok(item)) = (
+            serde_json::from_value::<ItemId>(id.clone()),
+            serde_json::from_value::<QuestItemData>(value.clone()),
+        ) {
+            items.insert(id, item);
         }
     } else {
         for nested in map.values() {

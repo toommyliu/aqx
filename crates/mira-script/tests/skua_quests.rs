@@ -41,6 +41,8 @@ public class QuestRepeats
         var quest = bot.Quests.EnsureLoad(12)!;
         bot.Log($"{quest.Name} rewards {string.Join(", ", quest.Rewards.Select(r => r.Name))}");
         bot.Log($"text {quest.Description} / {quest.EndText}");
+        var reward = quest.Rewards[0];
+        bot.Log($"member {reward.Upgrade} coins {reward.Coins} {reward.Category} {reward.Description}");
     }
 }
 "#;
@@ -270,7 +272,7 @@ fn a_quest_may_list_the_same_reward_twice() {
         if msg.contains("%getQuests%") {
             wire.object(
                     r#"{"cmd":"getQuests","quests":{"12":{"QuestID":12,"sName":"Twice","sDesc":"Bring supplies","sEndText":"Supplies received","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,
-                    "turnin":[],"oItems":{},"oRewards":{"itemsS":{"0":{"ItemID":1027,"sName":"Twilly Twig","iStk":1},"1":{"ItemID":1027,"sName":"Twilly Twig","iStk":1}}},
+                    "turnin":[],"oItems":{},"oRewards":{"itemsS":{"0":{"ItemID":1027,"sName":"Twilly Twig","iStk":1,"bUpg":"1","bCoins":1,"sType":"Staff","sDesc":"A bent twig"},"1":{"ItemID":1027,"sName":"Twilly Twig","iStk":1,"bUpg":"1","bCoins":1,"sType":"Staff","sDesc":"A bent twig"}}},
                     "reward":[{"ItemID":1027,"iQty":1,"iRate":50,"iType":0},{"ItemID":1027,"iQty":2,"iRate":100,"iType":0}]}}}"#,
                 );
         }
@@ -286,6 +288,10 @@ fn a_quest_may_list_the_same_reward_twice() {
     );
     assert!(
         logged.contains(&"text Bring supplies / Supplies received".into()),
+        "{logged:?}"
+    );
+    assert!(
+        logged.contains(&"member True coins True Staff A bent twig".into()),
         "{logged:?}"
     );
 }
@@ -306,6 +312,8 @@ fn core_bots_reads_item_metadata_and_requires_an_explicit_choice_without_a_rewar
                 );
             } else if msg.starts_with("%xt%zm%acceptQuest%5%13%") {
                 wire.object(r#"{"cmd":"acceptQuest","bSuccess":1,"QuestID":13,"msg":"success"}"#);
+            } else if msg.starts_with("%xt%zm%tryQuestComplete%5%13%-1%") {
+                wire.object(r#"{"cmd":"ccqr","bSuccess":0,"QuestID":13,"sName":"Pick One","msg":"Missing Turn In Item"}"#);
             } else if msg.starts_with("%xt%zm%tryQuestComplete%5%13%") {
                 wire.object(r#"{"cmd":"ccqr","bSuccess":1,"QuestID":13,"sName":"Pick One","rewardObj":{"intGold":0}}"#);
                 wire.object(r#"{"cmd":"addItems","items":{"1027":{"ItemID":1027,"sName":"Twilly Twig","iQty":1,"iStk":1,"CharItemID":10}}}"#);
@@ -318,6 +326,11 @@ fn core_bots_reads_item_metadata_and_requires_an_explicit_choice_without_a_rewar
     assert!(
         logged.iter().any(|l| l.ends_with("sword 77 pattern 2")),
         "{logged:#?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|m| m.starts_with("%xt%zm%tryQuestComplete%5%13%-1%false%1%wvz%")),
+        "{sent:#?}"
     );
     assert!(
         sent.iter()
@@ -369,7 +382,7 @@ fn update_quest_moves_the_quest_slot_the_way_skuas_fake_packet_does() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
-fn a_quest_whose_held_item_is_missing_is_not_available() {
+fn a_quest_whose_held_item_is_missing_is_still_available() {
     let fake = Fake::start_with(FARM, json!([]), json!([]), |msg, wire| {
         if msg.contains("%getQuests%") {
             wire.object(
@@ -382,7 +395,7 @@ fn a_quest_whose_held_item_is_missing_is_not_available() {
 
     assert!(result == Outcome::Finished, "{result:?}\n{logged:#?}");
     assert!(
-        logged.contains(&"available False".to_string()),
+        logged.contains(&"available True".to_string()),
         "{logged:#?}"
     );
 }
@@ -422,6 +435,107 @@ fn the_full_completion_check_counts_the_bank() {
         logged.contains(&"can complete False, counting the bank True".to_string()),
         "{logged:#?}"
     );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn an_equipped_turn_in_item_still_completes_the_quest() {
+    let fake = Fake::start_with(
+        FARM,
+        json!([{"ItemID":87,"CharItemID":9,"sName":"Treeant Branch","iQty":1,"iStk":10,"sType":"Item","sES":"Weapon","bEquip":true}]),
+        json!([]),
+        farm_quest_server,
+    );
+    let (result, logged, _) = fake.run(
+        r#"
+using Skua.Core.Interfaces;
+public class Equipped {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Quests.EnsureAccept(11);
+        bot.Log($"can complete {bot.Quests.CanComplete(11)}, turn-ins {bot.Flash.CallGameFunction<int>("world.maximumQuestTurnIns", 11)}");
+    }
+}
+"#,
+    );
+
+    assert!(result == Outcome::Finished, "{result:?}\n{logged:#?}");
+    assert!(
+        logged.contains(&"can complete True, turn-ins 0".to_string()),
+        "{logged:#?}"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn maximum_turn_ins_counts_like_the_client() {
+    let fake = Fake::start_with(
+        FARM,
+        json!([{"ItemID":87,"CharItemID":9,"sName":"Treeant Branch","iQty":7,"iStk":10,"sType":"Item","sES":"None"}]),
+        json!([]),
+        |msg, wire| {
+            if msg.contains("%getQuests%") {
+                wire.object(
+                    r#"{"cmd":"getQuests","quests":{
+                    "21":{"QuestID":21,"sName":"Nothing Needed","bOnce":false,"iSlot":-1,"turnin":[],"oItems":{},"oRewards":{},"reward":[]},
+                    "22":{"QuestID":22,"sName":"Once","bOnce":true,"iSlot":-1,"turnin":[{"ItemID":87,"iQty":2}],"oItems":{"87":{"ItemID":87,"sName":"Treeant Branch","iStk":10}},"oRewards":{},"reward":[]}}}"#,
+                );
+            }
+        },
+    );
+    let (result, logged, sent) = fake.run(
+        r#"
+using Skua.Core.Interfaces;
+public class Maximum {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Quests.Load(21, 22);
+        bot.Wait.ForTrue(() => bot.Quests.Tree.Count == 2, 20);
+        int Most(int id) => bot.Flash.CallGameFunction<int>("world.maximumQuestTurnIns", id);
+        bot.Log($"empty {Most(21)}, once {Most(22)}, unloaded {Most(404)}");
+    }
+}
+"#,
+    );
+
+    assert!(result == Outcome::Finished, "{result:?}\n{logged:#?}");
+    assert!(
+        logged.contains(&"empty -1, once 3, unloaded 0".to_string()),
+        "{logged:#?}"
+    );
+    assert!(!sent.iter().any(|m| m.contains("%404%")), "{sent:#?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn clearing_the_quest_tree_forgets_loaded_and_accepted_quests() {
+    let fake = Fake::start(farm_quest_server);
+    let (result, logged, sent) = fake.run(
+        r#"
+using System.Dynamic;
+using Skua.Core.Interfaces;
+public class ClearTree {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Quests.EnsureAccept(11);
+        bot.Flash.SetGameObject("world.questTree", new ExpandoObject());
+        bot.Log($"tree {bot.Quests.Tree.Count} in progress {bot.Quests.IsInProgress(11)}");
+        bot.Quests.EnsureLoad(11);
+        bot.Log($"accepted again {bot.Quests.EnsureAccept(11)}");
+    }
+}
+"#,
+    );
+
+    assert!(result == Outcome::Finished, "{result:?}\n{logged:#?}");
+    assert!(
+        logged.contains(&"tree 0 in progress False".to_string()),
+        "{logged:#?}"
+    );
+    assert!(
+        logged.contains(&"accepted again True".to_string()),
+        "{logged:#?}"
+    );
+    let count = |needle: &str| sent.iter().filter(|m| m.contains(needle)).count();
+    assert_eq!(count("%getQuests%5%11%"), 2, "{sent:#?}");
+    assert_eq!(count("%acceptQuest%5%11%"), 2, "{sent:#?}");
 }
 
 #[test]
@@ -577,7 +691,7 @@ public class Pickups {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
-fn a_class_quest_is_unavailable_until_the_class_has_the_points() {
+fn a_class_quest_is_unavailable_until_the_class_has_the_points_and_its_accept_is_sent_once() {
     let fake = Fake::start_with(
         FARM,
         json!([{"ItemID":15652,"CharItemID":78,"sName":"Rogue","iQty":900,"iStk":1,"sType":"Class","sES":"ar","bEquip":true}]),
@@ -591,6 +705,8 @@ fn a_class_quest_is_unavailable_until_the_class_has_the_points() {
                     "18":{"QuestID":18,"sName":"Rank Two","bOnce":false,"iSlot":-1,"iValue":0,"bUpg":false,"iLvl":0,"iClass":15652,"iReqCP":900,
                           "turnin":[],"oItems":{},"oRewards":{},"reward":[]}}}"#,
                 );
+            } else if msg.starts_with("%xt%zm%acceptQuest%5%17%") {
+                wire.object(r#"{"cmd":"acceptQuest","bSuccess":0,"QuestID":17,"msg":"Requirements not met"}"#);
             }
         },
     );
@@ -608,11 +724,14 @@ fn a_class_quest_is_unavailable_until_the_class_has_the_points() {
         "{logged:#?}"
     );
     assert!(
-        logged.contains(&"accepted the locked one False".to_string()),
+        logged.contains(&"accepted the locked one True".to_string()),
         "{logged:#?}"
     );
-    assert!(
-        !sent.iter().any(|m| m.contains("%acceptQuest%5%17%")),
+    assert_eq!(
+        sent.iter()
+            .filter(|m| m.contains("%acceptQuest%5%17%"))
+            .count(),
+        1,
         "{sent:#?}"
     );
 }
@@ -640,6 +759,7 @@ public class Reaccept {
         bot.Log($"accepted again {bot.Quests.IsInProgress(19)}");
         bot.Lite.ReacceptQuest = false;
         bot.Log($"completed {bot.Quests.Complete(19)} absent {bot.Quests.Complete(19)}");
+        bot.Quests.Complete(19, 1027);
     }
 }
 "#);
@@ -647,6 +767,11 @@ public class Reaccept {
     assert!(
         sent.iter()
             .any(|m| m.contains("%tryQuestComplete%5%19%-1%true%1%wvz%")),
+        "{sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|m| m.contains("%tryQuestComplete%5%19%1027%false%1%wvz%")),
         "{sent:?}"
     );
     assert!(logs.contains(&"accepted again True".into()), "{logs:?}");

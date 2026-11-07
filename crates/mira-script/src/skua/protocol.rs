@@ -70,13 +70,14 @@ pub enum Call {
     Complete {
         quest: QuestId,
         reward: Option<ItemId>,
-        times: u32,
+        times: i64,
         #[serde(default)]
         special: bool,
     },
     Abandon {
         quest: QuestId,
     },
+    ForgetQuests,
     Pickup {
         item: ItemId,
     },

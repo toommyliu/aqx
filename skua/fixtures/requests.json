@@ -225,6 +225,10 @@
     "quest": 11
   },
   {
+    "id": 107,
+    "call": "forget_quests"
+  },
+  {
     "id": 104,
     "call": "rest_packet"
   },

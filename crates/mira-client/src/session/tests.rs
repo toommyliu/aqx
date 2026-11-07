@@ -1202,7 +1202,8 @@ fn quest_status_follows_the_game_clients_checks() {
                     {"ItemID": "501", "iQty": 2, "iRate": 12.5, "iType": 1},
                 ],
                 "oRewards": {
-                    "itemsS": {"500": {"ItemID": 500, "sName": "Gold Bar", "iStk": 10}},
+                    "itemsS": {"500": {"ItemID": 500, "sName": "Gold Bar", "iStk": 10,
+                        "sDesc": "Heavy", "sType": "Item", "bUpg": "1", "bCoins": 0}},
                     "itemsR": {"501": {"ItemID": "501", "sName": "Gem"}},
                 },
             })),
@@ -1308,6 +1309,10 @@ fn quest_status_follows_the_game_clients_checks() {
                 qty: 3,
                 max_stack: 99,
                 temp: true,
+                description: String::new(),
+                category: String::new(),
+                member: false,
+                coins: false,
             }],
             required: vec![],
             rewards: vec![
@@ -1317,6 +1322,10 @@ fn quest_status_follows_the_game_clients_checks() {
                     qty: 1,
                     max_stack: 10,
                     temp: false,
+                    description: "Heavy".into(),
+                    category: "Item".into(),
+                    member: true,
+                    coins: false,
                     chance: 100.0,
                     kind: RewardKind::Always,
                 },
@@ -1326,6 +1335,10 @@ fn quest_status_follows_the_game_clients_checks() {
                     qty: 2,
                     max_stack: 0,
                     temp: false,
+                    description: String::new(),
+                    category: String::new(),
+                    member: false,
+                    coins: false,
                     chance: 12.5,
                     kind: RewardKind::Rolled,
                 },
@@ -2553,7 +2566,7 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
     assert!(session.snapshot().accepted_quests.contains(&QuestId(30)));
     session.accept_quest(QuestId(30)).wait().unwrap();
     session
-        .complete_quest_special(QuestId(30), Some(ItemId(600)), 2, true)
+        .complete_quest_unchecked(QuestId(30), Some(ItemId(600)), 2, true)
         .wait()
         .unwrap();
     let world = session.snapshot();
@@ -2609,6 +2622,20 @@ fn quest_actions_make_the_clients_checks_before_sending() {
             None,
             1,
         ));
+        peer.send("%xt%zm%tryQuestComplete%42%99%-1%false%1%wvz%");
+        peer.send(&json_message(
+            json!({"cmd": "ccqr", "QuestID": 44, "bSuccess": 1, "sName": "Echoed"}),
+        ));
+        peer.expect(&packet::accept_quest(AreaId(42), QuestId(44)));
+        peer.send(&json_message(
+            json!({"cmd": "acceptQuest", "QuestID": 44, "bSuccess": 1}),
+        ));
+        peer.expect(&packet::try_quest_complete(
+            AreaId(42),
+            QuestId(44),
+            None,
+            1,
+        ));
         peer.send("%xt%zm%tryQuestComplete%42%44%-1%false%1%wvz%");
         peer.expect(&packet::logout());
     });
@@ -2638,6 +2665,8 @@ fn quest_actions_make_the_clients_checks_before_sending() {
     let missing = session.load_quests(&[QuestId(46), QuestId(45), QuestId(44)]);
     assert!(matches!(missing.wait(), Err(ActionError::NoTarget(_))));
     assert!(session.snapshot().quests.contains_key(&QuestId(45)));
+    session.complete_quest(QuestId(44), None, 1).wait().unwrap();
+    session.accept_quest(QuestId(44)).wait().unwrap();
     let echoed = session.complete_quest(QuestId(44), None, 1).wait();
     assert!(matches!(echoed, Err(ActionError::Refused(_))));
     session.logout();

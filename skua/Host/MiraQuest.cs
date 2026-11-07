@@ -61,7 +61,14 @@ public sealed class MiraQuest(Protocol protocol, State state) : IScriptQuest
         try { protocol.Call(request); return true; }
         catch (InvalidOperationException) { return false; }
     }
-    public bool Accept(int id) { Act(new AcceptCall(id)); return IsInProgress(id); }
+    public bool Accept(int id)
+    {
+        Bot.ThrowIfStopped();
+        try { protocol.Call(new AcceptCall(id)); }
+        catch (CallFailedException e) when (e.Kind is ErrorKind.Refused or ErrorKind.NoReply) { }
+        catch (InvalidOperationException) { return IsInProgress(id); }
+        return true;
+    }
     public void Accept(params int[] ids) { foreach (int id in ids) { Accept(id); Bot.Sleep(Bot.Options.ActionDelay); } }
     public bool EnsureAccept(int id)
     {
@@ -171,7 +178,7 @@ public sealed class MiraQuest(Protocol protocol, State state) : IScriptQuest
                     }
                     token.ThrowIfCancellationRequested();
                     if (!CanComplete(id)) continue;
-                    uint times = (uint)(quest.Once || !string.IsNullOrEmpty(quest.Field) ? 1 : Bot.Flash.CallGameFunction<int>("world.maximumQuestTurnIns", id));
+                    int times = quest.Once || !string.IsNullOrEmpty(quest.Field) ? 1 : Bot.Flash.CallGameFunction<int>("world.maximumQuestTurnIns", id);
                     if (!Act(new CompleteCall(id, reward < 0 ? null : reward, times))) continue;
                     token.ThrowIfCancellationRequested();
                     lock (registered) lastComplete[id] = Environment.TickCount64;

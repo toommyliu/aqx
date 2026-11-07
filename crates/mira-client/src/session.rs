@@ -468,6 +468,7 @@ enum Action {
     ExitCombat,
     Quest(QuestAction),
     AbandonQuest(QuestId),
+    ForgetQuests,
     PickDrop(ItemId),
     RequestDrop(ItemId),
     LoadShop(ShopId),
@@ -504,6 +505,7 @@ impl Action {
             Action::Ready
                 | Action::Quest(_)
                 | Action::AbandonQuest(_)
+                | Action::ForgetQuests
                 | Action::PickDrop(_)
                 | Action::RequestDrop(_)
                 | Action::MapItem(_)
@@ -803,8 +805,16 @@ impl Handle {
         self.act(Action::AbandonQuest(id))
     }
 
+    pub fn forget_quests(&self) -> Pending {
+        self.act(Action::ForgetQuests)
+    }
+
     pub fn accept_quest(&self, id: QuestId) -> Pending {
-        self.act(Action::Quest(QuestAction::Accept(id)))
+        self.act(Action::Quest(QuestAction::Accept { id, checked: true }))
+    }
+
+    pub fn accept_quest_unchecked(&self, id: QuestId) -> Pending {
+        self.act(Action::Quest(QuestAction::Accept { id, checked: false }))
     }
 
     pub fn load_shop(&self, id: ShopId) -> Pending {
@@ -915,14 +925,20 @@ impl Handle {
     }
 
     pub fn complete_quest(&self, id: QuestId, reward: Option<ItemId>, times: u32) -> Pending {
-        self.complete_quest_special(id, reward, times, false)
+        self.act(Action::Quest(QuestAction::TurnIn {
+            id,
+            reward,
+            times: i64::from(times),
+            special: false,
+            checked: true,
+        }))
     }
 
-    pub fn complete_quest_special(
+    pub fn complete_quest_unchecked(
         &self,
         id: QuestId,
         reward: Option<ItemId>,
-        times: u32,
+        times: i64,
         special: bool,
     ) -> Pending {
         self.act(Action::Quest(QuestAction::TurnIn {
@@ -930,6 +946,7 @@ impl Handle {
             reward,
             times,
             special,
+            checked: false,
         }))
     }
 
@@ -1535,6 +1552,10 @@ impl Session {
             Action::Ready => self.ensure_ready(),
             Action::AbandonQuest(id) => self.ensure_ready().map(|()| {
                 self.accepted_quests.remove(&id);
+            }),
+            Action::ForgetQuests => self.ensure_ready().map(|()| {
+                self.quests = Arc::default();
+                self.accepted_quests.clear();
             }),
             Action::MoveToCell {
                 cell,

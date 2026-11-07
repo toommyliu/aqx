@@ -71,6 +71,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state, MiraEvent even
         ("lnkDestroy", [int id]) => DestroyLink(id),
         ("getGameObject" or "getGameObjectS", [string path]) => GameObject(path),
         ("setGameObject", ["litePreference.data.favs", object value]) => SetFavorites(value),
+        ("setGameObject", ["world.questTree", IDictionary<string, object?> { Count: 0 }]) => ForgetQuests(),
         ("setGameObject" or "setGameObjectKey", _) => null,
         ("isFavoriteItem", [int id]) => Volatile.Read(ref favorites).GetValueOrDefault(state.Me?.CharId ?? 0)?.Contains(id) == true,
         ("rejectExcept", [string names]) => ((MiraDrop)IScriptInterface.Instance.Drops).RejectOffers(names.Split(',')),
@@ -89,7 +90,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state, MiraEvent even
         ("callGameFunction", ["world.acceptQuest", int quest]) => IScriptInterface.Instance.Quests.Accept(quest),
         ("callGameFunction", ["world.isQuestInProgress", int quest]) => IScriptInterface.Instance.Quests.IsInProgress(quest),
         ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool special]) => IScriptInterface.Instance.Quests.Complete(quest, reward, special),
-        ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool special, int times]) => Act(new CompleteCall(quest, reward < 0 ? null : reward, (uint)times, special)),
+        ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool special, int times]) => Act(new CompleteCall(quest, reward < 0 ? null : reward, times, special)),
         ("callGameFunction", ["loaderInfo.applicationDomain.hasDefinition", "InvCat"]) => true,
         ("callGameFunction", ["loaderInfo.applicationDomain.getDefinition", "InvCat"]) => new { MISC_SLOTS = state.Me?.BagSlots ?? 0, MISC_TYPES = new[] { "Item", "Note", "Quest Item", "Resource" } },
         ("callGameFunction", ["world.myAvatar.getCPByID", int id]) => state.Inventory.ById.GetValueOrDefault(id)?.Qty ?? -1,
@@ -169,6 +170,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state, MiraEvent even
         var value = Newtonsoft.Json.Linq.JObject.FromObject(item);
         return ((MiraShop)IScriptInterface.Instance.Shops).MaximumBuys(value.ToObject<ShopItem>()!, value["turnin"] is { Type: not Newtonsoft.Json.Linq.JTokenType.Null });
     }
+    object? ForgetQuests() { Act(new ForgetQuestsCall()); return null; }
     object? SetFavorites(object value)
     {
         var parsed = JsonConvert.DeserializeObject<Dictionary<long, int[]>>(JsonConvert.SerializeObject(value))!;
@@ -260,11 +262,17 @@ public sealed class MiraFlashUtil(Protocol protocol, State state, MiraEvent even
     int Achievement(string field, int index) => index is < 0 or > 31 || state.Me?.Quests.Achievements.TryGetValue(field, out _) != true ? -1 : (int)((state.Me.Quests.Achievements[field] >> index) & 1);
     int MaximumTurnIns(int quest)
     {
-        if (!state.Quests.Definitions.TryGetValue(quest, out var definition)) { IScriptInterface.Instance.Quests.EnsureLoad(quest); definition = state.Quests.Definitions.GetValueOrDefault(quest); }
-        if (definition is null) return 0;
-        if (definition.TurnIn.IsEmpty) return 1;
-        if (definition.Once || definition.Period is not null) return 1;
-        return definition.TurnIn.Aggregate(250, (count, item) => Math.Min(count, ((state.Inventory.ById.GetValueOrDefault(item.Id)?.Qty ?? 0) + state.Temp.Where(i => i.Id == item.Id).Sum(i => i.Qty)) / Math.Max(1, item.Qty)));
+        if (!state.Quests.Definitions.TryGetValue(quest, out var definition)) return 0;
+        int most = -1;
+        foreach (var item in definition.TurnIn)
+        {
+            var held = state.Inventory.ById.GetValueOrDefault(item.Id);
+            int qty = (held?.Qty ?? 0) + state.Temp.Where(i => i.Id == item.Id).Sum(i => i.Qty);
+            if (qty < item.Qty || held?.Equipped == true) return 0;
+            int sets = qty / Math.Max(1, item.Qty);
+            if (most == -1 || sets < most) most = sets;
+        }
+        return Math.Min(most, 250);
     }
     bool LoadQuests(string ids) { IScriptInterface.Instance.Quests.Load(ids.Split(',').Select(int.Parse).ToArray()); return true; }
     object? SendPacket(string packet) { protocol.Call(new SendCall(packet)); return null; }

@@ -424,14 +424,15 @@ impl SkuaScript {
                             session.load_quests(&ids);
                             None
                         }
-                        Call::Accept { quest } => Some(session.accept_quest(quest)),
+                        Call::Accept { quest } => Some(session.accept_quest_unchecked(quest)),
                         Call::Complete {
                             quest,
                             reward,
                             times,
                             special,
-                        } => Some(session.complete_quest_special(quest, reward, times, special)),
+                        } => Some(session.complete_quest_unchecked(quest, reward, times, special)),
                         Call::Abandon { quest } => Some(session.abandon_quest(quest)),
+                        Call::ForgetQuests => Some(session.forget_quests()),
                         Call::Pickup { item } => Some(session.request_drop(item)),
                         Call::GetMapItem { item } => Some(session.get_map_item(item)),
                         Call::LoadCells => Some(session.load_cells()),

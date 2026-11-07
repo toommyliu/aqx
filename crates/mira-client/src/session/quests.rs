@@ -12,12 +12,16 @@ const LOAD_TRIES: u32 = 5;
 
 pub(super) enum QuestAction {
     Load(Vec<QuestId>),
-    Accept(QuestId),
+    Accept {
+        id: QuestId,
+        checked: bool,
+    },
     TurnIn {
         id: QuestId,
         reward: Option<ItemId>,
-        times: u32,
+        times: i64,
         special: bool,
+        checked: bool,
     },
 }
 
@@ -59,7 +63,7 @@ pub(super) enum Answer {
     SlowedDown,
     Accepted(Verdict),
     TurnedIn(Verdict),
-    TurnInEchoed,
+    TurnInEchoed(QuestId),
 }
 
 #[derive(Deserialize)]
@@ -88,7 +92,8 @@ impl Session {
     pub(super) fn start_quest(&self, action: QuestAction) -> QuestCall {
         let mut unfetched: Vec<QuestId> = match &action {
             QuestAction::Load(ids) => ids.clone(),
-            QuestAction::Accept(id) | QuestAction::TurnIn { id, .. } => vec![*id],
+            QuestAction::TurnIn { checked: false, .. } => Vec::new(),
+            QuestAction::Accept { id, .. } | QuestAction::TurnIn { id, .. } => vec![*id],
         };
         unfetched.retain(|id| !self.quests.contains_key(id));
         unfetched.sort();
@@ -142,24 +147,34 @@ impl Session {
                     None => Ok(()),
                 });
             }
-            QuestAction::Accept(id) => {
-                if self.accepted_quests.contains(id) {
+            &QuestAction::Accept { id, checked } => {
+                if self.accepted_quests.contains(&id) {
                     return Poll::Ready(Ok(()));
                 }
-                if let Err(e) = self.quest(*id).and_then(|quest| self.acceptable(quest)) {
+                let found = self.quest(id);
+                let checks = found.and_then(|quest| {
+                    if checked {
+                        self.acceptable(quest)
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(e) = checks {
                     return Poll::Ready(Err(e));
                 }
-                (Limit::AcceptQuest, packet::accept_quest(area, *id))
+                (Limit::AcceptQuest, packet::accept_quest(area, id))
             }
             &QuestAction::TurnIn {
                 id,
                 reward,
                 times,
                 special,
+                checked,
             } => {
-                if let Err(e) = self
-                    .quest(id)
-                    .and_then(|quest| self.can_turn_in(quest, reward, times))
+                if checked
+                    && let Err(e) = self
+                        .quest(id)
+                        .and_then(|quest| self.can_turn_in(quest, reward, times))
                 {
                     return Poll::Ready(Err(e));
                 }
@@ -204,7 +219,7 @@ impl Session {
             (Stage::Fetching { .. }, _, Answer::SlowedDown) => Err(ActionError::Refused(
                 "the server kept saying to slow down while loading quests".into(),
             )),
-            (Stage::Sent { .. }, QuestAction::Accept(id), Answer::Accepted(verdict))
+            (Stage::Sent { .. }, QuestAction::Accept { id, .. }, Answer::Accepted(verdict))
                 if verdict.id == *id =>
             {
                 verdict.result("the server refused the quest")
@@ -214,9 +229,13 @@ impl Session {
             {
                 verdict.result("the turn-in failed")
             }
-            (Stage::Sent { .. }, QuestAction::TurnIn { .. }, Answer::TurnInEchoed) => Err(
-                ActionError::Refused("the server sent the turn-in back unanswered".into()),
-            ),
+            (Stage::Sent { .. }, QuestAction::TurnIn { id, .. }, Answer::TurnInEchoed(echoed))
+                if echoed == *id =>
+            {
+                Err(ActionError::Refused(
+                    "the server sent the turn-in back unanswered".into(),
+                ))
+            }
             _ => return,
         };
         if let Some(Op::Quest { reply, .. }) = self.current.take() {
@@ -254,7 +273,7 @@ impl Session {
         &self,
         quest: &Quest,
         reward: Option<ItemId>,
-        times: u32,
+        times: i64,
     ) -> Result<(), ActionError> {
         let unusable = |why: String| Err(ActionError::Unusable(why));
         let accepted = self.accepted_quests.contains(&quest.id);
@@ -273,7 +292,7 @@ impl Session {
             }
             _ => {}
         }
-        if times == 0 || times > most {
+        if times < 1 || times > i64::from(most) {
             return unusable(format!(
                 "{} can be turned in {most} time{} at once now",
                 quest.name,

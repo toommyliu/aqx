@@ -52,7 +52,7 @@ public sealed class Protocol : IDisposable
             if (reply.Error is { } error)
             {
                 if (error.Kind == ErrorKind.Cancelled || error.Kind == ErrorKind.Closed) throw new OperationCanceledException(error.Message);
-                throw new InvalidOperationException($"{error.Kind}: {error.Message}");
+                throw new CallFailedException(error.Kind, error.Message);
             }
             return reply.Ok;
         }
