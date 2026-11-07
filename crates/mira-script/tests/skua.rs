@@ -285,6 +285,31 @@ public class Events {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn moving_cells_publishes_the_cell_changed_message() {
+    let source = r#"
+using CommunityToolkit.Mvvm.Messaging;
+using Skua.Core.Interfaces;
+using Skua.Core.Messaging;
+public class CellMessages {
+    public void ScriptMain(IScriptInterface bot) {
+        string? moved = null;
+        StrongReferenceMessenger.Default.Register<CellMessages, CellChangedMessage, int>(this, (int)MessageChannels.GameEvents, (_, m) => moved = $"{m.Map} {m.Cell} {m.Pad}");
+        bot.Map.Jump("r2", "Left");
+        bot.Wait.ForTrue(() => moved is not null, 50);
+        bot.Log($"cell changed {moved}");
+    }
+}
+"#;
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(
+        logs.contains(&"cell changed farm r2 Left".into()),
+        "{logs:?}"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn a_cached_script_does_not_load_the_compiler() {
     let source = r#"
 using Skua.Core.Interfaces;
