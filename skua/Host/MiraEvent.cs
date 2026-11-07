@@ -131,7 +131,7 @@ public sealed class MiraEvent : IScriptEvent
         {
             case DiedClientEvent: PlayerDeath?.Invoke(); break;
             case KilledClientEvent e: MonsterKilled?.Invoke((int)e.Id); break;
-            case JoinedClientEvent e: MapChanged?.Invoke(e.Map); break;
+            case JoinedClientEvent e: MapChanged?.Invoke(e.Map.Split('-')[0]); break;
             case QuestCompletedClientEvent e: QuestTurnedIn?.Invoke((int)e.Id); ((MiraQuest)IScriptInterface.Instance.Quests).Reaccept((int)e.Id); break;
             case AwayChangedClientEvent { Away: true }: PlayerAFK?.Invoke(); break;
             case CounterStartedClientEvent: CounterAttack?.Invoke(false); break;
