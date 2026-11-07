@@ -37,17 +37,34 @@ fn find_worker(building: &mut dyn FnMut()) -> Result<PathBuf, LoadError> {
 
 fn development_worker(building: &mut dyn FnMut()) -> Result<PathBuf, LoadError> {
     let skua = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skua");
+    build_worker(&skua, "dotnet".as_ref(), building)
+}
+
+fn build_worker(
+    skua: &Path,
+    dotnet: &std::ffi::OsStr,
+    building: &mut dyn FnMut(),
+) -> Result<PathBuf, LoadError> {
     let artifacts = skua.join("Host/artifacts");
     let worker = artifacts.join("publish/mira-skua");
     let stamp = artifacts.join("publish/.built");
-    let built = std::fs::metadata(&stamp).and_then(|m| m.modified()).ok();
-    if worker.is_file()
-        && built.is_some_and(|built| newest_source(&skua).is_none_or(|source| source <= built))
-    {
+    let fresh = || {
+        let built = std::fs::metadata(&stamp).and_then(|m| m.modified()).ok();
+        worker.is_file()
+            && built.is_some_and(|built| newest_source(skua).is_none_or(|source| source <= built))
+    };
+    if fresh() {
+        return Ok(worker);
+    }
+    let locked = |e: io::Error| LoadError(format!("couldn't lock the Skua worker build: {e}"));
+    std::fs::create_dir_all(&artifacts).map_err(locked)?;
+    let lock = std::fs::File::create(artifacts.join(".build.lock")).map_err(locked)?;
+    lock.lock().map_err(locked)?;
+    if fresh() {
         return Ok(worker);
     }
     building();
-    let published = Command::new("dotnet")
+    let published = Command::new(dotnet)
         .arg("publish")
         .arg(skua.join("Host/Host.csproj"))
         .args(["-c", "Release", "--artifacts-path"])
@@ -703,4 +720,42 @@ fn forward(
             }
         })
         .map(drop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn accounts_starting_together_build_a_stale_worker_once() {
+        let root = std::env::temp_dir().join(format!("mira-worker-build-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let skua = root.join("skua");
+        std::fs::create_dir_all(skua.join("Host")).unwrap();
+        std::fs::write(skua.join("Host/Host.csproj"), "").unwrap();
+        let builds = root.join("builds");
+        let dotnet = root.join("dotnet");
+        std::fs::write(
+            &dotnet,
+            format!(
+                "#!/bin/sh\necho >> '{}'\nsleep 0.3\nwhile [ \"$1\" != -o ]; do shift; done\nmkdir -p \"$2\" && touch \"$2/mira-skua\"\n",
+                builds.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&dotnet, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let starts: Vec<_> = (0..3)
+            .map(|_| {
+                let (skua, dotnet) = (skua.clone(), dotnet.clone());
+                thread::spawn(move || build_worker(&skua, dotnet.as_os_str(), &mut || {}))
+            })
+            .collect();
+        for start in starts {
+            start.join().unwrap().unwrap();
+        }
+        let built = std::fs::read_to_string(&builds).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(built.lines().count(), 1);
+    }
 }
