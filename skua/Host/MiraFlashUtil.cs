@@ -151,7 +151,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state, MiraEvent even
         if (state.Shop is not { } shop) return null;
         return path switch
         {
-            "" => new { ShopID = shop.Id, sName = shop.Name, bUpg = shop.Member, bLimited = shop.Limited, sMap = string.Join(',', shop.Maps), iIndex = shop.Index, sField = shop.Field, reqItems = shop.RequiredItem, items = shop.ScriptItems },
+            "" => new { ShopID = shop.Id, sName = shop.Name, bUpg = shop.Member, bLimited = shop.Limited, sMap = string.Join(',', shop.Maps), iIndex = shop.Index, sField = shop.Field, reqItems = shop.RequiredItem, items = shop.RawItems },
             "iIndex" => shop.Index,
             "sField" => shop.Field,
             "reqItems" => shop.RequiredItem,
@@ -160,7 +160,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state, MiraEvent even
             "bUpg" => shop.Member,
             "bLimited" => shop.Limited,
             "sMap" => string.Join(',', shop.Maps),
-            "items" => shop.ScriptItems,
+            "items" => shop.RawItems,
             _ => null
         };
     }

@@ -443,6 +443,7 @@ impl SkuaScript {
                         Call::Buy { listing, quantity } => Some(session.buy(listing, quantity)),
                         Call::Sell { item, quantity } => Some(session.sell(item, quantity)),
                         Call::Equip { item } => Some(session.equip(item)),
+                        Call::EquipUnchecked { item } => Some(session.equip_unchecked(item)),
                         Call::Unequip { item } => Some(session.unequip(item)),
                         Call::UseItem { item } => Some(session.use_item(item)),
                         Call::Send { text } => Some(session.send_now(&text)),

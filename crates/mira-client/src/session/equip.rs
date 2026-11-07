@@ -51,6 +51,7 @@ impl Session {
         &mut self,
         item: ItemId,
         on: bool,
+        checked: bool,
         stage: &mut EquipStage,
         now: Instant,
     ) -> Poll<Result<(), ActionError>> {
@@ -64,7 +65,7 @@ impl Session {
                 Poll::Pending
             };
         }
-        let plan = match self.plan_equip(item, on) {
+        let plan = match self.plan_equip(item, on, checked) {
             Ok(plan) => plan,
             Err(e) => return Poll::Ready(Err(e)),
         };
@@ -111,7 +112,7 @@ impl Session {
         Poll::Pending
     }
 
-    fn plan_equip(&self, id: ItemId, on: bool) -> Result<Plan, ActionError> {
+    fn plan_equip(&self, id: ItemId, on: bool, checked: bool) -> Result<Plan, ActionError> {
         let unusable = |why: String| Err(ActionError::Unusable(why));
         let Some(me) = &self.character else {
             return Err(ActionError::NotReady);
@@ -122,9 +123,9 @@ impl Session {
             )));
         };
         match me.state {
-            CombatState::Dead => return Err(ActionError::Dead),
-            CombatState::InCombat => return Err(ActionError::InCombat),
-            CombatState::Idle => {}
+            CombatState::Dead if checked => return Err(ActionError::Dead),
+            CombatState::InCombat if checked => return Err(ActionError::InCombat),
+            _ => {}
         }
         let consumable = item.kind.eq_ignore_ascii_case("item");
         let worn = if consumable {
@@ -147,11 +148,11 @@ impl Session {
             }
             return Ok(Plan::Gear);
         }
-        if item.member && !me.member {
+        if checked && item.member && !me.member {
             return unusable(format!("{} is for members", item.name));
         }
         let level = item.enhancement.as_ref().map_or(0, |e| e.level);
-        if level > me.level {
+        if checked && level > me.level {
             return unusable(format!("{} needs level {level}", item.name));
         }
         if consumable {
@@ -163,7 +164,8 @@ impl Session {
                 meta: item.meta.clone(),
             });
         }
-        if !ALWAYS_EQUIPPABLE.contains(&item.slot.as_str()) && item.enhancement.is_none() {
+        if checked && !ALWAYS_EQUIPPABLE.contains(&item.slot.as_str()) && item.enhancement.is_none()
+        {
             return unusable(format!("{} needs an enhancement first", item.name));
         }
         Ok(Plan::Gear)

@@ -476,6 +476,7 @@ enum Action {
     Equip {
         item: ItemId,
         on: bool,
+        checked: bool,
     },
     MapItem(MapItemId),
     Rest,
@@ -560,6 +561,7 @@ enum Op {
         reply: Reply,
         item: ItemId,
         on: bool,
+        checked: bool,
         stage: EquipStage,
     },
     MapItem {
@@ -869,11 +871,27 @@ impl Handle {
     }
 
     pub fn equip(&self, item: ItemId) -> Pending {
-        self.act(Action::Equip { item, on: true })
+        self.act(Action::Equip {
+            item,
+            on: true,
+            checked: true,
+        })
+    }
+
+    pub fn equip_unchecked(&self, item: ItemId) -> Pending {
+        self.act(Action::Equip {
+            item,
+            on: true,
+            checked: false,
+        })
     }
 
     pub fn unequip(&self, item: ItemId) -> Pending {
-        self.act(Action::Equip { item, on: false })
+        self.act(Action::Equip {
+            item,
+            on: false,
+            checked: true,
+        })
     }
 
     pub fn deposit(&self, item: ItemId) -> Pending {
@@ -1584,13 +1602,14 @@ impl Session {
                 };
                 return self.step(op, now);
             }
-            Action::Equip { item, on } => {
+            Action::Equip { item, on, checked } => {
                 let stage = EquipStage::Waiting { wake: None };
                 return self.step(
                     Op::Equip {
                         reply,
                         item,
                         on,
+                        checked,
                         stage,
                     },
                     now,
@@ -1964,12 +1983,14 @@ impl Session {
                 reply,
                 item,
                 on,
+                checked,
                 mut stage,
-            } => match self.step_equip(item, on, &mut stage, now) {
+            } => match self.step_equip(item, on, checked, &mut stage, now) {
                 task::Poll::Pending => Some(Op::Equip {
                     reply,
                     item,
                     on,
+                    checked,
                     stage,
                 }),
                 task::Poll::Ready(result) => {

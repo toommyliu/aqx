@@ -12,8 +12,10 @@ use crate::aura::{self, Target};
 use crate::combat::{self, ITEM_SLOT};
 use crate::enhancement::Enhanced;
 use crate::event::{Event, NoticeKind};
-use crate::faction::{self, AddedFaction, Faction, FactionData};
-use crate::inventory::{AddedItems, LoadInventory, Picked, Sold, TurnIn, Worn};
+use crate::faction::{self, AddedFaction, Caught, Faction, FactionData};
+use crate::inventory::{
+    AddedItems, LOADOUT_SLOTS, LoadInventory, Loadout, Picked, Removed, Sold, TurnIn, Worn,
+};
 use crate::player::{
     Balance, BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, SkillList, StatUpdate,
 };
@@ -473,6 +475,11 @@ impl Session {
                 });
                 self.on_sold(sold.char_item_id);
             }
+            "removeItem" => {
+                if let Some(event) = self.inventory.remove(&read::<Removed>(&json)?) {
+                    self.emit(event);
+                }
+            }
             "buyItem" => self.on_bought(read::<Bought>(&json)?),
             "enhanceItemShop" => {
                 let enhanced: Enhanced = read(&json)?;
@@ -516,6 +523,23 @@ impl Session {
                     self.on_worn(worn.id, on);
                 }
             }
+            "wearItem" | "unwearItem" => {
+                let worn: Worn = read(&json)?;
+                if Some(worn.uid) == self.me {
+                    self.inventory.set_worn(worn.id, json.cmd == "wearItem");
+                }
+            }
+            "wearLoadout" => {
+                let loadout: Loadout = read(&json)?;
+                if Some(loadout.uid) == self.me {
+                    for slot in LOADOUT_SLOTS {
+                        self.inventory.unwear_slot(slot);
+                        if let Some(piece) = loadout.costume.get(slot) {
+                            self.inventory.set_worn(piece.id, true);
+                        }
+                    }
+                }
+            }
             "addGoldExp" => {
                 let reward: Reward = read(&json)?;
                 if let Some(points) = self.character.as_mut().and_then(|c| c.gain(&reward)) {
@@ -539,6 +563,10 @@ impl Session {
                         exp: reward.exp,
                     });
                 }
+            }
+            "CatchResult" => {
+                let caught: Caught = read(&json)?;
+                faction::add_rep(&mut self.factions, faction::FISHING, caught.result.rep);
             }
             "levelUp" => {
                 let level: LevelUp = read(&json)?;

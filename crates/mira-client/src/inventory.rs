@@ -54,6 +54,7 @@ pub struct Item {
     pub kind: String,
     pub slot: String,
     pub equipped: bool,
+    pub worn: bool,
     pub coins: bool,
     pub member: bool,
     pub meta: String,
@@ -84,6 +85,8 @@ struct WireItem {
     slot: String,
     #[serde(rename = "bEquip", default, deserialize_with = "flex::bool")]
     equipped: bool,
+    #[serde(rename = "bWear", default, deserialize_with = "flex::bool")]
+    worn: bool,
     #[serde(rename = "bCoins", default, deserialize_with = "flex::bool")]
     coins: bool,
     #[serde(rename = "bUpg", default, deserialize_with = "flex::bool")]
@@ -111,6 +114,7 @@ impl From<WireItem> for Item {
             kind: wire.kind,
             slot: wire.slot,
             equipped: wire.equipped,
+            worn: wire.worn,
             coins: wire.coins,
             member: wire.member,
             meta: wire.meta,
@@ -265,6 +269,7 @@ impl Inventory {
                             kind: added.kind,
                             slot: added.slot,
                             equipped: false,
+                            worn: false,
                             coins: added.coins,
                             member: added.member,
                             meta: added.meta,
@@ -344,6 +349,7 @@ impl Inventory {
                 kind: offer.kind,
                 slot: offer.slot,
                 equipped: false,
+                worn: false,
                 coins: offer.coins,
                 member: offer.member,
                 meta: offer.meta,
@@ -390,11 +396,13 @@ impl Inventory {
         events
     }
 
-    pub(crate) fn buy(&mut self, listed: &ShopItem, bought: &Bought) -> Option<Event> {
-        if bought.bank {
-            return None;
-        }
-        let items = Arc::make_mut(&mut self.items);
+    pub(crate) fn buy(
+        items: &mut Arc<Vec<Item>>,
+        listed: &ShopItem,
+        bought: &Bought,
+        place: Place,
+    ) -> Option<Event> {
+        let items = Arc::make_mut(items);
         let qty = match items.iter_mut().find(|i| i.id == listed.id) {
             Some(held) => {
                 held.qty += bought.qty;
@@ -410,6 +418,7 @@ impl Inventory {
                     kind: listed.kind.clone(),
                     slot: listed.slot.clone(),
                     equipped: false,
+                    worn: false,
                     coins: listed.coins,
                     member: listed.member,
                     meta: listed.meta.clone(),
@@ -433,7 +442,7 @@ impl Inventory {
             id: listed.id,
             name: listed.name.clone(),
             qty,
-            place: Place::Inventory,
+            place,
         })
     }
 
@@ -513,6 +522,20 @@ impl Inventory {
         Some(take(Arc::make_mut(&mut self.items), at, sold.qty))
     }
 
+    pub(crate) fn remove(&mut self, removed: &Removed) -> Option<Event> {
+        if removed.bank {
+            return None;
+        }
+        let at = self
+            .items
+            .iter()
+            .position(|i| i.char_item_id == removed.char_item_id)?;
+        let qty = removed
+            .qty_now
+            .map_or(removed.qty, |now| self.items[at].qty.saturating_sub(now));
+        Some(take(Arc::make_mut(&mut self.items), at, qty))
+    }
+
     pub(crate) fn wear(&mut self, id: ItemId, on: bool) {
         let items = Arc::make_mut(&mut self.items);
         let slot = items.iter().find(|i| i.id == id).map(|i| i.slot.clone());
@@ -522,6 +545,35 @@ impl Inventory {
             } else if on && Some(&item.slot) == slot.as_ref() {
                 item.equipped = false;
             }
+        }
+    }
+
+    pub(crate) fn set_worn(&mut self, id: ItemId, on: bool) {
+        let Some(slot) = self
+            .items
+            .iter()
+            .find(|i| i.id == id)
+            .map(|i| i.slot.clone())
+        else {
+            return;
+        };
+        if on {
+            self.unwear_slot(&slot);
+        }
+        if let Some(item) = Arc::make_mut(&mut self.items)
+            .iter_mut()
+            .find(|i| i.id == id)
+        {
+            item.worn = on;
+        }
+    }
+
+    pub(crate) fn unwear_slot(&mut self, slot: &str) {
+        for item in Arc::make_mut(&mut self.items)
+            .iter_mut()
+            .filter(|i| i.slot == slot)
+        {
+            item.worn = false;
         }
     }
 
@@ -629,6 +681,22 @@ pub(crate) struct Sold {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct Removed {
+    #[serde(rename = "CharItemID")]
+    char_item_id: CharItemId,
+    #[serde(rename = "iQty", default = "one", deserialize_with = "flex::int")]
+    qty: u32,
+    #[serde(rename = "iQtyNow", default, deserialize_with = "flex::opt_int")]
+    qty_now: Option<u32>,
+    #[serde(rename = "bBank", default, deserialize_with = "flex::bool")]
+    bank: bool,
+}
+
+fn one() -> u32 {
+    1
+}
+
+#[derive(Deserialize)]
 pub(crate) struct Picked {
     #[serde(rename = "bSuccess", deserialize_with = "flex::bool")]
     pub(crate) ok: bool,
@@ -652,6 +720,21 @@ pub(crate) struct Worn {
     #[serde(rename = "ItemID")]
     pub(crate) id: ItemId,
 }
+
+#[derive(Deserialize)]
+pub(crate) struct Loadout {
+    pub(crate) uid: EntityId,
+    #[serde(default)]
+    pub(crate) costume: BTreeMap<String, CostumePiece>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CostumePiece {
+    #[serde(rename = "ItemID")]
+    pub(crate) id: ItemId,
+}
+
+pub(crate) const LOADOUT_SLOTS: [&str; 4] = ["Weapon", "he", "ba", "co"];
 
 pub(crate) fn no_room(items: &[Item], id: ItemId, pool: Pool, me: &Me) -> bool {
     let used = |pool| items.iter().filter(|i| i.pool() == pool).count();

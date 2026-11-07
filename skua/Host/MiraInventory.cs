@@ -15,8 +15,8 @@ public sealed class MiraInventory(Protocol protocol, State state) : IScriptInven
         while (!ToBank(item) && !bot.ShouldExit && bot.Player.Playing && ++tries < bot.Options.MaximumTries) bot.Sleep(bot.Options.ActionDelay);
         return !state.Inventory.ById.ContainsKey(item.ID);
     }
-    public void EquipItem(int id) => protocol.Call(new EquipCall(id));
-    public void EquipUsableItem(InventoryItem? item) { if (item is not null) EquipItem(item.ID); }
+    public void EquipItem(int id) { try { protocol.Call(new EquipUncheckedCall(id)); } catch (InvalidOperationException) { } }
+    public void EquipUsableItem(InventoryItem? item) { if (item is not null && item.CategoryString.Equals("item", StringComparison.OrdinalIgnoreCase)) EquipItem(item.ID); }
     public bool HasCategories => true;
     public int MiscSlots => Slots;
     public int MiscUsedSlots => state.Inventory.MiscUsed;

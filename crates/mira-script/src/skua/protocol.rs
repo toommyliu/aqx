@@ -109,6 +109,9 @@ pub enum Call {
     Equip {
         item: ItemId,
     },
+    EquipUnchecked {
+        item: ItemId,
+    },
     Unequip {
         item: ItemId,
     },

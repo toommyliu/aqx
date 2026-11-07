@@ -10,7 +10,7 @@ use super::{ActionError, Op, Session};
 use crate::REPLY_TIMEOUT;
 use crate::api;
 use crate::event::{Event, Place};
-use crate::inventory::{Item, Pool};
+use crate::inventory::Pool;
 use crate::room::CombatState;
 
 #[derive(Deserialize)]
@@ -251,7 +251,7 @@ impl Session {
             return;
         };
         let item = items.remove(at);
-        self.stored(&item, 1);
+        self.stored(item.coins, 1);
         self.emit(Event::ItemChanged {
             id,
             name: item.name.clone(),
@@ -270,7 +270,7 @@ impl Session {
             return;
         };
         let item = bank.remove(at);
-        self.stored(&item, -1);
+        self.stored(item.coins, -1);
         self.emit(Event::ItemChanged {
             id,
             name: item.name.clone(),
@@ -280,8 +280,8 @@ impl Session {
         Arc::make_mut(&mut self.inventory.items).push(item);
     }
 
-    fn stored(&mut self, item: &Item, change: i32) {
-        if let Some(me) = self.character.as_mut().filter(|_| !item.coins) {
+    pub(super) fn stored(&mut self, coins: bool, change: i32) {
+        if let Some(me) = self.character.as_mut().filter(|_| !coins) {
             me.bank_count = me.bank_count.saturating_add_signed(change);
         }
     }

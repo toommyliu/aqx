@@ -828,6 +828,12 @@ fn tracks_inventory_and_temp_items() {
         peer.send(&json_message(
             json!({"cmd": "sellItem", "CharItemID": 5003, "iQty": 1, "intAmount": 0}),
         ));
+        peer.send(&json_message(
+            json!({"cmd": "removeItem", "CharItemID": 5001, "iQty": 1}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "removeItem", "CharItemID": 5000}),
+        ));
         peer.send("%xt%multiLoginWarning%-1%");
     });
     let session = harness.session.clone();
@@ -847,6 +853,7 @@ fn tracks_inventory_and_temp_items() {
             kind: kind.into(),
             slot: slot.into(),
             equipped,
+            worn: false,
             coins: false,
             member: false,
             meta: String::new(),
@@ -859,8 +866,7 @@ fn tracks_inventory_and_temp_items() {
     assert_eq!(
         *world.inventory,
         [
-            item(100, 5000, "Default Sword", 1, 1, "Sword", "Weapon", false),
-            item(101, 5001, "Health Potion", 4, 10, "Item", "None", false),
+            item(101, 5001, "Health Potion", 3, 10, "Item", "None", false),
             item(102, 5002, "Iron Axe", 1, 1, "Axe", "Weapon", true),
         ]
     );
@@ -882,6 +888,49 @@ fn tracks_inventory_and_temp_items() {
             house: false,
         }]
     );
+}
+
+#[test]
+fn tracks_worn_cosmetics() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        let item = |id: i64, slot: &str, worn: u8| {
+            json!({"ItemID": id, "CharItemID": 5000 + id, "sName": format!("Item {id}"),
+                   "iQty": 1, "iStk": 1, "sType": "Armor", "sES": slot, "bWear": worn})
+        };
+        peer.serve_with_items(json!([
+            item(1, "he", 0),
+            item(2, "he", 1),
+            item(3, "ba", 0),
+            item(4, "Weapon", 0),
+            item(5, "mi", 1),
+        ]));
+        for message in [
+            json!({"cmd": "wearItem", "uid": 7, "ItemID": 1, "sES": "he"}),
+            json!({"cmd": "wearItem", "uid": 8, "ItemID": 3, "sES": "ba"}),
+            json!({"cmd": "wearLoadout", "uid": 7, "costume": {
+                "ba": {"ItemID": 3}, "Weapon": {"ItemID": 4},
+            }}),
+            json!({"cmd": "unwearItem", "uid": 7, "ItemID": 4, "sES": "Weapon"}),
+        ] {
+            peer.send(&json_message(message));
+        }
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
+        "{events:?}"
+    );
+    let worn: Vec<ItemId> = session
+        .snapshot()
+        .inventory
+        .iter()
+        .filter(|i| i.worn)
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(worn, [ItemId(3), ItemId(5)]);
 }
 
 #[test]
@@ -1018,6 +1067,12 @@ fn tracks_faction_reputation_and_rank() {
         peer.send(&json_message(
             json!({"cmd": "addGoldExp", "intGold": 5, "intExp": 5, "typ": "m", "id": 1}),
         ));
+        peer.send(&json_message(json!({"cmd": "addFaction", "faction": {
+            "FactionID": "20", "CharFactionID": "902", "sName": "Fishing", "iRep": "400",
+        }})));
+        peer.send(&json_message(
+            json!({"cmd": "CatchResult", "catchResult": {"myRep": 600}}),
+        ));
         peer.send("%xt%multiLoginWarning%-1%");
     });
     let session = harness.session.clone();
@@ -1044,6 +1099,14 @@ fn tracks_faction_reputation_and_rank() {
                 rank: 1,
                 rank_progress: 0,
                 rank_progress_max: Some(900),
+            },
+            Faction {
+                id: FactionId(20),
+                name: "Fishing".into(),
+                rep: 1000,
+                rank: 2,
+                rank_progress: 100,
+                rank_progress_max: Some(2700),
             },
         ]
     );
@@ -2852,6 +2915,8 @@ fn buys_and_sells_within_the_clients_limits() {
                  "iQty": 1, "TokID": 101, "TokQty": 2},
                 {"ItemID": 906, "ShopItemID": 75, "sName": "Bow", "iCost": 1, "iStk": 1,
                  "iQty": 1, "sType": "Bow"},
+                {"ItemID": 907, "ShopItemID": 76, "sName": "Dust", "iCost": 10, "iStk": 10,
+                 "iQty": 1, "sType": "Item"},
             ],
         }})));
         let bought = peer.expect_at(&packet::buy_item(
@@ -2886,6 +2951,23 @@ fn buys_and_sells_within_the_clients_limits() {
             "cmd": "sellItem", "CharItemID": 5001, "iQty": 2, "iQtyNow": 7, "intAmount": 50,
             "bCoins": 0,
         })));
+        peer.send(&json_message(
+            json!({"cmd": "loadBank", "bitSuccess": 1, "items": [
+                {"ItemID": 907, "CharItemID": 5007, "sName": "Dust", "iQty": 2, "iStk": 10,
+                 "sType": "Item"},
+            ]}),
+        ));
+        peer.expect(&packet::buy_item(
+            AreaId(42),
+            ItemId(907),
+            ShopId(7),
+            ShopItemId(76),
+            3,
+        ));
+        peer.send(&json_message(json!({
+            "cmd": "buyItem", "bitSuccess": 1, "ItemID": 907, "CharItemID": 5007, "iQty": 3,
+            "bBank": 1,
+        })));
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
@@ -2915,6 +2997,15 @@ fn buys_and_sells_within_the_clients_limits() {
     session.sell(ItemId(101), 2).wait().unwrap();
     let world = session.snapshot();
     assert_eq!((potions(&world), world.me.as_ref().unwrap().gold), (7, 850));
+    session.buy(ShopItemId(76), 3).wait().unwrap();
+    let world = session.snapshot();
+    assert!(!world.inventory.iter().any(|i| i.id == ItemId(907)));
+    let bank = world.bank.as_ref().unwrap();
+    assert_eq!(
+        bank.iter().map(|i| (i.id, i.qty)).collect::<Vec<_>>(),
+        [(ItemId(907), 5)]
+    );
+    assert_eq!(world.me.as_ref().unwrap().gold, 820);
     session.logout();
     harness.finish();
 }
@@ -3224,6 +3315,8 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
         peer.send(&json_message(
             json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}),
         ));
+        peer.expect(&packet::equip_item(AreaId(42), ItemId(5)));
+        peer.send(&worn("equipItem", 5));
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
@@ -3268,6 +3361,7 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
         session.equip(ItemId(3)).wait(),
         Err(ActionError::InCombat)
     ));
+    session.equip_unchecked(ItemId(5)).wait().unwrap();
     session.logout();
     harness.finish();
 }
