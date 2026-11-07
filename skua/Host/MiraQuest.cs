@@ -137,7 +137,7 @@ public sealed class MiraQuest(Protocol protocol, State state) : IScriptQuest
     }
     public void Reaccept(int id)
     {
-        if (Bot.Lite.ReacceptQuest && TryGetQuest(id, out var quest) && !quest!.Once && IsAvailable(id)) Accept(id);
+        if (Bot.Lite.ReacceptQuest && TryGetQuest(id, out var quest) && !quest!.Once && IsAvailable(id)) Task.Run(() => Accept(id));
     }
     void Poll(CancellationToken token)
     {
