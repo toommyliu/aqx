@@ -27,10 +27,16 @@ public static class Runner
             typeof(IScriptInterface).GetProperty(nameof(IScriptInterface.Instance))!.SetValue(null, bot);
             Ioc.Default.ConfigureServices(new Services(bot));
             string bundledSkills = new[] { Path.Combine(compiler.Root, "Skills", "AdvancedSkills.json"), Path.Combine(AppContext.BaseDirectory, "AdvancedSkills.json") }.FirstOrDefault(File.Exists) ?? "";
-            if (!File.Exists(ClientFileSources.SkuaAdvancedSkillsFile) && bundledSkills.Length > 0)
+            string skills = ClientFileSources.SkuaAdvancedSkillsFile;
+            if (bundledSkills.Length > 0 && (!File.Exists(skills) || File.GetLastWriteTimeUtc(bundledSkills) > File.GetLastWriteTimeUtc(skills) && !File.ReadAllBytes(bundledSkills).AsSpan().SequenceEqual(File.ReadAllBytes(skills))))
             {
                 Directory.CreateDirectory(ClientFileSources.SkuaDIR);
-                File.Copy(bundledSkills, ClientFileSources.SkuaAdvancedSkillsFile);
+                foreach (string target in new[] { skills, Path.Combine(ClientFileSources.SkuaDIR, "UserAdvancedSkills.json") })
+                {
+                    string temp = $"{target}.{Environment.ProcessId}";
+                    File.Copy(bundledSkills, temp, true);
+                    File.Move(temp, target, true);
+                }
             }
             while (true)
             {

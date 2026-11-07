@@ -840,7 +840,7 @@ fn skill_info_preserves_action_metadata_and_last_use() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
-fn skill_set_updates_use_downloaded_contents_and_report_failures() {
+fn skill_sets_update_from_downloads_and_from_a_newer_bundled_copy() {
     let (outcome, logs, _) = Fake::start(|_,_| {}).run(r#"
         using System.Net;
         using System.Net.Sockets;
@@ -885,4 +885,35 @@ fn skill_set_updates_use_downloaded_contents_and_report_failures() {
     for expected in ["downloaded True True", "failure True True"] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        using Skua.Core.Models;
+        public class StaleSkills {
+            public void ScriptMain(IScriptInterface bot) {
+                string user = Path.Combine(ClientFileSources.SkuaDIR, "UserAdvancedSkills.json");
+                string stale = File.ReadAllText(ClientFileSources.SkuaAdvancedSkillsFile) + "\n\n";
+                foreach (string file in new[] { ClientFileSources.SkuaAdvancedSkillsFile, user }) {
+                    File.WriteAllText(file, stale);
+                    File.SetLastWriteTimeUtc(file, DateTime.UnixEpoch);
+                }
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        using Skua.Core.Models;
+        public class SyncedSkills {
+            public void ScriptMain(IScriptInterface bot) {
+                bool Synced(string file) => !File.ReadAllText(file).EndsWith("\n\n");
+                bot.Log($"synced {Synced(ClientFileSources.SkuaAdvancedSkillsFile)} {Synced(Path.Combine(ClientFileSources.SkuaDIR, "UserAdvancedSkills.json"))}");
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    assert!(logs.contains(&"synced True True".into()), "{logs:?}");
 }
