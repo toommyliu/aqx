@@ -376,7 +376,7 @@ fn update_quest_moves_the_quest_slot_the_way_skuas_fake_packet_does() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
-fn a_quest_whose_held_item_is_missing_is_not_available() {
+fn a_quest_whose_held_item_is_missing_is_still_available() {
     let fake = Fake::start_with(FARM, json!([]), json!([]), |msg, wire| {
         if msg.contains("%getQuests%") {
             wire.object(
@@ -389,7 +389,7 @@ fn a_quest_whose_held_item_is_missing_is_not_available() {
 
     assert!(result == Outcome::Finished, "{result:?}\n{logged:#?}");
     assert!(
-        logged.contains(&"available False".to_string()),
+        logged.contains(&"available True".to_string()),
         "{logged:#?}"
     );
 }

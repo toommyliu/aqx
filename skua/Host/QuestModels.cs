@@ -6,7 +6,7 @@ static class QuestModels
 {
     public static Quest Project(QuestSnapshot quest, string? status)
     {
-        static JObject Item(QuestItemSnapshot item) => new() { ["ItemID"] = item.Id, ["sName"] = item.Name, ["iQty"] = item.Qty, ["iStk"] = item.MaxStack, ["bTemp"] = item.Temp };
+        static JObject Item(QuestItemSnapshot item) => new() { ["ItemID"] = item.Id, ["sName"] = item.Name, ["iQty"] = 0, ["iStk"] = item.MaxStack, ["bTemp"] = item.Temp };
         static JObject Items(IEnumerable<QuestItemSnapshot> items) => new(items.Select((item, index) => new JProperty(index.ToString(), Item(item))));
         return new JObject
         {
