@@ -213,7 +213,6 @@ impl Projection {
             json!({
                 "counter_hold": hold, "aggro": aggro,
                 "anti_afk": world.settings.anti_afk, "room": world.settings.room,
-                "load_cells": world.settings.load_cells,
             }),
         ));
         let mut sections = Vec::new();

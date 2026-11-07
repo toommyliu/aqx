@@ -277,7 +277,6 @@ fn restore(session: &Handle, settings: Settings) {
     session.set_counter_hold(settings.counter_hold);
     session.set_aggro(settings.aggro);
     session.set_anti_afk(settings.anti_afk);
-    session.set_load_cells(settings.load_cells);
     session.set_room(settings.room);
 }
 

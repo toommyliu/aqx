@@ -428,7 +428,6 @@ enum Setting {
     Aggro(Option<Aggro>),
     SpawnPoint(String, String),
     AntiAfk(bool),
-    LoadCells(bool),
     Room(Option<u32>),
 }
 
@@ -909,10 +908,6 @@ impl Handle {
         self.set(Setting::AntiAfk(on));
     }
 
-    pub fn set_load_cells(&self, on: bool) {
-        self.set(Setting::LoadCells(on));
-    }
-
     pub fn set_room(&self, room: Option<u32>) {
         self.set(Setting::Room(room));
     }
@@ -1033,7 +1028,6 @@ pub fn spawn(
         map_out,
         map_results,
         map_cells: HashMap::new(),
-        load_cells: false,
         load_cells_pending: false,
         relogin_out,
         relogin_results,
@@ -1117,7 +1111,6 @@ struct Session {
     map_out: mpsc::Sender<MapResult>,
     map_results: mpsc::Receiver<MapResult>,
     map_cells: HashMap<String, MapCells>,
-    load_cells: bool,
     load_cells_pending: bool,
     relogin_out: mpsc::Sender<Result<Account, ApiError>>,
     relogin_results: mpsc::Receiver<Result<Account, ApiError>>,
@@ -1301,10 +1294,6 @@ impl Session {
                 }
             }
             Setting::AntiAfk(on) => self.anti_afk = on,
-            Setting::LoadCells(on) => {
-                self.load_cells = on;
-                self.load_cells_pending = on && self.room.is_some();
-            }
             Setting::Room(room) => self.join_room = room,
         }
     }
@@ -2064,7 +2053,6 @@ impl Session {
                 counter_hold: self.counter_hold,
                 aggro: self.aggro.as_ref().map(|(aggro, _)| aggro.clone()),
                 anti_afk: self.anti_afk,
-                load_cells: self.load_cells,
                 room: self.join_room,
             },
         });
@@ -2598,7 +2586,7 @@ impl Session {
         }
         self.fetch_cellmates();
         self.aggro_cell();
-        self.load_cells_pending = self.load_cells;
+        self.load_cells_pending = true;
     }
 
     fn fetch_cellmates(&mut self) {

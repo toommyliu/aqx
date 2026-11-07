@@ -18,7 +18,7 @@ use mira_script::{AutoRelogin, Cancel, Level, Outcome, Output, Script, Start};
 
 const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster|player], \
-     kill <monster>, untarget, stop, cancel, who, cells [on|off], mons [all], me, inv, drops, pick <item>, reps, quests, \
+     kill <monster>, untarget, stop, cancel, who, cells, mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
      swap <#inventory item> <#bank item>, equip <item>, unequip <item>, use <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, spawnpoint <cell> [pad], room <number>|random, antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout";
@@ -531,8 +531,6 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
                 .complete_quest(QuestId(number(id)?), reward, times)
                 .wait()?;
         }
-        ["cells", "on"] => session.set_load_cells(true),
-        ["cells", "off"] => session.set_load_cells(false),
         ["cells"] => {
             session.load_cells().wait()?;
             let world = session.snapshot();

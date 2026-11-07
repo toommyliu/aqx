@@ -255,7 +255,6 @@ impl Fake {
             mira_client::Phase::Closed { .. }
         ) {
             ended.session.ready().wait().unwrap();
-            assert!(!ended.session.snapshot().settings.load_cells);
         }
         ended.session.logout();
         self.harness.finish();

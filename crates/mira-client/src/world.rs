@@ -54,7 +54,6 @@ pub struct Settings {
     pub counter_hold: CounterHold,
     pub aggro: Option<Aggro>,
     pub anti_afk: bool,
-    pub load_cells: bool,
     pub room: Option<u32>,
 }
 

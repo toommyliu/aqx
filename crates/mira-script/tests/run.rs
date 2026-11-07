@@ -1432,9 +1432,8 @@ fn settings_apply_while_the_script_runs_and_revert_after() {
         export default function* () {
           settings.counterHold = "all";
           settings.antiAfk = true;
-          settings.loadCells = true;
           settings.aggro = "cell";
-          script.log(settings.counterHold, settings.antiAfk, settings.aggro, settings.room, settings.loadCells);
+          script.log(settings.counterHold, settings.antiAfk, settings.aggro, settings.room);
           for (const bad of [() => (settings.counterHold = "sometimes" as any), () => (settings.room = 1.5)]) {
             try {
               bad();
@@ -1458,18 +1457,12 @@ fn settings_apply_while_the_script_runs_and_revert_after() {
     assert_eq!(outcome, Ok(Outcome::Finished));
     assert_eq!(
         logs(&outputs),
-        [
-            "all true cell null true",
-            "TypeError",
-            "RangeError",
-            "check"
-        ]
+        ["all true cell null", "TypeError", "RangeError", "check"]
     );
     let during = seen.lock().unwrap().clone().unwrap();
     assert_eq!(during.counter_hold, mira_client::CounterHold::All);
     assert_eq!(during.aggro, Some(mira_client::Aggro::Cell));
     assert!(during.anti_afk);
-    assert!(during.load_cells);
     assert_eq!(after, mira_client::Settings::default());
 }
 
@@ -2108,7 +2101,7 @@ fn what_mira_builds_matches_the_generated_types() {
 }
 
 #[test]
-fn map_cells_load_explicitly_return_labels_and_report_http_failures() {
+fn map_cells_appear_once_each_map_loads_and_stay_cached() {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     let http = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -2116,8 +2109,7 @@ fn map_cells_load_explicitly_return_labels_and_report_http_failures() {
     let requests = thread::spawn(move || {
         for (file, cells) in [
             ("forest.swf", Some(vec!["Enter", "r2", "Blank"])),
-            ("cave.swf", None),
-            ("cave.swf", Some(vec![])),
+            ("cave.swf", Some(vec!["Enter", "Cave"])),
         ] {
             let (mut stream, _) = http.accept().unwrap();
             let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -2172,22 +2164,17 @@ fn map_cells_load_explicitly_return_labels_and_report_http_failures() {
     let (outcome, outputs) = run_on(
         harness,
         r#"
-        import { map, script, settings } from "mira";
+        import { map, script, wait } from "mira";
         export default function* () {
-          script.log(settings.loadCells, map.cells.length);
-          yield* map.join("forest-1");
           script.log(map.cells.length);
-          const cells: readonly string[] = yield* map.loadCells();
-          script.log(cells.join(","), map.cells.join(","));
+          yield* map.join("forest-1");
+          yield* wait.until(() => map.cells.length > 0);
+          script.log(map.cells.join(","));
           yield* map.join("forest-2");
           script.log(map.cells.join(","));
-          script.log((yield* map.loadCells()).join(","));
           yield* map.join("cave-1");
-          script.log(map.cells.length);
-          try { yield* map.loadCells(); }
-          catch (e) { script.log(String(e).includes("503"), map.cells.length); }
-          script.log((yield* map.loadCells()).length, map.cells.length);
-          script.log((yield* map.loadCells()).length);
+          yield* wait.until(() => map.cells.length > 0);
+          script.log(map.cells.join(","));
         }
     "#,
     );
@@ -2196,15 +2183,10 @@ fn map_cells_load_explicitly_return_labels_and_report_http_failures() {
     assert_eq!(
         logs(&outputs),
         [
-            "false 0",
             "0",
-            "Enter,r2,Blank Enter,r2,Blank",
             "Enter,r2,Blank",
             "Enter,r2,Blank",
-            "0",
-            "true 0",
-            "0 0",
-            "0"
+            "Enter,Cave"
         ]
     );
 }

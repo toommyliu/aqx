@@ -138,7 +138,6 @@ impl SkuaScript {
         let original = start.session.clone();
         let mut session = start.session;
         let mut server = start.server;
-        session.set_load_cells(true);
         let result = self.drive(&mut session, &mut server, start.args, start.account);
         session.cancel_all();
         if !matches!(session.snapshot().phase, Phase::Closed { .. }) {
@@ -569,7 +568,6 @@ impl SkuaScript {
                             let (next, name) = relogged.take();
                             *session = next;
                             suppress_close = false;
-                            session.set_load_cells(true);
                             *server = name;
                             generation += 1;
                             send(

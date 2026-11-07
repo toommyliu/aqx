@@ -137,13 +137,12 @@ fn host<'a, 'js>(ctx: &'a Ctx<'js>) -> rquickjs::runtime::UserDataGuard<'a, Host
 
 pub struct Native;
 
-const NAMES: [&str; 26] = [
+const NAMES: [&str; 25] = [
     "miraVersion",
     "versionCompare",
     "setCounterHold",
     "setAggro",
     "setAntiAfk",
-    "setLoadCells",
     "setRoom",
     "setAutoRelogin",
     "server",
@@ -285,14 +284,6 @@ impl ModuleDef for Native {
                 let host = host(&ctx);
                 host.settings.borrow_mut().anti_afk = on;
                 host.session().map(|s| s.set_anti_afk(on)).is_some()
-            })?,
-        )?;
-        exports.export(
-            "setLoadCells",
-            Function::new(ctx.clone(), |ctx: Ctx<'js>, on: bool| {
-                let host = host(&ctx);
-                host.settings.borrow_mut().load_cells = on;
-                host.session().map(|s| s.set_load_cells(on)).is_some()
             })?,
         )?;
         exports.export(

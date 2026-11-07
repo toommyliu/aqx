@@ -4593,7 +4593,7 @@ fn join_map(peer: &mut Peer, area: i64, name: &str, file: &str) {
 }
 
 #[test]
-fn map_cells_load_on_demand_with_shared_requests_and_survive_rejoins() {
+fn map_cells_load_after_each_join_with_the_client_headers_and_cache_by_file() {
     let (http, base) = map_http();
     let harness = Harness::start_with_api(Options::default(), base, |listener| {
         let mut peer = Peer::accept(&listener);
@@ -4607,13 +4607,8 @@ fn map_cells_load_on_demand_with_shared_requests_and_survive_rejoins() {
     let session = &harness.session;
     session.ready().wait().unwrap();
     session.join("forest-1").wait().unwrap();
-    thread::sleep(Duration::from_millis(50));
-    assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
-    assert!(session.snapshot().room.as_ref().unwrap().cells.is_empty());
-    assert!(!session.snapshot().room.as_ref().unwrap().cells_loaded);
-    let first = session.load_cells();
     let (mut stream, headers) = accept_map_request(&http);
-    let second = session.load_cells();
+    let waiting = session.load_cells();
     assert_eq!(
         headers[0],
         "GET /game/gamefiles/maps/forest/forest.swf HTTP/1.1"
@@ -4634,21 +4629,20 @@ fn map_cells_load_on_demand_with_shared_requests_and_survive_rejoins() {
         ]
     );
     reply_map(&mut stream, &["Enter", "r2", "Blank"]);
-    first.wait().unwrap();
-    second.wait().unwrap();
-    session.load_cells().wait().unwrap();
+    waiting.wait().unwrap();
     session.join("forest-2").wait().unwrap();
     let world = session.snapshot();
     let room = world.room.as_ref().unwrap();
     assert_eq!(room.cells, ["Enter", "r2", "Blank"]);
     assert!(room.cells_loaded);
+    thread::sleep(Duration::from_millis(50));
     assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
     session.logout();
     harness.finish();
 }
 
 #[test]
-fn automatic_map_cells_wait_for_the_join_and_share_explicit_loads() {
+fn map_cells_wait_for_the_join_to_finish() {
     let (http, base) = map_http();
     let (joining, continue_join) = mpsc::channel();
     let (arrived, arrival) = mpsc::channel();
@@ -4662,13 +4656,10 @@ fn automatic_map_cells_wait_for_the_join_and_share_explicit_loads() {
         peer.send("%xt%server%-1%You joined \"forest-1\"!%");
         peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
         peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(8)]));
-        peer.expect(&packet::transfer("player1", "forest-2"));
-        join_map(&mut peer, 44, "forest-2", "forest.swf");
         peer.expect_logout();
     });
     let session = &harness.session;
     session.ready().wait().unwrap();
-    session.set_load_cells(true);
     let joined = session.join("forest-1");
     arrival.recv_timeout(Duration::from_secs(5)).unwrap();
     thread::sleep(Duration::from_millis(50));
@@ -4676,23 +4667,18 @@ fn automatic_map_cells_wait_for_the_join_and_share_explicit_loads() {
     joining.send(()).unwrap();
     joined.wait().unwrap();
     let (mut stream, _) = accept_map_request(&http);
-    let explicit = session.load_cells();
     reply_map(&mut stream, &["Enter", "r2"]);
-    explicit.wait().unwrap();
-    session.join("forest-2").wait().unwrap();
+    session.load_cells().wait().unwrap();
     assert_eq!(
         session.snapshot().room.as_ref().unwrap().cells,
         ["Enter", "r2"]
     );
-    thread::sleep(Duration::from_millis(50));
-    assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
-    assert!(session.snapshot().settings.load_cells);
     session.logout();
     harness.finish();
 }
 
 #[test]
-fn enabling_map_cells_loads_the_current_map_and_http_failures_can_retry() {
+fn a_failed_map_cell_load_reaches_its_waiters_and_can_retry() {
     let (http, base) = map_http();
     let harness = Harness::start_with_api(Options::default(), base, |listener| {
         let mut peer = Peer::accept(&listener);
@@ -4703,18 +4689,12 @@ fn enabling_map_cells_loads_the_current_map_and_http_failures_can_retry() {
     });
     let session = &harness.session;
     session.join("forest-1").wait().unwrap();
-    session.set_load_cells(true);
     let (mut stream, _) = accept_map_request(&http);
-    let first = session.load_cells();
-    let second = session.load_cells();
+    let waiting = session.load_cells();
     stream
         .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n")
         .unwrap();
-    for pending in [first, second] {
-        assert!(
-            matches!(pending.wait(), Err(ActionError::Http(message)) if message.contains("503"))
-        );
-    }
+    assert!(matches!(waiting.wait(), Err(ActionError::Http(message)) if message.contains("503")));
     let world = session.snapshot();
     let room = world.room.as_ref().unwrap();
     assert!(room.cells.is_empty());
@@ -4731,7 +4711,7 @@ fn enabling_map_cells_loads_the_current_map_and_http_failures_can_retry() {
 }
 
 #[test]
-fn map_cells_bypass_a_paced_join_and_cache_results_after_a_map_change() {
+fn map_cells_that_arrive_after_a_map_change_are_cached_for_a_later_join() {
     let (http, base) = map_http();
     let harness = Harness::start_with_api(Options::default(), base, |listener| {
         let mut peer = Peer::accept(&listener);
@@ -4748,28 +4728,31 @@ fn map_cells_bypass_a_paced_join_and_cache_results_after_a_map_change() {
     });
     let session = &harness.session;
     session.join("forest-1").wait().unwrap();
-    let joined = session.join("cave-1");
-    let started = Instant::now();
-    let loaded = session.load_cells();
-    let (mut stream, _) = accept_map_request(&http);
-    assert!(started.elapsed() < Duration::from_secs(2));
-    joined.wait().unwrap();
-    reply_map(&mut stream, &["Enter", "Blank"]);
-    assert!(matches!(loaded.wait(), Err(ActionError::Unusable(_))));
+    let (mut forest, _) = accept_map_request(&http);
+    let waiting = session.load_cells();
+    session.join("cave-1").wait().unwrap();
+    let (mut cave, _) = accept_map_request(&http);
+    reply_map(&mut forest, &["Enter", "Blank"]);
+    assert!(matches!(waiting.wait(), Err(ActionError::Unusable(_))));
     assert!(session.snapshot().room.as_ref().unwrap().cells.is_empty());
+    reply_map(&mut cave, &["Enter", "Cave"]);
+    session.load_cells().wait().unwrap();
+    assert_eq!(
+        session.snapshot().room.as_ref().unwrap().cells,
+        ["Enter", "Cave"]
+    );
     session.join("forest-2").wait().unwrap();
     assert_eq!(
         session.snapshot().room.as_ref().unwrap().cells,
         ["Enter", "Blank"]
     );
-    session.load_cells().wait().unwrap();
     assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
     session.logout();
     harness.finish();
 }
 
 #[test]
-fn map_cells_bypass_a_running_kill_and_cancel_only_the_requested_waiter() {
+fn map_cells_load_during_a_running_kill_and_cancel_only_the_requested_waiter() {
     let (http, base) = map_http();
     let (attacking, attack) = mpsc::channel();
     let harness = Harness::start_with_api(Options::default(), base, move |listener| {
@@ -4793,11 +4776,11 @@ fn map_cells_bypass_a_running_kill_and_cancel_only_the_requested_waiter() {
     });
     let session = &harness.session;
     session.join("forest-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
     let killing = session.kill(MonMapId(1));
     attack.recv_timeout(Duration::from_secs(5)).unwrap();
     let queued = session.rest();
     let cancelled = session.load_cells();
-    let (mut stream, _) = accept_map_request(&http);
     let loaded = session.load_cells();
     session.cancel(cancelled.id());
     assert!(matches!(cancelled.wait(), Err(ActionError::Cancelled)));
