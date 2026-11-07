@@ -15,7 +15,14 @@ public sealed class MiraEvent : IScriptEvent
         this.state = state;
         protocol.PacketReceived += OnPacket;
         protocol.EventReceived += OnEvent;
+        protocol.Capture = Capture;
     }
+    ClientEvent Capture(ClientEvent data) => data switch
+    {
+        DropOfferedClientEvent e => e with { Item = state.Drops.FirstOrDefault(i => i.Id == e.Id)?.ToScript() },
+        ItemReceivedClientEvent e when IScriptInterface.Instance is { } bot => e with { Item = e.Place switch { "bank" => bot.Bank.GetItem((int)e.Id), "temp" => bot.TempInv.GetItem((int)e.Id), _ => bot.Inventory.GetItem((int)e.Id) } },
+        _ => data,
+    };
     LogoutEventHandler? onLogout;
     public event LogoutEventHandler Logout
     {
@@ -130,7 +137,7 @@ public sealed class MiraEvent : IScriptEvent
             case CounterStartedClientEvent: CounterAttack?.Invoke(false); break;
             case CounterEndedClientEvent: CounterAttack?.Invoke(true); break;
             case DropOfferedClientEvent e:
-                if (state.Drops.FirstOrDefault(i => i.Id == e.Id)?.ToScript() is { } offered)
+                if (e.Item is { } offered)
                 {
                     _ = IScriptInterface.Instance.Drops;
                     offered.Quantity = (int)e.Qty;
@@ -142,9 +149,7 @@ public sealed class MiraEvent : IScriptEvent
                 StrongReferenceMessenger.Default.Send<ItemPickedUpMessage, int>(new((int)e.Id), (int)MessageChannels.GameEvents);
                 break;
             case ItemReceivedClientEvent e:
-                var bot = IScriptInterface.Instance;
-                ItemBase? received = e.Place switch { "bank" => bot.Bank.GetItem((int)e.Id), "temp" => bot.TempInv.GetItem((int)e.Id), _ => bot.Inventory.GetItem((int)e.Id) };
-                if (received is null) break;
+                if (e.Item is not { } received) break;
                 if (e.Place == "bank")
                 {
                     StrongReferenceMessenger.Default.Send<ItemAddedToBankMessage, int>(new(received, (int)e.Qty), (int)MessageChannels.GameEvents);

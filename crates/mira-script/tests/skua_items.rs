@@ -1061,3 +1061,38 @@ public class RawBank {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
 }
+
+const LATE_ITEM: &str = r#"
+using Skua.Core.Interfaces;
+
+public class LateItem
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bool received = false;
+        bot.Events.CellChanged += (map, cell, pad) => bot.Sleep(1000);
+        bot.Events.ItemDropped += (item, added, quantity) => { if (added && item.Name == "Note Shard") received = true; };
+        bot.Map.Jump("r2", "Left");
+        bot.Wait.ForTrue(() => received, 40);
+        bot.Log($"received {received}, held {bot.TempInv.Contains("Note Shard")}");
+    }
+}
+"#;
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn an_item_event_keeps_its_item_when_the_item_is_gone_before_handlers_run() {
+    let (outcome, logs, _) = Fake::start(|message, wire| {
+        if message.contains("%moveToCell%") {
+            wire.object(r#"{"cmd":"addItems","items":{"900":{"ItemID":900,"sName":"Note Shard","iQty":1,"iStk":1,"bTemp":1}}}"#);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            wire.object(r#"{"cmd":"turnIn","sItems":"900:1"}"#);
+        }
+    })
+    .run(LATE_ITEM);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(
+        logs.contains(&"received True, held False".into()),
+        "{logs:?}"
+    );
+}

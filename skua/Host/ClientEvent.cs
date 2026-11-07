@@ -51,11 +51,11 @@ public sealed record KilledClientEvent(long Id, string Name, ulong Gold, ulong E
 public sealed record DiedClientEvent() : ClientEvent;
 public sealed record RespawnedClientEvent() : ClientEvent;
 public sealed record LeveledUpClientEvent(uint Level) : ClientEvent;
-public sealed record DropOfferedClientEvent(long Id, string Name, uint Qty) : ClientEvent;
+public sealed record DropOfferedClientEvent(long Id, string Name, uint Qty) : ClientEvent { [JsonIgnore] public ItemBase? Item { get; init; } }
 public sealed record ItemChangedClientEvent(long Id, string Name, uint Qty, string Place) : ClientEvent;
 public sealed record BankLoadedClientEvent() : ClientEvent;
 public sealed record ItemPickedUpClientEvent(long Id) : ClientEvent;
-public sealed record ItemReceivedClientEvent(long Id, uint Qty, string Place) : ClientEvent;
+public sealed record ItemReceivedClientEvent(long Id, uint Qty, string Place) : ClientEvent { [JsonIgnore] public ItemBase? Item { get; init; } }
 public sealed record ItemBoughtClientEvent(long CharItemId) : ClientEvent;
 public sealed record ItemSoldClientEvent(long CharItemId, uint Qty, uint QtyNow, ulong Amount, bool Coins) : ClientEvent;
 public sealed record QuestAcceptedClientEvent(long Id) : ClientEvent;

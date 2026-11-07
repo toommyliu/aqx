@@ -23,8 +23,8 @@ public static class Runner
             if (protocol.Stopping.IsCancellationRequested) return 0;
             typeof(IScriptInterface).GetProperty(nameof(IScriptInterface.Instance))!.SetValue(null, bot);
             Ioc.Default.ConfigureServices(new Services(bot));
-            string bundledSkills = Path.Combine(compiler.Root, "Skills", "AdvancedSkills.json");
-            if (!File.Exists(ClientFileSources.SkuaAdvancedSkillsFile) && File.Exists(bundledSkills))
+            string bundledSkills = new[] { Path.Combine(compiler.Root, "Skills", "AdvancedSkills.json"), Path.Combine(AppContext.BaseDirectory, "AdvancedSkills.json") }.FirstOrDefault(File.Exists) ?? "";
+            if (!File.Exists(ClientFileSources.SkuaAdvancedSkillsFile) && bundledSkills.Length > 0)
             {
                 Directory.CreateDirectory(ClientFileSources.SkuaDIR);
                 File.Copy(bundledSkills, ClientFileSources.SkuaAdvancedSkillsFile);

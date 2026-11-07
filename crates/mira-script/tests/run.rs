@@ -2182,11 +2182,6 @@ fn map_cells_appear_once_each_map_loads_and_stay_cached() {
     assert_eq!(outcome, Ok(Outcome::Finished));
     assert_eq!(
         logs(&outputs),
-        [
-            "0",
-            "Enter,r2,Blank",
-            "Enter,r2,Blank",
-            "Enter,Cave"
-        ]
+        ["0", "Enter,r2,Blank", "Enter,r2,Blank", "Enter,Cave"]
     );
 }

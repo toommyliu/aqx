@@ -22,6 +22,7 @@ public sealed class Protocol : IDisposable
     public event Action<bool>? Disconnected;
     public event Action<Packet>? PacketReceived;
     public event Action<ClientEvent>? EventReceived;
+    public Func<ClientEvent, ClientEvent>? Capture;
     public event Action<SectionUpdate>? StateReceived;
 
     public Protocol(Stream output, TextReader input, State state)
@@ -83,8 +84,9 @@ public sealed class Protocol : IDisposable
                 else if (root.TryGetProperty("event", out _))
                 {
                     var message = JsonSerializer.Deserialize(line, Json.EventMessage)!;
+                    var captured = Capture?.Invoke(message.Event) ?? message.Event;
                     long current = Volatile.Read(ref generation);
-                    events.Add(() => { if (current == Volatile.Read(ref generation)) EventReceived?.Invoke(message.Event); });
+                    events.Add(() => { if (current == Volatile.Read(ref generation)) EventReceived?.Invoke(captured); });
                 }
                 else if (root.TryGetProperty("packet", out _))
                 {
