@@ -128,6 +128,12 @@ public sealed record DropOfferSnapshot(long Id, string Name, int Qty, int MaxSta
 public sealed record ShopSnapshot(long Id, string Name, bool Member, bool Limited, ImmutableArray<string> Maps, bool House, ImmutableArray<ShopItemSnapshot> Items, long Index, string Field, long RequiredItem)
 {
     public List<ShopItem> ScriptItems { get; } = Items.Select(i => i.ToScript()).ToList();
+    public Newtonsoft.Json.Linq.JArray RawItems => new(Items.Zip(ScriptItems, (listing, item) =>
+    {
+        var raw = Newtonsoft.Json.Linq.JObject.FromObject(item);
+        if (listing.Merge.IsEmpty) raw.Remove("turnin");
+        return raw;
+    }));
 }
 public sealed record ShopItemSnapshot(long Listing, long Id, string Name, ulong Cost, bool Coins, bool Member, int MaxStack, int Qty, long? Faction, int RequiredRep, string Kind, string Slot, string Meta, string Link, string File, bool House, ImmutableArray<MergeCostSnapshot> Merge, long EnhancementId, long Token, int TokenQty, long QuestSlot, long QuestValue, string Quest, int Level, string FactionName, string TokenName, int? Remaining)
 {

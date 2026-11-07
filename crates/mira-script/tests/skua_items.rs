@@ -883,6 +883,8 @@ public class ShopRequirements {
         bot.Shops.BuyItem(9, quantity: 1);
         bot.Shops.BuyItem(404);
         bot.Log($"bundles {bot.Flash.CallGameFunction<int>("world.maximumShopBuys", new ShopItem { ID = 10, Cost = 500, Quantity = 3, MaxStack = 10 })} raw {bot.Flash.CallGameFunction<int>("world.maximumShopBuys", new { ItemID = 10, iCost = 500, iQty = 3, iStk = 10 })}");
+        object plain = bot.Flash.GetGameObject<List<Newtonsoft.Json.Linq.JObject>>("world.shopinfo.items")!.Single(i => (int)i["ItemID"]! == 10);
+        bot.Log($"plain {bot.Flash.CallGameFunction<int>("world.maximumShopBuys", plain)}");
         bot.Log("safe preflight");
     }
 }
@@ -891,7 +893,7 @@ public class ShopRequirements {
         json!([{"ItemID":5,"CharItemID":15,"sName":"Dust","iQty":2,"iStk":10,"sType":"Resource"}]);
     let (outcome, logs, sent) = Fake::start_config(FARM, items, json!([]), json!({"iBagSlots":1,"strQuests":"000"}), |m,w| {
         if m.contains("%loadShop%") {
-            w.object(r#"{"cmd":"loadShop","shopinfo":{"ShopID":1348,"sName":"Locked Shop","Location":"farm","iIndex":"7","sField":"ia1","reqItems":"12","items":[{"ItemID":9,"ShopItemID":19,"sName":"Ash","iCost":0,"iStk":10,"iQty":1,"sType":"Resource","iQSindex":2,"iQSvalue":3,"sQuest":"A Quest","iLvl":40,"FactionID":4,"sFaction":"Good","TokName":"Dust","iQtyRemain":-1,"turnin":[{"ItemID":5,"sName":"Dust","iQty":1}]}]}}"#);
+            w.object(r#"{"cmd":"loadShop","shopinfo":{"ShopID":1348,"sName":"Locked Shop","Location":"farm","iIndex":"7","sField":"ia1","reqItems":"12","items":[{"ItemID":9,"ShopItemID":19,"sName":"Ash","iCost":0,"iStk":10,"iQty":1,"sType":"Resource","iQSindex":2,"iQSvalue":3,"sQuest":"A Quest","iLvl":40,"FactionID":4,"sFaction":"Good","TokName":"Dust","iQtyRemain":-1,"turnin":[{"ItemID":5,"sName":"Dust","iQty":1}]},{"ItemID":10,"ShopItemID":20,"sName":"Bundle","iCost":500,"iStk":10,"iQty":3,"sType":"Resource"}]}}"#);
         }
     }).run(source);
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
@@ -902,6 +904,7 @@ public class ShopRequirements {
         "space one False two True max 2",
         "unmet Quest requirement not met.",
         "bundles 6 raw 2",
+        "plain 2",
         "safe preflight",
     ] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
