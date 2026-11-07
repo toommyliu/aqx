@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use support::{Dir, Fake};
+use support::{Dir, FARM, Fake};
 
 const HELLO: &str = r#"
 using Skua.Core.Interfaces;
@@ -37,6 +37,7 @@ public class ReadStats
         var s = bot.Player.Stats!;
         bot.Log($"{s.Strength} {s.AttackPower} {s.SpellPower} {s.CriticalChance} {s.CriticalMultiplier} {s.Haste}");
         bot.Log($"coins {bot.Flash.GetGameObject<int>("world.myAvatar.objData.intCoins")}");
+        bot.Log($"user {bot.Flash.GetGameObject("sfc.myUserName")}");
         bot.Log($"id {bot.Player.ID}, in r2: {string.Join(", ", bot.Map.CellPlayers!.Select(p => $"{p.Name} {p.EntID}"))}");
         var monsters = Newtonsoft.Json.Linq.JArray.Parse(bot.Flash.Call("availableMonsters")!);
         bot.Log($"monsters in r2: {string.Join(", ", monsters.Select(m => $"{m["strMonName"]} {m["MonMapID"]} {m["intHP"]}"))}");
@@ -156,7 +157,8 @@ fn a_script_that_returns_raises_no_script_stopping() {
 #[test]
 #[ignore = "run with npm run skua:test"]
 fn a_script_reads_the_players_id_cell_and_combat_stats() {
-    let (outcome, logs, _)=Fake::start(|message,wire| if message.contains("%moveToCell%") {
+    let map = FARM.replace(r#""strUsername":"player1""#, r#""strUsername":"Player1""#);
+    let (outcome, logs, _)=Fake::start_with(&map, json!([]), json!([]), |message,wire| if message.contains("%moveToCell%") {
         wire.object(r#"{"cmd":"balance","intGold":10,"intCoins":50}"#);
         wire.object(r#"{"cmd":"stu","sta":{"$STR":7,"$ap":14,"$sp":37,"$tcr":0.08,"$scm":1.66,"$tha":0.03}}"#);
     }).run(STATS);
@@ -164,7 +166,8 @@ fn a_script_reads_the_players_id_cell_and_combat_stats() {
     for expected in [
         "7 14 37 0.08 1.66 0.03",
         "coins 50",
-        "id 1001, in r2: player1 1001",
+        "user \"player1\"",
+        "id 1001, in r2: Player1 1001",
     ] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }

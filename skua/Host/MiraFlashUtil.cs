@@ -115,7 +115,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         "world.myAvatar.objData.guild.Name" => "",
         "world.myAvatar.objData.CharID" => state.Me?.CharId,
         "world.myAvatar.objData.intAQ" => state.Me?.Aq ?? 0,
-        "sfc.myUserName" => state.Me?.Name ?? "",
+        "sfc.myUserName" => state.Me?.Name.ToLowerInvariant() ?? "",
         "world.myAvatar.objData.iUpgDays" => state.Me?.Member == true ? 0 : -1,
         "world.myAvatar.objData.intLevel" => state.Me?.Level,
         "world.myAvatar.objData.intGold" => state.Me?.Gold,
