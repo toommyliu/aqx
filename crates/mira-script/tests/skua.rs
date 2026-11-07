@@ -39,6 +39,7 @@ public class ReadStats
         bot.Log($"coins {bot.Flash.GetGameObject<int>("world.myAvatar.objData.intCoins")}");
         bot.Log($"user {bot.Flash.GetGameObject("sfc.myUserName")}");
         bot.Log($"id {bot.Player.ID}, in r2: {string.Join(", ", bot.Map.CellPlayers!.Select(p => $"{p.Name} {p.EntID}"))}");
+        bot.Log($"names {string.Join(", ", bot.Map.PlayerNames!)}, exists {bot.Map.PlayerExists("player1")}");
         var monsters = Newtonsoft.Json.Linq.JArray.Parse(bot.Flash.Call("availableMonsters")!);
         bot.Log($"monsters in r2: {string.Join(", ", monsters.Select(m => $"{m["strMonName"]} {m["MonMapID"]} {m["intHP"]}"))}");
     }
@@ -167,7 +168,8 @@ fn a_script_reads_the_players_id_cell_and_combat_stats() {
         "7 14 37 0.08 1.66 0.03",
         "coins 50",
         "user \"player1\"",
-        "id 1001, in r2: Player1 1001",
+        "id 1001, in r2: player1 1001",
+        "names player1, exists True",
     ] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
