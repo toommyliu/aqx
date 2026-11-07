@@ -279,6 +279,7 @@ interface PlayerFields {
 }
 
 interface MapFields {
+  readonly cells: readonly string[];
   /** With the room, as in "battleon-1234". */
   readonly name: string;
   readonly areaId: number;
@@ -324,6 +325,7 @@ interface Settings {
    */
   room: number | null;
   antiAfk: boolean;
+  loadCells: boolean;
   /**
    * While a monster in the player's cell counters, `all` holds every cast,
    * auto attacks included, and `attacks` holds only the casts that would hit
@@ -377,6 +379,7 @@ interface Native {
   setCounterHold(hold: Settings["counterHold"]): boolean;
   setAggro(mode: "off" | "cell" | "only", ids: number[]): boolean;
   setAntiAfk(on: boolean): boolean;
+  setLoadCells(on: boolean): boolean;
   setRoom(room: number | null): boolean;
   setAutoRelogin(delayMs: number | null, attempts: number, server: string | null): void;
   setSpawnPoint(cell: string, pad: string): boolean;
@@ -611,8 +614,11 @@ export const player = view(
 
 export const map = view(
   room,
-  { name: true, areaId: true, cell: true, pad: true, x: true, y: true, zone: true, players: true, monsters: true },
+  { cells: true, name: true, areaId: true, cell: true, pad: true, x: true, y: true, zone: true, players: true, monsters: true },
   {
+    loadCells(): Action<readonly string[]> {
+      return act("loadCells");
+    },
     /**
      * Without a room in `name`, joins settings.room. "refused" when the map is
      * locked, full, or for members only.
@@ -1032,7 +1038,7 @@ export const packets = Object.freeze({
 });
 
 const COUNTER_HOLDS: readonly Settings["counterHold"][] = ["off", "all", "attacks"];
-const config: Settings = { room: null, antiAfk: false, counterHold: "off", aggro: "off", autoRelogin: false };
+const config: Settings = { room: null, antiAfk: false, loadCells: false, counterHold: "off", aggro: "off", autoRelogin: false };
 let aggroWatched = false;
 
 function applyAggro(): boolean {
@@ -1057,6 +1063,14 @@ export const settings: Settings = Object.seal({
     if (value !== null) checkId(value, "settings.room");
     session(native.setRoom(value));
     config.room = value;
+  },
+  get loadCells() {
+    return config.loadCells;
+  },
+  set loadCells(on) {
+    if (typeof on !== "boolean") throw new TypeError("settings.loadCells must be true or false");
+    session(native.setLoadCells(on));
+    config.loadCells = on;
   },
   get antiAfk() {
     return config.antiAfk;

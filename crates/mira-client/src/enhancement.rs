@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use mira_protocol::flex;
+use mira_protocol::{ItemId, flex};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -106,7 +106,12 @@ pub(crate) struct EnhancementFields {
     level: Option<u32>,
     #[serde(rename = "PatternID", default, deserialize_with = "flex::opt_int")]
     item_pattern: Option<u32>,
-    #[serde(rename = "EnhPatternID", default, deserialize_with = "flex::opt_int")]
+    #[serde(
+        rename = "EnhPatternID",
+        alias = "EnhPID",
+        default,
+        deserialize_with = "flex::opt_int"
+    )]
     pattern: Option<u32>,
     #[serde(rename = "ProcID", default, deserialize_with = "flex::opt_int")]
     proc_id: Option<u32>,
@@ -114,6 +119,16 @@ pub(crate) struct EnhancementFields {
     rarity: Option<u32>,
     #[serde(rename = "iRty", default, deserialize_with = "flex::opt_int")]
     item_rarity: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Enhanced {
+    #[serde(rename = "ItemIDs")]
+    pub items: Vec<ItemId>,
+    #[serde(flatten)]
+    pub fields: EnhancementFields,
+    #[serde(rename = "iCost", default, deserialize_with = "flex::int")]
+    pub cost: u64,
 }
 
 impl EnhancementFields {

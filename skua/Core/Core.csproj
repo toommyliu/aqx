@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AssemblyName>Skua.Core</AssemblyName>
+    <RootNamespace>Skua.Core</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <WeaverConfiguration>
+      <Weavers>
+        <Caseless />
+      </Weavers>
+    </WeaverConfiguration>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../vendor/Skua/Skua.Core/Options/Option.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptWait.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Scripts/Inventory/ScriptInventoryHelper.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Scripts/Helpers/UltraBossHelper.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptBoost.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptKill.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptHunt.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Scripts/ScriptSkill.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Messaging/ScriptableEventMessages.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Messaging/MessageChannels.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Skills/*.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Flash/*.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Threading/*.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/ViewModels/Dialogs/DialogViewModelBase.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/ViewModels/Dialogs/InputDialogViewModel.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Services/QuestDataLoaderService.cs" />
+    <Compile Include="../vendor/Skua/Skua.Core/Services/UnifiedSettingsService.cs" />
+    <Compile Include="*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Caseless.Fody" Version="1.9.1" PrivateAssets="all" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Interfaces/Interfaces.csproj" />
+    <ProjectReference Include="../vendor/Skua/Skua.Core.Generators/Skua.Core.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

@@ -151,9 +151,6 @@ impl Session {
         let Some(room) = &self.room else {
             return Err(ActionError::NotReady);
         };
-        if self.shop.is_none() {
-            return Err(ActionError::Unusable("load a shop first".into()));
-        }
         let Some(held) = self.inventory.items.iter().find(|i| i.id == item) else {
             return Err(ActionError::NoTarget(format!(
                 "item {item} isn't in the inventory"
@@ -181,6 +178,11 @@ impl Session {
     }
 
     pub(super) fn on_bought(&mut self, bought: Bought) {
+        if bought.ok
+            && let Some(char_item_id) = bought.char_item_id
+        {
+            self.emit(crate::Event::ItemBought { char_item_id });
+        }
         let Some(Op::Trade {
             stage: TradeStage::Bought { listed, .. },
             ..

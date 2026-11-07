@@ -1,0 +1,250 @@
+[
+  {
+    "id": 1,
+    "call": "join",
+    "map": "farm",
+    "cell": "Enter",
+    "pad": "Spawn"
+  },
+  {
+    "id": 2,
+    "call": "jump",
+    "cell": "farm",
+    "pad": "farm",
+    "client_only": false
+  },
+  {
+    "id": 3,
+    "call": "walk",
+    "x": 1,
+    "y": 1
+  },
+  {
+    "id": 4,
+    "call": "goto",
+    "player": "farm"
+  },
+  {
+    "id": 5,
+    "call": "rest"
+  },
+  {
+    "id": 6,
+    "call": "exit_combat"
+  },
+  {
+    "id": 7,
+    "call": "attack",
+    "target": 1
+  },
+  {
+    "id": 8,
+    "call": "untarget"
+  },
+  {
+    "id": 9,
+    "call": "use_skill",
+    "slot": "farm",
+    "target": null
+  },
+  {
+    "id": 10,
+    "call": "load_quests",
+    "ids": [
+      1,
+      2
+    ]
+  },
+  {
+    "id": 11,
+    "call": "accept",
+    "quest": 1
+  },
+  {
+    "id": 12,
+    "call": "complete",
+    "quest": 1,
+    "reward": null,
+    "times": 1,
+    "special": false
+  },
+  {
+    "id": 13,
+    "call": "pickup",
+    "item": 1
+  },
+  {
+    "id": 14,
+    "call": "get_map_item",
+    "item": 1
+  },
+  {
+    "id": 15,
+    "call": "load_bank"
+  },
+  {
+    "id": 16,
+    "call": "deposit",
+    "item": 1
+  },
+  {
+    "id": 17,
+    "call": "withdraw",
+    "item": 1
+  },
+  {
+    "id": 18,
+    "call": "swap",
+    "inventory": 1,
+    "bank": 1
+  },
+  {
+    "id": 19,
+    "call": "load_shop",
+    "shop": 1
+  },
+  {
+    "id": 20,
+    "call": "buy",
+    "listing": 1,
+    "quantity": 1
+  },
+  {
+    "id": 21,
+    "call": "sell",
+    "item": 1,
+    "quantity": 1
+  },
+  {
+    "id": 22,
+    "call": "equip",
+    "item": 1
+  },
+  {
+    "id": 23,
+    "call": "unequip",
+    "item": 1
+  },
+  {
+    "id": 24,
+    "call": "use_item",
+    "item": 1
+  },
+  {
+    "id": 25,
+    "call": "send",
+    "text": "farm"
+  },
+  {
+    "id": 26,
+    "call": "inject",
+    "text": "farm"
+  },
+  {
+    "id": 27,
+    "call": "set_aggro",
+    "mode": "off"
+  },
+  {
+    "id": 28,
+    "call": "set_spawn_point",
+    "cell": "farm",
+    "pad": "farm"
+  },
+  {
+    "id": 29,
+    "call": "set_counter_hold",
+    "mode": "off"
+  },
+  {
+    "id": 30,
+    "call": "listen",
+    "direction": "in",
+    "enabled": true
+  },
+  {
+    "id": 31,
+    "call": "log",
+    "level": "log",
+    "text": "farm"
+  },
+  {
+    "id": 32,
+    "call": "status",
+    "text": "farm"
+  },
+  {
+    "id": 33,
+    "call": "servers"
+  },
+  {
+    "id": 34,
+    "call": "relogin",
+    "server": null,
+    "timeout_ms": 30000
+  },
+  {
+    "id": 100,
+    "call": "set_aggro",
+    "mode": "cell"
+  },
+  {
+    "id": 101,
+    "call": "set_aggro",
+    "mode": {
+      "only": [
+        1,
+        2
+      ]
+    }
+  },
+  {
+    "call": "use_skill",
+    "id": 102,
+    "slot": "a1",
+    "target": {
+      "monster": 1
+    }
+  },
+  {
+    "call": "use_skill",
+    "id": 103,
+    "slot": "a2",
+    "target": {
+      "player": 1001
+    }
+  },
+  {
+    "id": 39,
+    "call": "abandon",
+    "quest": 11
+  },
+  {
+    "id": 104,
+    "call": "rest_packet"
+  },
+  {
+    "id": 105,
+    "call": "set_aggro",
+    "mode": "all"
+  },
+  {
+    "id": 106,
+    "call": "load_cells"
+  },
+  {
+    "id": 101,
+    "call": "logout"
+  },
+  {
+    "id": 102,
+    "call": "cancel_relogin",
+    "request": 103
+  },
+  {
+    "id": 103,
+    "call": "set_login_info",
+    "username": "player1",
+    "password": "placeholder"
+  }
+]

@@ -33,6 +33,20 @@ pub struct Shop {
     pub house: bool,
     #[serde(rename(deserialize = "items"), default)]
     pub items: Vec<ShopItem>,
+    #[serde(
+        rename(deserialize = "iIndex"),
+        default,
+        deserialize_with = "flex::int"
+    )]
+    pub index: i64,
+    #[serde(rename(deserialize = "sField"), default)]
+    pub field: String,
+    #[serde(
+        rename(deserialize = "reqItems"),
+        default,
+        deserialize_with = "flex::int"
+    )]
+    pub required_item: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +91,8 @@ pub struct ShopItem {
     pub meta: String,
     #[serde(rename(deserialize = "sLink"), default)]
     pub link: String,
+    #[serde(rename(deserialize = "sFile"), default)]
+    pub file: String,
     #[serde(
         rename(deserialize = "bHouse"),
         default,
@@ -107,6 +123,20 @@ pub struct ShopItem {
         deserialize_with = "flex::int"
     )]
     pub quest_value: i64,
+    #[serde(rename(deserialize = "sQuest"), default)]
+    pub quest: String,
+    #[serde(rename(deserialize = "iLvl"), default, deserialize_with = "flex::int")]
+    pub level: u32,
+    #[serde(rename(deserialize = "sFaction"), default)]
+    pub faction_name: String,
+    #[serde(rename(deserialize = "TokName"), default)]
+    pub token_name: String,
+    #[serde(
+        rename(deserialize = "iQtyRemain"),
+        default,
+        deserialize_with = "flex::opt_int"
+    )]
+    pub remaining: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,4 +248,44 @@ fn faction<'de, D: Deserializer<'de>>(d: D) -> Result<Option<FactionId>, D::Erro
 #[derive(Deserialize)]
 pub(crate) struct LoadedShop {
     pub(crate) shopinfo: Shop,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn shop_snapshots_preserve_purchase_locks() {
+        let shop: super::Shop = serde_json::from_value(serde_json::json!({
+            "ShopID": 5, "iIndex": "7", "sField": "ia1", "reqItems": "12",
+            "items": [{"ItemID":9,"ShopItemID":19,"iQSindex":2,"iQSvalue":3,
+                "sQuest":"A Quest","iLvl":40,"FactionID":4,"sFaction":"Good","TokName":"Dust","iQtyRemain":8}]
+        })).unwrap();
+        let value = serde_json::to_value(shop).unwrap();
+        assert_eq!(value["index"], 7);
+        assert_eq!(value["field"], "ia1");
+        assert_eq!(value["required_item"], 12);
+        assert_eq!(value["items"][0]["quest"], "A Quest");
+        assert_eq!(value["items"][0]["level"], 40);
+        assert_eq!(value["items"][0]["faction_name"], "Good");
+        assert_eq!(value["items"][0]["token_name"], "Dust");
+        assert_eq!(value["items"][0]["remaining"], 8);
+        for (remaining, expected) in [
+            (serde_json::json!(-1), serde_json::json!(-1)),
+            (serde_json::json!("-1"), serde_json::json!(-1)),
+            (serde_json::json!(0), serde_json::json!(0)),
+        ] {
+            let shop: super::Shop = serde_json::from_value(serde_json::json!({
+                "ShopID": 5, "items": [{"ItemID":9,"ShopItemID":19,"iQtyRemain":remaining}]
+            }))
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(shop).unwrap()["items"][0]["remaining"],
+                expected
+            );
+        }
+        let shop: super::Shop = serde_json::from_value(serde_json::json!({
+            "ShopID": 5, "items": [{"ItemID":9,"ShopItemID":19}]
+        }))
+        .unwrap();
+        assert_eq!(shop.items[0].remaining, None);
+    }
 }

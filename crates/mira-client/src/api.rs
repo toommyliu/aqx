@@ -188,6 +188,25 @@ fn cache_buster() -> String {
     format!("0.{nanos:09}")
 }
 
+pub(crate) fn map_file(account: &Account, file: &str) -> Result<Vec<u8>, ApiError> {
+    let url = format!(
+        "{}/gamefiles/maps/{}",
+        account.api.trim_end_matches("/api"),
+        file.trim_start_matches('/')
+    );
+    request(ureq::get(url), &account.device)
+        .header("content-type", "")
+        .call()
+        .and_then(|mut reply| {
+            reply
+                .body_mut()
+                .with_config()
+                .limit(32 * 1024 * 1024)
+                .read_to_vec()
+        })
+        .map_err(|e| ApiError::Http(format!("map file request failed: {e}")))
+}
+
 pub(crate) fn bank(account: &Account, char_id: i64) -> Result<Vec<Value>, ApiError> {
     let url = format!("{}/char/bank?v={}", account.api, cache_buster());
     let body = request(ureq::post(url), &account.device)

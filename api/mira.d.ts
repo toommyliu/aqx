@@ -346,6 +346,7 @@ interface PlayerFields {
     };
 }
 interface MapFields {
+    readonly cells: readonly string[];
     /** With the room, as in "battleon-1234". */
     readonly name: string;
     readonly areaId: number;
@@ -385,6 +386,7 @@ interface Settings {
      */
     room: number | null;
     antiAfk: boolean;
+    loadCells: boolean;
     /**
      * While a monster in the player's cell counters, `all` holds every cast,
      * auto attacks included, and `attacks` holds only the casts that would hit
@@ -419,6 +421,7 @@ export declare const player: PlayerFields & {
     rest(): Action<void>;
 };
 export declare const map: MapFields & {
+    loadCells(): Action<readonly string[]>;
     /**
      * Without a room in `name`, joins settings.room. "refused" when the map is
      * locked, full, or for members only.

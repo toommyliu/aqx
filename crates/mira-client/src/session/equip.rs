@@ -81,6 +81,7 @@ impl Session {
                 return Poll::Ready(Ok(()));
             }
             Plan::Consumable { link, meta } => {
+                self.combat.lock_item_slot(now);
                 (packet::geia(area, &link, &meta, item), Ack::SlotFilled)
             }
             Plan::Gear => {
@@ -180,6 +181,7 @@ impl Session {
     }
 
     pub(super) fn on_slot_filled(&mut self, filled: SlotFilled, now: Instant) {
+        self.combat.unlock_item_slot();
         let Some(Op::Equip {
             item,
             stage:

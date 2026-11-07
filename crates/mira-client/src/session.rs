@@ -249,11 +249,12 @@ enum Limit {
     UnequipItem,
     MapItem,
     Rest,
+    RestPacket,
     Walk,
 }
 
 impl Limit {
-    const COUNT: usize = 12;
+    const COUNT: usize = 13;
 
     fn gap(self) -> Duration {
         Duration::from_millis(match self {
@@ -266,6 +267,7 @@ impl Limit {
             Limit::EquipItem | Limit::UnequipItem => 1500,
             Limit::MapItem => 1000,
             Limit::Rest => 2000,
+            Limit::RestPacket => 1200,
             Limit::Walk => 500,
         })
     }
@@ -277,6 +279,36 @@ struct Limits([Option<Instant>; Limit::COUNT]);
 impl Limits {
     fn until(&self, limit: Limit) -> Option<Instant> {
         self.0[limit as usize].map(|at| at + limit.gap())
+    }
+
+    fn snapshot(&self) -> BTreeMap<&'static str, crate::ActionLock> {
+        [
+            ("tfer", Some(Limit::Transfer), 3000),
+            ("loadShop", Some(Limit::LoadShop), 3000),
+            ("loadEnhShop", None, 3000),
+            ("loadHairShop", None, 3000),
+            ("equipItem", Some(Limit::EquipItem), 1500),
+            ("unequipItem", Some(Limit::UnequipItem), 1500),
+            ("buyItem", Some(Limit::BuyItem), 1000),
+            ("sellItem", Some(Limit::SellItem), 1000),
+            ("getMapItem", Some(Limit::MapItem), 1000),
+            ("tryQuestComplete", Some(Limit::TurnIn), 1250),
+            ("acceptQuest", Some(Limit::AcceptQuest), 1000),
+            ("rest", Some(Limit::Rest), 1900),
+            ("doIA", None, 1000),
+            ("who", None, 3000),
+        ]
+        .into_iter()
+        .map(|(name, limit, millis)| {
+            (
+                name,
+                crate::ActionLock {
+                    used: limit.and_then(|limit| self.0[limit as usize]),
+                    cooldown: limit.map_or(Duration::from_millis(millis), Limit::gap),
+                },
+            )
+        })
+        .collect()
     }
 
     fn used(&mut self, limit: Limit, now: Instant) {
@@ -296,17 +328,18 @@ struct Reply {
 
 #[derive(Debug, Clone)]
 pub enum Update {
+    State,
     Event(Event),
     Done {
         id: ActionId,
         result: Result<(), ActionError>,
     },
-    Packet(String),
+    Packet(Direction, String),
 }
 
 enum Outgoing {
     Event(Event),
-    Packet(String),
+    Packet(Direction, String),
 }
 
 enum Subscriber {
@@ -322,10 +355,10 @@ impl Subscriber {
         }
     }
 
-    fn packet(&self, text: &str) -> bool {
+    fn packet(&self, direction: Direction, text: &str) -> bool {
         match self {
             Subscriber::Events(_) => true,
-            Subscriber::Updates(tx) => tx.send(Update::Packet(text.to_owned())).is_ok(),
+            Subscriber::Updates(tx) => tx.send(Update::Packet(direction, text.to_owned())).is_ok(),
         }
     }
 
@@ -367,6 +400,7 @@ fn latest(slot: &Slot) -> Arc<World> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Aggro {
+    All,
     Cell,
     Only(HashSet<MonMapId>),
 }
@@ -374,7 +408,7 @@ pub enum Aggro {
 impl Aggro {
     fn covers(&self, id: MonMapId) -> bool {
         match self {
-            Aggro::Cell => true,
+            Aggro::All | Aggro::Cell => true,
             Aggro::Only(ids) => ids.contains(&id),
         }
     }
@@ -390,9 +424,11 @@ pub enum CounterHold {
 
 enum Setting {
     CounterHold(CounterHold),
+    SkillLastUse(String, Option<Instant>),
     Aggro(Option<Aggro>),
     SpawnPoint(String, String),
     AntiAfk(bool),
+    LoadCells(bool),
     Room(Option<u32>),
 }
 
@@ -401,12 +437,14 @@ enum Request {
     Set(Setting, u64),
     Cancel(Cancel),
     Untarget,
+    Inject(String),
     Subscribe(Subscriber),
     Logout,
 }
 
 enum Action {
     Ready,
+    LoadCells,
     Join {
         map: String,
         spot: Option<(String, String)>,
@@ -414,6 +452,7 @@ enum Action {
     MoveToCell {
         cell: String,
         pad: String,
+        client_only: bool,
     },
     Attack {
         target: MonMapId,
@@ -428,7 +467,9 @@ enum Action {
     },
     ExitCombat,
     Quest(QuestAction),
+    AbandonQuest(QuestId),
     PickDrop(ItemId),
+    RequestDrop(ItemId),
     LoadShop(ShopId),
     Trade(Trade),
     Bank(Option<BankMove>),
@@ -438,6 +479,8 @@ enum Action {
     },
     MapItem(MapItemId),
     Rest,
+    RequestRest,
+    RequestRestPacket,
     UseItem(ItemId),
     Goto(String),
     Walk {
@@ -451,7 +494,12 @@ impl Action {
     fn runs_during_fight(&self) -> bool {
         matches!(
             self,
-            Action::Ready | Action::Quest(_) | Action::PickDrop(_) | Action::MapItem(_)
+            Action::Ready
+                | Action::Quest(_)
+                | Action::AbandonQuest(_)
+                | Action::PickDrop(_)
+                | Action::RequestDrop(_)
+                | Action::MapItem(_)
         )
     }
 }
@@ -516,6 +564,7 @@ enum Op {
     Rest {
         reply: Reply,
         stage: RestStage,
+        mode: RestMode,
     },
     Walk {
         reply: Reply,
@@ -599,6 +648,13 @@ impl Op {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RestMode {
+    Full,
+    Start,
+    Packet,
+}
+
 enum RestStage {
     Cooling { wake: Option<Instant> },
     Sent { deadline: Instant },
@@ -646,6 +702,7 @@ enum JoinStage {
 
 #[derive(Clone)]
 pub struct Handle {
+    server_host: Arc<str>,
     requests: mpsc::Sender<Request>,
     waker: Arc<Waker>,
     world: Slot,
@@ -654,8 +711,16 @@ pub struct Handle {
 }
 
 impl Handle {
+    pub fn server_host(&self) -> &str {
+        &self.server_host
+    }
+
     pub fn ready(&self) -> Pending {
         self.act(Action::Ready)
+    }
+
+    pub fn load_cells(&self) -> Pending {
+        self.act(Action::LoadCells)
     }
 
     pub fn join(&self, map: &str) -> Pending {
@@ -676,6 +741,15 @@ impl Handle {
         self.act(Action::MoveToCell {
             cell: cell.to_owned(),
             pad: pad.to_owned(),
+            client_only: false,
+        })
+    }
+
+    pub fn move_to_cell_local(&self, cell: &str, pad: &str) -> Pending {
+        self.act(Action::MoveToCell {
+            cell: cell.to_owned(),
+            pad: pad.to_owned(),
+            client_only: true,
         })
     }
 
@@ -712,6 +786,10 @@ impl Handle {
         self.act(Action::Quest(QuestAction::Load(ids.to_vec())))
     }
 
+    pub fn abandon_quest(&self, id: QuestId) -> Pending {
+        self.act(Action::AbandonQuest(id))
+    }
+
     pub fn accept_quest(&self, id: QuestId) -> Pending {
         self.act(Action::Quest(QuestAction::Accept(id)))
     }
@@ -742,6 +820,14 @@ impl Handle {
 
     pub fn send_raw(&self, text: &str) -> Pending {
         self.act(Action::Send(text.to_owned()))
+    }
+
+    pub fn request_rest_packet(&self) -> Pending {
+        self.act(Action::RequestRestPacket)
+    }
+
+    pub fn request_rest(&self) -> Pending {
+        self.act(Action::RequestRest)
     }
 
     pub fn rest(&self) -> Pending {
@@ -776,12 +862,35 @@ impl Handle {
         self.act(Action::Bank(Some(BankMove::Swap { inventory, bank })))
     }
 
+    pub fn request_drop(&self, item: ItemId) -> Pending {
+        self.act(Action::RequestDrop(item))
+    }
+
     pub fn pick_drop(&self, item: ItemId) -> Pending {
         self.act(Action::PickDrop(item))
     }
 
     pub fn complete_quest(&self, id: QuestId, reward: Option<ItemId>, times: u32) -> Pending {
-        self.act(Action::Quest(QuestAction::TurnIn { id, reward, times }))
+        self.complete_quest_special(id, reward, times, false)
+    }
+
+    pub fn complete_quest_special(
+        &self,
+        id: QuestId,
+        reward: Option<ItemId>,
+        times: u32,
+        special: bool,
+    ) -> Pending {
+        self.act(Action::Quest(QuestAction::TurnIn {
+            id,
+            reward,
+            times,
+            special,
+        }))
+    }
+
+    pub fn set_skill_last_use(&self, slot: &str, at: Option<Instant>) {
+        self.set(Setting::SkillLastUse(slot.to_owned(), at));
     }
 
     pub fn set_counter_hold(&self, hold: CounterHold) {
@@ -798,6 +907,10 @@ impl Handle {
 
     pub fn set_anti_afk(&self, on: bool) {
         self.set(Setting::AntiAfk(on));
+    }
+
+    pub fn set_load_cells(&self, on: bool) {
+        self.set(Setting::LoadCells(on));
     }
 
     pub fn set_room(&self, room: Option<u32>) {
@@ -843,6 +956,10 @@ impl Handle {
 
     pub fn untarget(&self) {
         self.request(Request::Untarget);
+    }
+
+    pub fn inject(&self, text: &str) {
+        self.request(Request::Inject(text.to_owned()));
     }
 
     fn act(&self, action: Action) -> Pending {
@@ -905,12 +1022,19 @@ pub fn spawn(
     };
     let world = Arc::new(Mutex::new(Arc::new(World::connecting(phase.clone()))));
     let (bank_out, bank_results) = mpsc::channel();
+    let (map_out, map_results) = mpsc::channel();
     let (relogin_out, relogin_results) = mpsc::channel();
+    let server_host = Arc::from(server.host.as_str());
     let session = Session {
         account: account.clone(),
         waker: Arc::clone(&waker),
         bank_out,
         bank_results,
+        map_out,
+        map_results,
+        map_cells: HashMap::new(),
+        load_cells: false,
+        load_cells_pending: false,
         relogin_out,
         relogin_results,
         server: server.clone(),
@@ -968,6 +1092,7 @@ pub fn spawn(
         .name("mira-session".into())
         .spawn(move || session.run(server, version))?;
     let handle = Handle {
+        server_host,
         requests: requests_out,
         waker,
         world,
@@ -977,11 +1102,23 @@ pub fn spawn(
     Ok((handle, events_in))
 }
 
+enum MapCells {
+    Loading(Vec<Reply>),
+    Loaded(Vec<String>),
+}
+
+type MapResult = (String, Result<Vec<String>, ActionError>);
+
 struct Session {
     account: Account,
     waker: Arc<Waker>,
     bank_out: mpsc::Sender<BankResult>,
     bank_results: mpsc::Receiver<BankResult>,
+    map_out: mpsc::Sender<MapResult>,
+    map_results: mpsc::Receiver<MapResult>,
+    map_cells: HashMap<String, MapCells>,
+    load_cells: bool,
+    load_cells_pending: bool,
     relogin_out: mpsc::Sender<Result<Account, ApiError>>,
     relogin_results: mpsc::Receiver<Result<Account, ApiError>>,
     server: Server,
@@ -1041,6 +1178,7 @@ impl Session {
         self.current = Some(self.start_login(server, version, 1));
         loop {
             self.take_requests();
+            self.take_map_results();
             self.take_bank_results();
             self.take_relogin_results();
             self.advance(Instant::now());
@@ -1048,6 +1186,11 @@ impl Session {
                 self.take_requests();
                 self.advance(Instant::now());
                 return self.publish();
+            }
+            self.flush();
+            if self.load_cells_pending && self.outbox.is_empty() {
+                self.load_cells_pending = false;
+                self.load_map_cells(None);
             }
             self.publish();
             let timeout = self
@@ -1111,6 +1254,18 @@ impl Session {
         for (_, reply) in dropped {
             self.replies.push((reply, Err(ActionError::Cancelled)));
         }
+        for entry in self.map_cells.values_mut() {
+            if let MapCells::Loading(waiters) = entry {
+                let (cancelled, kept): (Vec<_>, Vec<_>) =
+                    waiters.drain(..).partition(|r| which.covers(r));
+                *waiters = kept;
+                self.replies.extend(
+                    cancelled
+                        .into_iter()
+                        .map(|r| (r, Err(ActionError::Cancelled))),
+                );
+            }
+        }
         if self.fight.as_ref().is_some_and(|f| which.covers(&f.reply)) {
             self.untarget();
         }
@@ -1138,6 +1293,7 @@ impl Session {
     fn apply(&mut self, setting: Setting) {
         match setting {
             Setting::CounterHold(hold) => self.counter_hold = hold,
+            Setting::SkillLastUse(slot, at) => self.combat.set_last_use(&slot, at),
             Setting::Aggro(aggro) => self.aggro = aggro.map(|aggro| (aggro, Instant::now())),
             Setting::SpawnPoint(cell, pad) => {
                 if let Some(room) = &mut self.room {
@@ -1145,6 +1301,10 @@ impl Session {
                 }
             }
             Setting::AntiAfk(on) => self.anti_afk = on,
+            Setting::LoadCells(on) => {
+                self.load_cells = on;
+                self.load_cells_pending = on && self.room.is_some();
+            }
             Setting::Room(room) => self.join_room = room,
         }
     }
@@ -1160,10 +1320,12 @@ impl Session {
                 }
                 Request::Cancel(which) => self.cancel(which),
                 Request::Untarget => self.untarget(),
+                Request::Inject(text) => self.receive_text(text),
                 Request::Subscribe(subscriber) => self.subscribers.push(subscriber),
                 Request::Logout => self.begin_logout(),
                 Request::Set(_, epoch) if self.stale_epoch(epoch) => {}
                 Request::Set(setting, _) => self.apply(setting),
+                Request::Act(Action::LoadCells, reply, _) => self.load_map_cells(Some(reply)),
                 Request::Act(Action::ExitCombat, reply, _) => {
                     if let Some(fight) = self.fight.take() {
                         self.replies
@@ -1287,8 +1449,19 @@ impl Session {
 
     fn start(&mut self, action: Action, reply: Reply, now: Instant) -> Option<Op> {
         let result = match action {
+            Action::LoadCells => {
+                self.load_map_cells(Some(reply));
+                return None;
+            }
             Action::Ready => self.ensure_ready(),
-            Action::MoveToCell { cell, pad } => self.move_to_cell(&cell, &pad),
+            Action::AbandonQuest(id) => self.ensure_ready().map(|()| {
+                self.accepted_quests.remove(&id);
+            }),
+            Action::MoveToCell {
+                cell,
+                pad,
+                client_only,
+            } => self.move_to_cell_with(&cell, &pad, client_only),
             Action::UseItem(item) => self.use_item(item),
             Action::Send(text) => self.ensure_ready().map(|()| self.send(&text)),
             Action::Walk { x, y } => {
@@ -1322,6 +1495,7 @@ impl Session {
                 Ok(None) => Ok(()),
                 Err(e) => Err(e),
             },
+            Action::RequestDrop(item) => self.start_pick(item, now).map(|_| ()),
             Action::PickDrop(item) => match self.start_pick(item, now) {
                 Ok(deadline) => {
                     return Some(Op::Pick {
@@ -1332,9 +1506,14 @@ impl Session {
                 }
                 Err(e) => Err(e),
             },
-            Action::Rest => {
+            Action::Rest | Action::RequestRest | Action::RequestRestPacket => {
+                let mode = match action {
+                    Action::Rest => RestMode::Full,
+                    Action::RequestRest => RestMode::Start,
+                    _ => RestMode::Packet,
+                };
                 let stage = RestStage::Cooling { wake: None };
-                return self.step(Op::Rest { reply, stage }, now);
+                return self.step(Op::Rest { reply, stage, mode }, now);
             }
             Action::MapItem(item) => {
                 let op = Op::MapItem {
@@ -1627,7 +1806,7 @@ impl Session {
                     None
                 }
             },
-            Op::Rest { reply, stage } => {
+            Op::Rest { reply, stage, mode } => {
                 let vitals = self.character.as_ref().map(|me| {
                     let hurt = me.hp < me.max_hp || me.mp < me.max_mp;
                     (me.state, hurt)
@@ -1635,29 +1814,42 @@ impl Session {
                 let result = match (self.ensure_ready(), vitals, stage) {
                     (Err(e), ..) => Err(e),
                     (Ok(()), None, _) => Err(ActionError::NotReady),
+                    (Ok(()), Some((state, _)), _)
+                        if mode != RestMode::Full && state != CombatState::Idle =>
+                    {
+                        Ok(())
+                    }
                     (Ok(()), Some((CombatState::Dead, _)), _) => Err(ActionError::Dead),
                     (Ok(()), Some((CombatState::InCombat, _)), _) => Err(ActionError::InCombat),
-                    (Ok(()), Some((_, false)), _) => Ok(()),
+                    (Ok(()), Some((_, false)), _) if mode == RestMode::Full => Ok(()),
                     (Ok(()), _, RestStage::Sent { deadline }) if now >= deadline => {
                         Err(ActionError::NoReply)
                     }
                     (Ok(()), _, stage @ RestStage::Sent { .. }) => {
-                        return Some(Op::Rest { reply, stage });
+                        return Some(Op::Rest { reply, stage, mode });
                     }
                     (Ok(()), _, RestStage::Cooling { .. }) => {
-                        if let Some(until) = self.cooling(Limit::Rest, now) {
+                        let limit = if mode == RestMode::Packet {
+                            Limit::RestPacket
+                        } else {
+                            Limit::Rest
+                        };
+                        if let Some(until) = self.cooling(limit, now) {
                             let stage = RestStage::Cooling { wake: Some(until) };
-                            return Some(Op::Rest { reply, stage });
+                            return Some(Op::Rest { reply, stage, mode });
                         }
-                        self.limits.used(Limit::Rest, now);
+                        self.limits.used(limit, now);
                         self.send(&packet::rest_request());
-                        self.send(&packet::emote("rest"));
-                        self.clear_afk();
+                        if mode != RestMode::Packet {
+                            self.send(&packet::emote("rest"));
+                            self.clear_afk();
+                        }
                         match self.ensure_ready() {
+                            Ok(()) if mode != RestMode::Full => Ok(()),
                             Ok(()) => {
                                 let deadline = now + REPLY_TIMEOUT;
                                 let stage = RestStage::Sent { deadline };
-                                return Some(Op::Rest { reply, stage });
+                                return Some(Op::Rest { reply, stage, mode });
                             }
                             Err(e) => Err(e),
                         }
@@ -1843,17 +2035,47 @@ impl Session {
             procs: Arc::clone(&self.procs),
             target: self.combat.auto_target(),
             readiness: self.readiness(Instant::now()),
+            global_cooldown: self
+                .character
+                .as_ref()
+                .and_then(|me| self.combat.global_cooldown(me)),
+            skill_timing: self
+                .character
+                .iter()
+                .flat_map(|me| {
+                    me.skills.iter().map(|skill| {
+                        (
+                            skill.slot.clone(),
+                            crate::SkillTiming {
+                                last_use: self.combat.last_use(&skill.slot),
+                                cooldown: self
+                                    .combat
+                                    .cooldown(me, skill)
+                                    .into_iter()
+                                    .chain(self.combat.global_cooldown(me))
+                                    .max(),
+                            },
+                        )
+                    })
+                })
+                .collect(),
+            action_locks: self.limits.snapshot(),
             settings: Settings {
                 counter_hold: self.counter_hold,
                 aggro: self.aggro.as_ref().map(|(aggro, _)| aggro.clone()),
                 anti_afk: self.anti_afk,
+                load_cells: self.load_cells,
                 room: self.join_room,
             },
+        });
+        self.subscribers.retain(|subscriber| match subscriber {
+            Subscriber::Events(_) => true,
+            Subscriber::Updates(tx) => tx.send(Update::State).is_ok(),
         });
         for outgoing in self.outgoing.drain(..) {
             self.subscribers.retain(|subscriber| match &outgoing {
                 Outgoing::Event(event) => subscriber.event(event),
-                Outgoing::Packet(text) => subscriber.packet(text),
+                Outgoing::Packet(direction, text) => subscriber.packet(*direction, text),
             });
         }
         for (reply, result) in self.replies.drain(..) {
@@ -1975,6 +2197,15 @@ impl Session {
     }
 
     fn move_to_cell(&mut self, cell: &str, pad: &str) -> Result<(), ActionError> {
+        self.move_to_cell_with(cell, pad, false)
+    }
+
+    fn move_to_cell_with(
+        &mut self,
+        cell: &str,
+        pad: &str,
+        client_only: bool,
+    ) -> Result<(), ActionError> {
         self.ensure_ready()?;
         let Some(room) = &mut self.room else {
             return Err(ActionError::NotReady);
@@ -1984,9 +2215,11 @@ impl Session {
         (room.x, room.y) = (0, 0);
         let area = room.area;
         self.combat.disengage();
-        self.send_action(&packet::move_to_cell(area, cell, pad));
-        self.fetch_cellmates();
-        self.aggro_cell();
+        if !client_only {
+            self.send_action(&packet::move_to_cell(area, cell, pad));
+            self.fetch_cellmates();
+            self.aggro_cell();
+        }
         self.ensure_ready()?;
         self.emit(Event::Moved {
             cell: cell.to_owned(),
@@ -2074,6 +2307,15 @@ impl Session {
             return;
         }
         let why = self.closing.take().unwrap_or(why);
+        for entry in self.map_cells.values_mut() {
+            if let MapCells::Loading(waiters) = entry {
+                self.replies.extend(
+                    waiters
+                        .drain(..)
+                        .map(|r| (r, Err(ActionError::Closed(why.clone())))),
+                );
+            }
+        }
         let plan =
             self.options.reconnect.as_ref().filter(|plan| {
                 self.ready_once && why.retryable() && self.reconnects < plan.attempts
@@ -2147,9 +2389,19 @@ impl Session {
                 text,
             });
         }
+        if self.watched() {
+            let text = packet.replace(self.token.as_str(), "<token>");
+            self.outgoing.push(Outgoing::Packet(Direction::Out, text));
+        }
         self.outbox.extend_from_slice(packet.as_bytes());
         self.outbox.push(0);
         self.flush();
+    }
+
+    fn watched(&self) -> bool {
+        self.subscribers
+            .iter()
+            .any(|s| matches!(s, Subscriber::Updates(_)))
     }
 
     fn flush(&mut self) {
@@ -2208,19 +2460,22 @@ impl Session {
     }
 
     fn receive(&mut self, frame: &[u8]) {
-        let mut received = None;
-        let message = mira_protocol::unpack(frame).and_then(|text| {
-            if self.options.trace_packets {
-                self.emit(Event::Packet {
-                    direction: Direction::In,
-                    text: redact(&text),
-                });
-            }
-            let message = mira_protocol::parse(&text);
-            received = Some(text);
-            message
-        });
-        let handled = match message {
+        match mira_protocol::unpack(frame) {
+            Ok(text) => self.receive_text(text),
+            Err(e) => self.emit(Event::Unreadable {
+                error: e.to_string(),
+            }),
+        }
+    }
+
+    fn receive_text(&mut self, text: String) {
+        if self.options.trace_packets {
+            self.emit(Event::Packet {
+                direction: Direction::In,
+                text: redact(&text),
+            });
+        }
+        let handled = match mira_protocol::parse(&text) {
             Ok(Message::Xml(xml)) => {
                 self.on_xml(&xml);
                 Ok(())
@@ -2235,16 +2490,86 @@ impl Session {
         if let Err(error) = handled {
             self.emit(Event::Unreadable { error });
         }
-        let watched = self
-            .subscribers
-            .iter()
-            .any(|s| matches!(s, Subscriber::Updates(_)));
-        if let Some(text) = received.filter(|_| watched) {
-            self.outgoing.push(Outgoing::Packet(redact(&text)));
+        if self.watched() {
+            self.outgoing
+                .push(Outgoing::Packet(Direction::In, redact(&text)));
         }
     }
 
-    fn enter(&mut self, room: Room) {
+    fn load_map_cells(&mut self, reply: Option<Reply>) {
+        let file = match self.room.as_ref() {
+            Some(room) if !room.file.is_empty() && !matches!(self.phase, Phase::Closed { .. }) => {
+                room.file.clone()
+            }
+            _ => {
+                if let Some(reply) = reply {
+                    self.replies.push((reply, Err(ActionError::NotReady)));
+                }
+                return;
+            }
+        };
+        match self.map_cells.get_mut(&file) {
+            Some(MapCells::Loaded(_)) => {
+                if let Some(reply) = reply {
+                    self.replies.push((reply, Ok(())));
+                }
+                return;
+            }
+            Some(MapCells::Loading(waiters)) => {
+                waiters.extend(reply);
+                return;
+            }
+            None => {}
+        }
+        self.map_cells
+            .insert(file.clone(), MapCells::Loading(reply.into_iter().collect()));
+        let account = self.account.clone();
+        let tx = self.map_out.clone();
+        let waker = self.waker.clone();
+        thread::spawn(move || {
+            let cells = crate::api::map_file(&account, &file)
+                .map_err(|e| ActionError::Http(e.to_string()))
+                .and_then(|bytes| {
+                    crate::map::labels(&bytes)
+                        .map_err(|e| ActionError::Http(format!("unreadable map file: {e}")))
+                });
+            let _ = tx.send((file, cells));
+            let _ = waker.wake();
+        });
+    }
+
+    fn take_map_results(&mut self) {
+        while let Ok((file, cells)) = self.map_results.try_recv() {
+            let Some(MapCells::Loading(waiters)) = self.map_cells.remove(&file) else {
+                continue;
+            };
+            let result = match cells {
+                Ok(cells) => {
+                    let current = self.room.as_mut().filter(|r| r.file == file);
+                    let result = if let Some(room) = current {
+                        room.cells = cells.clone();
+                        room.cells_loaded = true;
+                        Ok(())
+                    } else {
+                        Err(ActionError::Unusable(
+                            "the map changed while loading cells".into(),
+                        ))
+                    };
+                    self.map_cells.insert(file, MapCells::Loaded(cells));
+                    result
+                }
+                Err(e) => Err(e),
+            };
+            self.replies
+                .extend(waiters.into_iter().map(|reply| (reply, result.clone())));
+        }
+    }
+
+    fn enter(&mut self, mut room: Room) {
+        if let Some(MapCells::Loaded(cells)) = self.map_cells.get(&room.file) {
+            room.cells = cells.clone();
+            room.cells_loaded = true;
+        }
         let Some(me) = self.me else { return };
         let first = self.phase
             == (Phase::Loading {
@@ -2273,6 +2598,7 @@ impl Session {
         }
         self.fetch_cellmates();
         self.aggro_cell();
+        self.load_cells_pending = self.load_cells;
     }
 
     fn fetch_cellmates(&mut self) {
@@ -2312,7 +2638,7 @@ impl Session {
             return Ready(Err(ActionError::NotReady));
         };
         if let Some(maps) = self.shop_maps.get(&id)
-            && !maps.iter().any(|map| room.is_in(map))
+            && !maps.iter().any(|map| map == "Menu" || room.is_in(map))
         {
             return Ready(Err(ActionError::Unusable(format!(
                 "shop {id} isn't available in this map"
@@ -2439,6 +2765,16 @@ impl Session {
                     return;
                 };
                 (Holder::Me, character.auras.apply(change, now), None)
+            }
+            Some(Target::Player(eid)) => {
+                if let Some(player) = self
+                    .room
+                    .as_mut()
+                    .and_then(|room| room.players.iter_mut().find(|p| p.eid == eid))
+                {
+                    player.auras.apply(change, now);
+                }
+                return;
             }
             Some(Target::Monster(id)) => {
                 let room = self.arriving.as_mut().or(self.room.as_mut());

@@ -842,10 +842,12 @@ dependencies = [
 name = "mira-script"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "mira-client",
  "mira-protocol",
  "rquickjs",
  "semver",
+ "serde",
  "serde_json",
  "swc_common",
  "swc_ecma_ast",

@@ -3,6 +3,7 @@ mod args;
 mod engine;
 mod events;
 mod native;
+pub mod skua;
 mod source;
 mod views;
 
@@ -59,6 +60,9 @@ pub struct AutoRelogin {
 pub trait Account: Send + Sync {
     fn servers(&self) -> Result<Vec<Server>, String>;
     fn login(&self, server: &str) -> Result<Handle, String>;
+    fn login_as(&self, _server: &str, _username: &str, _password: &str) -> Result<Handle, String> {
+        Err("changing login identity is unavailable".into())
+    }
 }
 
 pub struct Start {
@@ -92,7 +96,7 @@ pub struct Cancel(Arc<Signal>);
 struct Signal {
     cancelled: AtomicBool,
     interrupt: AtomicBool,
-    wake: Mutex<Option<mpsc::Sender<Wake>>>,
+    wake: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 enum Wake {
@@ -141,7 +145,7 @@ impl Cancel {
         self.0.cancelled.store(true, Ordering::SeqCst);
         self.0.interrupt.store(true, Ordering::SeqCst);
         if let Some(wake) = &*self.0.wake.lock().unwrap_or_else(PoisonError::into_inner) {
-            let _ = wake.send(Wake::Cancel);
+            wake();
         }
     }
 
@@ -150,7 +154,13 @@ impl Cancel {
     }
 
     fn listen(&self, wake: mpsc::Sender<Wake>) {
-        *self.0.wake.lock().unwrap_or_else(PoisonError::into_inner) = Some(wake);
+        self.on_cancel(move || {
+            let _ = wake.send(Wake::Cancel);
+        });
+    }
+
+    fn on_cancel(&self, wake: impl Fn() + Send + 'static) {
+        *self.0.wake.lock().unwrap_or_else(PoisonError::into_inner) = Some(Box::new(wake));
     }
 
     fn resume_cleanup(&self) {
@@ -267,6 +277,7 @@ fn restore(session: &Handle, settings: Settings) {
     session.set_counter_hold(settings.counter_hold);
     session.set_aggro(settings.aggro);
     session.set_anti_afk(settings.anti_afk);
+    session.set_load_cells(settings.load_cells);
     session.set_room(settings.room);
 }
 

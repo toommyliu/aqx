@@ -18,7 +18,7 @@ use mira_script::{AutoRelogin, Cancel, Level, Outcome, Output, Script, Start};
 
 const DEFAULT_PAD: &str = "Left";
 const COMMANDS: &str = "join <map> [cell] [pad], cell <cell> [pad], attack <monster>, skill <slot> [monster|player], \
-     kill <monster>, untarget, stop, cancel, who, mons [all], me, inv, drops, pick <item>, reps, quests, \
+     kill <monster>, untarget, stop, cancel, who, cells [on|off], mons [all], me, inv, drops, pick <item>, reps, quests, \
      load <quest>..., accept <quest>, complete <quest> [times] [reward], shop <id>, \
      buy <#listing> [qty], sell <item> [qty], bank, deposit <item>, withdraw <item>, \
      swap <#inventory item> <#bank item>, equip <item>, unequip <item>, use <item>, mapitem <id> [times], rest, goto <player>, walk <x> <y>, spawnpoint <cell> [pad], room <number>|random, antiafk on|off, aggro on|off|<monster>[, <monster>...], anticounter off|all|attacks, logout";
@@ -86,7 +86,7 @@ enum Command {
         /// Log in with exactly this client version instead of following the server's minimum.
         #[arg(long, value_name = "VERSION")]
         client_version: Option<String>,
-        /// A value for script.args(). Lists and maps are JSON. Repeatable.
+        /// A script argument. C# accepts Name=value or Group:Name=value. Repeatable.
         #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = parse_arg)]
         args: Vec<(String, String)>,
     },
@@ -249,7 +249,11 @@ struct Login {
 
 impl Login {
     fn connect(&self, server: &str) -> anyhow::Result<Handle> {
-        let account = api::login(&self.device, &self.user, &self.pass)?;
+        self.connect_as(server, &self.user, &self.pass)
+    }
+
+    fn connect_as(&self, server: &str, user: &str, pass: &str) -> anyhow::Result<Handle> {
+        let account = api::login(&self.device, user, pass)?;
         let server = account.pick_server(server)?.clone();
         let options = Options {
             client_version: self.client_version.clone(),
@@ -270,6 +274,32 @@ impl mira_script::Account for Login {
     fn login(&self, server: &str) -> Result<Handle, String> {
         self.connect(server).map_err(|e| format!("{e:#}"))
     }
+    fn login_as(&self, server: &str, username: &str, password: &str) -> Result<Handle, String> {
+        self.connect_as(server, username, password)
+            .map_err(|e| format!("{e:#}"))
+    }
+}
+
+enum RunScript {
+    JavaScript(Script),
+    Skua(mira_script::skua::SkuaScript),
+}
+impl RunScript {
+    fn parse_args(
+        &self,
+        given: &[(String, String)],
+    ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        match self {
+            Self::JavaScript(script) => script.parse_args(given),
+            Self::Skua(script) => script.parse_args(given),
+        }
+    }
+    fn run(self, start: Start) -> mira_script::Ended {
+        match self {
+            Self::JavaScript(script) => script.run(start),
+            Self::Skua(script) => script.run(start),
+        }
+    }
 }
 
 fn run(
@@ -280,7 +310,17 @@ fn run(
 ) -> anyhow::Result<ExitCode> {
     let started = Instant::now();
     let cancel = Cancel::default();
-    let load = || Script::load(path, move |out| show(started, &out), &cancel);
+    let skua = path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cs"));
+    let load = || {
+        if skua {
+            mira_script::skua::SkuaScript::load(path, move |out| show(started, &out), &cancel)
+                .map(RunScript::Skua)
+        } else {
+            Script::load(path, move |out| show(started, &out), &cancel).map(RunScript::JavaScript)
+        }
+    };
     let mut script = load()?;
     let args = script.parse_args(given).map_err(anyhow::Error::msg)?;
     let login = Arc::new(login);
@@ -295,11 +335,13 @@ fn run(
             std::process::exit(130);
         }
         interrupt.0.cancel();
-        interrupt
-            .1
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .logout();
+        if !skua {
+            interrupt
+                .1
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .logout();
+        }
     })?;
 
     let outcome = loop {
@@ -488,6 +530,21 @@ fn run_command(session: &Handle, line: &str, json: bool) -> Result<(), CommandEr
             session
                 .complete_quest(QuestId(number(id)?), reward, times)
                 .wait()?;
+        }
+        ["cells", "on"] => session.set_load_cells(true),
+        ["cells", "off"] => session.set_load_cells(false),
+        ["cells"] => {
+            session.load_cells().wait()?;
+            let world = session.snapshot();
+            let room = world.room.as_ref().ok_or(ActionError::NotReady)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&room.cells).expect("cells serialize")
+                );
+            } else {
+                println!("{}", room.cells.join(", "));
+            }
         }
         ["who"] => match &session.snapshot().room {
             Some(room) if json => {
@@ -1111,7 +1168,14 @@ fn describe(event: &Event) -> Option<String> {
         Event::QuestCompleted { id } => format!("completed quest {id}"),
         Event::CounterStarted { monster } => format!("monster #{monster} is countering"),
         Event::CounterEnded { monster } => format!("monster #{monster} stopped countering"),
-        Event::AuraAdded { .. } | Event::AuraRemoved { .. } | Event::AwayChanged { .. } => {
+        Event::BankLoaded
+        | Event::ItemPickedUp { .. }
+        | Event::ItemReceived { .. }
+        | Event::ItemBought { .. }
+        | Event::ItemSold { .. }
+        | Event::AuraAdded { .. }
+        | Event::AuraRemoved { .. }
+        | Event::AwayChanged { .. } => {
             return None;
         }
         Event::Unreadable { error } => format!("unreadable message: {error}"),

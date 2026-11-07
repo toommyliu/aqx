@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use mira_client::{ActionError, ActionId, Event, Handle, Phase, Server, Update, World};
+use mira_client::{ActionError, ActionId, Direction, Event, Handle, Phase, Server, Update, World};
 use rquickjs::function::This;
 use rquickjs::{
     Array, CatchResultExt, CaughtError, Coerced, Constructor, Ctx, Error, FromJs, Function, Module,
@@ -283,7 +283,11 @@ impl<'js> Engine<'js> {
                     return Ok(());
                 }
                 Ok(Wake::Update(_, Update::Event(event))) => self.on_event(&event)?,
-                Ok(Wake::Update(_, Update::Packet(text))) => self.on_packet(&text)?,
+                Ok(Wake::Update(_, Update::Packet(Direction::In, text))) => {
+                    self.on_packet(&text)?
+                }
+                Ok(Wake::Update(_, Update::State)) => continue,
+                Ok(Wake::Update(_, Update::Packet(Direction::Out, _))) => {}
                 Ok(Wake::Update(_, Update::Done { id, result })) => self.answer(id, result)?,
                 Ok(Wake::External(id, external)) => {
                     self.on_external(id, external)?;

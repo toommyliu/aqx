@@ -46,6 +46,13 @@ pub fn view<'js>(ctx: &Ctx<'js>, world: &World, name: &str) -> Result<Value<'js>
             Some(view)
         }
         "currentShop" => world.shop.as_ref().map(|s| shop(ctx, s)).transpose()?,
+        "cells" => {
+            return world
+                .room
+                .as_ref()
+                .map_or(&[][..], |room| room.cells.as_slice())
+                .into_js(ctx);
+        }
         "bankItems" => {
             return match &world.bank {
                 Some(items) => Ok(list(ctx, items, |i| item(ctx, world, i))?.into_value()),
@@ -171,6 +178,7 @@ fn map<'js>(ctx: &Ctx<'js>, room: &Room, now: Instant) -> Result<Object<'js>> {
     view.set("name", room.name.as_str())?;
     view.set("areaId", room.area.0 as f64)?;
     view.set("cell", room.cell.as_str())?;
+    view.set("cells", room.cells.as_slice())?;
     view.set("pad", room.pad.as_str())?;
     view.set("x", room.x)?;
     view.set("y", room.y)?;

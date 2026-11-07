@@ -1,0 +1,20 @@
+[
+  {
+    "done": {
+      "outcome": "finished",
+      "detail": null
+    }
+  },
+  {
+    "done": {
+      "outcome": "stopped",
+      "detail": null
+    }
+  },
+  {
+    "done": {
+      "outcome": "failed",
+      "detail": null
+    }
+  }
+]

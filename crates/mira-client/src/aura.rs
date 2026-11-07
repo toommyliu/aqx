@@ -7,6 +7,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Aura {
     pub name: String,
+    pub icon: String,
+    pub description: String,
     pub duration: f64,
     pub stacks: u32,
     pub value: Option<f64>,
@@ -159,6 +161,10 @@ pub(crate) struct AuraChange {
 struct AuraData {
     #[serde(rename = "nam", default)]
     name: String,
+    #[serde(default)]
+    icon: String,
+    #[serde(rename = "desc", default)]
+    description: String,
     #[serde(rename = "dur", default, deserialize_with = "flex::float")]
     duration: f64,
     #[serde(rename = "stk", default, deserialize_with = "flex::opt_int")]
@@ -195,6 +201,8 @@ impl AuraData {
         Aura {
             expires,
             name: self.name,
+            icon: self.icon,
+            description: self.description,
             duration: self.duration,
             stacks: self.stacks.unwrap_or(1),
             value: self.value.and_then(|v| flex::float(v).ok()),
@@ -224,7 +232,7 @@ mod tests {
         let mut auras = Auras::default();
         auras.apply(
             change(serde_json::json!({"cmd": "aura+", "cInf": "m:1",
-                "auras": [{"nam": "Burn", "dur": 6, "isNew": true}]})),
+                "auras": [{"nam": "Burn", "dur": 6, "icon": "burn", "desc": "Burn description", "isNew": true}]})),
             t0,
         );
         assert_eq!(auras.active[0].expires, Some(t0 + Duration::from_secs(6)));
@@ -234,6 +242,8 @@ mod tests {
             t0 + Duration::from_secs(1),
         );
         assert_eq!(auras.active[0].expires, Some(t0 + Duration::from_secs(11)));
+        assert_eq!(auras.active[0].icon, "burn");
+        assert_eq!(auras.active[0].description, "Burn description");
         auras.apply(
             change(serde_json::json!({"cmd": "aura+", "cInf": "m:1",
                 "auras": [{"nam": "Burn", "dur": 1e300}]})),
