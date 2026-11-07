@@ -1,7 +1,7 @@
 pub mod protocol;
 mod state;
 use crate::{Cancel, Ended, Level, LoadError, Outcome, Output, Relogged, Start, restore};
-use mira_client::{ActionId, Direction, Handle, Phase, Update};
+use mira_client::{ActionId, Direction, Handle, Pending, Phase, Update};
 use protocol::{Call, Message, RequestId, Worker};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -323,7 +323,8 @@ impl SkuaScript {
         for message in projection.changed(session.snapshot(), server, session.server_host()) {
             send(&mut stdin, &message)?;
         }
-        let mut actions: HashMap<ActionId, RequestId> = HashMap::new();
+        let mut actions: HashMap<ActionId, (RequestId, Pending)> = HashMap::new();
+        let mut ended = false;
         let mut listening = [false; 2];
         let mut stopping = None;
         if self.cancel.is_cancelled() {
@@ -556,16 +557,12 @@ impl SkuaScript {
                             continue;
                         }
                     };
-                    if let Some(pending) = pending {
-                        actions.insert(pending.id(), id);
-                    } else {
-                        send(
-                            &mut stdin,
-                            &Message::Ok {
-                                reply: id,
-                                ok: Value::Null,
-                            },
-                        )?;
+                    match pending {
+                        Some(pending) if ended => send(&mut stdin, &reply(id, pending.wait()))?,
+                        Some(pending) => {
+                            actions.insert(pending.id(), (id, pending));
+                        }
+                        None => send(&mut stdin, &reply(id, Ok(())))?,
                     }
                 }
                 Wake::Update(g, update) if g == generation => {
@@ -610,24 +607,21 @@ impl SkuaScript {
                             )?;
                         }
                         Update::Done { id, result } => {
-                            if let Some(reply) = actions.remove(&id) {
-                                let message = match result {
-                                    Ok(()) => Message::Ok {
-                                        reply,
-                                        ok: Value::Null,
-                                    },
-                                    Err(error) => Message::Error {
-                                        reply,
-                                        error: error.into(),
-                                    },
-                                };
-                                send(&mut stdin, &message)?;
+                            if let Some((request, _)) = actions.remove(&id) {
+                                send(&mut stdin, &reply(request, result))?;
                             }
                         }
                         _ => {}
                     }
                 }
                 Wake::Update(..) => {}
+                Wake::Ended(g) if g == generation => {
+                    ended = true;
+                    for (_, (request, pending)) in actions.drain() {
+                        send(&mut stdin, &reply(request, pending.wait()))?;
+                    }
+                }
+                Wake::Ended(_) => {}
                 Wake::Servers(reply, result) => {
                     let message = match result {
                         Ok(servers) => {
@@ -657,7 +651,7 @@ impl SkuaScript {
                     relogging = None;
                     match result {
                         Ok(relogged) => {
-                            for (_, reply) in actions.drain() {
+                            for (_, (reply, _)) in actions.drain() {
                                 send(
                                     &mut stdin,
                                     &Message::Error {
@@ -669,6 +663,7 @@ impl SkuaScript {
                             let (next, name) = relogged.take();
                             *session = next;
                             suppress_close = false;
+                            ended = false;
                             *server = name;
                             generation += 1;
                             send(
@@ -738,6 +733,18 @@ impl Drop for Process {
         let _ = self.0.wait();
     }
 }
+fn reply(reply: RequestId, result: Result<(), mira_client::ActionError>) -> Message {
+    match result {
+        Ok(()) => Message::Ok {
+            reply,
+            ok: Value::Null,
+        },
+        Err(error) => Message::Error {
+            reply,
+            error: error.into(),
+        },
+    }
+}
 fn send(writer: &mut impl Write, message: &Message) -> io::Result<()> {
     serde_json::to_writer(&mut *writer, message)?;
     writer.write_all(b"\n")?;
@@ -749,6 +756,7 @@ enum Wake {
     Log(String),
     Cancel,
     Update(u64, Update),
+    Ended(u64),
     Servers(RequestId, Result<Vec<mira_client::Server>, String>),
     Relogged(RequestId, Result<Relogged, String>),
 }
@@ -776,7 +784,10 @@ fn forward(
                         }
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        let _ = tx.send(Wake::Ended(generation));
+                        break;
+                    }
                 }
             }
         })

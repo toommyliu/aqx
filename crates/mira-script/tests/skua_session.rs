@@ -103,6 +103,36 @@ public class Recovery {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn an_action_after_the_session_ends_fails_instead_of_hanging() {
+    let cancel = Cancel::default();
+    let deadline = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(10));
+        deadline.cancel();
+    });
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run_with(
+        r#"
+using Skua.Core.Interfaces;
+public class AfterLogout {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Servers.Logout();
+        bot.Wait.ForTrue(() => !bot.Servers.IsConnected, 50);
+        bot.Sleep(300);
+        try { bot.Player.Rest(); bot.Log("rest returned"); }
+        catch (OperationCanceledException) { bot.Log("rest failed"); }
+    }
+}
+"#,
+        &cancel,
+        Default::default(),
+        |_| {},
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(logs.contains(&"rest failed".into()), "{logs:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn join_packet_is_nonblocking_and_jump_honors_client_only_and_delay() {
     let started = Instant::now();
     let (outcome, logs, sent) = Fake::start(|_, _| {}).run(
