@@ -143,8 +143,9 @@ public sealed class MiraEvent : IScriptEvent
             case DiedClientEvent: PlayerDeath?.Invoke(); break;
             case KilledClientEvent e: MonsterKilled?.Invoke((int)e.Id); break;
             case JoinedClientEvent e:
-                SendCellChanged(e.Map.Split('-')[0], e.Cell, e.Pad);
-                MapChanged?.Invoke(e.Map);
+                string map = e.Map.Split('-')[0];
+                SendCellChanged(map, e.Cell, e.Pad);
+                MapChanged?.Invoke(map);
                 break;
             case MovedClientEvent e: SendCellChanged(state.Room?.MapName ?? "", e.Cell, e.Pad); break;
             case QuestCompletedClientEvent e: QuestTurnedIn?.Invoke((int)e.Id); ((MiraQuest)IScriptInterface.Instance.Quests).Reaccept((int)e.Id); break;

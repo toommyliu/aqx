@@ -9,13 +9,7 @@ public sealed class MiraAccounts(State state) : IScriptAccounts
     {
         lock (accounts)
         {
-            if (!accounts.TryGetValue(username, out var account))
-            {
-                if (username.Length == 0 || !username.Equals(Username, StringComparison.OrdinalIgnoreCase)) return false;
-                account = new AccountData { DisplayName = username };
-            }
-            if (!change(account.Tags)) return false;
-            accounts[username] = account;
+            if (!accounts.TryGetValue(username, out var account) || !change(account.Tags)) return false;
             MiraSettings.Write("ManagedAccounts", accounts);
             return true;
         }

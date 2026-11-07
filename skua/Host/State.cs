@@ -83,8 +83,8 @@ public sealed record RoomSnapshot(string Name, string Cell, string Pad, int X, i
     public string MapName { get; } = Name.Split('-')[0];
     public List<PlayerInfo> ScriptPlayers { get; } = Players.Select(ToPlayer).ToList();
     public List<PlayerInfo> ScriptCellPlayers { get; } = Players.Where(p => p.Cell == Cell).Select(ToPlayer).ToList();
-    public List<string> ScriptPlayerNames { get; } = Players.Select(p => p.Name).ToList();
-    static PlayerInfo ToPlayer(PlayerSnapshot p) => new() { Name = p.Name, EntID = (int)p.Eid, Cell = p.Cell!, Pad = p.Pad!, HP = p.Hp, MaxHP = p.MaxHp, MP = p.Mp, AFK = p.Away, Level = p.Level ?? 0, X = p.X, Y = p.Y };
+    public List<string> ScriptPlayerNames { get; } = Players.Select(p => p.Name.ToLowerInvariant()).ToList();
+    static PlayerInfo ToPlayer(PlayerSnapshot p) => new() { Name = p.Name.ToLowerInvariant(), EntID = (int)p.Eid, Cell = p.Cell!, Pad = p.Pad!, HP = p.Hp, MaxHP = p.MaxHp, MP = p.Mp, AFK = p.Away, Level = p.Level ?? 0, X = p.X, Y = p.Y };
     public ImmutableDictionary<long, PlayerSnapshot> PlayersById { get; } = Players.ToImmutableDictionary(p => p.Eid);
     public ImmutableDictionary<long, MonsterSnapshot> MonstersById { get; } = Monsters.ToImmutableDictionary(p => p.Id);
 }

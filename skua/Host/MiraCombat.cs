@@ -87,7 +87,7 @@ public sealed class MiraCombat : IScriptCombat
     public void Exit()
     {
         var bot = (MiraBot)IScriptInterface.Instance;
-        if (bot.Player.State == 1) return;
+        if (bot.Player.State == 1 || state.Me is null) return;
         CancelAutoAttack();
         CancelTarget();
         bot.Map.Jump(bot.Player.Cell, bot.Player.Pad);

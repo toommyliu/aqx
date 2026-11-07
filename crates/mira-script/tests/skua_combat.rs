@@ -436,6 +436,8 @@ public class MovementHelpers {
         bot.Log($"empty file {bot.Map.FileName.Length}");
         bot.Map.Jump("r2", "Left", false, true);
         bot.Player.WalkTo(200,300,24);
+        bot.Player.WalkTo(5000,5000);
+        bot.Log($"no target {bot.Player.Target is null} {bot.Player.Target.HP}");
         bot.Player.Goto("PLAYER1");
         bot.Combat.ApproachTarget();
         bot.Map.Reload();
@@ -458,6 +460,7 @@ public class MovementHelpers {
         "empty file 0",
         "last host example.invalid, password absent True",
         "pvp False, cell r2",
+        "no target False 0",
     ] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
@@ -466,6 +469,42 @@ public class MovementHelpers {
         "{sent:?}"
     );
     assert!(sent.contains(&"%xt%zm%mv%5%200%300%8%".into()), "{sent:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn the_player_reads_its_class_only_while_alive_and_goes_to_players_only_while_idle() {
+    let (outcome, logs, sent) = Fake::start_with(
+        FARM,
+        json!([{"ItemID":100,"CharItemID":5000,"sName":"Rogue","sType":"Class","sES":"ar","bEquip":1,"iQty":1,"iStk":1}]),
+        json!([]),
+        |m, w| match m {
+            "fight" => w.object(r#"{"cmd":"uotls","unm":"player1","o":{"intState":2}}"#),
+            "die" => w.object(r#"{"cmd":"uotls","unm":"player1","o":{"intState":0,"intHP":0}}"#),
+            _ => {}
+        },
+    )
+    .run(
+        r#"
+using Skua.Core.Interfaces;
+public class ClassAndGoto {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Log($"alive {bot.Player.CurrentClass?.Name}");
+        bot.Send.Packet("fight");
+        bot.Wait.ForTrue(() => bot.Player.State == 2, 20);
+        bot.Player.Goto("player2");
+        bot.Send.Packet("die");
+        bot.Wait.ForTrue(() => bot.Player.State == 0, 20);
+        bot.Log($"dead {bot.Player.CurrentClass?.Name ?? "none"}");
+    }
+}
+"#,
+    );
+    assert_finished(outcome, &logs);
+    for expected in ["alive Rogue", "dead none"] {
+        assert!(logs.contains(&expected.into()), "{logs:?}");
+    }
+    assert!(!sent.iter().any(|p| p.contains("%goto%")), "{sent:?}");
 }
 
 #[test]

@@ -192,6 +192,7 @@ public class JoinAnother
     public void ScriptMain(IScriptInterface bot)
     {
         Core.SetOptions();
+        Bot.Events.MapChanged += map => Core.Logger($"map changed to {map}");
         Core.Join("yulgar", "Room", "Center");
         Core.Logger($"now in {Bot.Map.FullName} at {Bot.Player.Cell}");
         Core.SetOptions(false);
@@ -491,6 +492,10 @@ fn core_bots_joins_another_map_in_a_private_room() {
     assert!(
         logs.iter()
             .any(|l| l.contains("now in yulgar-") && l.ends_with("at Room")),
+        "{logs:?}"
+    );
+    assert!(
+        logs.iter().any(|l| l.ends_with("map changed to yulgar")),
         "{logs:?}"
     );
     assert!(

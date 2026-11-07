@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use support::{Dir, FARM, Fake};
 
 const HELLO: &str = r#"
+using CommunityToolkit.Mvvm.DependencyInjection;
 using Skua.Core.Interfaces;
 
 public class Hello
@@ -19,6 +20,8 @@ public class Hello
         bot.Options.JoinMapTries = 5;
         bot.Log($"tries {bot.Options.JoinMapTries}, default delay {bot.Options.ActionDelay}, exit {bot.ShouldExit}");
         bot.ShowMessageBox("Continue?", "Question", true);
+        Ioc.Default.GetRequiredService<IThemeService>().ApplyBaseTheme(false);
+        bot.Log($"picked {Ioc.Default.GetRequiredService<IFileDialogService>().OpenFile() ?? "nothing"}");
         bot.Sleep(10);
     }
 }
@@ -39,6 +42,7 @@ public class ReadStats
         bot.Log($"coins {bot.Flash.GetGameObject<int>("world.myAvatar.objData.intCoins")}");
         bot.Log($"user {bot.Flash.GetGameObject("sfc.myUserName")}");
         bot.Log($"id {bot.Player.ID}, in r2: {string.Join(", ", bot.Map.CellPlayers!.Select(p => $"{p.Name} {p.EntID}"))}");
+        bot.Log($"names {string.Join(", ", bot.Map.PlayerNames!)}, exists {bot.Map.PlayerExists("player1")}");
         var monsters = Newtonsoft.Json.Linq.JArray.Parse(bot.Flash.Call("availableMonsters")!);
         bot.Log($"monsters in r2: {string.Join(", ", monsters.Select(m => $"{m["strMonName"]} {m["MonMapID"]} {m["intHP"]}"))}");
     }
@@ -90,7 +94,8 @@ fn the_skua_host_runs_a_script_against_the_session() {
         [
             "version unknown",
             "tries 5, default delay 800, exit False",
-            "Question: Continue? (dismissed, as if the window were closed)"
+            "Question: Continue? (dismissed, as if the window were closed)",
+            "picked nothing"
         ]
     );
 }
@@ -191,7 +196,8 @@ fn a_script_reads_the_players_id_cell_and_combat_stats() {
         "7 14 37 0.08 1.66 0.03",
         "coins 50",
         "user \"player1\"",
-        "id 1001, in r2: Player1 1001",
+        "id 1001, in r2: player1 1001",
+        "names player1, exists True",
     ] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
