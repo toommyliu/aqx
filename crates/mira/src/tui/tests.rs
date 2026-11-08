@@ -366,7 +366,7 @@ fn the_rail_labels_each_list_with_its_key_and_a_click_opens_it() {
 fn without_the_rail_the_divider_lists_every_view_as_a_tab() {
     let shown = [farmer("player1")];
     let mut app = App::default();
-    press(&mut app, &shown, KeyCode::Char('B'));
+    press(&mut app, &shown, KeyCode::Char('z'));
     let s = screen(&app, &shown, 150, 30);
     let divider = row(&s, "── 1 log·main");
     assert!(
@@ -455,10 +455,12 @@ fn the_sidebar_lists_each_account_with_offline_ones_last() {
 
     press(&mut app, &shown, KeyCode::Up);
     assert_eq!(app.selected, 2, "up walks the sidebar in its order");
-    press(&mut app, &shown, KeyCode::Char('}'));
-    assert_eq!(app.selected, 0, "}} jumps to the next group");
+    press(&mut app, &shown, KeyCode::Tab);
+    press(&mut app, &shown, KeyCode::Up);
+    assert_eq!(app.selected, 2, "with the main pane focused, up scrolls it");
     click(&mut app, &shown, 150, 30, "player2");
     assert_eq!(app.selected, 1);
+    assert!(!app.pane_focus, "a click in the sidebar focuses it");
 }
 
 #[test]
@@ -471,7 +473,7 @@ fn the_log_holds_still_while_scrolled_up_and_counts_what_arrives() {
     let _ = screen(&app, &shown, 150, 30);
     press(&mut app, &shown, KeyCode::PageUp);
     let before = screen(&app, &shown, 150, 30);
-    assert!(before.contains("jump to bottom (end)"), "{before}");
+    assert!(before.contains("jump to bottom (End)"), "{before}");
     app.receive(Line {
         seq: app.log.next_seq(),
         at_ms: 0,
@@ -486,7 +488,7 @@ fn the_log_holds_still_while_scrolled_up_and_counts_what_arrives() {
             .collect::<Vec<_>>()
     };
     assert_eq!(visible(&before), visible(&after), "{after}");
-    assert!(after.contains("1 new · jump to bottom (end)"), "{after}");
+    assert!(after.contains("1 new · jump to bottom (End)"), "{after}");
     press(&mut app, &shown, KeyCode::End);
     assert!(screen(&app, &shown, 150, 30).contains("line 60"));
 }
@@ -799,7 +801,7 @@ fn up_in_the_run_prompt_offers_scripts_running_elsewhere_after_your_own() {
     gather(&source, &mut app).unwrap();
     let shown = gather(&source, &mut app).unwrap().unwrap();
     let typed = |app: &App| app.prompt.as_ref().unwrap().input.value().to_owned();
-    press(&mut app, &shown, KeyCode::Char('o'));
+    press(&mut app, &shown, KeyCode::Char('O'));
     press(&mut app, &shown, KeyCode::Up);
     assert_eq!(typed(&app), "mine.ts");
     press(&mut app, &shown, KeyCode::Up);
@@ -834,7 +836,7 @@ fn a_paste_lands_in_the_open_input_at_once_and_never_submits() {
         "with no input open, a paste does nothing"
     );
 
-    press(&mut app, &shown, KeyCode::Char('o'));
+    press(&mut app, &shown, KeyCode::Char('O'));
     app.paste("farm/follow.ts\n", &shown);
     let prompt = app.prompt.as_ref().expect("the run prompt stays open");
     assert_eq!(
@@ -873,6 +875,7 @@ fn slash_searches_the_open_log_and_esc_clears_it() {
     push(&mut app, Channel::Script, "Killed Void Spider");
     push(&mut app, Channel::Server, "Profanity filter On.");
 
+    press(&mut app, &shown, KeyCode::Tab);
     press(&mut app, &shown, KeyCode::Char('/'));
     type_in(&mut app, &shown, "void");
     let s = screen(&app, &shown, 150, 30);
@@ -889,6 +892,7 @@ fn slash_searches_the_open_log_and_esc_clears_it() {
 
     press(&mut app, &shown, KeyCode::Enter);
     press(&mut app, &shown, KeyCode::Tab);
+    press(&mut app, &shown, KeyCode::Down);
     let s = screen(&app, &shown, 150, 30);
     assert_eq!(app.selected, 1);
     assert!(
@@ -896,6 +900,7 @@ fn slash_searches_the_open_log_and_esc_clears_it() {
         "the search stays on when the account changes:\n{s}"
     );
 
+    press(&mut app, &shown, KeyCode::Tab);
     type_in(&mut app, &shown, "/x");
     assert!(
         screen(&app, &shown, 150, 30).contains("No lines match \"voidx\"."),
@@ -1047,14 +1052,64 @@ fn saved(tab: skua::Tab, key: &str, value: &str) -> skua::Outcome {
 }
 
 #[test]
-fn c_offers_skua_options_only_for_a_skua_script() {
-    let skua = Shown {
-        script: Some("/srv/farm/doall.cs".into()),
-        ..farmer("player1")
+fn right_arrow_in_the_picker_opens_a_skua_scripts_options() {
+    let mut picker = skua_library();
+    picker.key(KeyEvent::from(KeyCode::Down));
+    assert_eq!(
+        picker.key(KeyEvent::from(KeyCode::Right)),
+        library::Outcome::Options("/srv/skua/Scripts/Farm/VoidAura.cs".into())
+    );
+    picker.key(KeyEvent::from(KeyCode::Char('/')));
+    for c in "token".chars() {
+        picker.key(KeyEvent::from(KeyCode::Char(c)));
+    }
+    assert_eq!(
+        picker.key(KeyEvent::from(KeyCode::Right)),
+        library::Outcome::Options("/srv/skua/Scripts/Legion/LegionToken.cs".into()),
+        "→ at the end of a search opens the options of what it found"
+    );
+    picker.tab = library::Tab::Mira;
+    assert_eq!(
+        picker.key(KeyEvent::from(KeyCode::Right)),
+        library::Outcome::Nothing,
+        "mira scripts have no options"
+    );
+
+    let shown = [farmer("player1")];
+    let mut app = App {
+        picker: Some(skua_library()),
+        ..App::default()
     };
-    let app = App::default();
-    assert!(!screen(&app, &[farmer("player1")], 150, 30).contains("c skua options"));
-    assert!(screen(&app, &[skua], 150, 30).contains("c skua options"));
+    let s = screen(&app, &shown, 150, 30);
+    assert!(s.lines().last().unwrap().contains("→ options"), "{s}");
+    app.skua = Some(skua_options());
+    let s = screen(&app, &shown, 150, 30);
+    assert!(s.contains("Skua options · player1"), "{s}");
+    press(&mut app, &shown, KeyCode::Esc);
+    assert!(
+        app.skua.is_none() && app.picker.is_some(),
+        "esc goes back to the picker"
+    );
+}
+
+#[test]
+fn the_picker_opens_on_the_accounts_script_and_pins_one_it_doesnt_list() {
+    let mut picker = skua_library();
+    picker.tab = library::Tab::Mira;
+    picker.select(Path::new("/srv/skua/Scripts/Legion/LegionToken.cs"));
+    assert_eq!(picker.tab, library::Tab::Skua);
+    assert_eq!(picker.shown()[picker.cursor].name, "Legion Token");
+
+    picker.select(Path::new("/srv/farm/doall.cs"));
+    let shown = picker.shown();
+    assert_eq!(
+        (shown[0].name.as_str(), picker.cursor, shown.len()),
+        ("doall", 0, 4)
+    );
+    assert_eq!(
+        picker.key(KeyEvent::from(KeyCode::Right)),
+        library::Outcome::Options("/srv/farm/doall.cs".into())
+    );
 }
 
 #[test]
@@ -1160,14 +1215,11 @@ fn skua_options_are_read_only_while_the_script_runs() {
 }
 
 #[test]
-fn redacted_skua_options_edit_the_real_account_and_show_its_alias() {
-    let mut app = App::default();
-    app.mask = mask(&[("player_one".into(), "Player_One".into())], true);
-    app.targets = vec![("Player_One".into(), Some("/srv/farm/doall.cs".into()))];
-    assert_eq!(
-        app.skua_target(),
-        Some(("Player_One".into(), PathBuf::from("/srv/farm/doall.cs")))
-    );
+fn redacted_skua_options_show_the_accounts_alias() {
+    let mut app = App {
+        mask: mask(&[("player_one".into(), "Player_One".into())], true),
+        ..App::default()
+    };
     let shown = [offline("account 1")];
     let mut skua = skua_options();
     skua.user = "Player_One".into();
@@ -1435,4 +1487,136 @@ fn a_skua_update_shows_its_progress_then_its_result() {
         "{}",
         footer(&app)
     );
+}
+
+#[test]
+fn the_key_list_shows_every_label_whole_at_any_width() {
+    let shown = [farmer("player1")];
+    let mut app = App::default();
+    press(&mut app, &shown, KeyCode::Char('?'));
+    for (width, height) in [(80, 40), (50, 50)] {
+        let s = screen(&app, &shown, width, height);
+        for (_, rows) in draw::KEY_GROUPS {
+            for &(commands, label) in rows {
+                let keys = app.keymap.keys(commands);
+                assert!(
+                    row(&s, &format!("{keys:<9}  {label}")).contains(label),
+                    "{keys} {label:?} at {width} wide:\n{s}"
+                );
+            }
+        }
+    }
+    let s = screen(&app, &shown, 80, 40);
+    assert!(row(&s, "1-8").contains("log and lists"), "{s}");
+    assert!(row(&s, "PgUp PgDn").contains("scroll a page"), "{s}");
+    press(&mut app, &shown, KeyCode::Char('x'));
+    assert!(!app.keys, "any key closes the list");
+}
+
+#[test]
+fn rebound_keys_drive_the_tui_and_show_where_keys_are_listed() {
+    let shown = [farmer("player1"), farmer("player2")];
+    let mut app = App {
+        keymap: Keymap::parse(
+            "up = [\"k\", \"up\"]\ndown = \"j\"\nview_drops = \"D\"\ndetails = []\nhelp = \"h\"\n",
+        )
+        .unwrap(),
+        ..App::default()
+    };
+    press(&mut app, &shown, KeyCode::Char('j'));
+    assert_eq!(app.selected, 1);
+    press(&mut app, &shown, KeyCode::Down);
+    assert_eq!(app.selected, 1, "down is no longer bound");
+    press(&mut app, &shown, KeyCode::Char('k'));
+    assert_eq!(app.selected, 0);
+    press(&mut app, &shown, KeyCode::Char('d'));
+    assert!(!app.details, "an empty list unbinds a command");
+
+    let s = screen(&app, &shown, 150, 34);
+    assert!(
+        s.contains("│ D Drops 8"),
+        "the side panel labels a list with its key:\n{s}"
+    );
+    let s = screen(&app, &shown, 80, 34);
+    assert!(
+        s.lines().last().unwrap().trim_end().ends_with("h more"),
+        "a narrow footer points at the rebound key list:\n{s}"
+    );
+    press(&mut app, &shown, KeyCode::Char('h'));
+    let s = screen(&app, &shown, 150, 40);
+    assert!(row(&s, "k j ← →").contains("move"), "{s}");
+    assert!(s.contains("1 2 D 4 5 6 7 8"), "{s}");
+}
+
+#[test]
+fn tab_moves_focus_and_opening_drops_takes_it() {
+    let shown = [farmer("player1"), farmer("player2")];
+    let mut app = App::default();
+    assert!(
+        accented(&app, &shown, 150, 30, "player2").contains('│'),
+        "the account list starts focused"
+    );
+    press(&mut app, &shown, KeyCode::Char(' '));
+    assert_eq!(app.marked, BTreeSet::from([0]));
+
+    press(&mut app, &shown, KeyCode::Char('3'));
+    assert!(app.pane_focus, "the drops list takes focus to pick from");
+    assert!(!accented(&app, &shown, 150, 30, "player2").contains('│'));
+    press(&mut app, &shown, KeyCode::Char(' '));
+    press(&mut app, &shown, KeyCode::Down);
+    assert_eq!(
+        (app.picked.len(), app.cursor, app.selected),
+        (1, 1, 0),
+        "keys act on the drops, not the accounts"
+    );
+
+    press(&mut app, &shown, KeyCode::Esc);
+    press(&mut app, &shown, KeyCode::Esc);
+    assert!(
+        app.view == View::Log && !app.pane_focus,
+        "esc leaves the pane"
+    );
+    assert_eq!(app.marked, BTreeSet::from([0]));
+    press(&mut app, &shown, KeyCode::Esc);
+    assert!(app.marked.is_empty(), "then unmarks");
+
+    press(&mut app, &shown, KeyCode::Enter);
+    assert!(app.pane_focus, "enter focuses the main pane");
+    press(&mut app, &shown, KeyCode::Tab);
+    assert!(!app.pane_focus);
+}
+
+#[test]
+fn slash_filters_the_sidebar_while_it_has_focus() {
+    let shown = [farmer("player1"), farmer("player2")];
+    let mut app = App::default();
+    press(&mut app, &shown, KeyCode::Char('/'));
+    type_in(&mut app, &shown, "player2");
+    let s = screen(&app, &shown, 150, 30);
+    assert!(s.contains(" filter accounts: player2"), "{s}");
+    assert_eq!(app.selected, 1);
+    press(&mut app, &shown, KeyCode::Enter);
+    press(&mut app, &shown, KeyCode::Tab);
+    press(&mut app, &shown, KeyCode::Char('/'));
+    assert!(
+        app.query.value().is_empty() && app.query_scope == Scope::Log,
+        "the main pane starts its own search"
+    );
+}
+
+#[test]
+fn arrows_move_between_cards_on_the_dashboard() {
+    let shown = [farmer("player1"), farmer("player2"), farmer("player3")];
+    let mut app = App::default();
+    press(&mut app, &shown, KeyCode::Char('g'));
+    let _ = screen(&app, &shown, 150, 30);
+    press(&mut app, &shown, KeyCode::Right);
+    press(&mut app, &shown, KeyCode::Char(' '));
+    press(&mut app, &shown, KeyCode::Tab);
+    assert_eq!(
+        (app.selected, app.marked.clone(), app.pane_focus),
+        (1, BTreeSet::from([1]), false)
+    );
+    press(&mut app, &shown, KeyCode::Enter);
+    assert!(!app.grid, "enter opens the account");
 }

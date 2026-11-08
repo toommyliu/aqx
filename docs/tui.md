@@ -8,7 +8,7 @@ The accounts live in a session that runs in the background. The first `mira` sta
 
 ## Write mira.toml
 
-`mira init` sets up `~/mira`, or the folder you name. It writes `mira.d.ts`, a `tsconfig.json` that points at it, a sample script, `mira.schema.json` for editor completion, and a `.gitignore` that keeps `mira.toml` out of git. In a terminal it also asks for one account and writes a `mira.toml` that runs the sample. Running it again updates `mira.d.ts` and the schema and leaves your other files alone. `mira schema` prints the schema.
+`mira init` sets up `~/mira`, or the folder you name. It writes `mira.d.ts`, a `tsconfig.json` that points at it, a sample script, `mira.schema.json` and `keys.schema.json` for editor completion, and a `.gitignore` that keeps `mira.toml` out of git. In a terminal it also asks for one account and writes a `mira.toml` that runs the sample. Running it again updates `mira.d.ts` and the schemas and leaves your other files alone. `mira schema` prints the schema.
 
 ```toml
 [defaults]
@@ -53,22 +53,40 @@ Script paths you type in the TUI also resolve relative to `mira.toml`. The sessi
 
 ## Keys
 
-Keys act on the marked accounts, or on the selected one when nothing is marked.
+The screen has two panes: the account list on the left, and the main pane with the selected account's log or one of its lists. `tab` moves focus between them, and the account list's edge lights up while it has focus. `↑` `↓`, `space`, `a`, `enter` and `/` act on the focused pane. With one account there's no account list, so they act on the main pane.
+
+These keys act on the marked accounts, or on the selected one when nothing is marked:
 
 | Key | Does |
 | --- | --- |
 | `i` | Log in, then run the account's `script` |
-| `o` | Run a script: type a path and `key=value` args, `tab` completes, `↑` recalls an earlier run |
-| `S` | Pick a script and run it. The mira tab lists the scripts in the `scripts` folder next to `mira.toml`, and the Skua tab lists the Skua library. `tab` switches between them, and `S` opens the one you used last. On the Skua tab, `u` downloads or updates the library. See [Run Skua scripts](skua.md). |
-| `c` | Edit the CoreBots and script options of the account's Skua script |
+| `o` | Pick a script and run it. The list opens on the selected account's script. The mira tab lists the scripts in the `scripts` folder next to `mira.toml`, and the Skua tab lists the Skua library. `tab` switches between them. On the Skua tab, `→` edits the selected script's options and `u` downloads or updates the library. See [Run Skua scripts](skua.md). |
+| `O` | Type a script path and `key=value` args. `tab` completes, and `↑` recalls an earlier run. |
 | `s`, `r` | Stop or restart the script. Stopping also leaves combat. |
 | `p` | Pause the script, or resume it. A pause lets the current step finish, such as a kill in progress, then holds the script. Skua scripts can't pause. |
 | `x` | Log out |
-| `↑` `↓`, `tab` | Pick an account. With one account, `↑` `↓` scroll instead. |
-| `space`, `a` | Mark one account, or all of them |
-| `/` | Search what the main pane shows: lines in the log, rows in a list, or accounts by name on the dashboard. `enter` keeps the search, `esc` clears it. |
+
+These act on the focused pane:
+
+| Key | Does |
+| --- | --- |
+| `tab` | Move focus between the account list and the main pane |
+| `↑` `↓` | Pick an account, or scroll the main pane. On the dashboard, `←` `→` move between cards too. |
+| `space`, `a` | Mark one account or drop, or all of them. `a` unmarks them when they're all marked. |
+| `enter` | Focus the main pane, or accept drops. On the dashboard, open the account. |
+| `/` | Search the focused pane: accounts by name, lines in the log, or rows in a list. `enter` keeps the search, and `esc` clears it. |
+| `esc` | Clear the marked drops, then the search, then go back to the log and the account list, then unmark the accounts |
+
+These work anywhere:
+
+| Key | Does |
+| --- | --- |
 | `g` | Show every account as a card |
 | `d` | Show more of the selected account |
+| `z` | Hide the account list and the side panel, or show them again |
+| `<` `>` | Narrow or widen the account list. Dragging its edge works too. |
+| `PgUp` `PgDn` | Scroll the main pane a page |
+| `Home` `End` | Scroll the main pane to the top, or to the newest lines |
 | `q` | Detach, leaving the accounts running |
 | `Q`, `ctrl+c` | Ask to end the session. In that dialog `enter` logs everyone out, `q` or a second `ctrl+c` detaches, and `esc` stays. The TUI stays open while the accounts log out, then closes as the session ends. |
 | `?` | List every key |
@@ -90,11 +108,50 @@ The area under the account shows its log or one of its lists. Each view has a nu
 | `7` | Bank, once a script has opened it |
 | `8` | Faction ranks |
 
-`esc` goes back to the log. A search stays on when you pick another account, and opening another view clears it. The side panel labels each list with its number, and clicking a list there opens it. With the side panel hidden (`B`), the divider shows every view as a tab instead.
+`esc` goes back to the log. A search stays on when you pick another account or move focus, and opening another view clears it. The side panel labels each list with its number, and clicking a list there opens it. With the side panel hidden (`z`), the divider shows every view as a tab instead.
 
 The log sorts lines into channels: `mira`, `script`, `server`, `chat` and `game`. The divider lists them, with the one shown highlighted. `[` and `]` move one channel left or right, and stop at the ends. `main`, the default, shows everything except chat and game events. `all` shows every channel. Clicking a channel shows it.
 
-In the drops list, `↑` `↓` move, `space` marks a drop, `a` marks them all, and `enter` accepts the marked drops, or the one under the cursor.
+Opening the drops list focuses the main pane. There `↑` `↓` move, `space` marks a drop, `a` marks them all, and `enter` accepts the marked drops, or the one under the cursor.
+
+### Change the keys
+
+Put a `keys.toml` in `~/mira`, or in `MIRA_HOME` when it's set, to change the keys. Each line gives a command a key, or a list of keys. A command you leave out keeps its default, and an empty list unbinds it:
+
+```toml
+#:schema ./keys.schema.json
+up = ["k", "up"]
+down = ["j", "down"]
+pick_script = "ctrl+o"
+details = []
+```
+
+A key is a character such as `o`, `O` or `?`, or one of `up`, `down`, `left`, `right`, `enter`, `esc`, `tab`, `space`, `backspace`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown` and `f1` to `f12`. Put `ctrl+`, `alt+` or `shift+` in front for a combination. `shift+` works with letters and `tab`; for other shifted characters, write the character itself, like `!`. `mira` refuses to open the TUI when the file names a command it doesn't know, a key it can't read, or one key for two commands, and says which. `ctrl+c` always asks to end the session, and keys inside the script picker, the run prompt and other dialogs stay the same. `?`, the footer and the side panel show the keys you set. mira reads the file when the TUI opens.
+
+`mira init` writes `keys.schema.json`, so an editor can complete the command names:
+
+| Command | Default | Command | Default |
+| --- | --- | --- | --- |
+| `focus` | `tab` | `view_log` | `1` |
+| `up` | `up` | `view_players` | `2` |
+| `down` | `down` | `view_drops` | `3` |
+| `left` | `left` | `view_quests` | `4` |
+| `right` | `right` | `view_temp` | `5` |
+| `mark` | `space` | `view_inventory` | `6` |
+| `mark_all` | `a` | `view_bank` | `7` |
+| `open` | `enter` | `view_factions` | `8` |
+| `search` | `/` | `previous_channel` | `[` |
+| `back` | `esc` | `next_channel` | `]` |
+| `log_in` | `i` | `dashboard` | `g` |
+| `log_out` | `x` | `details` | `d` |
+| `pick_script` | `o` | `zoom` | `z` |
+| `type_script` | `O` | `narrower_sidebar` | `<` |
+| `stop` | `s` | `wider_sidebar` | `>` |
+| `restart` | `r` | `page_up` | `pageup` |
+| `pause` | `p` | `page_down` | `pagedown` |
+| `help` | `?` | `oldest` | `home` |
+| `detach` | `q` | `newest` | `end` |
+| `end_session` | `Q` | | |
 
 ### Script args
 

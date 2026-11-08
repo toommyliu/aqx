@@ -15,7 +15,7 @@ mira runs most [Skua](https://github.com/auqw/Skua) scripts unchanged. A worker 
 	```
 
 	The installed `mira` builds the Skua worker from this clone. If you move or delete the clone, Skua scripts stop working until you install mira again from a clone.
-3. Download the script library. In the TUI, press `S`, then `tab` to the Skua tab, then `u`. From a shell, run `mira skua update`.
+3. Download the script library. In the TUI, press `o`, switch to the Skua tab with `tab`, then press `u`. From a shell, run `mira skua update`.
 
 	`mira skua update` downloads the `Skua` branch of [auqw/Scripts](https://github.com/auqw/Scripts), about 3 MB, into `~/mira/skua/Scripts`. Then it builds the worker. The first build takes about a minute, because .NET downloads the worker's packages.
 
@@ -23,7 +23,7 @@ mira contacts GitHub only when you press `u` or run `mira skua update`. Scripts 
 
 ## Run a script from the library
 
-In the TUI, mark the accounts, press `S`, and `tab` to the Skua tab. The list shows the scripts in the library, and the bottom lines show the description and the tags of the selected script. The list leaves out files and folders whose names start with `Core`, such as `CoreBots.cs`, because they hold shared code and aren't meant to run. `mira skua list` leaves them out too. Press `/` to search names, folders, descriptions, and tags. A script matches when it contains every word you type. A word that starts with `#` searches only tags. If a tag has exactly that name, the word matches only that tag, so `#rep` skips scripts tagged `reputation`. Otherwise the word matches every tag that starts with it, so `#mer` already finds the scripts tagged `merge`. `#merge legion` finds the scripts tagged `merge` that mention Legion. Press `enter` to run the selected script on the marked accounts, or on the selected account when no account is marked.
+In the TUI, mark the accounts, press `o`, and switch to the Skua tab with `tab`. The list shows the scripts in the library, and the bottom lines show the description and the tags of the selected script. The list leaves out files and folders whose names start with `Core`, such as `CoreBots.cs`, because they hold shared code and aren't meant to run. `mira skua list` leaves them out too. Press `/` to search names, folders, descriptions, and tags. A script matches when it contains every word you type. A word that starts with `#` searches only tags. If a tag has exactly that name, the word matches only that tag, so `#rep` skips scripts tagged `reputation`. Otherwise the word matches every tag that starts with it, so `#mer` already finds the scripts tagged `merge`. `#merge legion` finds the scripts tagged `merge` that mention Legion. Press `enter` to run the selected script on the marked accounts, or on the selected account when no account is marked.
 
 To run a library script each time an account logs in, set the account's `script` in `mira.toml`. Paths in `mira.toml` are relative to the file, so with the file in `~/mira` the path starts with `skua/Scripts`:
 
@@ -43,7 +43,7 @@ mira run -a player1 ~/mira/skua/Scripts/Evil/NSoD/VoidAuras/0SmartVoidAuras.cs
 
 ## Change script options
 
-In the TUI, select an account that runs a Skua script and press `c`. The **CoreBots** tab edits the CoreBots options of that account. The **Script** tab edits the options of the script, and every account that runs the script shares them. You can change options only while the account is offline or idle.
+In the TUI, press `o`, select a Skua script on the Skua tab, and press `→`. The list opens on the selected account's script, so for a script the account already runs, that's `o` then `→`. A script that isn't in the library shows first on the Skua tab. `esc` goes back to the list. The **CoreBots** tab edits the CoreBots options of that account. The **Script** tab edits the options of the script, and every account that runs the script shares them. You can change options only while the account is offline or idle.
 
 From a shell, pass options to `mira run` as `--arg Name=value`. For an option outside the `Options` group, write `--arg Group:Name=value`.
 
@@ -72,7 +72,7 @@ If a folder above the script has its own `CoreBots.cs`, mira reads the includes 
 
 ## Update the library
 
-Press `u` on the Skua tab of the `S` list, or run `mira skua update`. mira downloads the library only when it changed upstream.
+Press `u` on the Skua tab of the `o` list, or run `mira skua update`. mira downloads the library only when it changed upstream.
 
 An update replaces the whole `~/mira/skua/Scripts` folder, so mira discards any edits you made inside it. If the download fails, mira keeps the current library. Scripts that are running keep running, and the next start uses the new library.
 

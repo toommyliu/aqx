@@ -46,6 +46,7 @@ pub enum Catalog {
 pub enum Outcome {
     Close,
     Run(PathBuf),
+    Options(PathBuf),
     Update,
     Nothing,
 }
@@ -60,6 +61,7 @@ pub struct Picker {
     pub searching: bool,
     pub cursor: usize,
     pub failed: Option<String>,
+    pinned: Option<Entry>,
 }
 
 impl Picker {
@@ -82,6 +84,7 @@ impl Picker {
             searching: false,
             cursor: 0,
             failed: None,
+            pinned: None,
         };
         picker.load(found);
         picker
@@ -117,11 +120,47 @@ impl Picker {
 
     pub fn shown(&self) -> Vec<&Entry> {
         let query = self.query.value();
-        match (self.tab, &self.mira, &self.catalog) {
+        let pinned = self
+            .pinned
+            .as_ref()
+            .filter(|_| self.pinned_tab() == Some(self.tab));
+        let pinned = pinned.map(std::slice::from_ref).unwrap_or_default();
+        let mut shown = library::search(pinned, query);
+        shown.extend(match (self.tab, &self.mira, &self.catalog) {
             (Tab::Mira, Ok(entries), _) => library::search(entries, query),
             (Tab::Skua, _, Catalog::Ready(found)) => library::search(&found.entries, query),
             _ => Vec::new(),
+        });
+        shown
+    }
+
+    pub fn select(&mut self, script: &Path) {
+        self.tab = tab_of(script);
+        self.cursor = 0;
+        self.pinned = None;
+        let at = self
+            .shown()
+            .iter()
+            .position(|e| self.folder().join(&e.path) == script);
+        match at {
+            Some(at) => self.cursor = at,
+            None => {
+                self.pinned = Some(Entry {
+                    name: script
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    description: "The selected account's script.".to_owned(),
+                    tags: Vec::new(),
+                    path: script.display().to_string(),
+                });
+            }
         }
+    }
+
+    fn pinned_tab(&self) -> Option<Tab> {
+        self.pinned.as_ref().map(|e| tab_of(Path::new(&e.path)))
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Outcome {
@@ -150,6 +189,14 @@ impl Picker {
                 self.cursor = 0;
             }
             KeyCode::Esc => return Outcome::Close,
+            KeyCode::Right
+                if self.tab == Tab::Skua
+                    && self.query.cursor() == self.query.value().chars().count() =>
+            {
+                if let Some(entry) = self.shown().get(self.cursor) {
+                    return Outcome::Options(self.folder().join(&entry.path));
+                }
+            }
             _ if self.searching => {
                 if self
                     .query
@@ -164,6 +211,14 @@ impl Picker {
             _ => {}
         }
         Outcome::Nothing
+    }
+}
+
+fn tab_of(script: &Path) -> Tab {
+    if super::skua_script(script.to_str()).is_some() {
+        Tab::Skua
+    } else {
+        Tab::Mira
     }
 }
 

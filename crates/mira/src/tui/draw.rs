@@ -9,9 +9,10 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use tui_input::Input as TextInput;
 use unicode_width::UnicodeWidthChar;
 
+use super::keymap::Command;
 use super::library::{Catalog, Picker, Tab as PickerTab};
 use super::skua::{Pane, Skua, Tab};
-use super::{App, Filter, Hit, Scope, Section, View, skua_script};
+use super::{App, Filter, Hit, Scope, Section, View};
 use crate::fleet::{Channel, Line as LogLine};
 use crate::view::{Game, QuestProgress, Shown, Stack, Standing, State, found, matches, order};
 use mira_script::skua::library;
@@ -33,44 +34,73 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 type Field = Vec<Span<'static>>;
 
-const ACCOUNT_KEYS: [(&str, &str); 17] = [
-    ("", "Accounts"),
-    ("↑ ↓", "pick"),
-    ("tab", "next"),
-    ("{ }", "online / offline"),
-    ("/", "filter, on the dashboard"),
-    ("space", "mark"),
-    ("a", "mark all / none"),
-    ("esc", "back to log, unmark"),
-    ("i", "log in"),
-    ("x", "log out"),
-    ("o", "run a script"),
-    ("S", "pick a script"),
-    ("s r", "stop / restart"),
-    ("p", "pause / resume"),
-    ("c", "Skua script options"),
-    ("q", "detach, leaving them running"),
-    ("Q", "log out all and end"),
-];
+type KeyRow = (&'static [Command], &'static str);
 
-const VIEW_KEYS: [(&str, &str); 17] = [
-    ("", "View"),
-    ("1", "log"),
-    ("2-8", "players … factions"),
-    ("[ ]", "log channel"),
-    ("/", "search the log or list"),
-    ("g", "dashboard"),
-    ("d", "more details"),
-    ("b", "hide sidebar"),
-    ("B", "hide side panel"),
-    ("< >", "resize sidebar"),
-    ("⇧↑ ⇧↓", "scroll a line"),
-    ("PgUp PgDn", "scroll a page"),
-    ("End", "newest lines"),
-    ("", ""),
-    ("", ""),
-    ("", ""),
-    ("", ""),
+pub(super) const KEY_GROUPS: [(&str, &[KeyRow]); 4] = [
+    (
+        "In the focused pane",
+        &[
+            (&[Command::Focus], "switch pane"),
+            (
+                &[Command::Up, Command::Down, Command::Left, Command::Right],
+                "move",
+            ),
+            (&[Command::Mark], "mark"),
+            (&[Command::MarkAll], "mark all / none"),
+            (&[Command::Open], "open, accept drops"),
+            (&[Command::Search], "search"),
+            (&[Command::Back], "back, unmark"),
+        ],
+    ),
+    (
+        "Accounts",
+        &[
+            (&[Command::LogIn], "log in"),
+            (&[Command::LogOut], "log out"),
+            (&[Command::PickScript], "pick a script"),
+            (&[Command::TypeScript], "type a script"),
+            (&[Command::Stop, Command::Restart], "stop / restart"),
+            (&[Command::Pause], "pause / resume"),
+        ],
+    ),
+    (
+        "View",
+        &[
+            (&VIEWS, "log and lists"),
+            (
+                &[Command::PreviousChannel, Command::NextChannel],
+                "log channel",
+            ),
+            (&[Command::Dashboard], "dashboard"),
+            (&[Command::Details], "details"),
+            (&[Command::Zoom], "zoom"),
+            (
+                &[Command::NarrowerSidebar, Command::WiderSidebar],
+                "sidebar width",
+            ),
+            (&[Command::PageUp, Command::PageDown], "scroll a page"),
+            (&[Command::Oldest, Command::Newest], "oldest / newest"),
+        ],
+    ),
+    (
+        "Session",
+        &[
+            (&[Command::Help], "keys"),
+            (&[Command::Detach], "detach"),
+            (&[Command::EndSession], "end the session"),
+        ],
+    ),
+];
+const KEY_GAP: usize = 4;
+const VIEWS: [Command; 8] = [
+    Command::View(View::Log),
+    Command::View(View::List(Section::Players)),
+    Command::View(View::List(Section::Drops)),
+    Command::View(View::List(Section::Quests)),
+    Command::View(View::List(Section::Temp)),
+    Command::View(View::List(Section::Inventory)),
+    Command::View(View::List(Section::Bank)),
+    Command::View(View::List(Section::Factions)),
 ];
 
 impl Section {
@@ -84,10 +114,6 @@ impl Section {
             Section::Bank => "Bank",
             Section::Factions => "Factions",
         }
-    }
-
-    fn key(self) -> char {
-        View::List(self).key()
     }
 
     fn rail_rows(self) -> usize {
@@ -267,7 +293,7 @@ fn script_label(s: &Shown) -> String {
 pub(super) fn draw(f: &mut Frame, app: &App, shown: &[Shown]) {
     app.hits.borrow_mut().clear();
     let matches: Vec<String> = match &app.prompt {
-        _ if app.querying && app.scope() == Scope::Accounts => order(shown, app.query.value())
+        _ if app.querying && app.query_scope == Scope::Accounts => order(shown, app.query.value())
             .into_iter()
             .map(|i| shown[i].name.clone())
             .collect(),
@@ -282,7 +308,7 @@ pub(super) fn draw(f: &mut Frame, app: &App, shown: &[Shown]) {
     ])
     .areas(f.area());
     draw_matches(f, suggestions, &matches);
-    let sidebar = !app.grid && !app.sidebar_hidden && body.width >= WIDE && shown.len() > 1;
+    let sidebar = !app.grid && !app.zoomed && body.width >= WIDE && shown.len() > 1;
     app.sidebar.set(None);
     draw_header(f, header, app, shown, sidebar || app.grid);
     if app.grid {
@@ -310,14 +336,14 @@ pub(super) fn draw(f: &mut Frame, app: &App, shown: &[Shown]) {
         draw_account(f, pane, account, app);
     }
     draw_footer(f, footer, app, shown);
-    if let Some(skua) = &app.skua {
-        draw_skua(f, body, app, skua, shown.get(skua.account));
-    }
     if let Some(picker) = &app.picker {
         draw_picker(f, body, app, picker);
     }
+    if let Some(skua) = &app.skua {
+        draw_skua(f, body, app, skua, shown.get(skua.account));
+    }
     if app.keys {
-        draw_keys(f, body);
+        draw_keys(f, body, app);
     }
     if app.ending {
         draw_ending(f, body, shown.iter().filter(|s| !s.offline()).count());
@@ -372,14 +398,26 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, shown: &[Shown], overview: 
     if !app.marked.is_empty() {
         left.push(Span::raw(format!(" · {} marked", app.marked.len())).dark_gray());
     }
+    let key = |c| app.keymap.key(c);
     let mut keys = Vec::new();
-    if !overview && shown.len() > 1 {
-        keys.push(("tab", "next"));
+    if !app.grid && shown.len() > 1 {
+        keys.push((key(Command::Focus), "switch pane"));
     }
     if shown.len() > 1 {
-        keys.extend([("g", "dashboard"), ("/", "filter")]);
+        let search = if app.on_pane(shown) {
+            "search"
+        } else {
+            "filter"
+        };
+        keys.extend([
+            (key(Command::Dashboard), "dashboard"),
+            (key(Command::Search), search),
+        ]);
     }
-    keys.extend([("?", "keys"), ("q", "detach")]);
+    keys.extend([
+        (key(Command::Help), "keys"),
+        (key(Command::Detach), "detach"),
+    ]);
     let width = area.width.saturating_sub(1) as usize;
     f.render_widget(Paragraph::new(spread(left, hints(&keys), width)), area);
 }
@@ -445,7 +483,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     }
     let rule = Block::new()
         .borders(Borders::RIGHT)
-        .border_style(Style::new().dark_gray());
+        .border_style(if app.pane_focus {
+            Style::new().dark_gray()
+        } else {
+            Style::new().fg(ACCENT)
+        });
     f.render_widget(Paragraph::new(lines).block(rule), area);
 }
 
@@ -527,7 +569,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         return f.render_widget(Paragraph::new(Line::from(line)), area);
     }
     if app.querying {
-        let (label, keys) = match app.scope() {
+        let (label, keys) = match app.query_scope {
             Scope::Accounts => (
                 " filter accounts: ".to_owned(),
                 hints(&[
@@ -590,6 +632,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
             (false, PickerTab::Skua) => &[
                 ("↑↓", "pick"),
                 ("enter", "run"),
+                ("→", "options"),
                 ("/", "search"),
                 ("u", "update"),
                 ("tab", "mira scripts"),
@@ -677,7 +720,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         return f.render_widget(Paragraph::new(Line::from(line)), area);
     }
     let keys = if app.view != View::Log && !app.grid {
-        list_keys(app)
+        list_keys(app, app.on_pane(shown))
     } else {
         account_keys(app, shown)
     };
@@ -690,7 +733,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     if used + spans_width(&hints(&keys)) <= width {
         line.extend(hints(&keys));
     } else {
-        let more = spans_width(&hints(&[("?", "more")])) + 2;
+        let help = [(app.keymap.key(Command::Help), "more")];
+        let more = spans_width(&hints(&help)) + 2;
         let fit = (0..keys.len())
             .rev()
             .find(|&n| used + spans_width(&hints(&keys[..n])) + more <= width)
@@ -699,33 +743,39 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         if fit > 0 {
             line.push(Span::raw("  "));
         }
-        line.extend(hints(&[("?", "more")]));
+        line.extend(hints(&help));
     }
     f.render_widget(Paragraph::new(Line::from(line)), area);
 }
 
-fn list_keys(app: &App) -> Vec<(&'static str, &'static str)> {
+fn list_keys(app: &App, pane: bool) -> Vec<(String, &'static str)> {
+    let key = |c| app.keymap.key(c);
     let mut keys = Vec::new();
-    if app.picking() && app.list_len.get() > 0 {
+    if app.picking() && app.list_len.get() > 0 && !pane {
+        keys.push((key(Command::Focus), "pick drops"));
+    } else if app.picking() && app.list_len.get() > 0 {
         let accept = if app.picked.is_empty() {
             "accept"
         } else {
             "accept marked"
         };
         keys.extend([
-            ("↑↓", "pick"),
-            ("space", "mark"),
-            ("a", "mark all"),
-            ("enter", accept),
+            (key(Command::Up) + &key(Command::Down), "pick"),
+            (key(Command::Mark), "mark"),
+            (key(Command::MarkAll), "mark all"),
+            (key(Command::Open), accept),
         ]);
     } else if app.list_max.get() > 0 {
-        keys.push(("PgUp PgDn", "scroll"));
+        keys.push((
+            app.keymap.keys(&[Command::PageUp, Command::PageDown]),
+            "scroll",
+        ));
     }
     keys.extend([
-        ("/", "search"),
-        ("1-8", "views"),
+        (key(Command::Search), "search"),
+        (app.keymap.keys(&VIEWS), "views"),
         (
-            "esc",
+            key(Command::Back),
             if !app.picked.is_empty() {
                 "clear marks"
             } else if !app.query.value().is_empty() {
@@ -738,11 +788,15 @@ fn list_keys(app: &App) -> Vec<(&'static str, &'static str)> {
     keys
 }
 
-fn account_keys(app: &App, shown: &[Shown]) -> Vec<(&'static str, &'static str)> {
+fn account_keys(app: &App, shown: &[Shown]) -> Vec<(String, &'static str)> {
+    let key = |c| app.keymap.key(c);
     let details = if app.details { "less" } else { "details" };
     let offline = app.all(shown, Shown::offline);
     let mut keys = if offline {
-        vec![("i", "log in"), ("o", "log in and run")]
+        vec![
+            (key(Command::LogIn), "log in"),
+            (key(Command::PickScript), "log in and run"),
+        ]
     } else {
         let pause = if app.all(shown, Shown::paused) {
             "resume"
@@ -750,21 +804,27 @@ fn account_keys(app: &App, shown: &[Shown]) -> Vec<(&'static str, &'static str)>
             "pause"
         };
         vec![
-            ("o", "run"),
-            ("s", "stop"),
-            ("r", "restart"),
-            ("p", pause),
-            ("x", "log out"),
+            (key(Command::PickScript), "run"),
+            (key(Command::Stop), "stop"),
+            (key(Command::Restart), "restart"),
+            (key(Command::Pause), pause),
+            (key(Command::LogOut), "log out"),
         ]
     };
-    if skua_script(shown.get(app.selected).and_then(|s| s.script.as_deref())).is_some() {
-        keys.push(("c", "skua options"));
+    if !app.on_pane(shown) {
+        keys.push((key(Command::Mark), "mark"));
     }
-    keys.push(("space", "mark"));
+    let channels = app
+        .keymap
+        .keys(&[Command::PreviousChannel, Command::NextChannel]);
     match (app.grid, offline) {
-        (true, _) => keys.push(("enter", "open")),
-        (false, true) => keys.extend([("d", details), ("[ ]", "channel")]),
-        (false, false) => keys.extend([("d", details), ("[ ]", "channel"), ("2-8", "lists")]),
+        (true, _) => keys.push((key(Command::Open), "open")),
+        (false, true) => keys.extend([(key(Command::Details), details), (channels, "channel")]),
+        (false, false) => keys.extend([
+            (key(Command::Details), details),
+            (channels, "channel"),
+            (app.keymap.keys(&VIEWS[1..]), "lists"),
+        ]),
     }
     keys
 }
@@ -908,7 +968,7 @@ fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
     .areas(area);
     f.render_widget(Paragraph::new(head), top);
     let game = account.game.as_ref();
-    let rail = game.filter(|_| !app.rail_hidden && area.width >= LOG_MIN + RAIL_WIDTH);
+    let rail = game.filter(|_| !app.zoomed && area.width >= LOG_MIN + RAIL_WIDTH);
     let side = if rail.is_some() { RAIL_WIDTH } else { 0 };
     let [main, side] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(side)]).areas(below);
@@ -924,7 +984,7 @@ fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
                     rule.push(
                         Span::raw(format!(
                             "{} {} ",
-                            section.key(),
+                            app.keymap.key(Command::View(View::List(section))),
                             section.label().to_lowercase()
                         ))
                         .fg(ACCENT)
@@ -1053,7 +1113,10 @@ fn tab_strip(rule: &mut Strip, app: &App, g: &Game, width: usize) {
         View::ALL
             .into_iter()
             .map(|view| {
-                let mut tab = vec![Span::raw(format!("{} ", view.key()))];
+                let mut tab = vec![Span::raw(format!(
+                    "{} ",
+                    app.keymap.key(Command::View(view))
+                ))];
                 match view {
                     View::Log => tab.push(Span::raw(format!("log·{}", app.filter.label()))),
                     View::List(section) => {
@@ -1124,10 +1187,7 @@ fn draw_rail(f: &mut Frame, area: Rect, g: &Game, app: &App) {
             lines.push(Line::default());
         }
         let start = lines.len();
-        lines.push(fit(
-            heading(g, section, app.view == View::List(section)),
-            width,
-        ));
+        lines.push(fit(heading(g, section, app), width));
         let entries: Vec<_> = section.entries(g).into_iter().take(sizes[i]).collect();
         let cut = entries.len() > rows[i] && rows[i] >= 1;
         let fits = if cut {
@@ -1196,10 +1256,15 @@ fn rail_rows(
     (spaced, rows)
 }
 
-fn heading(g: &Game, section: Section, open: bool) -> Field {
+fn heading(g: &Game, section: Section, app: &App) -> Field {
+    let open = app.view == View::List(section);
     let mut spans = vec![
         Span::raw(if open { "▌" } else { " " }).fg(ACCENT),
-        Span::raw(format!("{} ", section.key())).dark_gray(),
+        Span::raw(format!(
+            "{} ",
+            app.keymap.key(Command::View(View::List(section)))
+        ))
+        .dark_gray(),
     ];
     let empty = match section {
         Section::Inventory | Section::Bank => "",
@@ -1362,10 +1427,11 @@ fn draw_jump(f: &mut Frame, area: Rect, app: &App) {
     let unseen = app.unseen_from.map_or(0, |from| {
         app.log.since(from).filter(|l| app.shows(l)).count()
     });
+    let end = app.keymap.key(Command::Newest);
     let label = if unseen > 0 {
-        format!(" {unseen} new · jump to bottom (end) ↓ ")
+        format!(" {unseen} new · jump to bottom ({end}) ↓ ")
     } else {
-        " jump to bottom (end) ↓ ".to_owned()
+        format!(" jump to bottom ({end}) ↓ ")
     };
     let width = (label.chars().count() as u16).min(area.width);
     let pill = Rect {
@@ -1634,13 +1700,13 @@ fn spread(mut left: Field, right: Field, width: usize) -> Line<'static> {
     Line::from(left)
 }
 
-fn hints(keys: &[(&str, &str)]) -> Field {
+fn hints<K: AsRef<str>>(keys: &[(K, &str)]) -> Field {
     let mut spans = Vec::new();
     for (i, (key, word)) in keys.iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::raw(key.to_string()).bold());
+        spans.push(Span::raw(key.as_ref().to_owned()).bold());
         spans.push(Span::raw(format!(" {word}")).dark_gray());
     }
     spans
@@ -1771,36 +1837,77 @@ fn wrap(text: &str, room: usize) -> Vec<&str> {
     }
 }
 
-fn draw_keys(f: &mut Frame, area: Rect) {
+fn draw_keys(f: &mut Frame, area: Rect, app: &App) {
     f.buffer_mut()
         .set_style(area, Style::new().fg(Color::DarkGray));
-    let cell = |(key, word): (&str, &str), width: usize| -> Field {
-        if key.is_empty() {
-            return vec![Span::raw(format!("{word:<width$}")).bold()];
-        }
-        vec![
-            Span::raw(format!("{key:<11}")).bold(),
-            Span::raw(format!("{word:<w$}", w = width - 11)),
-        ]
-    };
-    let (left, right) = (32, 30);
-    let rows = ACCOUNT_KEYS.len().max(VIEW_KEYS.len());
-    let mut lines: Vec<Line> = (0..rows)
-        .map(|i| {
-            let mut spans = ACCOUNT_KEYS
-                .get(i)
-                .map_or_else(|| vec![Span::raw(" ".repeat(left))], |&k| cell(k, left));
-            spans.extend(
-                VIEW_KEYS
-                    .get(i)
-                    .map(|&k| cell(k, right))
-                    .unwrap_or_default(),
-            );
-            Line::from(spans)
+    let groups: Vec<(&str, Vec<(String, &str)>)> = KEY_GROUPS
+        .iter()
+        .map(|&(title, rows)| {
+            let rows = rows
+                .iter()
+                .map(|&(commands, label)| (app.keymap.keys(commands), label))
+                .filter(|(keys, _)| !keys.is_empty())
+                .collect();
+            (title, rows)
         })
         .collect();
-    lines.push(Line::raw("Keys act on the marked accounts, or the selected one.").dark_gray());
-    let rect = centered(area, (left + right) as u16 + 4, lines.len() as u16 + 2);
+    let rows = || groups.iter().flat_map(|(_, rows)| rows);
+    let key_width = rows().map(|(k, _)| k.chars().count()).max().unwrap_or(0);
+    let column = rows()
+        .map(|(_, label)| key_width + 2 + label.chars().count())
+        .chain(groups.iter().map(|(title, _)| title.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let block = |groups: &[(&str, Vec<(String, &str)>)]| -> Vec<Field> {
+        let mut lines = Vec::new();
+        for (title, rows) in groups {
+            if !lines.is_empty() {
+                lines.push(vec![Span::raw(" ".repeat(column))]);
+            }
+            lines.push(vec![Span::raw(format!("{title:<column$}")).bold()]);
+            for (keys, label) in rows {
+                lines.push(vec![
+                    Span::raw(format!("{keys:<key_width$}  ")).bold(),
+                    Span::raw(format!("{label:<w$}", w = column - key_width - 2)),
+                ]);
+            }
+        }
+        lines
+    };
+    let two = 2 * column + KEY_GAP + 4 <= usize::from(area.width);
+    let (width, mut lines): (usize, Vec<Line>) = if two {
+        let half = groups.len() / 2;
+        let (left, right) = (block(&groups[..half]), block(&groups[half..]));
+        let blank = || vec![Span::raw(" ".repeat(column))];
+        let lines = (0..left.len().max(right.len()))
+            .map(|i| {
+                let mut spans = left.get(i).cloned().unwrap_or_else(blank);
+                spans.push(Span::raw(" ".repeat(KEY_GAP)));
+                spans.extend(right.get(i).cloned().unwrap_or_default());
+                Line::from(spans)
+            })
+            .collect();
+        (2 * column + KEY_GAP, lines)
+    } else {
+        (column, block(&groups).into_iter().map(Line::from).collect())
+    };
+    let mut notes =
+        vec!["Account keys act on the marked accounts, or the selected one.".to_owned()];
+    if let Some(path) = &app.keymap.path {
+        notes.push(format!(
+            "Change keys in {}.",
+            app.mask.hide(&path.display().to_string())
+        ));
+    }
+    lines.push(Line::default());
+    for note in &notes {
+        lines.extend(
+            wrap(note, width)
+                .into_iter()
+                .map(|l| Line::raw(l.to_owned()).dark_gray()),
+        );
+    }
+    let rect = centered(area, width as u16 + 4, lines.len() as u16 + 2);
     f.render_widget(Clear, rect);
     let block = Block::bordered()
         .title(" keys ")

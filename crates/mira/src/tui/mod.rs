@@ -1,5 +1,6 @@
 mod ask;
 mod draw;
+mod keymap;
 mod library;
 mod mask;
 mod prompt;
@@ -27,6 +28,8 @@ use crate::control::{Action, Source, Want};
 use crate::fleet::{Channel, Line, Log};
 use crate::view::{self, Game, Shown, order};
 use ask::{Ask, Remembered};
+use keymap::Command;
+pub use keymap::{Keymap, SCHEMA_NAME as KEYS_SCHEMA_NAME, keymap_path, schema as keys_schema};
 use library::{Picker, Update};
 use mask::Mask;
 use prompt::{History, Prompt, Recent};
@@ -80,19 +83,6 @@ impl View {
         View::List(Section::Bank),
         View::List(Section::Factions),
     ];
-
-    fn key(self) -> char {
-        let at = View::ALL
-            .iter()
-            .position(|&v| v == self)
-            .expect("every view is listed");
-        char::from(b'1' + at as u8)
-    }
-
-    fn of_key(key: char) -> Option<View> {
-        let at = key.to_digit(10)?.checked_sub(1)?;
-        View::ALL.get(at as usize).copied()
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -140,9 +130,10 @@ impl Filter {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 enum Scope {
     Accounts,
+    #[default]
     Log,
     List(Section),
 }
@@ -163,8 +154,9 @@ struct App {
     details: bool,
     grid: bool,
     keys: bool,
-    sidebar_hidden: bool,
-    rail_hidden: bool,
+    keymap: Keymap,
+    pane_focus: bool,
+    zoomed: bool,
     sidebar_width: Option<u16>,
     sidebar: Cell<Option<Rect>>,
     dragging: bool,
@@ -186,6 +178,7 @@ struct App {
     hits: RefCell<Vec<(Rect, Hit)>>,
     prompt: Option<Prompt>,
     query: TextInput,
+    query_scope: Scope,
     querying: bool,
     ending: bool,
     closing: bool,
@@ -216,6 +209,7 @@ pub enum Leave {
 pub fn run(
     source: &dyn Source,
     home: &Path,
+    keymap: Keymap,
     redact: bool,
     note: Option<String>,
 ) -> std::io::Result<Leave> {
@@ -231,6 +225,7 @@ pub fn run(
         restore(info);
     }));
     let mut app = App::new(&source.configured(), home, History::in_data_dir(), redact);
+    app.keymap = keymap;
     if let Some(note) = note {
         app.note = Some((note, Instant::now() + OPENING_NOTE_FOR));
     }
@@ -454,16 +449,20 @@ impl App {
         }
     }
 
-    fn scope(&self) -> Scope {
-        match (self.grid, self.view) {
-            (true, _) => Scope::Accounts,
-            (false, View::Log) => Scope::Log,
-            (false, View::List(section)) => Scope::List(section),
+    fn on_pane(&self, shown: &[Shown]) -> bool {
+        !self.grid && (shown.len() < 2 || self.pane_focus)
+    }
+
+    fn focused(&self, shown: &[Shown]) -> Scope {
+        match self.view {
+            _ if !self.on_pane(shown) => Scope::Accounts,
+            View::Log => Scope::Log,
+            View::List(section) => Scope::List(section),
         }
     }
 
     fn search(&self, scope: Scope) -> &str {
-        if self.scope() == scope {
+        if self.query_scope == scope {
             self.query.value()
         } else {
             ""
@@ -508,35 +507,17 @@ impl App {
         }
     }
 
-    fn step(&mut self, shown: &[Shown], by: isize, wrap: bool) {
+    fn step(&mut self, shown: &[Shown], by: isize) {
         let order = order(shown, self.search(Scope::Accounts));
         let Some(at) = order.iter().position(|&i| i == self.selected) else {
             return;
         };
-        let (at, n) = (at as isize + by, order.len() as isize);
-        let at = if wrap {
-            at.rem_euclid(n)
-        } else {
-            at.clamp(0, n - 1)
-        };
+        let at = (at as isize + by).clamp(0, order.len() as isize - 1);
         self.pick(order[at as usize]);
     }
 
-    fn jump(&mut self, shown: &[Shown], by: isize) {
-        let order = order(shown, self.search(Scope::Accounts));
-        let offline = |i: usize| shown[i].offline();
-        let starts: Vec<usize> = (0..order.len())
-            .filter(|&at| at == 0 || offline(order[at]) != offline(order[at - 1]))
-            .collect();
-        let Some(at) = order.iter().position(|&i| i == self.selected) else {
-            return;
-        };
-        let group = starts.iter().rposition(|&start| start <= at).unwrap_or(0) as isize;
-        self.pick(order[starts[(group + by).rem_euclid(starts.len() as isize) as usize]]);
-    }
-
     fn refilter(&mut self, shown: &[Shown]) {
-        match self.scope() {
+        match self.query_scope {
             Scope::Accounts => {
                 let order = order(shown, self.search(Scope::Accounts));
                 if let Some(&first) = order.first().filter(|_| !order.contains(&self.selected)) {
@@ -563,6 +544,13 @@ impl App {
             self.view = view;
             self.reset_list();
             self.clear_search();
+        }
+    }
+
+    fn open(&mut self, view: View) {
+        self.show(view);
+        if view == View::List(Section::Drops) {
+            self.pane_focus = true;
         }
     }
 
@@ -691,10 +679,13 @@ impl App {
             .map(|&(_, hit)| hit);
         match hit {
             Some(Hit::View(view)) if view == self.view => self.show(View::Log),
-            Some(Hit::View(view)) => self.show(view),
+            Some(Hit::View(view)) => self.open(view),
             Some(Hit::Filter(filter)) => self.set_filter(filter),
             Some(Hit::Jump) => self.scroll = 0,
-            Some(Hit::Account(i)) if i < shown.len() => self.pick(i),
+            Some(Hit::Account(i)) if i < shown.len() => {
+                self.pick(i);
+                self.pane_focus = false;
+            }
             Some(Hit::Account(_)) | None => {}
         }
     }
@@ -830,6 +821,15 @@ impl App {
             }
             return None;
         }
+        if let Some(skua) = &mut self.skua {
+            let editable = shown.get(skua.account).is_some_and(skua::editable);
+            match skua.key(key, editable) {
+                skua::Outcome::Close => self.skua = None,
+                skua::Outcome::Save(save) => skua.save(save),
+                skua::Outcome::Nothing => {}
+            }
+            return None;
+        }
         if let Some(picker) = &mut self.picker {
             let outcome = picker.key(key);
             self.picker_tab = picker.tab;
@@ -845,22 +845,14 @@ impl App {
                         source,
                     );
                 }
+                library::Outcome::Options(script) => self.skua = self.options(script),
                 library::Outcome::Update => self.start_update(),
                 library::Outcome::Nothing => {}
             }
             return None;
         }
-        if let Some(skua) = &mut self.skua {
-            let editable = shown.get(skua.account).is_some_and(skua::editable);
-            match skua.key(key, editable) {
-                skua::Outcome::Close => self.skua = None,
-                skua::Outcome::Save(save) => skua.save(save),
-                skua::Outcome::Nothing => {}
-            }
-            return None;
-        }
         if self.querying {
-            let accounts = self.scope() == Scope::Accounts;
+            let accounts = self.query_scope == Scope::Accounts;
             let changed = match key.code {
                 KeyCode::Esc => {
                     self.clear_search();
@@ -871,11 +863,11 @@ impl App {
                     false
                 }
                 KeyCode::Up if accounts => {
-                    self.step(shown, -1, false);
+                    self.step(shown, -1);
                     false
                 }
                 KeyCode::Down if accounts => {
-                    self.step(shown, 1, false);
+                    self.step(shown, 1);
                     false
                 }
                 KeyCode::Up => {
@@ -904,42 +896,51 @@ impl App {
             }
             return None;
         }
-        let visible = order(shown, self.search(Scope::Accounts));
-        let cols = self.grid_cols.get().max(1) as isize;
-        let line = shown.len() < 2 || key.modifiers.contains(KeyModifiers::SHIFT);
-        let picking = self.picking();
-        match key.code {
-            KeyCode::Char('q') => return Some(Leave::Detach),
-            KeyCode::Char('Q') => self.ending = true,
-            KeyCode::Char('?') => self.keys = true,
-            KeyCode::Char('g') if shown.len() > 1 => {
+        if let Some(command) = self.keymap.command(key) {
+            return self.command(command, source, shown);
+        }
+        None
+    }
+
+    fn command(&mut self, command: Command, source: &dyn Source, shown: &[Shown]) -> Option<Leave> {
+        let pane = self.on_pane(shown);
+        let picking = pane && self.picking();
+        match command {
+            Command::Detach => return Some(Leave::Detach),
+            Command::EndSession => self.ending = true,
+            Command::Help => self.keys = true,
+            Command::Dashboard if shown.len() > 1 => {
                 self.grid = !self.grid;
                 self.clear_search();
             }
-            KeyCode::Char('d' | '[' | ']' | '1'..='8')
-            | KeyCode::PageUp
-            | KeyCode::PageDown
-            | KeyCode::Home
-            | KeyCode::End
-                if self.grid => {}
-            KeyCode::Enter if self.grid => {
-                self.grid = false;
-                self.clear_search();
+            Command::Search => {
+                let scope = self.focused(shown);
+                if scope != self.query_scope {
+                    self.query.reset();
+                    self.query_scope = scope;
+                    self.refilter(shown);
+                }
+                self.querying = true;
             }
-            KeyCode::Left if self.grid => self.step(shown, -1, false),
-            KeyCode::Right if self.grid => self.step(shown, 1, false),
-            KeyCode::Up if self.grid => self.step(shown, -cols, false),
-            KeyCode::Down if self.grid => self.step(shown, cols, false),
-            KeyCode::Up if picking => self.up(1),
-            KeyCode::Down if picking => self.down(1),
-            KeyCode::Char(' ') if picking => {
+            Command::Back => self.back(shown),
+            Command::LogIn => self.act(source, "logging in", Action::Login),
+            Command::LogOut => self.act(source, "logging out", Action::Logout),
+            Command::Stop => self.act(source, "stopping the script", Action::Stop),
+            Command::Restart => self.act(source, "restarting the script", Action::Restart),
+            Command::Pause if self.all(shown, Shown::paused) => {
+                self.act(source, "resumed", Action::Resume);
+            }
+            Command::Pause => self.act(source, "paused", Action::Pause),
+            Command::PickScript => self.open_picker(),
+            Command::TypeScript => self.prompt = Some(Prompt::new(&self.home)),
+            Command::Mark if picking => {
                 if let Some(drop) = self.drops(shown).get(self.cursor)
                     && !self.picked.remove(&drop.id)
                 {
                     self.picked.insert(drop.id);
                 }
             }
-            KeyCode::Char('a') if picking => {
+            Command::MarkAll if picking => {
                 let ids: Vec<ItemId> = self.drops(shown).iter().map(|d| d.id).collect();
                 if ids.iter().all(|id| self.picked.contains(id)) {
                     self.picked.retain(|id| !ids.contains(id));
@@ -947,68 +948,96 @@ impl App {
                     self.picked.extend(ids);
                 }
             }
-            KeyCode::Enter if picking => self.pick_up(source, shown),
-            KeyCode::Esc if !self.picked.is_empty() => self.picked.clear(),
-            KeyCode::Esc if !self.query.value().is_empty() => {
-                self.query.reset();
-                self.refilter(shown);
-            }
-            KeyCode::Esc if self.view != View::Log => self.show(View::Log),
-            KeyCode::Esc => self.marked.clear(),
-            KeyCode::Up if line => self.up(1),
-            KeyCode::Down if line => self.down(1),
-            KeyCode::Up => self.step(shown, -1, false),
-            KeyCode::Down => self.step(shown, 1, false),
-            KeyCode::Tab => self.step(shown, 1, true),
-            KeyCode::BackTab => self.step(shown, -1, true),
-            KeyCode::Char('}') => self.jump(shown, 1),
-            KeyCode::Char('{') => self.jump(shown, -1),
-            KeyCode::Char(' ') => {
+            Command::Open if picking => self.pick_up(source, shown),
+            Command::Mark | Command::MarkAll | Command::Open if pane => {}
+            Command::Mark => {
                 if !self.marked.remove(&self.selected) {
                     self.marked.insert(self.selected);
                 }
             }
-            KeyCode::Char('a') if visible.iter().all(|i| self.marked.contains(i)) => {
-                self.marked.retain(|i| !visible.contains(i));
-            }
-            KeyCode::Char('a') => self.marked.extend(visible),
-            KeyCode::Char('/') => self.querying = true,
-            KeyCode::Char(c @ '1'..='8') => {
-                let view = View::of_key(c).expect("1 to 8 name views");
+            Command::MarkAll => self.mark_all(shown),
+            _ if self.grid => self.on_grid(command, shown),
+            Command::Focus if shown.len() > 1 => self.pane_focus = !self.pane_focus,
+            Command::Up if pane => self.up(1),
+            Command::Down if pane => self.down(1),
+            Command::Up => self.step(shown, -1),
+            Command::Down => self.step(shown, 1),
+            Command::Open => self.pane_focus = true,
+            Command::View(view) => {
                 let open = shown.get(self.selected).is_some_and(|s| s.game.is_some());
                 if open || view == View::Log {
-                    self.show(view);
+                    self.open(view);
                 }
             }
-            KeyCode::Char('[') => self.set_filter(self.filter.step(-1)),
-            KeyCode::Char(']') => self.set_filter(self.filter.step(1)),
-            KeyCode::PageUp => self.up(PAGE_LINES),
-            KeyCode::PageDown => self.down(PAGE_LINES),
-            KeyCode::Home => self.up(usize::MAX),
-            KeyCode::End => self.down(usize::MAX),
-            KeyCode::Char('d') => self.details = !self.details,
-            KeyCode::Char('b') => self.sidebar_hidden = !self.sidebar_hidden,
-            KeyCode::Char('B') => self.rail_hidden = !self.rail_hidden,
-            KeyCode::Char('<') => self.resize_sidebar(|w| w.saturating_sub(SIDEBAR_STEP)),
-            KeyCode::Char('>') => self.resize_sidebar(|w| w + SIDEBAR_STEP),
-            KeyCode::Char('o') => self.prompt = Some(Prompt::new(&self.home)),
-            KeyCode::Char('S') => self.picker = Some(Picker::open(&self.home, self.picker_tab)),
-            KeyCode::Char('c') => {
-                if let Some((user, script)) = self.skua_target() {
-                    self.skua = Some(Skua::open(self.selected, user, script));
-                }
-            }
-            KeyCode::Char('i') => self.act(source, "logging in", Action::Login),
-            KeyCode::Char('x') => self.act(source, "logging out", Action::Logout),
-            KeyCode::Char('s') => self.act(source, "stopping the script", Action::Stop),
-            KeyCode::Char('r') => self.act(source, "restarting the script", Action::Restart),
-            KeyCode::Char('p') if self.all(shown, Shown::paused) => {
-                self.act(source, "resumed", Action::Resume);
-            }
-            KeyCode::Char('p') => self.act(source, "paused", Action::Pause),
-            _ => {}
+            Command::PreviousChannel => self.set_filter(self.filter.step(-1)),
+            Command::NextChannel => self.set_filter(self.filter.step(1)),
+            Command::PageUp => self.up(PAGE_LINES),
+            Command::PageDown => self.down(PAGE_LINES),
+            Command::Oldest => self.up(usize::MAX),
+            Command::Newest => self.down(usize::MAX),
+            Command::Details => self.details = !self.details,
+            Command::Zoom => self.zoomed = !self.zoomed,
+            Command::NarrowerSidebar => self.resize_sidebar(|w| w.saturating_sub(SIDEBAR_STEP)),
+            Command::WiderSidebar => self.resize_sidebar(|w| w + SIDEBAR_STEP),
+            Command::Focus | Command::Left | Command::Right | Command::Dashboard => {}
         }
         None
+    }
+
+    fn on_grid(&mut self, command: Command, shown: &[Shown]) {
+        let cols = self.grid_cols.get().max(1) as isize;
+        match command {
+            Command::Left => self.step(shown, -1),
+            Command::Right => self.step(shown, 1),
+            Command::Up => self.step(shown, -cols),
+            Command::Down => self.step(shown, cols),
+            Command::Open => {
+                self.grid = false;
+                self.clear_search();
+            }
+            _ => {}
+        }
+    }
+
+    fn mark_all(&mut self, shown: &[Shown]) {
+        let visible = order(shown, self.search(Scope::Accounts));
+        if visible.iter().all(|i| self.marked.contains(i)) {
+            self.marked.retain(|i| !visible.contains(i));
+        } else {
+            self.marked.extend(visible);
+        }
+    }
+
+    fn back(&mut self, shown: &[Shown]) {
+        if !self.picked.is_empty() {
+            self.picked.clear();
+        } else if !self.query.value().is_empty() {
+            self.query.reset();
+            self.refilter(shown);
+        } else if self.view != View::Log || (self.pane_focus && self.on_pane(shown)) {
+            self.show(View::Log);
+            self.pane_focus = false;
+        } else {
+            self.marked.clear();
+        }
+    }
+
+    fn open_picker(&mut self) {
+        let mut picker = Picker::open(&self.home, self.picker_tab);
+        if let Some(script) = self
+            .targets
+            .get(self.selected)
+            .and_then(|(_, s)| s.as_deref())
+        {
+            picker.select(&self.home.join(script));
+        }
+        self.picker_tab = picker.tab;
+        self.picker = Some(picker);
+    }
+
+    fn options(&self, script: PathBuf) -> Option<Skua> {
+        let (user, _) = self.targets.get(self.selected)?;
+        Some(Skua::open(self.selected, user.clone(), script))
     }
 
     fn start_update(&mut self) {
@@ -1033,12 +1062,6 @@ impl App {
             Ok(text) => self.say(text),
             Err(why) => self.say(why.lines().next().unwrap_or_default().to_owned()),
         }
-    }
-
-    fn skua_target(&self) -> Option<(String, PathBuf)> {
-        let (user, script) = self.targets.get(self.selected)?;
-        let script = skua_script(script.as_deref())?;
-        Some((user.clone(), self.home.join(script)))
     }
 
     fn submit(&mut self, typed: &str, source: &dyn Source) {

@@ -26,6 +26,12 @@ pub fn init(
     write(dir, ".gitignore", &format!("{FILE_NAME}\n"), false)?;
     write(dir, SAMPLE_NAME, SAMPLE, false)?;
     write(dir, SCHEMA_NAME, &crate::config::schema(), true)?;
+    write(
+        dir,
+        crate::tui::KEYS_SCHEMA_NAME,
+        &crate::tui::keys_schema(),
+        true,
+    )?;
     let config = dir.join(FILE_NAME);
     if config.exists() {
         println!("kept {}", config.display());

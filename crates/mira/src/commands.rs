@@ -226,13 +226,17 @@ pub fn open(open: &Open, redact: bool) -> anyhow::Result<ExitCode> {
     }
     let path = config_path(open.config.as_deref())?;
     config::load(&path).map_err(anyhow::Error::msg)?;
+    let keymap = match tui::keymap_path() {
+        Some(keys) => tui::Keymap::load(keys).map_err(anyhow::Error::msg)?,
+        None => tui::Keymap::default(),
+    };
     let (session, joined) = session_for(&path, &open.wanted()?)?;
     let note = match joined {
         Joined::Started => None,
         Joined::Attached => Some(attached_note(&session, &path)),
         Joined::Restarted => Some("restarted the session with this build".to_owned()),
     };
-    match tui::run(session.source(), &session.home(), redact, note)? {
+    match tui::run(session.source(), &session.home(), keymap, redact, note)? {
         Leave::Detach => {
             println!(
                 "detached; the accounts keep running. mira attaches again, and mira down ends the session"
