@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use tui_input::Input as TextInput;
 use unicode_width::UnicodeWidthChar;
 
-use super::library::{Catalog, Picker};
+use super::library::{Catalog, Picker, Tab as PickerTab};
 use super::skua::{Pane, Skua, Tab};
 use super::{App, Filter, Hit, Scope, Section, View, skua_script};
 use crate::fleet::{Channel, Line as LogLine};
@@ -45,7 +45,7 @@ const ACCOUNT_KEYS: [(&str, &str); 17] = [
     ("i", "log in"),
     ("x", "log out"),
     ("o", "run a script"),
-    ("S", "Skua scripts"),
+    ("S", "pick a script"),
     ("s r", "stop / restart"),
     ("p", "pause / resume"),
     ("c", "Skua script options"),
@@ -578,16 +578,23 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         );
     }
     if let Some(picker) = &app.picker {
-        let keys: &[(&str, &str)] = if picker.searching {
-            &[("↑↓", "pick"), ("enter", "run"), ("esc", "clear")]
-        } else {
-            &[
+        let keys: &[(&str, &str)] = match (picker.searching, picker.tab) {
+            (true, _) => &[("↑↓", "pick"), ("enter", "run"), ("esc", "clear")],
+            (false, PickerTab::Mira) => &[
+                ("↑↓", "pick"),
+                ("enter", "run"),
+                ("/", "search"),
+                ("tab", "Skua scripts"),
+                ("esc", "close"),
+            ],
+            (false, PickerTab::Skua) => &[
                 ("↑↓", "pick"),
                 ("enter", "run"),
                 ("/", "search"),
                 ("u", "update"),
+                ("tab", "mira scripts"),
                 ("esc", "close"),
-            ]
+            ],
         };
         let line = [
             vec![Span::raw(format!(" run on {who}   ")).bold()],
@@ -1958,15 +1965,29 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, picker: &Picker) {
     let rect = centered(area, 84, area.height.saturating_sub(2).max(8));
     f.render_widget(Clear, rect);
     let block = Block::bordered()
-        .title(" Skua scripts ")
+        .title(" Scripts ")
         .padding(Padding::horizontal(1));
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let width = inner.width as usize;
-    let folder = app.mask.hide(&picker.scripts.display().to_string());
+    let mut tabs = Vec::new();
+    for tab in PickerTab::ALL {
+        if !tabs.is_empty() {
+            tabs.push(Span::raw("   "));
+        }
+        tabs.push(if tab == picker.tab {
+            Span::raw(tab.label()).bold().fg(ACCENT).underlined()
+        } else {
+            Span::raw(tab.label()).dark_gray()
+        });
+    }
+    let folder = app.mask.hide(&picker.folder().display().to_string());
     let shown = picker.shown();
-    let about = match &picker.catalog {
-        Catalog::Ready(library) => format!(
+    let about = match (picker.tab, &picker.mira, &picker.catalog) {
+        (PickerTab::Mira, Ok(entries), _) if !entries.is_empty() => {
+            format!("{} scripts · {folder}", grouped(entries.len() as u64))
+        }
+        (PickerTab::Skua, _, Catalog::Ready(library)) => format!(
             "{} scripts · {} · {folder}",
             grouped(library.entries.len() as u64),
             library::short(&library.commit)
@@ -1983,6 +2004,7 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, picker: &Picker) {
         Vec::new()
     };
     let mut lines = vec![
+        Line::from(tabs),
         fit(vec![Span::raw(about).dark_gray()], width),
         Line::from(search),
     ];
@@ -1994,13 +2016,37 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, picker: &Picker) {
             .map(str::to_owned)
             .collect()
     };
-    if let Some(why) = &picker.failed {
+    if let Some(why) = picker
+        .failed
+        .as_ref()
+        .filter(|_| picker.tab == PickerTab::Skua)
+    {
         lines.extend(wrapped(why).into_iter().take(6).map(|l| Line::raw(l).red()));
     }
     let height =
         (inner.height as usize).saturating_sub(lines.len() + 1 + DESCRIPTION_LINES + TAG_LINES);
-    match &picker.catalog {
-        Catalog::Missing => lines.extend([
+    match (picker.tab, &picker.mira, &picker.catalog) {
+        (PickerTab::Mira, Err(why), _) => lines.extend(
+            wrapped(why)
+                .into_iter()
+                .take(height)
+                .map(|l| Line::raw(l).red()),
+        ),
+        (PickerTab::Mira, Ok(entries), _) if entries.is_empty() => lines.extend([
+            fit(
+                vec![Span::raw(format!("No scripts in {folder} yet."))],
+                width,
+            ),
+            Line::default(),
+            fit(
+                vec![
+                    Span::raw("Put your .ts and .js scripts in that folder to pick them here.")
+                        .dark_gray(),
+                ],
+                width,
+            ),
+        ]),
+        (PickerTab::Skua, _, Catalog::Missing) => lines.extend([
             Line::raw("mira hasn't downloaded the Skua scripts yet."),
             Line::default(),
             fit(
@@ -2014,16 +2060,16 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, picker: &Picker) {
                 width,
             ),
         ]),
-        Catalog::Failed(why) => lines.extend(
+        (PickerTab::Skua, _, Catalog::Failed(why)) => lines.extend(
             wrapped(why)
                 .into_iter()
                 .take(height)
                 .map(|l| Line::raw(l).red()),
         ),
-        Catalog::Ready(_) if shown.is_empty() => {
+        _ if shown.is_empty() => {
             lines.push(Line::raw("No script matches.").dark_gray());
         }
-        Catalog::Ready(_) => {
+        _ => {
             let start = (picker.cursor + 1).saturating_sub(height.max(1));
             for (i, entry) in shown.iter().enumerate().skip(start).take(height) {
                 let folder = entry.path.rsplit_once('/').map_or("", |(dir, _)| dir);

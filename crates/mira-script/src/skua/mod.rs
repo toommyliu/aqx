@@ -213,7 +213,7 @@ fn failed(skua: &Path, why: String) -> LoadError {
         return LoadError(why);
     }
     LoadError(format!(
-        "{}\nThe Skua scripts aren't downloaded. Run `mira skua update`, or press S and then u in the TUI",
+        "{}\nThe Skua scripts aren't downloaded. Run `mira skua update`, or press S, tab to the Skua tab, and press u in the TUI",
         why.trim_end()
     ))
 }

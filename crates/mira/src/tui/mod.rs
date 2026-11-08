@@ -194,6 +194,7 @@ struct App {
     ask: Option<Ask>,
     skua: Option<Skua>,
     picker: Option<Picker>,
+    picker_tab: library::Tab,
     update: Option<Update>,
     targets: Vec<(String, Option<String>)>,
     share_args: bool,
@@ -830,7 +831,9 @@ impl App {
             return None;
         }
         if let Some(picker) = &mut self.picker {
-            match picker.key(key) {
+            let outcome = picker.key(key);
+            self.picker_tab = picker.tab;
+            match outcome {
                 library::Outcome::Close => self.picker = None,
                 library::Outcome::Run(path) => {
                     self.picker = None;
@@ -989,7 +992,7 @@ impl App {
             KeyCode::Char('<') => self.resize_sidebar(|w| w.saturating_sub(SIDEBAR_STEP)),
             KeyCode::Char('>') => self.resize_sidebar(|w| w + SIDEBAR_STEP),
             KeyCode::Char('o') => self.prompt = Some(Prompt::new(&self.home)),
-            KeyCode::Char('S') => self.picker = Some(Picker::open()),
+            KeyCode::Char('S') => self.picker = Some(Picker::open(&self.home, self.picker_tab)),
             KeyCode::Char('c') => {
                 if let Some((user, script)) = self.skua_target() {
                     self.skua = Some(Skua::open(self.selected, user, script));

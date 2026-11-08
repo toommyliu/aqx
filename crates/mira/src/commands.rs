@@ -581,7 +581,7 @@ pub fn skua(action: Skua) -> anyhow::Result<ExitCode> {
             let query = query.join(" ");
             let scripts = library::scripts(&home);
             let mut out = std::io::stdout().lock();
-            for entry in found.search(&query) {
+            for entry in library::search(&found.entries, &query) {
                 let path = scripts.join(&entry.path);
                 if writeln!(out, "{}  {}", path.display(), entry.name).is_err() {
                     break;

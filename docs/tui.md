@@ -59,7 +59,7 @@ Keys act on the marked accounts, or on the selected one when nothing is marked.
 | --- | --- |
 | `i` | Log in, then run the account's `script` |
 | `o` | Run a script: type a path and `key=value` args, `tab` completes, `↑` recalls an earlier run |
-| `S` | Pick a Skua script from the library and run it. In the list, `u` downloads or updates the library. See [Run Skua scripts](skua.md). |
+| `S` | Pick a script and run it. The mira tab lists the scripts in the `scripts` folder next to `mira.toml`, and the Skua tab lists the Skua library. `tab` switches between them, and `S` opens the one you used last. On the Skua tab, `u` downloads or updates the library. See [Run Skua scripts](skua.md). |
 | `c` | Edit the CoreBots and script options of the account's Skua script |
 | `s`, `r` | Stop or restart the script. Stopping also leaves combat. |
 | `p` | Pause the script, or resume it. A pause lets the current step finish, such as a kill in progress, then holds the script. Skua scripts can't pause. |

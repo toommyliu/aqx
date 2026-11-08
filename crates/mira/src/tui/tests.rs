@@ -1229,6 +1229,7 @@ fn skua_library() -> Picker {
         path: path.into(),
     };
     Picker::new(
+        library::Tab::Skua,
         PathBuf::from("/srv/skua/Scripts"),
         Ok(Some(Library {
             commit: "6c58f70aa".into(),
@@ -1288,8 +1289,81 @@ fn a_searched_skua_script_runs_on_the_marked_accounts() {
 }
 
 #[test]
+fn a_mira_script_picked_from_the_scripts_folder_asks_for_its_args() {
+    let dir = std::env::temp_dir().join(format!("mira-picker-tests-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let scripts = dir.join("scripts");
+    let farm = "import { script, type Script } from \"mira\";\nexport default function* (): Script {\n\tconst { monster } = script.args<{ monster: string }>();\n}\n";
+    for (file, text) in [
+        ("farm/frog-hunt.ts", farm),
+        ("quests.js", ""),
+        ("types.d.ts", ""),
+        ("notes.txt", ""),
+        ("node_modules/lib/index.ts", ""),
+        (".drafts/old.ts", ""),
+    ] {
+        let path = scripts.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let shown = [farmer("player1")];
+    let mut app = App {
+        names: vec!["player1".into()],
+        picker: Some(
+            Picker::new(
+                library::Tab::Mira,
+                PathBuf::from("/srv/skua/Scripts"),
+                Ok(None),
+            )
+            .with_mira(scripts.clone()),
+        ),
+        ..App::default()
+    };
+    let s = screen(&app, &shown, 150, 30);
+    assert!(s.contains("2 scripts · "), "{s}");
+    assert!(row(&s, "frog-hunt").contains("farm"), "{s}");
+    assert!(s.contains("quests"), "{s}");
+    for skipped in ["types", "notes", "node_modules", ".drafts"] {
+        assert!(!s.contains(skipped), "{skipped}:\n{s}");
+    }
+    assert!(
+        s.lines().last().unwrap().contains("tab Skua scripts"),
+        "{s}"
+    );
+
+    let source = Acts(RefCell::new(Vec::new()));
+    app.handle(KeyEvent::from(KeyCode::Tab), &source, &shown);
+    let s = screen(&app, &shown, 150, 30);
+    assert!(
+        s.contains("mira hasn't downloaded the Skua scripts yet."),
+        "{s}"
+    );
+    assert_eq!(app.picker_tab, library::Tab::Skua);
+    app.handle(KeyEvent::from(KeyCode::BackTab), &source, &shown);
+
+    app.handle(KeyEvent::from(KeyCode::Char('/')), &source, &shown);
+    app.paste("frog", &shown);
+    app.handle(KeyEvent::from(KeyCode::Enter), &source, &shown);
+    assert!(app.picker.is_none());
+    assert!(source.0.borrow().is_empty(), "the run waits for its args");
+    app.paste("Frogzard", &shown);
+    app.handle(KeyEvent::from(KeyCode::Enter), &source, &shown);
+
+    let run = Action::Run(crate::config::Script {
+        path: scripts.join("farm/frog-hunt.ts"),
+        args: vec![("monster".into(), "Frogzard".into())],
+    });
+    assert_eq!(*source.0.borrow(), [(0, run)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_skua_picker_offers_the_download_before_the_first_one() {
-    let mut picker = Picker::new(PathBuf::from("/srv/skua/Scripts"), Ok(None));
+    let mut picker = Picker::new(
+        library::Tab::Skua,
+        PathBuf::from("/srv/skua/Scripts"),
+        Ok(None),
+    );
     picker.failed = Some(
         "/srv/skua/Scripts wasn't downloaded by mira, so mira won't replace it. Move it somewhere else, then update again".into(),
     );

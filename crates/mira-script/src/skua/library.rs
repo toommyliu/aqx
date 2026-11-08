@@ -110,25 +110,23 @@ enum Word<'a> {
     TagPrefix(&'a str),
 }
 
-impl Library {
-    pub fn search(&self, query: &str) -> Vec<&Entry> {
-        let query = query.to_lowercase();
-        let words: Vec<Word> = query
-            .split_whitespace()
-            .filter_map(|word| match word.strip_prefix('#') {
-                Some("") => None,
-                Some(tag) if self.entries.iter().any(|e| e.tags.iter().any(|t| t == tag)) => {
-                    Some(Word::Tag(tag))
-                }
-                Some(prefix) => Some(Word::TagPrefix(prefix)),
-                None => Some(Word::Text(word)),
-            })
-            .collect();
-        self.entries
-            .iter()
-            .filter(|e| words.iter().all(|word| e.has(word)))
-            .collect()
-    }
+pub fn search<'a>(entries: &'a [Entry], query: &str) -> Vec<&'a Entry> {
+    let query = query.to_lowercase();
+    let words: Vec<Word> = query
+        .split_whitespace()
+        .filter_map(|word| match word.strip_prefix('#') {
+            Some("") => None,
+            Some(tag) if entries.iter().any(|e| e.tags.iter().any(|t| t == tag)) => {
+                Some(Word::Tag(tag))
+            }
+            Some(prefix) => Some(Word::TagPrefix(prefix)),
+            None => Some(Word::Text(word)),
+        })
+        .collect();
+    entries
+        .iter()
+        .filter(|e| words.iter().all(|word| e.has(word)))
+        .collect()
 }
 
 impl Entry {
@@ -559,17 +557,13 @@ mod tests {
             tags: tags.iter().map(|t| (*t).to_owned()).collect(),
             path: format!("Farm/{}.cs", name.replace(' ', "")),
         };
-        let library = Library {
-            commit: "aaaaaaa".into(),
-            entries: vec![
-                entry("Void Aura", &["nulgath", "farm"]),
-                entry("Rep Shop", &["rep"]),
-                entry("Reputation Grind", &["reputation"]),
-            ],
-        };
+        let entries = [
+            entry("Void Aura", &["nulgath", "farm"]),
+            entry("Rep Shop", &["rep"]),
+            entry("Reputation Grind", &["reputation"]),
+        ];
         let names = |query: &str| -> Vec<&str> {
-            library
-                .search(query)
+            search(&entries, query)
                 .iter()
                 .map(|e| e.name.as_str())
                 .collect()
