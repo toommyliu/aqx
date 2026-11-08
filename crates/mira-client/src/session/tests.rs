@@ -3977,6 +3977,22 @@ fn goes_to_players_the_way_the_client_does() {
         ));
         assert!(peer.expect_at(&packet::goto("player13")) >= idle);
         peer.send("%xt%warning%-1%Player 'player13' could not be found.%");
+        peer.expect(&packet::transfer_to(
+            AreaId(47),
+            "player1",
+            "battlegrounde-98906",
+            "r3",
+            "Left",
+        ));
+        peer.send(&arrival(48, "battlegrounde-98906", "1", "Enter", "Spawn"));
+        peer.send("%xt%server%-1%You joined \"battlegrounde-98906\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(48), "r3", "Left"));
+        peer.expect(&packet::goto("player16"));
+        peer.send("%xt%warning%-1%Player 'player16' could not be found.%");
+        peer.expect(&packet::goto("player15"));
+        peer.send(&arrival(49, "house-12345", "1", "Enter", "Spawn"));
+        peer.send("%xt%server%-1%You joined \"house-12345\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(49), "Enter", "Spawn"));
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
@@ -4017,6 +4033,37 @@ fn goes_to_players_the_way_the_client_does() {
     assert_eq!(session.snapshot().room.as_ref().unwrap().cell, "r5");
     let away = session.goto("player13").wait();
     assert!(matches!(away, Err(ActionError::NoTarget(_))), "{away:?}");
+    session.set_locate(|name| match name.to_lowercase().as_str() {
+        "player14" => Some(Spot {
+            map: "battlegrounde-98906".into(),
+            cell: "r3".into(),
+            pad: "Left".into(),
+        }),
+        "player16" => Some(Spot {
+            map: "battlegrounde-98906".into(),
+            cell: "r9".into(),
+            pad: "Left".into(),
+        }),
+        "player15" => Some(Spot {
+            map: "house-12345".into(),
+            cell: "Enter".into(),
+            pad: "Spawn".into(),
+        }),
+        _ => None,
+    });
+    session.goto("Player14").wait().unwrap();
+    let room = session.snapshot().room.clone().unwrap();
+    assert_eq!(
+        (room.name.as_str(), room.cell.as_str()),
+        ("battlegrounde-98906", "r3")
+    );
+    let stale = session.goto("player16").wait();
+    assert!(matches!(stale, Err(ActionError::NoTarget(_))), "{stale:?}");
+    session.goto("player15").wait().unwrap();
+    assert_eq!(
+        session.snapshot().room.as_ref().unwrap().name,
+        "house-12345"
+    );
     session.logout();
     harness.finish();
 }

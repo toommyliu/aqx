@@ -634,7 +634,9 @@ export const map = view(
     },
     /**
      * Leaves combat first when the player is in another map. "not_found" when
-     * the player isn't on this server.
+     * the player isn't on this server. Another account in this mira session on
+     * the same server is reached by joining its room, which also works in maps
+     * where the server refuses goto.
      */
     goto(player: string): Action<"arrived" | "not_found" | "refused"> {
       return act("goto", { player: checkText(player, "map.goto's player") });

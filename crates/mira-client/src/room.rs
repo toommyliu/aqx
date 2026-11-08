@@ -188,15 +188,19 @@ impl<'de> Deserialize<'de> for CombatState {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Spot {
-    pub(crate) map: String,
-    pub(crate) cell: String,
-    pub(crate) pad: String,
+pub struct Spot {
+    pub map: String,
+    pub cell: String,
+    pub pad: String,
 }
 
 pub(crate) fn names_room(name: &str) -> bool {
     name.rsplit_once('-')
         .is_some_and(|(_, room)| !room.is_empty() && room.bytes().all(|b| b.is_ascii_digit()))
+}
+
+pub(crate) fn names_house(name: &str) -> bool {
+    without_room(name).eq_ignore_ascii_case("house")
 }
 
 fn without_room(name: &str) -> &str {

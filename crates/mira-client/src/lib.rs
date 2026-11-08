@@ -31,10 +31,10 @@ pub use player::{BoostKind, Boosts, Me, Skill, SkillDetails, SkillTarget, Stats}
 pub use quest::{
     Quest, QuestItem, QuestPeriod, QuestProgress, QuestReward, QuestStatus, RewardKind,
 };
-pub use room::{CombatState, Monster, Player, Room};
+pub use room::{CombatState, Monster, Player, Room, Spot};
 pub use session::{
     ActionError, ActionId, Aggro, CounterHold, DEFAULT_CLIENT_VERSION, DEFAULT_RECONNECT_ATTEMPTS,
-    Disconnect, Handle, Jump, Load, Options, Pending, Phase, Reconnect, Update, spawn,
+    Disconnect, Handle, Jump, Load, Locate, Options, Pending, Phase, Reconnect, Update, spawn,
 };
 pub use shop::{MergeCost, Shop, ShopItem};
 pub use world::{ActionLock, Settings, SkillTiming, World};

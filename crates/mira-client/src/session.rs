@@ -30,7 +30,9 @@ use crate::inventory::{Inventory, Item, Pool};
 use crate::map::MapFile;
 use crate::player::{BoostKind, Me};
 use crate::quest::Quest;
-use crate::room::{CombatState, Monster, Player, Room, Spot, UserEntry, Vitals, names_room};
+use crate::room::{
+    CombatState, Monster, Player, Room, Spot, UserEntry, Vitals, names_house, names_room,
+};
 use crate::shop::Shop;
 use crate::world::{Settings, World};
 use bank::{BankMove, BankStage};
@@ -436,7 +438,10 @@ enum Setting {
     SpawnPoint(String, String),
     AntiAfk(bool),
     Room(Option<u32>),
+    Locate(Locate),
 }
+
+pub type Locate = Box<dyn Fn(&str) -> Option<Spot> + Send>;
 
 enum Request {
     Act(Action, Reply, u64),
@@ -977,6 +982,10 @@ impl Handle {
         self.set(Setting::Room(room));
     }
 
+    pub fn set_locate(&self, locate: impl Fn(&str) -> Option<Spot> + Send + 'static) {
+        self.set(Setting::Locate(Box::new(locate)));
+    }
+
     fn set(&self, setting: Setting) {
         let epoch = self.epoch.load(Ordering::SeqCst);
         self.request(Request::Set(setting, epoch));
@@ -1145,6 +1154,7 @@ pub fn spawn(
         shop_maps: HashMap::new(),
         requested_spot: None,
         join_room: None,
+        locate: None,
         counter_hold: CounterHold::Off,
         aggro: None,
         anti_afk: false,
@@ -1232,6 +1242,7 @@ struct Session {
     shop_maps: HashMap<ShopId, Vec<String>>,
     requested_spot: Option<Spot>,
     join_room: Option<u32>,
+    locate: Option<Locate>,
     counter_hold: CounterHold,
     aggro: Option<(Aggro, Instant)>,
     anti_afk: bool,
@@ -1377,6 +1388,7 @@ impl Session {
             }
             Setting::AntiAfk(on) => self.anti_afk = on,
             Setting::Room(room) => self.join_room = room,
+            Setting::Locate(locate) => self.locate = Some(locate),
         }
     }
 
@@ -2264,6 +2276,16 @@ impl Session {
         }
         if let Some(result) = self.goto_in_room(&name) {
             return result.map(|()| None);
+        }
+        if let Some(spot) = self
+            .locate
+            .as_ref()
+            .and_then(|locate| locate(&name))
+            .filter(|spot| {
+                !names_house(&spot.map) && !self.room.as_ref().is_some_and(|r| r.is_in(&spot.map))
+            })
+        {
+            return self.start_join(spot.map, Some((spot.cell, spot.pad)), now);
         }
         self.start_transfer(JoinTarget::Player(name), now)
     }

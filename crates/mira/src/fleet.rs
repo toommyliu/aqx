@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use mira_client::{ActionError, CombatState, DeviceId, Event, Handle, ItemId, Phase, Server, api};
+use mira_client::{
+    ActionError, CombatState, DeviceId, Event, Handle, ItemId, Phase, Server, Spot, api,
+};
 use mira_script::{Cancel, Level, Outcome, Output};
 use serde::{Deserialize, Serialize};
 
@@ -484,6 +486,32 @@ fn leave_combat(session: &Handle) {
     }
 }
 
+fn locator(fleet: Accounts, server: String) -> impl Fn(&str) -> Option<Spot> + Send {
+    move |name| {
+        let accounts = fleet.read().unwrap_or_else(PoisonError::into_inner).clone();
+        accounts.iter().find_map(|account| {
+            let session = match &account.board().link {
+                Link::Session {
+                    session,
+                    server: on,
+                    ..
+                } if on.eq_ignore_ascii_case(&server) => session.clone(),
+                _ => return None,
+            };
+            let world = session.snapshot();
+            let (Phase::Ready, Some(me), Some(room)) = (&world.phase, &world.me, &world.room)
+            else {
+                return None;
+            };
+            me.name.eq_ignore_ascii_case(name).then(|| Spot {
+                map: room.name.clone(),
+                cell: room.cell.clone(),
+                pad: room.pad.clone(),
+            })
+        })
+    }
+}
+
 fn closed(session: &Handle) -> bool {
     matches!(session.snapshot().phase, Phase::Closed { .. })
 }
@@ -512,16 +540,18 @@ pub struct LastLines {
     pub lines: Vec<Line>,
 }
 
+type Accounts = Arc<RwLock<Vec<Arc<Account>>>>;
+
 pub struct Fleet {
     device: DeviceId,
-    accounts: RwLock<Vec<Arc<Account>>>,
+    accounts: Accounts,
 }
 
 impl Fleet {
     pub fn new(device: DeviceId) -> Fleet {
         Fleet {
             device,
-            accounts: RwLock::default(),
+            accounts: Accounts::default(),
         }
     }
 
@@ -570,6 +600,7 @@ impl Fleet {
         });
         let linked = Arc::new(Linked {
             account: Arc::clone(&account),
+            fleet: Arc::clone(&self.accounts),
             login: Login {
                 device: self.device.clone(),
                 user: config.user,
@@ -749,6 +780,7 @@ impl Backoff {
 
 struct Linked {
     account: Arc<Account>,
+    fleet: Accounts,
     login: Login,
 }
 
@@ -944,6 +976,7 @@ impl Linked {
         if let Some(room) = self.account.room {
             session.set_room(Some(room));
         }
+        session.set_locate(locator(Arc::clone(&self.fleet), server.to_owned()));
         let account = Arc::clone(&self.account);
         thread::spawn(move || {
             for event in events {
@@ -1111,7 +1144,7 @@ impl Fleet {
     pub(crate) fn of(accounts: Vec<Arc<Account>>) -> Fleet {
         Fleet {
             device: mira_client::testing::device_id(),
-            accounts: RwLock::new(accounts),
+            accounts: Arc::new(RwLock::new(accounts)),
         }
     }
 }
@@ -1185,6 +1218,7 @@ mod tests {
     fn linked(account: Account) -> Arc<Linked> {
         Arc::new(Linked {
             account: Arc::new(account),
+            fleet: Accounts::default(),
             login: Login {
                 device: mira_client::testing::device_id(),
                 user: "player1".into(),
