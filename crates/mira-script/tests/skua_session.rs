@@ -469,6 +469,28 @@ public class Packets {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_client_packet_level_up_shows_in_the_avatar_data_but_not_the_player_level() {
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(
+        r#"
+using Skua.Core.Interfaces;
+public class FakeLevel {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Send.ClientPacket(
+            "{\"t\":\"xt\",\"b\":{\"r\":-1,\"o\":{\"cmd\":\"levelUp\",\"intExpToLevel\":\"0\",\"intLevel\":100}}}",
+            type: "json"
+        );
+        bot.Wait.ForTrue(() => bot.Flash.GetGameObject("world.myAvatar.objData.intLevel") == "100", 20);
+        bot.Log($"level {bot.Player.Level}, shown {bot.Flash.GetGameObject("world.myAvatar.objData.intLevel")}");
+    }
+}
+"#,
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(logs.contains(&"level 50, shown 100".into()), "{logs:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn account_tags_reject_unknown_accounts_and_lite_keys_share_typed_values() {
     let (outcome, logs, _) = Fake::start(|_, _| {}).run(r#"
 using Skua.Core.Interfaces;

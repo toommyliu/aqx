@@ -24,7 +24,7 @@ use crate::room::{self, MonsterUpdate, MoveToArea, PlayerUpdate, Room, Tick, Use
 use crate::shop::{Bought, LoadedShop};
 
 use super::{
-    BOOST_CHECK, Disconnect, JoinStage, Load, Op, Phase, Recovery, Session, ShopStage,
+    BOOST_CHECK, Disconnect, JoinStage, Load, Op, Origin, Phase, Recovery, Session, ShopStage,
     required_version,
 };
 
@@ -207,7 +207,7 @@ impl Session {
         }
     }
 
-    pub(super) fn on_json(&mut self, json: JsonMessage) -> Result<(), String> {
+    pub(super) fn on_json(&mut self, json: JsonMessage, origin: Origin) -> Result<(), String> {
         fn read<T: DeserializeOwned>(json: &JsonMessage) -> Result<T, String> {
             T::deserialize(&json.data).map_err(|e| format!("{}: {e}", json.cmd))
         }
@@ -593,8 +593,11 @@ impl Session {
             }
             "levelUp" => {
                 let level: LevelUp = read(&json)?;
-                if let Some(character) = &mut self.character {
-                    let level = character.level_up(&level);
+                if let Some(level) = self
+                    .character
+                    .as_mut()
+                    .and_then(|character| character.level_up(&level, origin))
+                {
                     self.emit(Event::LeveledUp { level });
                 }
             }

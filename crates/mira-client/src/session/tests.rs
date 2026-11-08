@@ -719,6 +719,7 @@ fn tracks_the_players_vitals_haste_and_skills() {
             id: EntityId(7),
             name: "Player1".into(),
             level: 50,
+            injected_level: None,
             exp: 400,
             exp_to_level: 2000,
             gold: 10,
@@ -2208,6 +2209,40 @@ fn direct_requests_answer_while_a_queued_action_waits_on_the_server() {
     loading.wait().unwrap();
     session.logout();
     harness.finish();
+}
+
+#[test]
+fn an_injected_level_up_changes_only_the_level_the_client_shows() {
+    let (step, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        next.recv().unwrap();
+        peer.send(&json_message(
+            json!({"cmd": "levelUp", "intLevel": 51, "intExpToLevel": 2500, "xp": 0}),
+        ));
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    session.ready().wait().unwrap();
+    session.inject(&json_message(
+        json!({"cmd": "levelUp", "intLevel": 100, "intExpToLevel": "0"}),
+    ));
+    session.sync().wait().unwrap();
+    let levels = || {
+        let world = session.snapshot();
+        let me = world.me.as_ref().unwrap();
+        (me.level, me.exp_to_level, me.injected_level)
+    };
+    assert_eq!(levels(), (50, 0, Some(100)));
+    step.send(()).unwrap();
+    let events = harness.finish();
+    assert_eq!(levels(), (51, 2500, None));
+    let leveled: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, Event::LeveledUp { .. }))
+        .collect();
+    assert_eq!(leveled, [&Event::LeveledUp { level: 51 }]);
 }
 
 #[test]

@@ -12,12 +12,14 @@ use crate::combat::ITEM_SLOT;
 use crate::quest::QuestProgress;
 use crate::rank::rank;
 use crate::room::{CombatState, Vitals};
+use crate::session::Origin;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Me {
     pub id: EntityId,
     pub name: String,
     pub level: u32,
+    pub injected_level: Option<u32>,
     pub exp: u64,
     pub exp_to_level: u64,
     pub gold: u64,
@@ -74,6 +76,7 @@ impl Me {
             self.boosts.set(kind, secs, now);
         }
         self.level = data.level;
+        self.injected_level = None;
         self.gold = data.gold;
         self.coins = data.coins;
         self.member = data.member_days >= 0;
@@ -100,11 +103,20 @@ impl Me {
         Some(self.class_points)
     }
 
-    pub(crate) fn level_up(&mut self, level: &LevelUp) -> u32 {
-        self.level = level.level;
+    pub(crate) fn level_up(&mut self, level: &LevelUp, origin: Origin) -> Option<u32> {
         self.exp = level.exp;
         self.exp_to_level = level.exp_to_level;
-        self.level
+        match origin {
+            Origin::Server => {
+                self.level = level.level;
+                self.injected_level = None;
+                Some(self.level)
+            }
+            Origin::Injected => {
+                self.injected_level = Some(level.level);
+                None
+            }
+        }
     }
 
     pub(crate) fn receive(&mut self, amount: u64, coins: bool) {

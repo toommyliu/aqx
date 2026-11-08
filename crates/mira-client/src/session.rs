@@ -443,6 +443,12 @@ enum Setting {
 
 pub type Locate = Box<dyn Fn(&str) -> Option<Spot> + Send>;
 
+#[derive(Clone, Copy)]
+pub(crate) enum Origin {
+    Server,
+    Injected,
+}
+
 enum Request {
     Act(Action, Reply, u64),
     Direct(Direct, Reply, u64),
@@ -1405,7 +1411,7 @@ impl Session {
                 }
                 Request::Cancel(which) => self.cancel(which),
                 Request::Untarget => self.untarget(),
-                Request::Inject(text) => self.receive_text(text),
+                Request::Inject(text) => self.receive_text(text, Origin::Injected),
                 Request::Subscribe(subscriber) => self.subscribers.push(subscriber),
                 Request::Logout => self.begin_logout(),
                 Request::Set(_, epoch) if self.stale_epoch(epoch) => {}
@@ -2664,14 +2670,14 @@ impl Session {
 
     fn receive(&mut self, frame: &[u8]) {
         match mira_protocol::unpack(frame) {
-            Ok(text) => self.receive_text(text),
+            Ok(text) => self.receive_text(text, Origin::Server),
             Err(e) => self.emit(Event::Unreadable {
                 error: e.to_string(),
             }),
         }
     }
 
-    fn receive_text(&mut self, text: String) {
+    fn receive_text(&mut self, text: String, origin: Origin) {
         if self.options.trace_packets {
             self.emit(Event::Packet {
                 direction: Direction::In,
@@ -2687,7 +2693,7 @@ impl Session {
                 self.on_xt(&xt);
                 Ok(())
             }
-            Ok(Message::Json(json)) => self.on_json(json),
+            Ok(Message::Json(json)) => self.on_json(json, origin),
             Err(e) => Err(e.to_string()),
         };
         if let Err(error) = handled {
