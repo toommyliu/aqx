@@ -59,6 +59,8 @@ Keys act on the marked accounts, or on the selected one when nothing is marked.
 | --- | --- |
 | `i` | Log in, then run the account's `script` |
 | `o` | Run a script: type a path and `key=value` args, `tab` completes, `↑` recalls an earlier run |
+| `S` | Pick a Skua script from the library and run it. In the list, `u` downloads or updates the library. See [Run Skua scripts](skua.md). |
+| `c` | Edit the CoreBots and script options of the account's Skua script |
 | `s`, `r` | Stop or restart the script. Stopping also leaves combat. |
 | `p` | Pause the script, or resume it. A pause lets the current step finish, such as a kill in progress, then holds the script. Skua scripts can't pause. |
 | `x` | Log out |
@@ -121,6 +123,7 @@ Each config gets its own session, so accounts from different `mira.toml` files c
 | Command | Does |
 | --- | --- |
 | `mira check SCRIPT...` | Compile scripts and the files they import, without logging in or running them |
+| `mira skua update\|list [QUERY]\|path` | Download or update the Skua script library, search it, or print its folder. See [Run Skua scripts](skua.md). |
 | `mira run -a ACCOUNT [SCRIPT] [--arg KEY=VALUE]...` | Log one account from `mira.toml` in, run its script or the one named, and log out when it ends |
 | `mira run ... --record FILE` | Also write every packet to `FILE` as JSON lines, with the token and personal fields redacted |
 | `mira view FILE [--cmd NAME]... [--full]` | Print a recording one packet per line, only the named commands if any, cut at 160 characters unless `--full` |

@@ -1,3 +1,4 @@
+pub mod library;
 pub mod protocol;
 mod state;
 use crate::{Cancel, Ended, Level, LoadError, Outcome, Output, Relogged, Start, restore};
@@ -15,14 +16,11 @@ use std::time::{Duration, Instant};
 const STOP_BUDGET: Duration = Duration::from_secs(10);
 pub struct SkuaScript {
     path: PathBuf,
+    skua: PathBuf,
     output: Box<dyn FnMut(Output)>,
     cancel: Cancel,
 }
-pub fn worker() -> Result<PathBuf, LoadError> {
-    find_worker(&mut || eprintln!("mira: building the Skua worker"))
-}
-
-fn find_worker(building: &mut dyn FnMut()) -> Result<PathBuf, LoadError> {
+pub fn worker(building: &mut dyn FnMut()) -> Result<PathBuf, LoadError> {
     if let Some(path) = std::env::var_os("MIRA_SKUA_WORKER") {
         return Ok(path.into());
     }
@@ -36,7 +34,23 @@ fn find_worker(building: &mut dyn FnMut()) -> Result<PathBuf, LoadError> {
 }
 
 fn development_worker(building: &mut dyn FnMut()) -> Result<PathBuf, LoadError> {
-    let skua = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skua");
+    let clone = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("mira-script sits two folders inside the clone");
+    let skua = clone.join("skua");
+    if !skua.join("Host/Host.csproj").is_file() {
+        return Err(LoadError(format!(
+            "mira builds the Skua worker from the clone it was installed from, and {} isn't there anymore. Install mira again from a clone with `cargo install --path crates/mira`",
+            clone.display()
+        )));
+    }
+    if !skua.join("vendor/Skua/Skua.Core").is_dir() {
+        return Err(LoadError(format!(
+            "the Skua worker needs the Skua submodule. Run `git submodule update --init skua/vendor/Skua` in {}",
+            clone.display()
+        )));
+    }
     build_worker(&skua, "dotnet".as_ref(), building)
 }
 
@@ -143,21 +157,30 @@ pub enum Kind {
     Choice,
 }
 
-pub fn script_options(path: &Path, changes: &[(String, String)]) -> Result<Settings, LoadError> {
+pub fn script_options(
+    path: &Path,
+    skua: &Path,
+    changes: &[(String, String)],
+) -> Result<Settings, LoadError> {
     let path = std::path::absolute(path).map_err(|e| LoadError(e.to_string()))?;
-    settings("options", path.as_os_str(), changes)
+    settings("options", path.as_os_str(), skua, changes)
 }
 
-pub fn core_bots_options(user: &str, changes: &[(String, String)]) -> Result<Settings, LoadError> {
-    settings("cbo", user.as_ref(), changes)
+pub fn core_bots_options(
+    user: &str,
+    skua: &Path,
+    changes: &[(String, String)],
+) -> Result<Settings, LoadError> {
+    settings("cbo", user.as_ref(), skua, changes)
 }
 
 fn settings(
     mode: &str,
     arg: &std::ffi::OsStr,
+    skua: &Path,
     changes: &[(String, String)],
 ) -> Result<Settings, LoadError> {
-    let mut command = command(mode, arg, &mut || {})?;
+    let mut command = command(mode, arg, skua, &mut || {})?;
     for (key, value) in changes {
         command.arg("--set").arg(format!("{key}={value}"));
     }
@@ -166,7 +189,8 @@ fn settings(
         .output()
         .map_err(|e| LoadError(format!("couldn't run the Skua worker: {e}")))?;
     if !out.status.success() {
-        return Err(LoadError(
+        return Err(failed(
+            skua,
             String::from_utf8_lossy(&out.stderr).trim().to_owned(),
         ));
     }
@@ -176,21 +200,27 @@ fn settings(
 fn command(
     mode: &str,
     arg: &std::ffi::OsStr,
+    skua: &Path,
     building: &mut dyn FnMut(),
 ) -> Result<Command, LoadError> {
-    let data = match std::env::var_os("MIRA_SKUA_DATA") {
-        Some(path) => PathBuf::from(path),
-        None => dirs::data_local_dir()
-            .ok_or_else(|| LoadError("couldn't find the application data directory".into()))?
-            .join("mira/skua"),
-    };
-    let mut command = Command::new(find_worker(building)?);
-    command.arg(mode).arg(arg).env("MIRA_SKUA_DATA", data);
+    let mut command = Command::new(worker(building)?);
+    command.arg(mode).arg(arg).env("MIRA_SKUA_DATA", skua);
     Ok(command)
+}
+
+fn failed(skua: &Path, why: String) -> LoadError {
+    if library::scripts(skua).is_dir() {
+        return LoadError(why);
+    }
+    LoadError(format!(
+        "{}\nThe Skua scripts aren't downloaded. Run `mira skua update`, or press S and then u in the TUI",
+        why.trim_end()
+    ))
 }
 impl SkuaScript {
     pub fn load(
         path: &Path,
+        skua: &Path,
         mut output: impl FnMut(Output) + 'static,
         cancel: &Cancel,
     ) -> Result<Self, LoadError> {
@@ -201,18 +231,22 @@ impl SkuaScript {
                 text: "building the Skua worker".into(),
             });
         };
-        let checked = command("check", path.as_os_str(), &mut building)?
+        let checked = command("check", path.as_os_str(), skua, &mut building)?
             .output()
             .map_err(|e| LoadError(format!("couldn't check the C# script: {e}")))?;
         if !checked.status.success() {
-            return Err(LoadError(format!(
-                "{}{}",
-                String::from_utf8_lossy(&checked.stdout),
-                String::from_utf8_lossy(&checked.stderr)
-            )));
+            return Err(failed(
+                skua,
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&checked.stdout),
+                    String::from_utf8_lossy(&checked.stderr)
+                ),
+            ));
         }
         Ok(Self {
             path,
+            skua: skua.to_path_buf(),
             output: Box::new(output),
             cancel: cancel.clone(),
         })
@@ -263,8 +297,8 @@ impl SkuaScript {
                 text: "building the Skua worker".into(),
             });
         };
-        let mut command =
-            command("serve", self.path.as_os_str(), &mut building).map_err(io::Error::other)?;
+        let mut command = command("serve", self.path.as_os_str(), &self.skua, &mut building)
+            .map_err(io::Error::other)?;
         for (key, value) in args {
             command.arg("--arg").arg(format!(
                 "{key}={}",

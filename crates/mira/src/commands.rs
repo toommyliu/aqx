@@ -5,6 +5,9 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail};
+use mira_script::Cancel;
+use mira_script::skua::library::{self, Updated};
+use mira_script::skua::{self, SkuaScript};
 
 use crate::config::{self, Script};
 use crate::control::{Action, Want};
@@ -546,10 +549,65 @@ pub fn ctl(account: &str, ctl: Ctl) -> anyhow::Result<ExitCode> {
     }
 }
 
+#[derive(clap::Subcommand, Debug)]
+pub enum Skua {
+    /// Download the Skua scripts if they changed upstream, then build the Skua worker.
+    Update,
+    /// List the downloaded Skua scripts, or the ones matching every word of QUERY. A #word matches that tag, or the tags starting with it when no tag has that name.
+    List { query: Vec<String> },
+    /// Print the folder that holds the Skua scripts and their options.
+    Path,
+}
+
+pub fn skua(action: Skua) -> anyhow::Result<ExitCode> {
+    let home = config::skua_home().map_err(|e| anyhow!(e))?;
+    match action {
+        Skua::Path => println!("{}", home.display()),
+        Skua::Update => {
+            match library::update(&home).map_err(|e| anyhow!(e))? {
+                Updated::Current => println!("the Skua scripts are up to date"),
+                Updated::To(commit) => println!(
+                    "updated the Skua scripts to {} in {}",
+                    library::short(&commit),
+                    library::scripts(&home).display()
+                ),
+            }
+            skua::worker(&mut || println!("building the Skua worker")).map_err(|e| anyhow!(e))?;
+        }
+        Skua::List { query } => {
+            let Some(found) = library::open(&home).map_err(|e| anyhow!(e))? else {
+                bail!("the Skua scripts aren't downloaded. Run `mira skua update`");
+            };
+            let query = query.join(" ");
+            let scripts = library::scripts(&home);
+            let mut out = std::io::stdout().lock();
+            for entry in found.search(&query) {
+                let path = scripts.join(&entry.path);
+                if writeln!(out, "{}  {}", path.display(), entry.name).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn check(scripts: &[PathBuf]) -> anyhow::Result<ExitCode> {
     let mut failed = 0;
     for script in scripts {
-        match mira_script::check(script) {
+        let checked = if script
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("cs"))
+        {
+            config::skua_home().and_then(|skua| {
+                SkuaScript::load(script, &skua, |_| {}, &Cancel::default())
+                    .map(drop)
+                    .map_err(|e| e.to_string())
+            })
+        } else {
+            mira_script::check(script)
+        };
+        match checked {
             Ok(()) => println!("{}: ok", script.display()),
             Err(e) => {
                 failed += 1;

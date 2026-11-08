@@ -161,6 +161,11 @@ enum Command {
         #[arg(required = true)]
         scripts: Vec<PathBuf>,
     },
+    /// Download, update, and search the Skua script library in $MIRA_HOME/skua or ~/mira/skua.
+    Skua {
+        #[command(subcommand)]
+        action: commands::Skua,
+    },
     /// Print the JSON Schema of mira.toml, for editor completion and checks.
     Schema,
     /// Print a run --record file one packet per line.
@@ -253,6 +258,7 @@ fn main() -> ExitCode {
         } => commands::logs(account.as_deref(), follow, all),
         Command::Ctl { account, action } => commands::ctl(&account, action),
         Command::Check { scripts } => commands::check(&scripts),
+        Command::Skua { action } => commands::skua(action),
         Command::Schema => {
             println!("{}", config::schema());
             Ok(ExitCode::SUCCESS)

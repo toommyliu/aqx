@@ -102,11 +102,14 @@ impl Skua {
         let user = self.user.clone();
         let script = self.script.clone();
         thread::spawn(move || {
-            let result = match tab {
-                Tab::CoreBots => skua::core_bots_options(&user, &changes),
-                Tab::Script => skua::script_options(&script, &changes),
-            };
-            let _ = sender.send((tab, saving, result.map_err(|e| e.to_string())));
+            let result = crate::config::skua_home().and_then(|home| {
+                match tab {
+                    Tab::CoreBots => skua::core_bots_options(&user, &home, &changes),
+                    Tab::Script => skua::script_options(&script, &home, &changes),
+                }
+                .map_err(|e| e.to_string())
+            });
+            let _ = sender.send((tab, saving, result));
         });
     }
 

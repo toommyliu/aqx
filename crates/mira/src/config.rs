@@ -190,6 +190,12 @@ pub fn default_home() -> Option<PathBuf> {
     home(std::env::var_os("MIRA_HOME"), std::env::var_os("HOME"))
 }
 
+pub fn skua_home() -> Result<PathBuf, String> {
+    default_home()
+        .map(|home| home.join("skua"))
+        .ok_or_else(|| "couldn't find a home folder for the Skua scripts. Set MIRA_HOME".to_owned())
+}
+
 fn home(mira_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     match mira_home.filter(|dir| !dir.is_empty()) {
         Some(dir) => Some(PathBuf::from(dir)),

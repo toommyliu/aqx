@@ -1182,3 +1182,183 @@ fn redacted_skua_options_edit_the_real_account_and_show_its_alias() {
         "{s}"
     );
 }
+
+struct Acts(RefCell<Vec<(usize, Action)>>);
+
+impl Source for Acts {
+    fn frame(&self, _: &crate::control::Want) -> Result<crate::control::Frame, String> {
+        Err("no frames".into())
+    }
+
+    fn act(&self, account: usize, action: Action) -> Result<(), String> {
+        self.0.borrow_mut().push((account, action));
+        Ok(())
+    }
+
+    fn configured(&self) -> Vec<crate::config::Script> {
+        Vec::new()
+    }
+
+    fn end(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn skua_library() -> Picker {
+    use mira_script::skua::library::{Entry, Library};
+    let entry = |name: &str, path: &str, description: &str| Entry {
+        name: name.into(),
+        description: description.into(),
+        tags: [
+            "farm",
+            "nulgath",
+            "nation",
+            "ultra",
+            "shadow",
+            "realm",
+            "essence",
+            "commanding",
+            "army",
+            "legion",
+            "merge",
+            "seasonal",
+            "frostvale",
+        ]
+        .map(String::from)
+        .to_vec(),
+        path: path.into(),
+    };
+    Picker::new(
+        PathBuf::from("/srv/skua/Scripts"),
+        Ok(Some(Library {
+            commit: "6c58f70aa".into(),
+            entries: vec![
+                entry("CoreBots", "CoreBots.cs", ""),
+                entry(
+                    "Void Aura",
+                    "Farm/VoidAura.cs",
+                    "Farms Void Auras in the Shadow Realm, then turns in the quest for Commanding Shadow Essences until the bank is full",
+                ),
+                entry(
+                    "Legion Token",
+                    "Legion/LegionToken.cs",
+                    "Farms Legion Tokens",
+                ),
+            ],
+        })),
+    )
+}
+
+#[test]
+fn a_searched_skua_script_runs_on_the_marked_accounts() {
+    let shown = [farmer("player1"), farmer("player2")];
+    let mut app = App {
+        names: vec!["player1".into(), "player2".into()],
+        marked: BTreeSet::from([0, 1]),
+        picker: Some(skua_library()),
+        ..App::default()
+    };
+    let s = screen(&app, &shown, 150, 30);
+    assert!(s.contains("3 scripts · 6c58f70 · /srv/skua/Scripts"), "{s}");
+    assert!(row(&s, "Void Aura").contains("Farm"), "{s}");
+    assert!(s.lines().last().unwrap().contains("u update"), "{s}");
+
+    app.marked.clear();
+    click(&mut app, &shown, 150, 30, "player2");
+    assert_eq!(app.selected, 0, "a click under the picker reaches nothing");
+    app.marked = BTreeSet::from([0, 1]);
+
+    let source = Acts(RefCell::new(Vec::new()));
+    app.handle(KeyEvent::from(KeyCode::Char('/')), &source, &shown);
+    app.paste("aura", &shown);
+    let s = screen(&app, &shown, 150, 30);
+    assert!(!s.contains("Legion Token"), "{s}");
+    assert!(s.contains("Farms Void Auras"), "{s}");
+    assert!(s.contains("until the bank is full"), "{s}");
+    assert!(s.contains("#farm #nulgath"), "{s}");
+    assert!(s.contains("#frostvale"), "tags wrap:\n{s}");
+    app.handle(KeyEvent::from(KeyCode::Enter), &source, &shown);
+
+    let run = Action::Run(crate::config::Script {
+        path: "/srv/skua/Scripts/Farm/VoidAura.cs".into(),
+        args: Vec::new(),
+    });
+    assert_eq!(*source.0.borrow(), [(0, run.clone()), (1, run)]);
+    assert!(app.picker.is_none());
+}
+
+#[test]
+fn the_skua_picker_offers_the_download_before_the_first_one() {
+    let mut picker = Picker::new(PathBuf::from("/srv/skua/Scripts"), Ok(None));
+    picker.failed = Some(
+        "/srv/skua/Scripts wasn't downloaded by mira, so mira won't replace it. Move it somewhere else, then update again".into(),
+    );
+    let mut app = App {
+        picker: Some(picker),
+        ..App::default()
+    };
+    let s = screen(&app, &[farmer("player1")], 150, 30);
+    assert!(s.contains("then update again"), "{s}");
+    assert!(
+        s.contains("mira hasn't downloaded the Skua scripts yet."),
+        "{s}"
+    );
+    assert!(
+        s.contains("u downloads them from github.com/auqw/Scripts"),
+        "{s}"
+    );
+    let picker = app.picker.as_mut().unwrap();
+    assert_eq!(
+        picker.key(KeyEvent::from(KeyCode::Char('u'))),
+        library::Outcome::Update
+    );
+    assert_eq!(
+        picker.key(KeyEvent::from(KeyCode::Enter)),
+        library::Outcome::Nothing
+    );
+    assert_eq!(
+        picker.key(KeyEvent::from(KeyCode::Esc)),
+        library::Outcome::Close
+    );
+}
+
+#[test]
+fn a_skua_update_shows_its_progress_then_its_result() {
+    let shown = [farmer("player1")];
+    let footer = |app: &App| {
+        screen(app, &shown, 150, 30)
+            .lines()
+            .last()
+            .unwrap()
+            .to_owned()
+    };
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let (staged, reached) = std::sync::mpsc::channel::<()>();
+    let mut app = App {
+        update: Some(Update::spawn(move |stage| {
+            stage("building the Skua worker");
+            staged.send(()).unwrap();
+            wait.recv().unwrap();
+            Ok("updated the Skua scripts to 6c58f70".into())
+        })),
+        ..App::default()
+    };
+    reached.recv().unwrap();
+    app.poll_update();
+    assert!(
+        footer(&app).contains("building the Skua worker"),
+        "{}",
+        footer(&app)
+    );
+
+    release.send(()).unwrap();
+    let started = Instant::now();
+    while app.update.is_some() && started.elapsed() < Duration::from_secs(5) {
+        app.poll_update();
+    }
+    assert!(
+        footer(&app).contains("updated the Skua scripts to 6c58f70"),
+        "{}",
+        footer(&app)
+    );
+}

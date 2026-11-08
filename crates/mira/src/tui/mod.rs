@@ -1,5 +1,6 @@
 mod ask;
 mod draw;
+mod library;
 mod mask;
 mod prompt;
 mod skua;
@@ -26,6 +27,7 @@ use crate::control::{Action, Source, Want};
 use crate::fleet::{Channel, Line, Log};
 use crate::view::{self, Game, Shown, order};
 use ask::{Ask, Remembered};
+use library::{Picker, Update};
 use mask::Mask;
 use prompt::{History, Prompt, Recent};
 use skua::Skua;
@@ -191,6 +193,8 @@ struct App {
     history: History,
     ask: Option<Ask>,
     skua: Option<Skua>,
+    picker: Option<Picker>,
+    update: Option<Update>,
     targets: Vec<(String, Option<String>)>,
     share_args: bool,
     remembered: Remembered,
@@ -235,6 +239,7 @@ pub fn run(
         if let Some(skua) = &mut app.skua {
             skua.poll();
         }
+        app.poll_update();
         let shown = match gather(source, &mut app) {
             Ok(Some(shown)) => shown,
             Ok(None) => break Ok(Leave::Ended),
@@ -383,7 +388,12 @@ impl App {
                 input.handle(InputRequest::InsertChar(c));
             }
         };
-        if let Some(prompt) = &mut self.prompt {
+        if let Some(picker) = &mut self.picker {
+            if picker.searching {
+                insert(&mut picker.query);
+                picker.cursor = 0;
+            }
+        } else if let Some(prompt) = &mut self.prompt {
             insert(&mut prompt.input);
             prompt.edited();
             prompt.find_matches(&self.home);
@@ -647,6 +657,9 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent, shown: &[Shown]) {
+        if self.picker.is_some() {
+            return;
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => self.click(mouse.column, mouse.row, shown),
             MouseEventKind::Drag(MouseButton::Left) if self.dragging => {
@@ -816,6 +829,24 @@ impl App {
             }
             return None;
         }
+        if let Some(picker) = &mut self.picker {
+            match picker.key(key) {
+                library::Outcome::Close => self.picker = None,
+                library::Outcome::Run(path) => {
+                    self.picker = None;
+                    self.start(
+                        crate::config::Script {
+                            path,
+                            args: Vec::new(),
+                        },
+                        source,
+                    );
+                }
+                library::Outcome::Update => self.start_update(),
+                library::Outcome::Nothing => {}
+            }
+            return None;
+        }
         if let Some(skua) = &mut self.skua {
             let editable = shown.get(skua.account).is_some_and(skua::editable);
             match skua.key(key, editable) {
@@ -958,6 +989,7 @@ impl App {
             KeyCode::Char('<') => self.resize_sidebar(|w| w.saturating_sub(SIDEBAR_STEP)),
             KeyCode::Char('>') => self.resize_sidebar(|w| w + SIDEBAR_STEP),
             KeyCode::Char('o') => self.prompt = Some(Prompt::new(&self.home)),
+            KeyCode::Char('S') => self.picker = Some(Picker::open()),
             KeyCode::Char('c') => {
                 if let Some((user, script)) = self.skua_target() {
                     self.skua = Some(Skua::open(self.selected, user, script));
@@ -976,6 +1008,30 @@ impl App {
         None
     }
 
+    fn start_update(&mut self) {
+        if self.update.is_none() {
+            self.update = Some(Update::start());
+        }
+        if let Some(picker) = &mut self.picker {
+            picker.failed = None;
+        }
+    }
+
+    fn poll_update(&mut self) {
+        let Some(done) = self.update.as_mut().and_then(Update::poll) else {
+            return;
+        };
+        self.update = None;
+        if let Some(picker) = &mut self.picker {
+            picker.reload();
+            picker.failed = done.as_ref().err().cloned();
+        }
+        match done {
+            Ok(text) => self.say(text),
+            Err(why) => self.say(why.lines().next().unwrap_or_default().to_owned()),
+        }
+    }
+
     fn skua_target(&self) -> Option<(String, PathBuf)> {
         let (user, script) = self.targets.get(self.selected)?;
         let script = skua_script(script.as_deref())?;
@@ -986,10 +1042,13 @@ impl App {
         if typed.trim().is_empty() {
             return;
         }
-        let script = match prompt::parse(typed, &self.home) {
-            Ok(script) => script,
-            Err(e) => return self.say(e),
-        };
+        match prompt::parse(typed, &self.home) {
+            Ok(script) => self.start(script, source),
+            Err(e) => self.say(e),
+        }
+    }
+
+    fn start(&mut self, script: crate::config::Script, source: &dyn Source) {
         self.recent.add(script.clone());
         if let Err(e) = self.history.save(&self.recent) {
             self.say(format!("couldn't save the run history: {e}"));

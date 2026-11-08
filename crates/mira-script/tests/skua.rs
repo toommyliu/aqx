@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use support::{Dir, FARM, Fake};
+use support::{Dir, FARM, Fake, data};
 
 const HELLO: &str = r#"
 using CommunityToolkit.Mvvm.DependencyInjection;
@@ -104,7 +104,7 @@ fn the_skua_host_runs_a_script_against_the_session() {
 fn a_host_stopped_while_starting_exits_quietly() {
     let dir = Dir::new();
     let path = dir.script(HELLO);
-    let mut child = Command::new(worker().unwrap())
+    let mut child = Command::new(worker(&mut || {}).unwrap())
         .arg("serve")
         .arg(path)
         .stdin(Stdio::piped())
@@ -519,7 +519,7 @@ public class Configured {
 "#
         .replace("STORAGE", &storage),
     );
-    let listed = skua::script_options(&path, &[]).unwrap();
+    let listed = skua::script_options(&path, &data(), &[]).unwrap();
     assert_eq!(listed.storage.as_deref(), Some(storage.as_str()));
     let values: Vec<_> = listed
         .options
@@ -547,7 +547,7 @@ public class Configured {
         ("Pick".to_owned(), "Second".to_owned()),
         ("Extra_Group:Tries".to_owned(), "5".to_owned()),
     ];
-    let saved = skua::script_options(&path, &changes).unwrap();
+    let saved = skua::script_options(&path, &data(), &changes).unwrap();
     assert_eq!(
         saved
             .options
@@ -556,18 +556,20 @@ public class Configured {
             .collect::<Vec<_>>(),
         [Some("False"), Some("Second"), Some("5")]
     );
-    let file = PathBuf::from(std::env::var("MIRA_SKUA_DATA").unwrap())
-        .join("options")
-        .join(format!("{storage}.cfg"));
+    let file = data().join("options").join(format!("{storage}.cfg"));
     assert_eq!(
         std::fs::read_to_string(&file).unwrap(),
         "Options:Fast=False\nOptions:Pick=Second\nExtra_Group:Tries=5\n"
     );
-    let wrong = skua::script_options(&path, &[("Extra_Group:Tries".into(), "many".into())])
-        .unwrap_err()
-        .to_string();
+    let wrong = skua::script_options(
+        &path,
+        &data(),
+        &[("Extra_Group:Tries".into(), "many".into())],
+    )
+    .unwrap_err()
+    .to_string();
     assert!(wrong.contains("Tries must be a number"), "{wrong}");
-    let missing = skua::script_options(&path, &[("Once".into(), "y".into())])
+    let missing = skua::script_options(&path, &data(), &[("Once".into(), "y".into())])
         .unwrap_err()
         .to_string();
     assert!(missing.contains("no option Once"), "{missing}");
@@ -578,7 +580,7 @@ public class Configured {
 #[ignore = "run with npm run skua:test"]
 fn core_bots_options_edit_only_the_given_keys_in_the_lowercase_users_file() {
     let user = format!("Player{}", std::process::id());
-    let file = PathBuf::from(std::env::var("MIRA_SKUA_DATA").unwrap())
+    let file = data()
         .join("options")
         .join(format!("CBO_Storage({}).txt", user.to_lowercase()));
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -592,7 +594,7 @@ fn core_bots_options_edit_only_the_given_keys_in_the_lowercase_users_file() {
         ("HuntDelayNr".to_owned(), String::new()),
         ("SoloModeSelect".to_owned(), "Farm".to_owned()),
     ];
-    let saved = skua::core_bots_options(&user, &changes).unwrap();
+    let saved = skua::core_bots_options(&user, &data(), &changes).unwrap();
     let value = |name: &str| {
         saved
             .options
@@ -609,9 +611,10 @@ fn core_bots_options_edit_only_the_given_keys_in_the_lowercase_users_file() {
         std::fs::read_to_string(&file).unwrap(),
         "Unknown: kept\nPrivateRooms: True\nSoloModeSelect: Farm\n"
     );
-    let wrong = skua::core_bots_options(&user, &[("SoloModeSelect".into(), "farm".into())])
-        .unwrap_err()
-        .to_string();
+    let wrong =
+        skua::core_bots_options(&user, &data(), &[("SoloModeSelect".into(), "farm".into())])
+            .unwrap_err()
+            .to_string();
     assert!(wrong.contains("SoloModeSelect must be one of"), "{wrong}");
     let _ = std::fs::remove_file(file);
 }
@@ -629,9 +632,9 @@ fn includes_compile_together_and_errors_surface_before_a_session() {
 using Skua.Core.Interfaces;
 public class Includes { public void ScriptMain(IScriptInterface bot) { bot.Log(Included.Value.ToString()); } }
 "#);
-    assert!(SkuaScript::load(&path, |_| {}, &Cancel::default()).is_ok());
+    assert!(SkuaScript::load(&path, &data(), |_| {}, &Cancel::default()).is_ok());
     std::fs::write(&path, "public class Broken {").unwrap();
-    let error = SkuaScript::load(&path, |_| {}, &Cancel::default())
+    let error = SkuaScript::load(&path, &data(), |_| {}, &Cancel::default())
         .err()
         .unwrap();
     assert!(error.to_string().contains("CS1513"), "{error}");
