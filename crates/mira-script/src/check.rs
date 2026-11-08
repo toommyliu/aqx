@@ -2,18 +2,10 @@ use std::path::Path;
 
 use rquickjs::{Context, Module, Runtime};
 
-use crate::{Cancel, args, engine, skua, source};
+use crate::{args, engine, source};
 
 pub fn check(path: &Path) -> Result<(), String> {
     let path = std::path::absolute(path).map_err(|e| e.to_string())?;
-    if path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("cs"))
-    {
-        return skua::SkuaScript::load(&path, |_| {}, &Cancel::default())
-            .map(drop)
-            .map_err(|e| e.to_string());
-    }
     let name = path.to_string_lossy().into_owned();
     let runtime = Runtime::new().map_err(|e| e.to_string())?;
     runtime.set_loader(source::Resolve, source::Load);

@@ -21,6 +21,12 @@ pub const FARM: &str = r#"{"cmd":"moveToArea","areaId":5,"areaName":"farm-1","st
     "monBranch":[{"MonMapID":1,"MonID":10,"intHP":540,"intHPMax":540,"intState":1},{"MonMapID":2,"MonID":12,"intHP":900,"intHPMax":900,"intState":1}],
     "uoBranch":[{"entID":1001,"strUsername":"player1","strFrame":"Enter","strPad":"Spawn","intHP":3000,"intHPMax":3000,"intMP":100,"intMPMax":100,"intState":1}]}"#;
 
+pub fn data() -> PathBuf {
+    PathBuf::from(
+        std::env::var_os("MIRA_SKUA_DATA").expect("scripts/skua-test.sh sets MIRA_SKUA_DATA"),
+    )
+}
+
 pub struct Dir(pub PathBuf);
 impl Dir {
     pub fn new() -> Self {
@@ -252,6 +258,7 @@ impl Fake {
         let sink = logs.clone();
         let script = SkuaScript::load(
             &path,
+            &data(),
             move |out| {
                 if let Output::Log { text, .. } = out {
                     observe(&text);

@@ -91,6 +91,12 @@ impl fmt::Display for LoadError {
 
 impl std::error::Error for LoadError {}
 
+impl LoadError {
+    pub fn new(why: String) -> LoadError {
+        LoadError(why)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Cancel(Arc<Signal>);
 

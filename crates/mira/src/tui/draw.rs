@@ -9,10 +9,12 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use tui_input::Input as TextInput;
 use unicode_width::UnicodeWidthChar;
 
+use super::library::{Catalog, Picker};
 use super::skua::{Pane, Skua, Tab};
 use super::{App, Filter, Hit, Scope, Section, View, skua_script};
 use crate::fleet::{Channel, Line as LogLine};
 use crate::view::{Game, QuestProgress, Shown, Stack, Standing, State, found, matches, order};
+use mira_script::skua::library;
 
 const WIDE: u16 = 90;
 const ACCENT: Color = Color::Blue;
@@ -31,7 +33,7 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 type Field = Vec<Span<'static>>;
 
-const ACCOUNT_KEYS: [(&str, &str); 16] = [
+const ACCOUNT_KEYS: [(&str, &str); 17] = [
     ("", "Accounts"),
     ("↑ ↓", "pick"),
     ("tab", "next"),
@@ -43,6 +45,7 @@ const ACCOUNT_KEYS: [(&str, &str); 16] = [
     ("i", "log in"),
     ("x", "log out"),
     ("o", "run a script"),
+    ("S", "Skua scripts"),
     ("s r", "stop / restart"),
     ("p", "pause / resume"),
     ("c", "Skua script options"),
@@ -50,7 +53,7 @@ const ACCOUNT_KEYS: [(&str, &str); 16] = [
     ("Q", "log out all and end"),
 ];
 
-const VIEW_KEYS: [(&str, &str); 16] = [
+const VIEW_KEYS: [(&str, &str); 17] = [
     ("", "View"),
     ("1", "log"),
     ("2-8", "players … factions"),
@@ -64,6 +67,7 @@ const VIEW_KEYS: [(&str, &str); 16] = [
     ("⇧↑ ⇧↓", "scroll a line"),
     ("PgUp PgDn", "scroll a page"),
     ("End", "newest lines"),
+    ("", ""),
     ("", ""),
     ("", ""),
     ("", ""),
@@ -308,6 +312,9 @@ pub(super) fn draw(f: &mut Frame, app: &App, shown: &[Shown]) {
     draw_footer(f, footer, app, shown);
     if let Some(skua) = &app.skua {
         draw_skua(f, body, app, skua, shown.get(skua.account));
+    }
+    if let Some(picker) = &app.picker {
+        draw_picker(f, body, app, picker);
     }
     if app.keys {
         draw_keys(f, body);
@@ -570,6 +577,25 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
             area,
         );
     }
+    if let Some(picker) = &app.picker {
+        let keys: &[(&str, &str)] = if picker.searching {
+            &[("↑↓", "pick"), ("enter", "run"), ("esc", "clear")]
+        } else {
+            &[
+                ("↑↓", "pick"),
+                ("enter", "run"),
+                ("/", "search"),
+                ("u", "update"),
+                ("esc", "close"),
+            ]
+        };
+        let line = [
+            vec![Span::raw(format!(" run on {who}   ")).bold()],
+            hints(keys),
+        ]
+        .concat();
+        return f.render_widget(Paragraph::new(Line::from(clip(line, width))), area);
+    }
     if let Some(prompt) = &app.prompt {
         let keys = hints(&[("tab", "complete"), ("↑↓", "recent"), ("esc", "cancel")]);
         let typed = [
@@ -635,6 +661,13 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
         && std::time::Instant::now() < *until
     {
         return f.render_widget(Paragraph::new(format!(" {note}")).yellow(), area);
+    }
+    if let Some(update) = &app.update {
+        let line = vec![
+            Span::raw(format!(" {} ", SPINNER[app.frame % SPINNER.len()])).yellow(),
+            Span::raw(update.stage).yellow(),
+        ];
+        return f.render_widget(Paragraph::new(Line::from(line)), area);
     }
     let keys = if app.view != View::Log && !app.grid {
         list_keys(app)
@@ -1903,6 +1936,137 @@ fn draw_skua(f: &mut Frame, area: Rect, app: &App, skua: &Skua, account: Option<
     .areas(inner);
     f.render_widget(Paragraph::new(lines), top);
     f.render_widget(Paragraph::new(fit(vec![note], width)), bottom);
+}
+
+const DESCRIPTION_LINES: usize = 3;
+const TAG_LINES: usize = 2;
+
+fn cut(text: &str, width: usize, most: usize) -> Vec<String> {
+    let pieces = wrap(text, width);
+    let mut kept: Vec<String> = pieces.iter().take(most).map(|l| (*l).to_owned()).collect();
+    if pieces.len() > most
+        && let Some(last) = kept.last_mut()
+    {
+        *last = wrap(last, width.saturating_sub(1))[0].to_owned() + "…";
+    }
+    kept
+}
+
+fn draw_picker(f: &mut Frame, area: Rect, app: &App, picker: &Picker) {
+    f.buffer_mut()
+        .set_style(area, Style::new().fg(Color::DarkGray));
+    let rect = centered(area, 84, area.height.saturating_sub(2).max(8));
+    f.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(" Skua scripts ")
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let width = inner.width as usize;
+    let folder = app.mask.hide(&picker.scripts.display().to_string());
+    let shown = picker.shown();
+    let about = match &picker.catalog {
+        Catalog::Ready(library) => format!(
+            "{} scripts · {} · {folder}",
+            grouped(library.entries.len() as u64),
+            library::short(&library.commit)
+        ),
+        _ => folder.clone(),
+    };
+    let search = if picker.searching || !picker.query.value().is_empty() {
+        [
+            vec![Span::raw("search: ").bold()],
+            typed_spans(&picker.query),
+        ]
+        .concat()
+    } else {
+        Vec::new()
+    };
+    let mut lines = vec![
+        fit(vec![Span::raw(about).dark_gray()], width),
+        Line::from(search),
+    ];
+    let wrapped = |text: &str| -> Vec<String> {
+        app.mask
+            .hide(text)
+            .lines()
+            .flat_map(|l| wrap(l, width))
+            .map(str::to_owned)
+            .collect()
+    };
+    if let Some(why) = &picker.failed {
+        lines.extend(wrapped(why).into_iter().take(6).map(|l| Line::raw(l).red()));
+    }
+    let height =
+        (inner.height as usize).saturating_sub(lines.len() + 1 + DESCRIPTION_LINES + TAG_LINES);
+    match &picker.catalog {
+        Catalog::Missing => lines.extend([
+            Line::raw("mira hasn't downloaded the Skua scripts yet."),
+            Line::default(),
+            fit(
+                hints(&[("u", "downloads them from github.com/auqw/Scripts")]),
+                width,
+            ),
+            fit(
+                vec![
+                    Span::raw("and builds the Skua worker, which needs the .NET SDK.").dark_gray(),
+                ],
+                width,
+            ),
+        ]),
+        Catalog::Failed(why) => lines.extend(
+            wrapped(why)
+                .into_iter()
+                .take(height)
+                .map(|l| Line::raw(l).red()),
+        ),
+        Catalog::Ready(_) if shown.is_empty() => {
+            lines.push(Line::raw("No script matches.").dark_gray());
+        }
+        Catalog::Ready(_) => {
+            let start = (picker.cursor + 1).saturating_sub(height.max(1));
+            for (i, entry) in shown.iter().enumerate().skip(start).take(height) {
+                let folder = entry.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+                let mut row = spread(
+                    vec![Span::raw(entry.name.clone())],
+                    vec![Span::raw(folder.to_owned()).dark_gray()],
+                    width,
+                );
+                if i == picker.cursor {
+                    row = row.reversed();
+                }
+                lines.push(row);
+            }
+        }
+    }
+    let note: Vec<Line> = match &app.update {
+        Some(update) => vec![
+            Line::raw(format!(
+                "{} {}",
+                SPINNER[app.frame % SPINNER.len()],
+                update.stage
+            ))
+            .yellow(),
+        ],
+        None => shown.get(picker.cursor).map_or_else(Vec::new, |e| {
+            let tags: Vec<String> = e.tags.iter().map(|t| format!("#{t}")).collect();
+            let description = cut(&e.description, width, DESCRIPTION_LINES)
+                .into_iter()
+                .map(|l| Line::raw(l).dark_gray());
+            let tags = cut(&tags.join(" "), width, TAG_LINES)
+                .into_iter()
+                .map(|l| Line::raw(l).fg(ACCENT));
+            description.chain(tags).collect()
+        }),
+    };
+    let [top, _, bottom] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length((DESCRIPTION_LINES + TAG_LINES) as u16),
+    ])
+    .areas(inner);
+    f.render_widget(Paragraph::new(lines), top);
+    f.render_widget(Paragraph::new(note), bottom);
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {

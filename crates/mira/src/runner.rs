@@ -124,7 +124,8 @@ impl Job {
         let output = Rc::clone(&self.output);
         let output = move |out| output(out);
         if self.is_skua() {
-            SkuaScript::load(&self.path, output, &self.cancel).map(Loaded::Skua)
+            let skua = crate::config::skua_home().map_err(LoadError::new)?;
+            SkuaScript::load(&self.path, &skua, output, &self.cancel).map(Loaded::Skua)
         } else {
             Script::load(&self.path, output, &self.cancel).map(Loaded::JavaScript)
         }
