@@ -13,3 +13,9 @@ mira init
 - [Run accounts from the TUI](docs/tui.md)
 - [Write a mira script](docs/writing-scripts.md)
 - [Run Skua scripts](docs/skua.md). Skua support also needs the .NET SDK and the Skua submodule.
+
+## How it works
+
+mira doesn't open a game window or load Flash. It talks to the AQW server directly, the same way the game client does.
+
+Skua scripts normally need Skua, which runs only on Windows. mira runs them in a small .NET helper instead and performs actions in the game on the helper's behalf.
