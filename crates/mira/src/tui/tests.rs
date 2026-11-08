@@ -1631,6 +1631,106 @@ fn the_key_list_shows_every_label_whole_at_any_width() {
 }
 
 #[test]
+fn e_in_the_key_list_changes_a_key_and_saves_it() {
+    let dir = std::env::temp_dir().join(format!("mira-key-editor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("keys.toml");
+    let shown = [farmer("player1"), farmer("player2")];
+    let mut app = App {
+        keymap: Keymap::load(path.clone()).unwrap(),
+        ..App::default()
+    };
+    press(&mut app, &shown, KeyCode::Char('?'));
+    let s = screen(&app, &shown, 100, 40);
+    assert!(s.contains("Press e to change keys."), "{s}");
+    press(&mut app, &shown, KeyCode::Char('e'));
+    let s = screen(&app, &shown, 100, 40);
+    assert!(
+        row(&s, "Switch between the account list").contains("tab"),
+        "{s}"
+    );
+    assert!(s.contains("enter change"), "{s}");
+    app.handle(
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        &idle_fleet(),
+        &shown,
+    );
+    press(&mut app, &shown, KeyCode::Esc);
+    assert!(
+        !app.ending && app.rebind.is_some(),
+        "esc answers the end-session question over the editor"
+    );
+    assert!(
+        s.contains("keys.toml."),
+        "the note wraps instead of cutting the path:\n{s}"
+    );
+    let lines: Vec<&str> = s.lines().collect();
+    let top = lines
+        .iter()
+        .position(|l| l.contains("┌ change keys"))
+        .unwrap();
+    let tall = lines[top..].iter().position(|l| l.contains("└──")).unwrap() + 1;
+    assert!(tall <= 20, "the dialog stays short on a tall screen:\n{s}");
+
+    let stop = keymap::COMMANDS
+        .iter()
+        .position(|e| e.name == "stop")
+        .unwrap();
+    for _ in 0..stop {
+        press(&mut app, &shown, KeyCode::Down);
+    }
+    press(&mut app, &shown, KeyCode::Up);
+    let s = screen(&app, &shown, 100, 40);
+    assert!(
+        s.contains("Stop the script."),
+        "moving up inside the list doesn't scroll it:\n{s}"
+    );
+    press(&mut app, &shown, KeyCode::Down);
+    press(&mut app, &shown, KeyCode::Enter);
+    let s = screen(&app, &shown, 100, 40);
+    assert!(row(&s, "Stop the script.").contains('…'), "{s}");
+    press(&mut app, &shown, KeyCode::Char('r'));
+    let s = screen(&app, &shown, 100, 40);
+    assert!(s.contains("r is bound to both stop and restart"), "{s}");
+    assert!(!path.exists(), "a clash saves nothing");
+
+    press(&mut app, &shown, KeyCode::Enter);
+    press(&mut app, &shown, KeyCode::Char('k'));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "stop = \"k\"\n");
+    assert!(
+        accented(&app, &shown, 100, 40, "Stop the script.").starts_with('k'),
+        "a changed key shows in blue"
+    );
+    press(&mut app, &shown, KeyCode::Enter);
+    press(&mut app, &shown, KeyCode::Esc);
+    assert_eq!(app.keymap.key(Command::Stop), "k", "esc cancels a change");
+    press(&mut app, &shown, KeyCode::Esc);
+    assert!(
+        app.rebind.is_none() && app.keys,
+        "esc goes back to the key list"
+    );
+    press(&mut app, &shown, KeyCode::Esc);
+    assert_eq!(
+        app.keymap.command(KeyEvent::from(KeyCode::Char('k'))),
+        Some(Command::Stop)
+    );
+
+    press(&mut app, &shown, KeyCode::Char('?'));
+    press(&mut app, &shown, KeyCode::Char('e'));
+    for _ in 0..stop {
+        press(&mut app, &shown, KeyCode::Down);
+    }
+    press(&mut app, &shown, KeyCode::Backspace);
+    assert_eq!(
+        app.keymap.key(Command::Stop),
+        "s",
+        "backspace restores the default"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn rebound_keys_drive_the_tui_and_show_where_keys_are_listed() {
     let shown = [farmer("player1"), farmer("player2")];
     let mut app = App {

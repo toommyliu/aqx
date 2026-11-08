@@ -9,10 +9,10 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
 use tui_input::Input as TextInput;
 use unicode_width::UnicodeWidthChar;
 
-use super::keymap::Command;
+use super::keymap::{COMMANDS, Command};
 use super::library::{Catalog, Picker, Tab as PickerTab};
 use super::skua::{Pane, Skua, Tab};
-use super::{App, Filter, Hit, Scope, Section, View};
+use super::{App, Filter, Hit, Rebind, Scope, Section, View};
 use crate::fleet::{Channel, Line as LogLine};
 use crate::view::{Game, QuestProgress, Shown, Stack, Standing, State, found, matches, order};
 use mira_script::skua::library;
@@ -352,6 +352,9 @@ pub(super) fn draw(f: &mut Frame, app: &App, shown: &[Shown]) {
     }
     if app.keys {
         draw_keys(f, body, app);
+    }
+    if let Some(rebind) = &app.rebind {
+        draw_rebind(f, body, app, rebind);
     }
     if app.ending {
         draw_ending(f, body, shown.iter().filter(|s| !s.offline()).count());
@@ -1935,7 +1938,7 @@ fn draw_keys(f: &mut Frame, area: Rect, app: &App) {
         vec!["Account keys act on the marked accounts, or the selected one.".to_owned()];
     if let Some(path) = &app.keymap.path {
         notes.push(format!(
-            "Change keys in {}.",
+            "Press e to change keys. mira saves them in {}.",
             app.mask.hide(&path.display().to_string())
         ));
     }
@@ -1953,6 +1956,97 @@ fn draw_keys(f: &mut Frame, area: Rect, app: &App) {
         .title(" keys ")
         .padding(Padding::horizontal(1));
     f.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
+const REBIND_WIDTH: u16 = 72;
+pub(super) const REBIND_ROWS: usize = 12;
+
+fn draw_rebind(f: &mut Frame, area: Rect, app: &App, rebind: &Rebind) {
+    f.buffer_mut()
+        .set_style(area, Style::new().fg(Color::DarkGray));
+    let width = usize::from(REBIND_WIDTH.min(area.width).saturating_sub(4));
+    let keys: Vec<String> = COMMANDS
+        .iter()
+        .map(|e| app.keymap.keys(&[e.command]))
+        .collect();
+    let key_width = keys.iter().map(|k| k.chars().count()).max().unwrap_or(0);
+    let path = app.keymap.path.as_ref().map_or_else(String::new, |path| {
+        app.mask.hide(&path.display().to_string())
+    });
+    let saved = format!("Blue keys differ from the defaults. mira saves them in {path}.");
+    let saved: Vec<Line> = wrap(&saved, width)
+        .into_iter()
+        .map(|l| Line::raw(l.to_owned()).dark_gray())
+        .collect();
+    let last: Vec<Line> = match (&rebind.error, rebind.waiting) {
+        (_, true) => vec![Line::raw("Press the new key, or esc to cancel.").fg(ACCENT)],
+        (Some(why), false) => wrap(&app.mask.hide(why), width)
+            .into_iter()
+            .map(|l| Line::raw(l.to_owned()).red())
+            .collect(),
+        (None, false) => vec![fit(
+            hints(&[
+                ("↑↓", "pick"),
+                ("enter", "change"),
+                ("backspace", "default"),
+                ("esc", "close"),
+            ]),
+            width,
+        )],
+    };
+    let tall = REBIND_ROWS.min(COMMANDS.len()) + 1 + saved.len() + last.len() + 2;
+    let rect = centered(area, REBIND_WIDTH, tall as u16);
+    f.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(" change keys ")
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let [list, _, note, footer] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(saved.len() as u16),
+        Constraint::Length(last.len() as u16),
+    ])
+    .areas(inner);
+    let height = usize::from(list.height).max(1);
+    let start = rebind
+        .top
+        .max((rebind.cursor + 1).saturating_sub(height))
+        .min(rebind.cursor);
+    let rows: Vec<Line> = COMMANDS
+        .iter()
+        .zip(&keys)
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(i, (entry, keys))| {
+            let keys = if rebind.waiting && i == rebind.cursor {
+                "…"
+            } else {
+                keys
+            };
+            let mut style = Style::new().bold();
+            if !app.keymap.is_default(entry.command) {
+                style = style.fg(ACCENT);
+            }
+            let row = fit(
+                vec![
+                    Span::styled(format!("{keys:<key_width$}  "), style),
+                    Span::raw(entry.about),
+                ],
+                width,
+            );
+            if i == rebind.cursor {
+                row.reversed()
+            } else {
+                row
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(rows), list);
+    f.render_widget(Paragraph::new(saved), note);
+    f.render_widget(Paragraph::new(last), footer);
 }
 
 fn draw_ending(f: &mut Frame, area: Rect, online: usize) {

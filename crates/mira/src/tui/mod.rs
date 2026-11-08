@@ -147,6 +147,14 @@ enum Hit {
 }
 
 #[derive(Default)]
+struct Rebind {
+    cursor: usize,
+    top: usize,
+    waiting: bool,
+    error: Option<String>,
+}
+
+#[derive(Default)]
 struct App {
     home: PathBuf,
     selected: usize,
@@ -154,6 +162,7 @@ struct App {
     details: bool,
     grid: bool,
     keys: bool,
+    rebind: Option<Rebind>,
     keymap: Keymap,
     pane_focus: bool,
     zoomed: bool,
@@ -747,10 +756,6 @@ impl App {
             self.ending = true;
             return None;
         }
-        if self.keys {
-            self.keys = false;
-            return None;
-        }
         if self.ending {
             match key.code {
                 KeyCode::Enter => {
@@ -763,6 +768,56 @@ impl App {
                 KeyCode::Char('q') => return Some(Leave::Detach),
                 KeyCode::Esc => self.ending = false,
                 _ => {}
+            }
+            return None;
+        }
+        if self.keys {
+            self.keys = false;
+            if key.code == KeyCode::Char('e') && self.keymap.path.is_some() {
+                self.rebind = Some(Rebind::default());
+            }
+            return None;
+        }
+        if let Some(rebind) = &mut self.rebind {
+            let last = keymap::COMMANDS.len() - 1;
+            let change = match key.code {
+                _ if rebind.waiting => {
+                    rebind.waiting = false;
+                    (key.code != KeyCode::Esc).then_some(Some(key))
+                }
+                KeyCode::Esc => {
+                    self.rebind = None;
+                    self.keys = true;
+                    return None;
+                }
+                KeyCode::Up => {
+                    rebind.cursor = rebind.cursor.saturating_sub(1);
+                    rebind.top = rebind.top.min(rebind.cursor);
+                    None
+                }
+                KeyCode::Down => {
+                    rebind.cursor = (rebind.cursor + 1).min(last);
+                    let bottom = (rebind.cursor + 1).saturating_sub(draw::REBIND_ROWS);
+                    rebind.top = rebind.top.max(bottom);
+                    None
+                }
+                KeyCode::Enter => {
+                    rebind.waiting = true;
+                    rebind.error = None;
+                    None
+                }
+                KeyCode::Backspace | KeyCode::Delete => Some(None),
+                _ => None,
+            };
+            if let Some(key) = change {
+                let command = keymap::COMMANDS[rebind.cursor].command;
+                match self.keymap.rebind(command, key) {
+                    Ok(keymap) => {
+                        self.keymap = keymap;
+                        rebind.error = None;
+                    }
+                    Err(why) => rebind.error = Some(why),
+                }
             }
             return None;
         }

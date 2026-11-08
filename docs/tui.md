@@ -116,7 +116,9 @@ Opening the drops list focuses the main pane. There `↑` `↓` move, `space` ma
 
 ### Change the keys
 
-Put a `keys.toml` in `~/mira`, or in `MIRA_HOME` when it's set, to change the keys. Each line gives a command a key, or a list of keys. A command you leave out keeps its default, and an empty list unbinds it:
+Press `?`, then `e`, to change keys in the TUI. Pick a command and press `enter`, then the new key. `backspace` puts the default back, and keys that differ from the default show in blue. A key that's already taken shows an error and changes nothing, so to swap two keys, move one to a spare key first. `esc` cancels a change, so it can't be picked this way. `esc` in the list goes back to `?`. mira saves each change to `keys.toml` right away and leaves the rest of the file, comments included, as it was. A key you pick there replaces every key that command had.
+
+You can also write `keys.toml` yourself. It lives in `~/mira`, or in `MIRA_HOME` when it's set. Each line gives a command a key, or a list of keys. A command you leave out keeps its default, and an empty list unbinds it:
 
 ```toml
 #:schema ./keys.schema.json
@@ -126,7 +128,7 @@ pick_script = "ctrl+o"
 details = []
 ```
 
-A key is a character such as `o`, `O` or `?`, or one of `up`, `down`, `left`, `right`, `enter`, `esc`, `tab`, `space`, `backspace`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown` and `f1` to `f12`. Put `ctrl+`, `alt+` or `shift+` in front for a combination. `shift+` works with letters and `tab`; for other shifted characters, write the character itself, like `!`. `mira` refuses to open the TUI when the file names a command it doesn't know, a key it can't read, or one key for two commands, and says which. `ctrl+c` always asks to end the session, and keys inside the script picker, the run prompt and other dialogs stay the same. `?`, the footer and the side panel show the keys you set. mira reads the file when the TUI opens.
+A key is a character such as `o`, `O` or `?`, or one of `up`, `down`, `left`, `right`, `enter`, `esc`, `tab`, `space`, `backspace`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown` and `f1` to `f12`. Put `ctrl+`, `alt+` or `shift+` in front for a combination. `shift+` works with letters and `tab`; for other shifted characters, write the character itself, like `!`. `mira` refuses to open the TUI when the file names a command it doesn't know, a key it can't read, or one key for two commands, and says which. `ctrl+c` always asks to end the session, and keys inside the script picker, the run prompt and other dialogs stay the same. `?`, the footer and the side panel show the keys you set. mira reads the file when the TUI opens, so edits you make by hand show up the next time you open it.
 
 `mira init` writes `keys.schema.json`, so an editor can complete the command names:
 

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
@@ -363,6 +363,33 @@ impl Key {
         Ok(key)
     }
 
+    fn name(self) -> Option<String> {
+        let name = match self.code {
+            KeyCode::Char(' ') => "space".to_owned(),
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::Up => "up".to_owned(),
+            KeyCode::Down => "down".to_owned(),
+            KeyCode::Left => "left".to_owned(),
+            KeyCode::Right => "right".to_owned(),
+            KeyCode::Enter => "enter".to_owned(),
+            KeyCode::Esc => "esc".to_owned(),
+            KeyCode::Tab | KeyCode::BackTab => "tab".to_owned(),
+            KeyCode::Backspace => "backspace".to_owned(),
+            KeyCode::Delete => "delete".to_owned(),
+            KeyCode::Insert => "insert".to_owned(),
+            KeyCode::Home => "home".to_owned(),
+            KeyCode::End => "end".to_owned(),
+            KeyCode::PageUp => "pageup".to_owned(),
+            KeyCode::PageDown => "pagedown".to_owned(),
+            KeyCode::F(n @ 1..=12) => format!("f{n}"),
+            _ => return None,
+        };
+        let shift = self.shift || self.code == KeyCode::BackTab;
+        let held = [(self.ctrl, "ctrl+"), (self.alt, "alt+"), (shift, "shift+")];
+        let prefix: String = held.iter().filter(|(on, _)| *on).map(|(_, m)| *m).collect();
+        Some(format!("{prefix}{name}"))
+    }
+
     fn label(self) -> String {
         let name = match self.code {
             KeyCode::Up => "↑".to_owned(),
@@ -486,6 +513,51 @@ impl Keymap {
         })
     }
 
+    pub(super) fn rebind(&self, command: Command, key: Option<KeyEvent>) -> Result<Keymap, String> {
+        let path = self
+            .path
+            .as_ref()
+            .ok_or("mira has no home folder to keep keys in")?;
+        let shown = path.display();
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("{shown}: {e}")),
+        };
+        let mut file: toml_edit::DocumentMut = text.parse().map_err(|e| format!("{shown}: {e}"))?;
+        let name = COMMANDS[command.at()].name;
+        match key {
+            Some(event) => {
+                let key = Key::of(event).name().ok_or("mira can't use that key")?;
+                let mut value = toml_edit::Value::from(key);
+                if let Some(old) = file.get(name).and_then(toml_edit::Item::as_value) {
+                    *value.decor_mut() = old.decor().clone();
+                }
+                file[name] = toml_edit::Item::Value(value);
+            }
+            None => {
+                file.remove(name);
+            }
+        }
+        let text = file.to_string();
+        let mut keymap = Keymap::parse(&text)?;
+        save(path, &text).map_err(|e| format!("{shown}: {e}"))?;
+        keymap.path = Some(path.clone());
+        Ok(keymap)
+    }
+
+    pub(super) fn is_default(&self, command: Command) -> bool {
+        let defaults = COMMANDS[command.at()]
+            .keys
+            .iter()
+            .map(|k| Key::parse(k).ok());
+        self.bound[command.at()]
+            .iter()
+            .copied()
+            .map(Some)
+            .eq(defaults)
+    }
+
     pub(super) fn command(&self, event: KeyEvent) -> Option<Command> {
         self.lookup.get(&Key::of(event)).copied()
     }
@@ -518,6 +590,15 @@ impl Keymap {
         let firsts: Vec<String> = firsts.into_iter().filter(|k| !k.is_empty()).collect();
         firsts.join(" ")
     }
+}
+
+fn save(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder)?;
+    }
+    let fresh = path.with_extension("toml.new");
+    std::fs::write(&fresh, text)?;
+    std::fs::rename(&fresh, path)
 }
 
 pub fn schema() -> String {
@@ -610,6 +691,68 @@ mod tests {
             Keymap::parse("stop = \"r\"\nrestart = \"R\"").is_ok(),
             "a swap is fine"
         );
+    }
+
+    #[test]
+    fn a_pressed_key_saves_as_text_that_reads_back_as_the_same_key() {
+        for text in [
+            "s",
+            "S",
+            "+",
+            "ctrl++",
+            "ctrl+s",
+            "ctrl+S",
+            "alt+x",
+            "space",
+            "shift+tab",
+            "ctrl+shift+tab",
+            "shift+up",
+            "pagedown",
+            "f5",
+            "?",
+        ] {
+            let key = Key::parse(text).unwrap();
+            let saved = key.name().unwrap();
+            assert_eq!(Key::parse(&saved).unwrap(), key, "{text} saved as {saved}");
+        }
+        let pressed = Key::of(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        assert_eq!(pressed.name().as_deref(), Some("S"));
+    }
+
+    #[test]
+    fn rebinding_saves_the_file_and_keeps_what_else_it_says() {
+        let dir = std::env::temp_dir().join(format!("mira-rebind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join(FILE_NAME);
+        let mut keymap = Keymap {
+            path: Some(path.clone()),
+            ..Keymap::default()
+        };
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        keymap = keymap.rebind(Command::Stop, Some(ctrl_s)).unwrap();
+        assert_eq!(keymap.key(Command::Stop), "ctrl+s");
+        assert!(!keymap.is_default(Command::Stop) && keymap.is_default(Command::Restart));
+
+        std::fs::write(
+            &path,
+            "# my keys\nstop = \"ctrl+s\" # easier\nzoom = \"Z\"\n",
+        )
+        .unwrap();
+        let r = KeyEvent::from(KeyCode::Char('r'));
+        assert_eq!(
+            keymap.rebind(Command::LogIn, Some(r)).unwrap_err(),
+            "r is bound to both log_in and restart"
+        );
+        keymap = keymap.rebind(Command::Zoom, None).unwrap();
+        assert_eq!(keymap.key(Command::Zoom), "z");
+        let k = KeyEvent::from(KeyCode::Char('k'));
+        keymap = keymap.rebind(Command::Stop, Some(k)).unwrap();
+        assert_eq!(keymap.key(Command::Stop), "k");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# my keys\nstop = \"k\" # easier\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
