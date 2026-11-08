@@ -441,7 +441,7 @@ fn the_sidebar_lists_each_account_with_offline_ones_last() {
     let shown = [offline("player1"), farmer("player2"), farmer("player3")];
     let mut app = App::default();
     let s = screen(&app, &shown, 150, 30);
-    let lines: Vec<&str> = s.lines().skip(1).take(4).collect();
+    let lines: Vec<&str> = s.lines().skip(2).take(4).collect();
     assert!(
         lines[0].contains("player2") && lines[0].contains("void-aura.ts"),
         "{s}"
@@ -1548,12 +1548,29 @@ fn rebound_keys_drive_the_tui_and_show_where_keys_are_listed() {
     assert!(s.contains("1 2 D 4 5 6 7 8"), "{s}");
 }
 
+fn lit_boxes(app: &App, shown: &[Shown]) -> Vec<String> {
+    let top = &cells(app, shown, 150, 30)[1];
+    let text: Vec<&str> = top.iter().map(|c| c.symbol()).collect();
+    text.iter()
+        .enumerate()
+        .filter(|&(x, &c)| c == "╭" && top[x].fg == Color::Blue)
+        .map(|(x, _)| {
+            text[x + 2..]
+                .iter()
+                .take_while(|&&c| c != " ")
+                .copied()
+                .collect()
+        })
+        .collect()
+}
+
 #[test]
 fn tab_moves_focus_and_opening_drops_takes_it() {
     let shown = [farmer("player1"), farmer("player2")];
     let mut app = App::default();
-    assert!(
-        accented(&app, &shown, 150, 30, "player2").contains('│'),
+    assert_eq!(
+        lit_boxes(&app, &shown),
+        ["accounts"],
         "the account list starts focused"
     );
     press(&mut app, &shown, KeyCode::Char(' '));
@@ -1561,7 +1578,7 @@ fn tab_moves_focus_and_opening_drops_takes_it() {
 
     press(&mut app, &shown, KeyCode::Char('3'));
     assert!(app.pane_focus, "the drops list takes focus to pick from");
-    assert!(!accented(&app, &shown, 150, 30, "player2").contains('│'));
+    assert_eq!(lit_boxes(&app, &shown), ["player1"]);
     press(&mut app, &shown, KeyCode::Char(' '));
     press(&mut app, &shown, KeyCode::Down);
     assert_eq!(

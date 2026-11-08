@@ -53,7 +53,7 @@ Script paths you type in the TUI also resolve relative to `mira.toml`. The sessi
 
 ## Keys
 
-The screen has two panes: the account list on the left, and the main pane with the selected account's log or one of its lists. `tab` moves focus between them, and the account list's edge lights up while it has focus. `↑` `↓`, `space`, `a`, `enter` and `/` act on the focused pane. With one account there's no account list, so they act on the main pane.
+The screen has two boxes: the account list on the left, and the selected account on the right, with its details above its log or one of its lists. `tab` moves focus between them, and the focused box has a blue border. `↑` `↓`, `space`, `a`, `enter` and `/` act on the focused pane. With one account there's no account list, so they act on the main pane.
 
 These keys act on the marked accounts, or on the selected one when nothing is marked:
 

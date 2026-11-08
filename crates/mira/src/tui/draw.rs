@@ -314,26 +314,34 @@ pub(super) fn draw(f: &mut Frame, app: &App, shown: &[Shown]) {
     if app.grid {
         draw_grid(f, body, app, shown);
     } else if let Some(account) = shown.get(app.selected) {
-        let pane = if sidebar {
-            let fitted = (4 + name_width(shown) + 1 + ABOUT_WIDTH + 1) as u16;
+        if sidebar {
+            let fitted = (4 + name_width(shown) + 1 + ABOUT_WIDTH + 2) as u16;
             let width = app
                 .sidebar_width
                 .unwrap_or(fitted)
                 .clamp(SIDEBAR_MIN, body.width - PANE_MIN);
-            let [left, _, pane, _] = Layout::horizontal([
-                Constraint::Length(width),
-                Constraint::Length(1),
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .areas(body);
+            let [left, right] =
+                Layout::horizontal([Constraint::Length(width), Constraint::Min(0)]).areas(body);
             app.sidebar.set(Some(left));
-            draw_sidebar(f, left, app, shown);
-            pane
+            let pane = app.on_pane(shown);
+            let accounts = pane_box(!pane).title(Line::from(" accounts "));
+            draw_sidebar(f, accounts.inner(left), app, shown);
+            f.render_widget(accounts, left);
+            let (name, status) = identity_parts(account, app.frame);
+            let room = usize::from(right.width).saturating_sub(spans_width(&status) + 8);
+            let mut title = vec![Span::raw(" ")];
+            title.extend(clip(name, room));
+            title.push(Span::raw(" "));
+            let status = [vec![Span::raw(" ")], status, vec![Span::raw(" ")]].concat();
+            let block = pane_box(pane)
+                .title(Line::from(title))
+                .title(Line::from(status).right_aligned())
+                .padding(Padding::horizontal(1));
+            draw_account(f, block.inner(right), account, app, false);
+            f.render_widget(block, right);
         } else {
-            body.inner(Margin::new(1, 0))
-        };
-        draw_account(f, pane, account, app);
+            draw_account(f, body.inner(Margin::new(1, 0)), account, app, true);
+        }
     }
     draw_footer(f, footer, app, shown);
     if let Some(picker) = &app.picker {
@@ -389,7 +397,12 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, shown: &[Shown], overview: 
     } else if let Some(account) = shown.get(app.selected).filter(|_| shown.len() > 1) {
         let order = order(shown, app.search(Scope::Accounts));
         let at = order.iter().position(|&i| i == app.selected).unwrap_or(0);
-        left.push(Span::raw(format!("  {} {}/{}", account.name, at + 1, order.len())).dark_gray());
+        let label = Span::raw(format!("  {} {}/{}", account.name, at + 1, order.len()));
+        left.push(if app.on_pane(shown) {
+            label.dark_gray()
+        } else {
+            label.fg(ACCENT)
+        });
     }
     let accounts = app.search(Scope::Accounts);
     if !accounts.is_empty() {
@@ -431,8 +444,20 @@ fn name_width(shown: &[Shown]) -> usize {
         .clamp(4, 14)
 }
 
+fn pane_box(focused: bool) -> Block<'static> {
+    let style = if focused {
+        Style::new().fg(ACCENT)
+    } else {
+        Style::new().dark_gray()
+    };
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(style)
+        .title_style(style)
+}
+
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
-    let inner = usize::from(area.width.saturating_sub(1));
+    let inner = usize::from(area.width);
     let name_col = name_width(shown).min(inner.saturating_sub(4));
     let rows = sidebar_rows(shown, app.search(Scope::Accounts));
     let offline = rows
@@ -458,13 +483,13 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
                 let rect = Rect {
                     y: area.y + y as u16,
                     height: 1,
-                    width: area.width.saturating_sub(1),
                     ..area
                 };
                 hit(app, rect, Hit::Account(i));
                 sidebar_row(
                     &shown[i],
                     i == app.selected,
+                    !app.pane_focus,
                     app.marked.contains(&i),
                     app.frame,
                     name_col,
@@ -481,14 +506,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
             }
         });
     }
-    let rule = Block::new()
-        .borders(Borders::RIGHT)
-        .border_style(if app.pane_focus {
-            Style::new().dark_gray()
-        } else {
-            Style::new().fg(ACCENT)
-        });
-    f.render_widget(Paragraph::new(lines).block(rule), area);
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn sidebar_rows(shown: &[Shown], query: &str) -> Vec<Option<usize>> {
@@ -507,6 +525,7 @@ fn sidebar_rows(shown: &[Shown], query: &str) -> Vec<Option<usize>> {
 fn sidebar_row(
     account: &Shown,
     selected: bool,
+    focused: bool,
     marked: bool,
     frame: usize,
     name_col: usize,
@@ -515,7 +534,11 @@ fn sidebar_row(
     let status = Status::of(account);
     let name = Span::raw(account.name.clone());
     let mut spans = vec![
-        Span::raw(if selected { "▌" } else { " " }).fg(ACCENT),
+        Span::raw(if selected { "▌" } else { " " }).fg(if focused {
+            ACCENT
+        } else {
+            Color::DarkGray
+        }),
         Span::raw(if marked { "◆" } else { " " }).fg(ACCENT),
         status.mark(frame),
         Span::raw(" "),
@@ -958,8 +981,14 @@ fn task(s: &Shown) -> Field {
     task
 }
 
-fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App) {
-    let head = detail(account, app.details, app.frame, usize::from(area.width));
+fn draw_account(f: &mut Frame, area: Rect, account: &Shown, app: &App, named: bool) {
+    let head = detail(
+        account,
+        named,
+        app.details,
+        app.frame,
+        usize::from(area.width),
+    );
     let [top, divider, below] = Layout::vertical([
         Constraint::Length(head.len() as u16),
         Constraint::Length(1),
@@ -1445,8 +1474,19 @@ fn draw_jump(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(label).style(style), pill);
 }
 
-fn detail(account: &Shown, full: bool, frame: usize, width: usize) -> Vec<Line<'static>> {
-    let mut lines = vec![identity(account, frame, width)];
+fn detail(
+    account: &Shown,
+    named: bool,
+    full: bool,
+    frame: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if named {
+        let (left, right) = identity_parts(account, frame);
+        let left = clip(left, width.saturating_sub(spans_width(&right) + 2));
+        lines.push(spread(left, right, width));
+    }
     lines.extend(trouble(account).map(|t| fit(vec![t], width)));
     lines.push(fit(task(account), width));
     if let Some(g) = &account.game {
@@ -1460,7 +1500,7 @@ fn detail(account: &Shown, full: bool, frame: usize, width: usize) -> Vec<Line<'
     lines
 }
 
-fn identity(s: &Shown, frame: usize, width: usize) -> Line<'static> {
+fn identity_parts(s: &Shown, frame: usize) -> (Field, Field) {
     let mut left = vec![Span::raw(s.name.clone()).bold()];
     if !s.user.eq_ignore_ascii_case(&s.name) {
         left.push(Span::raw(format!(" ({})", s.user)));
@@ -1475,8 +1515,7 @@ fn identity(s: &Shown, frame: usize, width: usize) -> Line<'static> {
     if let Some(up) = s.up {
         right.push(Span::raw(format!("  up {}", span(up))).dark_gray());
     }
-    let left = clip(left, width.saturating_sub(spans_width(&right) + 2));
-    spread(left, right, width)
+    (left, right)
 }
 
 fn summary(s: &Shown, g: &Game) -> Vec<Field> {
