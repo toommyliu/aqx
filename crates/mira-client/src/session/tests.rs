@@ -2832,21 +2832,25 @@ fn picks_up_drops_while_the_bag_has_room() {
 }
 
 #[test]
-fn a_join_leaves_combat_first_and_refuses_when_dead_without_sending() {
+fn a_join_leaves_combat_before_and_after_sending_and_refuses_when_dead_without_sending() {
     let (step, next) = mpsc::channel::<()>();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_farm();
-        peer.send(&json_message(
-            json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}),
-        ));
+        let fighting = json_message(json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}));
+        let idle = json_message(json!({"cmd": "uotls", "unm": "player1", "o": {"intState": 1}}));
+        peer.send(&fighting);
         peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
         thread::sleep(Duration::from_millis(300));
-        let idle = Instant::now();
-        peer.send(&json_message(
-            json!({"cmd": "uotls", "unm": "player1", "o": {"intState": 1}}),
-        ));
-        assert!(peer.expect_at(&packet::transfer("player1", "yulgar-1")) >= idle);
+        let calm = Instant::now();
+        peer.send(&idle);
+        let ignored = peer.expect_at(&packet::transfer("player1", "yulgar-1"));
+        assert!(ignored >= calm);
+        peer.send(&fighting);
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.send(&idle);
+        let again = peer.expect_at(&packet::transfer("player1", "yulgar-1"));
+        assert!(again - ignored >= Limit::Transfer.gap() - SLACK);
         peer.send("%xt%warning%-1%Cannot join that map.%");
         next.recv().unwrap();
         peer.send(&json_message(

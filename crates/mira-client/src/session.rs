@@ -58,6 +58,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(3);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
+const JOIN_PULLBACKS: u8 = 3;
 const CELL_PAD: &str = "Left";
 const VERSION_RETRIES: usize = 3;
 const WALK_SPEED: u32 = 8;
@@ -541,6 +542,7 @@ enum Op {
     Join {
         reply: Reply,
         stage: JoinStage,
+        pulled: u8,
     },
     Cast {
         reply: Reply,
@@ -727,8 +729,8 @@ enum JoinStage {
         until: Instant,
     },
     Sent {
+        to: JoinTarget,
         joins: u64,
-        goto: bool,
         deadline: Instant,
     },
 }
@@ -1597,12 +1599,24 @@ impl Session {
                 return self.step(op, now);
             }
             Action::Goto(name) => match self.start_goto(name, now) {
-                Ok(Some(stage)) => return Some(Op::Join { reply, stage }),
+                Ok(Some(stage)) => {
+                    return Some(Op::Join {
+                        reply,
+                        stage,
+                        pulled: 0,
+                    });
+                }
                 Ok(None) => Ok(()),
                 Err(e) => Err(e),
             },
             Action::Join { map, spot } => match self.start_join(map, spot, now) {
-                Ok(Some(stage)) => return Some(Op::Join { reply, stage }),
+                Ok(Some(stage)) => {
+                    return Some(Op::Join {
+                        reply,
+                        stage,
+                        pulled: 0,
+                    });
+                }
                 Ok(None) => Ok(()),
                 Err(e) => Err(e),
             },
@@ -1747,15 +1761,24 @@ impl Session {
             Op::Join {
                 reply,
                 stage: JoinStage::Leaving { to, cell, deadline },
+                pulled,
             } => match self.step_leaving(&cell, deadline, now) {
                 task::Poll::Pending => Some(Op::Join {
                     reply,
                     stage: JoinStage::Leaving { to, cell, deadline },
+                    pulled,
                 }),
                 task::Poll::Ready(Ok(())) => {
                     let until = self.cooling(Limit::Transfer, now).unwrap_or(now);
                     let stage = JoinStage::Cooling { to, until };
-                    self.step(Op::Join { reply, stage }, now)
+                    self.step(
+                        Op::Join {
+                            reply,
+                            stage,
+                            pulled,
+                        },
+                        now,
+                    )
                 }
                 task::Poll::Ready(Err(e)) => {
                     self.replies.push((reply, Err(e)));
@@ -1765,6 +1788,7 @@ impl Session {
             Op::Join {
                 reply,
                 stage: JoinStage::Cooling { to, .. },
+                pulled,
             } => {
                 let state = self.character.as_ref().map(|me| me.state);
                 let in_room =
@@ -1772,19 +1796,20 @@ impl Session {
                 let refused = match (self.ensure_ready(), state) {
                     (Err(e), _) => Some(e),
                     (Ok(()), Some(CombatState::Dead)) => Some(ActionError::Dead),
-                    (Ok(()), Some(CombatState::InCombat)) if !in_room => {
-                        Some(ActionError::InCombat)
-                    }
                     (Ok(()), _) => None,
                 };
                 if let Some(e) = refused {
                     self.replies.push((reply, Err(e)));
                     return None;
                 }
+                if state == Some(CombatState::InCombat) && !in_room {
+                    return self.pulled_back(reply, to, pulled, now);
+                }
                 if let Some(until) = self.cooling(Limit::Transfer, now) {
                     return Some(Op::Join {
                         reply,
                         stage: JoinStage::Cooling { to, until },
+                        pulled,
                     });
                 }
                 if let JoinTarget::Player(name) = &to
@@ -1807,12 +1832,15 @@ impl Session {
                     ) => packet::transfer_to(area, &self.username, map, cell, pad),
                     (JoinTarget::Map { map, .. }, _) => packet::transfer(&self.username, map),
                 };
-                let goto = matches!(to, JoinTarget::Player(_));
-                self.requested_spot = match to {
+                self.requested_spot = match &to {
                     JoinTarget::Map {
                         map,
                         spot: Some((cell, pad)),
-                    } => Some(Spot { map, cell, pad }),
+                    } => Some(Spot {
+                        map: map.clone(),
+                        cell: cell.clone(),
+                        pad: pad.clone(),
+                    }),
                     _ => None,
                 };
                 self.send(&transfer);
@@ -1820,41 +1848,53 @@ impl Session {
                 Some(Op::Join {
                     reply,
                     stage: JoinStage::Sent {
+                        to,
                         joins,
-                        goto,
                         deadline: now + REPLY_TIMEOUT,
                     },
+                    pulled,
                 })
             }
             Op::Join {
                 reply,
                 stage:
                     JoinStage::Sent {
+                        to,
                         joins,
-                        goto,
                         deadline,
                     },
+                pulled,
             } => {
+                let fighting = self
+                    .character
+                    .as_ref()
+                    .is_some_and(|me| me.state == CombatState::InCombat);
                 let result = if let Err(e) = self.ensure_ready() {
                     Err(e)
                 } else if self.joins != joins {
                     Ok(())
                 } else if let Some(why) = self.refusal.clone() {
-                    Err(if goto && player_not_found(&why) {
-                        ActionError::NoTarget(why)
-                    } else {
-                        ActionError::Refused(why)
-                    })
+                    Err(
+                        if matches!(to, JoinTarget::Player(_)) && player_not_found(&why) {
+                            ActionError::NoTarget(why)
+                        } else {
+                            ActionError::Refused(why)
+                        },
+                    )
+                } else if fighting {
+                    self.requested_spot = None;
+                    return self.pulled_back(reply, to, pulled, now);
                 } else if now >= deadline {
                     Err(ActionError::NoReply)
                 } else {
                     return Some(Op::Join {
                         reply,
                         stage: JoinStage::Sent {
+                            to,
                             joins,
-                            goto,
                             deadline,
                         },
+                        pulled,
                     });
                 };
                 if result.is_err() {
@@ -2266,6 +2306,7 @@ impl Session {
             format!("{map}-{}", random_room())
         };
         self.start_transfer(JoinTarget::Map { map, spot }, now)
+            .map(Some)
     }
 
     fn start_goto(&mut self, name: String, now: Instant) -> Result<Option<JoinStage>, ActionError> {
@@ -2293,23 +2334,46 @@ impl Session {
         {
             return self.start_join(spot.map, Some((spot.cell, spot.pad)), now);
         }
-        self.start_transfer(JoinTarget::Player(name), now)
+        self.start_transfer(JoinTarget::Player(name), now).map(Some)
     }
 
-    fn start_transfer(
+    fn pulled_back(
         &mut self,
+        reply: Reply,
         to: JoinTarget,
+        pulled: u8,
         now: Instant,
-    ) -> Result<Option<JoinStage>, ActionError> {
+    ) -> Option<Op> {
+        if pulled >= JOIN_PULLBACKS {
+            self.replies.push((reply, Err(ActionError::InCombat)));
+            return None;
+        }
+        match self.start_transfer(to, now) {
+            Ok(stage) => self.step(
+                Op::Join {
+                    reply,
+                    stage,
+                    pulled: pulled + 1,
+                },
+                now,
+            ),
+            Err(e) => {
+                self.replies.push((reply, Err(e)));
+                None
+            }
+        }
+    }
+
+    fn start_transfer(&mut self, to: JoinTarget, now: Instant) -> Result<JoinStage, ActionError> {
         let in_combat = self
             .character
             .as_ref()
             .is_some_and(|me| me.state == CombatState::InCombat);
         if in_combat && let Some((cell, deadline)) = self.start_leaving(now)? {
-            return Ok(Some(JoinStage::Leaving { to, cell, deadline }));
+            return Ok(JoinStage::Leaving { to, cell, deadline });
         }
         let until = self.cooling(Limit::Transfer, now).unwrap_or(now);
-        Ok(Some(JoinStage::Cooling { to, until }))
+        Ok(JoinStage::Cooling { to, until })
     }
 
     fn step_leaving(

@@ -24,8 +24,8 @@ use crate::room::{self, MonsterUpdate, MoveToArea, PlayerUpdate, Room, Tick, Use
 use crate::shop::{Bought, LoadedShop};
 
 use super::{
-    BOOST_CHECK, Disconnect, JoinStage, Load, Op, Origin, Phase, Recovery, Session, ShopStage,
-    required_version,
+    BOOST_CHECK, Disconnect, JoinStage, JoinTarget, Load, Op, Origin, Phase, Recovery, Session,
+    ShopStage, required_version,
 };
 
 impl Session {
@@ -68,7 +68,10 @@ impl Session {
                     && matches!(
                         self.current,
                         Some(Op::Join {
-                            stage: JoinStage::Sent { goto: true, .. },
+                            stage: JoinStage::Sent {
+                                to: JoinTarget::Player(_),
+                                ..
+                            },
                             ..
                         })
                     );
