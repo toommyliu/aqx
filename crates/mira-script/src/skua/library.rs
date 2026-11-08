@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 const ARCHIVE: &str = "https://codeload.github.com/auqw/Scripts/tar.gz/refs/heads/Skua";
 const DOWNLOAD_LIMIT: u64 = 64 << 20;
+const UNPACK_LIMIT: u64 = 512 << 20;
 const VERSION: &str = ".mira-version";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,20 +59,23 @@ pub fn open(skua: &Path) -> Result<Option<Library>, String> {
     let Some(version) = version(&scripts)? else {
         return Ok(None);
     };
-    let listed = fs::read(scripts.join("scripts.json"))
-        .map_err(|e| format!("couldn't read the Skua script list: {e}"))?;
-    let listed: Vec<Listed> = serde_json::from_slice(&listed)
-        .map_err(|e| format!("couldn't read the Skua script list: {e}"))?;
+    Ok(Some(Library {
+        commit: version.commit,
+        entries: entries(&scripts)?,
+    }))
+}
+
+fn entries(scripts: &Path) -> Result<Vec<Entry>, String> {
+    let failed = |e: &dyn std::fmt::Display| format!("couldn't read the Skua script list: {e}");
+    let listed = fs::read(scripts.join("scripts.json")).map_err(|e| failed(&e))?;
+    let listed: Vec<Listed> = serde_json::from_slice(&listed).map_err(|e| failed(&e))?;
     let mut entries: Vec<Entry> = listed
         .into_iter()
         .filter(|l| !storage(&l.path))
         .map(Entry::from)
         .collect();
     entries.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(Some(Library {
-        commit: version.commit,
-        entries,
-    }))
+    Ok(entries)
 }
 
 fn storage(path: &str) -> bool {
@@ -141,10 +145,10 @@ impl Entry {
 }
 
 pub fn update(skua: &Path) -> Result<Updated, String> {
-    update_from(skua, ARCHIVE)
+    update_from(skua, ARCHIVE, UNPACK_LIMIT)
 }
 
-fn update_from(skua: &Path, url: &str) -> Result<Updated, String> {
+fn update_from(skua: &Path, url: &str, unpack_limit: u64) -> Result<Updated, String> {
     let failed = |e: io::Error| format!("couldn't update the Skua scripts: {e}");
     fs::create_dir_all(skua).map_err(failed)?;
     let lock = File::create(skua.join(".update.lock")).map_err(failed)?;
@@ -196,13 +200,14 @@ fn update_from(skua: &Path, url: &str) -> Result<Updated, String> {
         .into_with_config()
         .limit(DOWNLOAD_LIMIT)
         .reader();
-    let commit =
-        unpack(body, &staged).map_err(|e| format!("couldn't unpack the Skua scripts: {e}"))?;
+    let commit = unpack(body, &staged, unpack_limit)
+        .map_err(|e| format!("couldn't unpack the Skua scripts: {e}"))?;
     let version = serde_json::to_vec(&Version {
         etag,
         commit: commit.clone(),
     })
     .expect("a version serializes");
+    entries(&staged)?;
     fs::write(staged.join(VERSION), version).map_err(failed)?;
     if scripts.exists() {
         fs::rename(&scripts, &old).map_err(failed)?;
@@ -212,10 +217,11 @@ fn update_from(skua: &Path, url: &str) -> Result<Updated, String> {
     Ok(Updated::To(commit))
 }
 
-fn unpack(body: impl io::Read, into: &Path) -> io::Result<String> {
+fn unpack(body: impl io::Read, into: &Path, limit: u64) -> io::Result<String> {
     fs::create_dir_all(into)?;
     let mut archive = tar::Archive::new(GzDecoder::new(body));
     let mut commit = None;
+    let mut unpacked = 0;
     for entry in archive.entries()? {
         let mut entry = entry?;
         let kind = entry.header().entry_type();
@@ -246,6 +252,13 @@ fn unpack(body: impl io::Read, into: &Path) -> io::Result<String> {
         if kind.is_dir() {
             fs::create_dir_all(&target)?;
         } else if kind.is_file() {
+            unpacked += entry.header().size()?;
+            if unpacked > limit {
+                return Err(io::Error::other(format!(
+                    "the library is larger than {} MB",
+                    limit >> 20
+                )));
+            }
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -413,7 +426,7 @@ mod tests {
         assert_eq!(open(&skua), Ok(None));
 
         assert_eq!(
-            update_from(&skua, &upstream.url),
+            update_from(&skua, &upstream.url, UNPACK_LIMIT),
             Ok(Updated::To("aaaaaaa".into()))
         );
         assert_eq!(read(&skua, "Farm/VoidAura.cs").as_deref(), Some("farm"));
@@ -437,14 +450,17 @@ mod tests {
             ]
         );
 
-        assert_eq!(update_from(&skua, &upstream.url), Ok(Updated::Current));
+        assert_eq!(
+            update_from(&skua, &upstream.url, UNPACK_LIMIT),
+            Ok(Updated::Current)
+        );
 
         upstream.publish(
             archive("bbbbbbb", &[("scripts.json", "[]"), ("CoreBots.cs", "v2")]),
             "\"two\"",
         );
         assert_eq!(
-            update_from(&skua, &upstream.url),
+            update_from(&skua, &upstream.url, UNPACK_LIMIT),
             Ok(Updated::To("bbbbbbb".into()))
         );
         assert_eq!(read(&skua, "CoreBots.cs").as_deref(), Some("v2"));
@@ -463,16 +479,34 @@ mod tests {
             "aaaaaaa",
             &[("scripts.json", "[]"), ("CoreBots.cs", "v1")],
         ));
-        update_from(&skua, &upstream.url).unwrap();
+        update_from(&skua, &upstream.url, UNPACK_LIMIT).unwrap();
 
         upstream.publish(b"not a tarball".to_vec(), "\"two\"");
-        assert!(update_from(&skua, &upstream.url).is_err());
+        assert!(update_from(&skua, &upstream.url, UNPACK_LIMIT).is_err());
         upstream.publish(
             archive("bbbbbbb", &[("CoreBots.cs", "v2"), ("../escaped.cs", "x")]),
             "\"three\"",
         );
-        let escaped = update_from(&skua, &upstream.url).unwrap_err();
+        let escaped = update_from(&skua, &upstream.url, UNPACK_LIMIT).unwrap_err();
         assert!(escaped.contains("outside the library"), "{escaped}");
+        upstream.publish(
+            archive(
+                "ccccccc",
+                &[("scripts.json", "not a list"), ("CoreBots.cs", "v3")],
+            ),
+            "\"four\"",
+        );
+        let unlisted = update_from(&skua, &upstream.url, UNPACK_LIMIT).unwrap_err();
+        assert!(unlisted.contains("script list"), "{unlisted}");
+        upstream.publish(
+            archive(
+                "ddddddd",
+                &[("scripts.json", "[]"), ("CoreBots.cs", &"x".repeat(100))],
+            ),
+            "\"five\"",
+        );
+        let oversized = update_from(&skua, &upstream.url, 64).unwrap_err();
+        assert!(oversized.contains("larger than"), "{oversized}");
 
         assert!(!skua.join("escaped.cs").exists());
         assert_eq!(read(&skua, "CoreBots.cs").as_deref(), Some("v1"));
@@ -487,7 +521,7 @@ mod tests {
         fs::write(scripts(&skua).join("Mine.cs"), "mine").unwrap();
         let upstream = Upstream::start(archive("aaaaaaa", &[("CoreBots.cs", "v1")]));
 
-        let refused = update_from(&skua, &upstream.url).unwrap_err();
+        let refused = update_from(&skua, &upstream.url, UNPACK_LIMIT).unwrap_err();
 
         assert!(refused.contains("wasn't downloaded by mira"), "{refused}");
         assert_eq!(read(&skua, "Mine.cs").as_deref(), Some("mine"));
@@ -502,11 +536,14 @@ mod tests {
             "aaaaaaa",
             &[("scripts.json", "[]"), ("CoreBots.cs", "v1")],
         ));
-        update_from(&skua, &upstream.url).unwrap();
+        update_from(&skua, &upstream.url, UNPACK_LIMIT).unwrap();
         fs::rename(scripts(&skua), skua.join(".Scripts.old")).unwrap();
         fs::create_dir_all(skua.join(".Scripts.new")).unwrap();
 
-        assert_eq!(update_from(&skua, &upstream.url), Ok(Updated::Current));
+        assert_eq!(
+            update_from(&skua, &upstream.url, UNPACK_LIMIT),
+            Ok(Updated::Current)
+        );
 
         assert_eq!(read(&skua, "CoreBots.cs").as_deref(), Some("v1"));
         assert!(!skua.join(".Scripts.old").exists());
