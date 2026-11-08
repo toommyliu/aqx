@@ -107,6 +107,7 @@ public sealed class MiraEvent : IScriptEvent
         add { lock (subscriptions) { onFlashCall += value; Listen(); } }
         remove { lock (subscriptions) { onFlashCall -= value; Listen(); } }
     }
+    internal void ClearFlashCalls() { lock (subscriptions) { onFlashCall = null; Listen(); } }
     public void RaiseStopping(Exception? error) => ScriptStopping?.Invoke(error);
     void OnPacket(Packet packet)
     {

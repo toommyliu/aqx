@@ -301,6 +301,92 @@ public class Relogged {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn automatic_relogin_restarts_past_a_stopping_handler_that_never_returns() {
+    let cancel = Cancel::default();
+    let deadline = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(20));
+        deadline.cancel();
+    });
+    let account = Arc::new(LoginAccount::default());
+    let (outcome, logs, _) = Fake::reconnecting(|msg, wire| {
+        if msg == "disconnect" {
+            wire.hang_up();
+        }
+    })
+    .run_account(
+        r#"
+using System.Threading;
+using Skua.Core.Interfaces;
+public class Stuck {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Log($"run on {bot.Servers.LastName}");
+        if (bot.Servers.LastName == "Fallback") return;
+        bot.Options.AutoRelogin = true;
+        bot.Options.ReloginServer = "Fallback";
+        bot.Options.ReloginTryDelay = 20;
+        bot.Events.ScriptStopping += _ => { Thread.Sleep(Timeout.Infinite); return true; };
+        bot.Send.Packet("disconnect");
+        for (;;) { bot.Map.Jump("r2", "Left"); bot.Sleep(100); }
+    }
+}
+"#,
+        &cancel,
+        Default::default(),
+        account.clone(),
+        |_| {},
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(logs.contains(&"run on Fallback".into()), "{logs:?}");
+    for session in account.sessions.lock().unwrap().drain(..) {
+        session.finish();
+    }
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn automatic_relogin_drops_the_previous_runs_flash_callbacks() {
+    let account = Arc::new(LoginAccount::default());
+    let (outcome, logs, _) = Fake::reconnecting(|msg, wire| {
+        if msg == "disconnect" {
+            wire.hang_up();
+        }
+    })
+    .run_account(
+        r#"
+using Skua.Core.Interfaces;
+public class Callbacks {
+    public void ScriptMain(IScriptInterface bot) {
+        string run = bot.Servers.LastName;
+        bot.Flash.FlashCall += (name, args) => { if (name == "packet" && args[0].ToString()!.Contains("probe")) bot.Log($"{run} saw probe"); };
+        if (run == "Fallback") {
+            bot.Send.Packet("%xt%zm%cmd%1%probe%");
+            bot.Sleep(300);
+            return;
+        }
+        bot.Options.AutoRelogin = true;
+        bot.Options.ReloginServer = "Fallback";
+        bot.Options.ReloginTryDelay = 20;
+        bot.Send.Packet("disconnect");
+        for (;;) { bot.Map.Jump("r2", "Left"); bot.Sleep(100); }
+    }
+}
+"#,
+        &Cancel::default(),
+        Default::default(),
+        account.clone(),
+        |_| {},
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    let probes: Vec<&String> = logs.iter().filter(|l| l.ends_with("saw probe")).collect();
+    assert_eq!(probes, ["Fallback saw probe"], "{logs:?}");
+    for session in account.sessions.lock().unwrap().drain(..) {
+        session.finish();
+    }
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn join_packet_is_nonblocking_and_jump_honors_client_only_auto_correct_and_delay() {
     let started = Instant::now();
     let (outcome, logs, sent) = Fake::start(|_, _| {}).run(

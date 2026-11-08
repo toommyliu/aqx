@@ -68,12 +68,13 @@ public static class Runner
                     delay = bot.Options.SafeRelogin || bot.Kicked ? 70000 : bot.Options.ReloginTryDelay;
                     if (bot.ShouldExit) script.Join(TimeSpan.FromSeconds(8));
                     if (!script.IsAlive && (bot.ShouldExit || error is not null)) stopping = bot.RaiseStopping(error is OperationCanceledException ? null : error);
-                    if (recover) Await(stopping);
+                    if (recover) Await(stopping, TimeSpan.FromSeconds(2));
                 }
                 if (recover && !script.IsAlive && bot.PrepareRestart())
                 {
                     ((MiraEvent)bot.Events).RaiseRelogin(bot.Kicked);
                     bot.Events.ClearHandlers();
+                    ((MiraEvent)bot.Events).ClearFlashCalls();
                     bot.Resume();
                     try
                     {
@@ -92,9 +93,9 @@ public static class Runner
         catch (OperationCanceledException) { return 0; }
         catch (Exception e) { protocol.Finish(EndOutcome.Failed, e.ToString()); return 1; }
     }
-    static void Await(Task handlers)
+    static void Await(Task handlers, TimeSpan? timeout = null)
     {
-        try { handlers.Wait(); } catch (AggregateException e) { Console.Error.WriteLine(e.InnerException?.Message); }
+        try { handlers.Wait(timeout ?? Timeout.InfiniteTimeSpan); } catch (AggregateException e) { Console.Error.WriteLine(e.InnerException?.Message); }
     }
     sealed class Services(MiraBot bot) : IServiceProvider
     {
