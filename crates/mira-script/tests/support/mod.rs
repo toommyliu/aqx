@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use mira_client::testing::{API_OK, Harness, Peer, TOKEN, json_message};
-use mira_client::{Handle, Options, Server};
+use mira_client::{Handle, Options, Reconnect, Server};
 use mira_protocol::{AreaId, EntityId, packet};
 use mira_script::skua::SkuaScript;
 use mira_script::{Account, Cancel, Outcome, Output, Start};
@@ -89,6 +89,23 @@ impl Fake {
         items: Value,
         bank: Value,
         data: Value,
+        response: impl FnMut(&str, &mut Wire) + Send + 'static,
+    ) -> Self {
+        Self::start_options(Options::default(), map, items, bank, data, response)
+    }
+    pub fn reconnecting(response: impl FnMut(&str, &mut Wire) + Send + 'static) -> Self {
+        let options = Options {
+            reconnect: Some(Reconnect::new("pass1".into(), Duration::from_secs(60))),
+            ..Options::default()
+        };
+        Self::start_options(options, FARM, json!([]), json!([]), json!({}), response)
+    }
+    fn start_options(
+        options: Options,
+        map: &str,
+        items: Value,
+        bank: Value,
+        data: Value,
         mut response: impl FnMut(&str, &mut Wire) + Send + 'static,
     ) -> Self {
         let map = map.to_owned();
@@ -138,7 +155,7 @@ impl Fake {
         });
         let sent = Arc::new(Mutex::new(Vec::new()));
         let observed = sent.clone();
-        let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let harness = Harness::start_with_api(options, base, move |listener| {
             let mut peer = Peer::accept(&listener);
             peer.set_read_timeout(Duration::from_secs(30));
             peer.expect(&packet::version_check());
@@ -267,18 +284,20 @@ impl Fake {
 }
 
 fn map_swf() -> Vec<u8> {
-    let mut body = vec![0, 0, 24, 1, 0];
-    for cell in ["Enter", "r1", "r2", "Side1", "Blank"] {
-        body.extend_from_slice(&((43 << 6) | (cell.len() + 1) as u16).to_le_bytes());
-        body.extend_from_slice(cell.as_bytes());
-        body.push(0);
-        body.extend_from_slice(&(1u16 << 6).to_le_bytes());
-    }
-    body.extend_from_slice(&[0, 0]);
-    [
-        b"FWS\x0a".as_slice(),
-        &((body.len() + 8) as u32).to_le_bytes(),
-        &body,
-    ]
-    .concat()
+    use mira_client::testing::MapCell;
+    mira_client::testing::map_swf_with(&[
+        MapCell {
+            name: "Enter",
+            pads: &[],
+            doors: &[(5, "r2", "Left")],
+        },
+        MapCell::named("r1"),
+        MapCell {
+            name: "r2",
+            pads: &[("Top", 480, 300), ("Left", 190, 350)],
+            doors: &[],
+        },
+        MapCell::named("Side1"),
+        MapCell::named("Blank"),
+    ])
 }

@@ -12,7 +12,8 @@ use mira_protocol::{
 use super::*;
 use crate::quest::{QuestItem, QuestReward, QuestStatus, RewardKind};
 use crate::testing::{
-    API_OK, FARM_SKILLS, Harness, JOIN_OK, LOGIN_OK, Peer, TOKEN, json_message, move_to_area,
+    API_OK, FARM_SKILLS, Harness, JOIN_OK, LOGIN_OK, MapCell, Peer, TOKEN, json_message,
+    move_to_area,
 };
 use crate::{
     Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Item, Monster, Readiness, Skill,
@@ -723,11 +724,14 @@ fn tracks_the_players_vitals_haste_and_skills() {
             gold: 10,
             coins: 50,
             member: false,
+            member_days: -1,
             class_name: String::new(),
             class_points: 899,
             char_id: 4242,
             aq: 0,
             email_verified: false,
+            created: String::new(),
+            gender: String::new(),
             bag_slots: 2,
             house_slots: 1,
             bank_slots: 3,
@@ -825,6 +829,12 @@ fn tracks_inventory_and_temp_items() {
         peer.send(&json_message(
             json!({"cmd": "sellItem", "CharItemID": 5003, "iQty": 1, "intAmount": 0}),
         ));
+        peer.send(&json_message(
+            json!({"cmd": "removeItem", "CharItemID": 5001, "iQty": 1}),
+        ));
+        peer.send(&json_message(
+            json!({"cmd": "removeItem", "CharItemID": 5000}),
+        ));
         peer.send("%xt%multiLoginWarning%-1%");
     });
     let session = harness.session.clone();
@@ -844,6 +854,7 @@ fn tracks_inventory_and_temp_items() {
             kind: kind.into(),
             slot: slot.into(),
             equipped,
+            worn: false,
             coins: false,
             member: false,
             meta: String::new(),
@@ -856,8 +867,7 @@ fn tracks_inventory_and_temp_items() {
     assert_eq!(
         *world.inventory,
         [
-            item(100, 5000, "Default Sword", 1, 1, "Sword", "Weapon", false),
-            item(101, 5001, "Health Potion", 4, 10, "Item", "None", false),
+            item(101, 5001, "Health Potion", 3, 10, "Item", "None", false),
             item(102, 5002, "Iron Axe", 1, 1, "Axe", "Weapon", true),
         ]
     );
@@ -879,6 +889,49 @@ fn tracks_inventory_and_temp_items() {
             house: false,
         }]
     );
+}
+
+#[test]
+fn tracks_worn_cosmetics() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        let item = |id: i64, slot: &str, worn: u8| {
+            json!({"ItemID": id, "CharItemID": 5000 + id, "sName": format!("Item {id}"),
+                   "iQty": 1, "iStk": 1, "sType": "Armor", "sES": slot, "bWear": worn})
+        };
+        peer.serve_with_items(json!([
+            item(1, "he", 0),
+            item(2, "he", 1),
+            item(3, "ba", 0),
+            item(4, "Weapon", 0),
+            item(5, "mi", 1),
+        ]));
+        for message in [
+            json!({"cmd": "wearItem", "uid": 7, "ItemID": 1, "sES": "he"}),
+            json!({"cmd": "wearItem", "uid": 8, "ItemID": 3, "sES": "ba"}),
+            json!({"cmd": "wearLoadout", "uid": 7, "costume": {
+                "ba": {"ItemID": 3}, "Weapon": {"ItemID": 4},
+            }}),
+            json!({"cmd": "unwearItem", "uid": 7, "ItemID": 4, "sES": "Weapon"}),
+        ] {
+            peer.send(&json_message(message));
+        }
+        peer.send("%xt%multiLoginWarning%-1%");
+    });
+    let session = harness.session.clone();
+    let events = harness.finish();
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Unreadable { .. })),
+        "{events:?}"
+    );
+    let worn: Vec<ItemId> = session
+        .snapshot()
+        .inventory
+        .iter()
+        .filter(|i| i.worn)
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(worn, [ItemId(3), ItemId(5)]);
 }
 
 #[test]
@@ -1015,6 +1068,12 @@ fn tracks_faction_reputation_and_rank() {
         peer.send(&json_message(
             json!({"cmd": "addGoldExp", "intGold": 5, "intExp": 5, "typ": "m", "id": 1}),
         ));
+        peer.send(&json_message(json!({"cmd": "addFaction", "faction": {
+            "FactionID": "20", "CharFactionID": "902", "sName": "Fishing", "iRep": "400",
+        }})));
+        peer.send(&json_message(
+            json!({"cmd": "CatchResult", "catchResult": {"myRep": 600}}),
+        ));
         peer.send("%xt%multiLoginWarning%-1%");
     });
     let session = harness.session.clone();
@@ -1041,6 +1100,14 @@ fn tracks_faction_reputation_and_rank() {
                 rank: 1,
                 rank_progress: 0,
                 rank_progress_max: Some(900),
+            },
+            Faction {
+                id: FactionId(20),
+                name: "Fishing".into(),
+                rep: 1000,
+                rank: 2,
+                rank_progress: 100,
+                rank_progress_max: Some(2700),
             },
         ]
     );
@@ -1136,7 +1203,8 @@ fn quest_status_follows_the_game_clients_checks() {
                     {"ItemID": "501", "iQty": 2, "iRate": 12.5, "iType": 1},
                 ],
                 "oRewards": {
-                    "itemsS": {"500": {"ItemID": 500, "sName": "Gold Bar", "iStk": 10}},
+                    "itemsS": {"500": {"ItemID": 500, "sName": "Gold Bar", "iStk": 10,
+                        "sDesc": "Heavy", "sType": "Item", "bUpg": "1", "bCoins": 0}},
                     "itemsR": {"501": {"ItemID": "501", "sName": "Gem"}},
                 },
             })),
@@ -1242,6 +1310,10 @@ fn quest_status_follows_the_game_clients_checks() {
                 qty: 3,
                 max_stack: 99,
                 temp: true,
+                description: String::new(),
+                category: String::new(),
+                member: false,
+                coins: false,
             }],
             required: vec![],
             rewards: vec![
@@ -1251,6 +1323,10 @@ fn quest_status_follows_the_game_clients_checks() {
                     qty: 1,
                     max_stack: 10,
                     temp: false,
+                    description: "Heavy".into(),
+                    category: "Item".into(),
+                    member: true,
+                    coins: false,
                     chance: 100.0,
                     kind: RewardKind::Always,
                 },
@@ -1260,6 +1336,10 @@ fn quest_status_follows_the_game_clients_checks() {
                     qty: 2,
                     max_stack: 0,
                     temp: false,
+                    description: String::new(),
+                    category: String::new(),
+                    member: false,
+                    coins: false,
                     chance: 12.5,
                     kind: RewardKind::Rolled,
                 },
@@ -1422,6 +1502,7 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
     };
     assert!(removed("Pact") && !removed("Slow"));
     let world = session.snapshot();
+    let applied = Instant::now();
     let aura = |name: &str, duration: f64, value: Option<f64>, caster| Aura {
         name: name.into(),
         icon: String::new(),
@@ -1434,10 +1515,12 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
         caster,
         effects: Vec::new(),
         expires: None,
+        applied,
     };
     let untimed = |auras: &[Aura]| -> Vec<Aura> {
         let drop_time = |a: &Aura| Aura {
             expires: None,
+            applied,
             ..a.clone()
         };
         auras.iter().map(drop_time).collect()
@@ -1449,17 +1532,14 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
     assert!(mine.active[0].expires.is_some_and(|at| at > Instant::now()));
     assert_eq!(mine.passive[0].expires, None);
     assert_eq!(
-        Auras {
-            active: untimed(&mine.active),
-            passive: untimed(&mine.passive),
-        },
-        Auras {
-            active: vec![
+        (untimed(&mine.active), untimed(&mine.passive)),
+        (
+            vec![
                 aura("Stun", 6.0, Some(2.0), from_monster),
                 aura("Slow", 3.0, None, from_monster),
                 aura("Stun", 6.0, Some(2.0), from_monster),
             ],
-            passive: vec![Aura {
+            vec![Aura {
                 persist: false,
                 effects: vec![
                     StatEffect {
@@ -1475,7 +1555,7 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
                 ],
                 ..aura("Hot Headed", 0.0, None, None)
             }],
-        }
+        )
     );
     let monsters = &world.room.as_ref().unwrap().monsters;
     assert!(monsters[0].auras.active.is_empty());
@@ -1493,6 +1573,7 @@ fn tracks_auras_the_way_the_game_client_stores_them() {
             caster: Some(Caster::Player(EntityId(7))),
             effects: Vec::new(),
             expires: None,
+            applied,
         }]
     );
     assert_eq!(
@@ -1957,6 +2038,47 @@ fn wait_until(session: &Handle, done: impl Fn(&Me) -> bool) {
 }
 
 #[test]
+fn a_cell_locked_by_kill_count_opens_once_enough_monsters_die() {
+    let (tried, tried_jump) = mpsc::channel();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "farm-1"));
+        peer.send(&json_message(json!({
+            "cmd": "moveToArea", "areaId": 43, "areaName": "farm-1",
+            "intKillCount": 1, "objLock": {"r2": "2"},
+            "uoBranch": [{"entID": 7, "strUsername": "player1", "strFrame": "Enter"}],
+            "mondef": [{"MonID": 10, "strMonName": "Mosquito"}],
+            "monmap": [{"MonMapID": 1, "MonID": 10, "strFrame": "Enter", "bRed": 0}],
+            "monBranch": [{"MonMapID": 1, "MonID": 10, "intHP": 500, "intHPMax": 500, "intState": 1}],
+        })));
+        peer.send("%xt%server%-1%You joined \"farm-1\"!%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        tried_jump.recv_timeout(Duration::from_secs(5)).unwrap();
+        peer.expect_silence(Duration::from_millis(50));
+        peer.send(&json_message(
+            json!({"cmd": "mtls", "id": 1, "o": {"intHP": 0}}),
+        ));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("farm-1").wait().unwrap();
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    assert_eq!(session.snapshot().room.as_ref().unwrap().cell, "Enter");
+    tried.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while session.snapshot().room.as_ref().unwrap().monsters[0].hp != 0 {
+        assert!(Instant::now() < deadline, "the monster never died");
+        thread::sleep(Duration::from_millis(5));
+    }
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    assert_eq!(session.snapshot().room.as_ref().unwrap().cell, "r2");
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn leaving_combat_interrupts_the_fight_moves_away_from_aggressive_monsters_and_waits_for_the_server()
  {
     let harness = Harness::start(Options::default(), |listener| {
@@ -2032,6 +2154,58 @@ fn a_refused_skill_reports_it_and_keeps_its_old_cooldown() {
         Err(ActionError::Refused(why)) if why == "the server refused Strike"
     ));
     session.use_skill("a1", Some(ONE)).wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_fired_skill_answers_once_sent_and_lets_queued_actions_pass_while_it_waits() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.expect("%xt%zm%afk%1%false%");
+        let moved = peer.expect_at(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
+        let shield = peer.expect_at(&gar(0, "a2", &[Aim::Player(EntityId(7))]));
+        assert!(shield - moved >= Duration::from_millis(700) - SLACK);
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    session.send_now("%xt%zm%afk%1%false%").wait().unwrap();
+    let shield = session.fire_skill("a2", None);
+    assert!(matches!(
+        session.fire_skill("a1", Some(ONE)).wait(),
+        Err(ActionError::Unusable(why)) if why == "another skill is waiting to fire"
+    ));
+    session.move_to_cell("Enter", "Spawn").wait().unwrap();
+    shield.wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn direct_requests_answer_while_a_queued_action_waits_on_the_server() {
+    let harness = Harness::start(Options::default(), |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::get_quests(AreaId(42), &[QuestId(30)]));
+        peer.expect("%xt%zm%afk%1%false%");
+        peer.send(&json_message(
+            json!({"cmd": "getQuests", "quests": {"30": {"QuestID": 30, "sName": "Potion Run"}}}),
+        ));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let loading = session.load_quests(&[QuestId(30)]);
+    session.inject(&json_message(
+        json!({"cmd": "balance", "intGold": 10, "intCoins": 50}),
+    ));
+    session.sync().wait().unwrap();
+    assert_eq!(session.snapshot().me.as_ref().unwrap().gold, 10);
+    session.send_now("%xt%zm%afk%1%false%").wait().unwrap();
+    loading.wait().unwrap();
     session.logout();
     harness.finish();
 }
@@ -2197,6 +2371,88 @@ fn untargeting_ends_the_fight_and_the_auto_attack_without_moving() {
 }
 
 #[test]
+fn a_death_keeps_the_target_and_stops_the_auto_attack_until_the_respawn_move() {
+    let (retargeted, next) = mpsc::channel::<()>();
+    let (cleared, respawned) = mpsc::channel::<()>();
+    let (quiet, checked) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.expect(&gar(0, "aa", &[ONE]));
+        peer.answer(0, 1);
+        peer.send(&json_message(
+            json!({"cmd": "ct", "p": {"player1": {"intHP": 0, "intState": 0}}}),
+        ));
+        next.recv().unwrap();
+        peer.expect_silence(Duration::from_millis(1500));
+        peer.send(&json_message(
+            json!({"cmd": "uotls", "unm": "player1", "o": {"intHP": 1000, "intState": 1}}),
+        ));
+        peer.send("%xt%resTimed%-1%");
+        peer.expect(&packet::move_to_cell(AreaId(43), "Enter", "Spawn"));
+        peer.expect(&packet::aggro_mon(AreaId(43), &[MonMapId(1)]));
+        respawned.recv().unwrap();
+        peer.expect_silence(Duration::from_millis(1500));
+        quiet.send(()).unwrap();
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    session.attack(MonMapId(1)).wait().unwrap();
+    wait_until(session, |me| me.state == CombatState::Dead);
+    assert_eq!(session.snapshot().target, Some(MonMapId(1)));
+    session.attack(MonMapId(2)).wait().unwrap();
+    assert_eq!(session.snapshot().target, Some(MonMapId(2)));
+    retargeted.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while session.snapshot().target.is_some() {
+        assert!(
+            Instant::now() < deadline,
+            "the respawn move kept the target"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    cleared.send(()).unwrap();
+    checked.recv().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_class_change_readies_the_new_skills_but_a_rank_up_keeps_their_cooldowns() {
+    let (cast, next) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_farm();
+        peer.expect(&gar(0, "a1", &[ONE, TWO]));
+        peer.answer(0, 1);
+        next.recv().unwrap();
+        let ranked = FARM_SKILLS.replacen(r#""isOK": false"#, r#""isOK": true"#, 1);
+        peer.send(&json_message(serde_json::from_str(&ranked).unwrap()));
+        next.recv().unwrap();
+        peer.send(&json_message(
+            json!({"cmd": "updateClass", "uid": 7, "sClassName": "Mage", "iCP": 0}),
+        ));
+        let mage = FARM_SKILLS.replacen("Strike", "Fireball", 1);
+        peer.send(&json_message(serde_json::from_str(&mage).unwrap()));
+        peer.expect_logout();
+    });
+    wait_for_farm(&harness);
+    let session = &harness.session;
+    let a1_used = || session.snapshot().skill_timing["a1"].last_use.is_some();
+    session.use_skill("a1", Some(ONE)).wait().unwrap();
+    assert!(a1_used());
+    cast.send(()).unwrap();
+    wait_until(session, |me| me.skills.iter().all(|s| s.unlocked));
+    assert!(a1_used());
+    cast.send(()).unwrap();
+    wait_until(session, |me| me.skills.iter().any(|s| s.name == "Fireball"));
+    assert!(!a1_used());
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn cancelling_a_queued_action_or_the_fight_leaves_the_rest_alone() {
     let (fighting, started) = mpsc::channel::<()>();
     let (cancelled, next) = mpsc::channel::<()>();
@@ -2241,7 +2497,7 @@ fn cancelling_answers_at_once_but_holds_the_queue_until_a_sent_request_is_answer
     let (fetching, sent) = mpsc::channel::<()>();
     let (cancelled, next) = mpsc::channel::<()>();
     let ids: Vec<QuestId> = (1..=15).map(QuestId).collect();
-    let first = ids[..14].to_vec();
+    let first = ids.clone();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
@@ -2298,15 +2554,12 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
         let ids: Vec<QuestId> = (1..=15).map(QuestId).collect();
-        let first = peer.expect_at(&packet::get_quests(AreaId(42), &ids[..14]));
-        peer.send(&json_message(json!({"cmd": "getQuests", "quests": {}})));
-        let second = peer.expect_at(&packet::get_quests(AreaId(42), &ids[14..]));
-        assert!(second - first >= Limit::LoadQuests.gap() - SLACK);
+        let first = peer.expect_at(&packet::get_quests(AreaId(42), &ids));
         peer.send(&json_message(
             json!({"cmd": "getQuests", "quests": {"15": {"QuestID": 15, "sName": "Fifteen"}}}),
         ));
-        let third = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(30)]));
-        assert!(third - second >= Limit::LoadQuests.gap() - SLACK);
+        let second = peer.expect_at(&packet::get_quests(AreaId(42), &[QuestId(30)]));
+        assert!(second - first >= Limit::LoadQuests.gap() - SLACK);
         peer.send(&json_message(
             json!({"cmd": "getQuests", "quests": {"16": {"QuestID": 16, "sName": "Sixteen"}}}),
         ));
@@ -2355,7 +2608,7 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
     assert!(session.snapshot().accepted_quests.contains(&QuestId(30)));
     session.accept_quest(QuestId(30)).wait().unwrap();
     session
-        .complete_quest_special(QuestId(30), Some(ItemId(600)), 2, true)
+        .complete_quest_unchecked(QuestId(30), Some(ItemId(600)), 2, true)
         .wait()
         .unwrap();
     let world = session.snapshot();
@@ -2411,6 +2664,20 @@ fn quest_actions_make_the_clients_checks_before_sending() {
             None,
             1,
         ));
+        peer.send("%xt%zm%tryQuestComplete%42%99%-1%false%1%wvz%");
+        peer.send(&json_message(
+            json!({"cmd": "ccqr", "QuestID": 44, "bSuccess": 1, "sName": "Echoed"}),
+        ));
+        peer.expect(&packet::accept_quest(AreaId(42), QuestId(44)));
+        peer.send(&json_message(
+            json!({"cmd": "acceptQuest", "QuestID": 44, "bSuccess": 1}),
+        ));
+        peer.expect(&packet::try_quest_complete(
+            AreaId(42),
+            QuestId(44),
+            None,
+            1,
+        ));
         peer.send("%xt%zm%tryQuestComplete%42%44%-1%false%1%wvz%");
         peer.expect(&packet::logout());
     });
@@ -2440,6 +2707,8 @@ fn quest_actions_make_the_clients_checks_before_sending() {
     let missing = session.load_quests(&[QuestId(46), QuestId(45), QuestId(44)]);
     assert!(matches!(missing.wait(), Err(ActionError::NoTarget(_))));
     assert!(session.snapshot().quests.contains_key(&QuestId(45)));
+    session.complete_quest(QuestId(44), None, 1).wait().unwrap();
+    session.accept_quest(QuestId(44)).wait().unwrap();
     let echoed = session.complete_quest(QuestId(44), None, 1).wait();
     assert!(matches!(echoed, Err(ActionError::Refused(_))));
     session.logout();
@@ -2717,6 +2986,8 @@ fn buys_and_sells_within_the_clients_limits() {
                  "iQty": 1, "TokID": 101, "TokQty": 2},
                 {"ItemID": 906, "ShopItemID": 75, "sName": "Bow", "iCost": 1, "iStk": 1,
                  "iQty": 1, "sType": "Bow"},
+                {"ItemID": 907, "ShopItemID": 76, "sName": "Dust", "iCost": 10, "iStk": 10,
+                 "iQty": 1, "sType": "Item"},
             ],
         }})));
         let bought = peer.expect_at(&packet::buy_item(
@@ -2751,6 +3022,23 @@ fn buys_and_sells_within_the_clients_limits() {
             "cmd": "sellItem", "CharItemID": 5001, "iQty": 2, "iQtyNow": 7, "intAmount": 50,
             "bCoins": 0,
         })));
+        peer.send(&json_message(
+            json!({"cmd": "loadBank", "bitSuccess": 1, "items": [
+                {"ItemID": 907, "CharItemID": 5007, "sName": "Dust", "iQty": 2, "iStk": 10,
+                 "sType": "Item"},
+            ]}),
+        ));
+        peer.expect(&packet::buy_item(
+            AreaId(42),
+            ItemId(907),
+            ShopId(7),
+            ShopItemId(76),
+            3,
+        ));
+        peer.send(&json_message(json!({
+            "cmd": "buyItem", "bitSuccess": 1, "ItemID": 907, "CharItemID": 5007, "iQty": 3,
+            "bBank": 1,
+        })));
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
@@ -2780,6 +3068,15 @@ fn buys_and_sells_within_the_clients_limits() {
     session.sell(ItemId(101), 2).wait().unwrap();
     let world = session.snapshot();
     assert_eq!((potions(&world), world.me.as_ref().unwrap().gold), (7, 850));
+    session.buy(ShopItemId(76), 3).wait().unwrap();
+    let world = session.snapshot();
+    assert!(!world.inventory.iter().any(|i| i.id == ItemId(907)));
+    let bank = world.bank.as_ref().unwrap();
+    assert_eq!(
+        bank.iter().map(|i| (i.id, i.qty)).collect::<Vec<_>>(),
+        [(ItemId(907), 5)]
+    );
+    assert_eq!(world.me.as_ref().unwrap().gold, 820);
     session.logout();
     harness.finish();
 }
@@ -3089,6 +3386,8 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
         peer.send(&json_message(
             json!({"cmd": "cb", "p": {"player1": {"intState": 2}}}),
         ));
+        peer.expect(&packet::equip_item(AreaId(42), ItemId(5)));
+        peer.send(&worn("equipItem", 5));
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
@@ -3133,6 +3432,7 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
         session.equip(ItemId(3)).wait(),
         Err(ActionError::InCombat)
     ));
+    session.equip_unchecked(ItemId(5)).wait().unwrap();
     session.logout();
     harness.finish();
 }
@@ -4534,7 +4834,7 @@ fn aggro_all_includes_monsters_in_other_cells() {
 }
 
 #[test]
-fn rest_packets_do_not_send_an_emote_or_wait_for_recovery() {
+fn rest_packets_skip_the_cooldown_instead_of_waiting_and_send_no_emote() {
     let harness = Harness::start(Options::default(), |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
@@ -4545,6 +4845,10 @@ fn rest_packets_do_not_send_an_emote_or_wait_for_recovery() {
     });
     harness.session.ready().wait().unwrap();
     harness.session.request_rest_packet().wait().unwrap();
+    let skipped = Instant::now();
+    harness.session.request_rest_packet().wait().unwrap();
+    assert!(skipped.elapsed() < Duration::from_millis(500));
+    thread::sleep(Limit::RestPacket.gap());
     harness.session.request_rest_packet().wait().unwrap();
     harness.session.logout();
     harness.finish();
@@ -4584,7 +4888,12 @@ fn accept_map_request(listener: &TcpListener) -> (TcpStream, Vec<String>) {
 }
 
 fn reply_map(stream: &mut TcpStream, cells: &[&str]) {
-    let body = crate::testing::map_swf(cells);
+    let cells: Vec<_> = cells.iter().map(|name| MapCell::named(name)).collect();
+    reply_map_with(stream, &cells);
+}
+
+fn reply_map_with(stream: &mut TcpStream, cells: &[MapCell]) {
+    let body = crate::testing::map_swf_with(cells);
     write!(
         stream,
         "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
@@ -4646,6 +4955,155 @@ fn map_cells_load_after_each_join_with_the_client_headers_and_cache_by_file() {
     assert!(room.cells_loaded);
     thread::sleep(Duration::from_millis(50));
     assert!(matches!(http.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_door_reply_moves_the_player_into_the_doors_cell_without_a_move_packet() {
+    let (http, base) = map_http();
+    let (replied, reply_seen) = mpsc::channel();
+    let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "arena-1"));
+        join_map(&mut peer, 43, "arena-1", "arena.swf");
+        peer.expect("%xt%zm%mtcid%43%9%");
+        peer.send("%xt%mtcid%-1%9%");
+        peer.expect("%xt%zm%mtcid%43%5%");
+        peer.send("%xt%mtcid%-1%5%3%");
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(9)]));
+        replied.send(()).unwrap();
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("arena-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let loading = session.load_cells();
+    reply_map_with(
+        &mut stream,
+        &[
+            MapCell {
+                name: "Enter",
+                pads: &[],
+                doors: &[(5, "r2", "Left")],
+            },
+            MapCell {
+                name: "r2",
+                pads: &[],
+                doors: &[(9, "Enter", "Right")],
+            },
+        ],
+    );
+    loading.wait().unwrap();
+    let updates = session.updates();
+    session.send_raw("%xt%zm%mtcid%43%9%").wait().unwrap();
+    session.send_raw("%xt%zm%mtcid%43%5%").wait().unwrap();
+    reply_seen.recv_timeout(Duration::from_secs(5)).unwrap();
+    let world = session.snapshot();
+    let room = world.room.as_ref().unwrap();
+    assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r2", "Left"));
+    assert!(updates.try_iter().any(|update| matches!(
+        update,
+        Update::Event(Event::Moved { cell, pad }) if cell == "r2" && pad == "Left"
+    )));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn the_player_stands_on_the_pad_after_a_join_or_a_jump() {
+    let (http, base) = map_http();
+    let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "arena-1"));
+        join_map(&mut peer, 43, "arena-1", "arena.swf");
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(9)]));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Top"));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("arena-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let loading = session.load_cells();
+    reply_map_with(
+        &mut stream,
+        &[
+            MapCell {
+                name: "Enter",
+                pads: &[("Spawn", 322, 350)],
+                doors: &[],
+            },
+            MapCell {
+                name: "r2",
+                pads: &[("Right", 788, 350), ("Left", 190, 340)],
+                doors: &[],
+            },
+        ],
+    );
+    loading.wait().unwrap();
+    let position = || {
+        let world = session.snapshot();
+        let room = world.room.as_ref().unwrap();
+        (room.x, room.y)
+    };
+    assert_eq!(position(), (322, 350));
+    session.move_to_cell("r2", "Left").wait().unwrap();
+    assert_eq!(position(), (190, 340));
+    session.move_to_cell("r2", "Top").wait().unwrap();
+    assert_eq!(position(), (480, 275));
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_corrected_jump_swaps_a_pad_the_cell_lacks_for_left_or_its_first_pad() {
+    let (http, base) = map_http();
+    let harness = Harness::start_with_api(Options::default(), base, move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "arena-1"));
+        join_map(&mut peer, 43, "arena-1", "arena.swf");
+        peer.expect(&packet::move_to_cell(AreaId(43), "r2", "Left"));
+        peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(9)]));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r3", "Top"));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r3", "Right"));
+        peer.expect(&packet::move_to_cell(AreaId(43), "r3", "Bottom"));
+        peer.expect(&packet::move_to_cell(AreaId(43), "Blank", "Bottom"));
+        peer.expect_logout();
+    });
+    let session = &harness.session;
+    session.join("arena-1").wait().unwrap();
+    let (mut stream, _) = accept_map_request(&http);
+    let loading = session.load_cells();
+    reply_map_with(
+        &mut stream,
+        &[
+            MapCell {
+                name: "r2",
+                pads: &[("Right", 788, 350), ("Left", 190, 340)],
+                doors: &[],
+            },
+            MapCell {
+                name: "r3",
+                pads: &[("Top", 480, 300), ("Right", 788, 350)],
+                doors: &[],
+            },
+            MapCell::named("Blank"),
+        ],
+    );
+    loading.wait().unwrap();
+    let corrected = Jump {
+        client_only: false,
+        correct_pad: true,
+    };
+    session.jump("r2", "Bottom", corrected).wait().unwrap();
+    session.jump("r3", "Bottom", corrected).wait().unwrap();
+    session.jump("r3", "Right", corrected).wait().unwrap();
+    session.move_to_cell("r3", "Bottom").wait().unwrap();
+    session.jump("Blank", "Bottom", corrected).wait().unwrap();
     session.logout();
     harness.finish();
 }
@@ -4850,7 +5308,17 @@ fn local_cell_movement_updates_state_without_sending_a_packet() {
     });
     let session = &harness.session;
     session.ready().wait().unwrap();
-    session.move_to_cell_local("r1", "Right").wait().unwrap();
+    session
+        .jump(
+            "r1",
+            "Right",
+            Jump {
+                client_only: true,
+                correct_pad: false,
+            },
+        )
+        .wait()
+        .unwrap();
     let world = session.snapshot();
     let room = world.room.as_ref().unwrap();
     assert_eq!((&*room.cell, &*room.pad), ("r1", "Right"));

@@ -27,10 +27,16 @@ public static class Runner
             typeof(IScriptInterface).GetProperty(nameof(IScriptInterface.Instance))!.SetValue(null, bot);
             Ioc.Default.ConfigureServices(new Services(bot));
             string bundledSkills = new[] { Path.Combine(compiler.Root, "Skills", "AdvancedSkills.json"), Path.Combine(AppContext.BaseDirectory, "AdvancedSkills.json") }.FirstOrDefault(File.Exists) ?? "";
-            if (!File.Exists(ClientFileSources.SkuaAdvancedSkillsFile) && bundledSkills.Length > 0)
+            string skills = ClientFileSources.SkuaAdvancedSkillsFile;
+            if (bundledSkills.Length > 0 && (!File.Exists(skills) || File.GetLastWriteTimeUtc(bundledSkills) > File.GetLastWriteTimeUtc(skills) && !File.ReadAllBytes(bundledSkills).AsSpan().SequenceEqual(File.ReadAllBytes(skills))))
             {
                 Directory.CreateDirectory(ClientFileSources.SkuaDIR);
-                File.Copy(bundledSkills, ClientFileSources.SkuaAdvancedSkillsFile);
+                foreach (string target in new[] { skills, Path.Combine(ClientFileSources.SkuaDIR, "UserAdvancedSkills.json") })
+                {
+                    string temp = $"{target}.{Environment.ProcessId}";
+                    File.Copy(bundledSkills, temp, true);
+                    File.Move(temp, target, true);
+                }
             }
             while (true)
             {
@@ -52,6 +58,7 @@ public static class Runner
                 }) { IsBackground = true, Name = "Script thread" };
                 bool recover = false;
                 int delay = 0;
+                Task stopping = Task.CompletedTask;
                 using (MiraBackground background = new(bot, protocol))
                 {
                     background.Start();
@@ -59,13 +66,15 @@ public static class Runner
                     while (!script.Join(20) && !bot.ShouldExit) { }
                     recover = bot.Disconnected && bot.Options.AutoRelogin && !protocol.Stopping.IsCancellationRequested;
                     delay = bot.Options.SafeRelogin || bot.Kicked ? 70000 : bot.Options.ReloginTryDelay;
-                    if (bot.ShouldExit || error is not null) bot.RaiseStopping(error is OperationCanceledException ? null : error);
-                    if (bot.ShouldExit) { script.Join(TimeSpan.FromSeconds(5)); if (script.IsAlive) script.Join(TimeSpan.FromSeconds(3)); }
+                    if (bot.ShouldExit) script.Join(TimeSpan.FromSeconds(8));
+                    if (!script.IsAlive && (bot.ShouldExit || error is not null)) stopping = bot.RaiseStopping(error is OperationCanceledException ? null : error);
+                    if (recover) Await(stopping, TimeSpan.FromSeconds(2));
                 }
                 if (recover && !script.IsAlive && bot.PrepareRestart())
                 {
                     ((MiraEvent)bot.Events).RaiseRelogin(bot.Kicked);
                     bot.Events.ClearHandlers();
+                    ((MiraEvent)bot.Events).ClearFlashCalls();
                     bot.Resume();
                     try
                     {
@@ -77,17 +86,24 @@ public static class Runner
                 }
                 context.Unload();
                 protocol.Finish(error is not null && error is not OperationCanceledException ? EndOutcome.Failed : bot.ShouldExit ? EndOutcome.Stopped : EndOutcome.Finished, error is OperationCanceledException ? null : error?.ToString());
+                Await(stopping);
                 return 0;
             }
         }
         catch (OperationCanceledException) { return 0; }
         catch (Exception e) { protocol.Finish(EndOutcome.Failed, e.ToString()); return 1; }
     }
+    static void Await(Task handlers, TimeSpan? timeout = null)
+    {
+        try { handlers.Wait(timeout ?? Timeout.InfiniteTimeSpan); } catch (AggregateException e) { Console.Error.WriteLine(e.InnerException?.Message); }
+    }
     sealed class Services(MiraBot bot) : IServiceProvider
     {
         readonly IGetScriptsService scripts = new MiraGetScriptsService();
         readonly IQuestDataLoaderService quests = new global::Skua.Core.Services.QuestDataLoaderService(bot.Quests, bot.Player, bot.Flash, bot.Wait);
         readonly IDialogService dialogs = new MiraDialogService(bot);
-        public object? GetService(Type type) => type == typeof(IQuestDataLoaderService) ? quests : type == typeof(IGetScriptsService) ? scripts : type == typeof(IScriptInterface) ? bot : type == typeof(IScriptManager) ? bot.Manager : type == typeof(IDialogService) ? dialogs : typeof(MiraBot).GetProperties().FirstOrDefault(p => p.PropertyType == type)?.GetValue(bot);
+        readonly IFileDialogService files = new MiraFileDialogService();
+        readonly IThemeService themes = new MiraThemeService();
+        public object? GetService(Type type) => type == typeof(IQuestDataLoaderService) ? quests : type == typeof(IGetScriptsService) ? scripts : type == typeof(IScriptInterface) ? bot : type == typeof(IScriptManager) ? bot.Manager : type == typeof(IDialogService) ? dialogs : type == typeof(IFileDialogService) ? files : type == typeof(IThemeService) ? themes : typeof(MiraBot).GetProperties().FirstOrDefault(p => p.PropertyType == type)?.GetValue(bot);
     }
 }

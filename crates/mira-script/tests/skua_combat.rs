@@ -47,6 +47,7 @@ public class AuraTime
         var seal = bot.Self.GetAura("Righteous Seal");
         bot.Log($"seal stacks {bot.Self.GetAuraStacks("Righteous Seal")}, rule stacks {bot.Self.GetAuraRuleStacks("Righteous Seal")}");
         bot.Log($"seal x{seal?.Value} with {(seal?.RemainingTime is > 60 and <= 120 ? "minutes" : $"{seal?.RemainingTime} s")} left");
+        bot.Log($"doom stacks {bot.Self.GetAuraStacks("Doom")}, rule stacks {bot.Self.GetAuraRuleStacks("Doom")}, active {bot.Self.HasActiveAura("Doom")}, {bot.Self.Auras.Count} auras, {bot.Self.Snapshots.Count} snapshots");
     }
 }
 "#;
@@ -208,15 +209,23 @@ fn a_monster_in_combat_reads_as_state_2() {
 #[test]
 #[ignore = "run with npm run skua:test"]
 fn an_aura_reports_the_time_it_has_left() {
-    let source = AURA_TIME.replace("var seal", "bot.Map.Jump(\"r2\", \"Left\"); bot.Wait.ForTrue(() => bot.Self.HasActiveAura(\"Righteous Seal\"), 20); var seal");
+    let source = AURA_TIME.replace("var seal", "bot.Map.Jump(\"r2\", \"Left\"); bot.Wait.ForTrue(() => bot.Self.GetAuraStacks(\"Doom\") == 8, 20); var seal");
     let (outcome, logs, _) = Fake::start(|message, wire| {
         if message.contains("%moveToCell%") {
-            wire.object(r#"{"cmd":"aura+","auras":[{"nam":"Righteous Seal","dur":120,"val":7,"stk":2,"isNew":true}],"tInf":"p:1001"}"#);
+            wire.object(r#"{"cmd":"aura+","auras":[{"nam":"Righteous Seal","dur":120,"val":7,"stk":2,"isNew":true},{"nam":"Doom","dur":0,"stk":9,"isNew":true}],"tInf":"p:1001"}"#);
+            wire.object(r#"{"cmd":"aura+p","auras":[{"nam":"Righteous Seal","val":50}],"tInf":"p:1001"}"#);
+            wire.object(r#"{"cmd":"aura+","auras":[{"nam":"Righteous Seal","dur":120,"val":7,"stk":5}],"tInf":"p:1001"}"#);
+            wire.object(r#"{"cmd":"aura=","auras":[{"nam":"Righteous Seal","stk":3}],"tInf":"p:1001"}"#);
+            wire.object(r#"{"cmd":"aura-","aura":{"nam":"Doom","stk":8},"tInf":"p:1001"}"#);
         }
     }).run(&source);
     assert_finished(outcome, &logs);
     assert!(
-        logs.contains(&"seal stacks 2, rule stacks 7".into()),
+        logs.contains(&"seal stacks 3, rule stacks 7".into()),
+        "{logs:?}"
+    );
+    assert!(
+        logs.contains(&"doom stacks 8, rule stacks 8, active False, 1 auras, 2 snapshots".into()),
         "{logs:?}"
     );
     assert!(
@@ -325,6 +334,34 @@ fn rest_packets_and_aggro_all_monsters_send_in_the_background() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn aggro_monsters_pulls_the_cell_and_outlasts_aggro_all_monsters() {
+    let (outcome, logs, sent) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        public class AggroCell {
+            public void ScriptMain(IScriptInterface bot) {
+                bot.Map.Jump("r2", "Left");
+                bot.Options.AggroMonsters = true;
+                bot.Options.AggroAllMonsters = true;
+                bot.Options.AggroAllMonsters = false;
+                bot.Sleep(1300);
+                bot.Options.AggroMonsters = false;
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    assert!(
+        sent.iter()
+            .filter(|m| m.ends_with("%aggroMon%5%2%"))
+            .count()
+            >= 2,
+        "{sent:?}"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn resting_sends_once_and_waits_for_full_only_briefly() {
     let map = FARM.replace("\"intHP\":3000", "\"intHP\":100");
     let (outcome, logs, sent) = Fake::start_with(&map, json!([]), json!([]), |_, _| {}).run(REST);
@@ -399,6 +436,8 @@ public class MovementHelpers {
         bot.Log($"empty file {bot.Map.FileName.Length}");
         bot.Map.Jump("r2", "Left", false, true);
         bot.Player.WalkTo(200,300,24);
+        bot.Player.WalkTo(5000,5000);
+        bot.Log($"no target {bot.Player.Target is null} {bot.Player.Target.HP}");
         bot.Player.Goto("PLAYER1");
         bot.Combat.ApproachTarget();
         bot.Map.Reload();
@@ -421,6 +460,7 @@ public class MovementHelpers {
         "empty file 0",
         "last host example.invalid, password absent True",
         "pvp False, cell r2",
+        "no target False 0",
     ] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
@@ -429,6 +469,42 @@ public class MovementHelpers {
         "{sent:?}"
     );
     assert!(sent.contains(&"%xt%zm%mv%5%200%300%8%".into()), "{sent:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn the_player_reads_its_class_only_while_alive_and_goes_to_players_only_while_idle() {
+    let (outcome, logs, sent) = Fake::start_with(
+        FARM,
+        json!([{"ItemID":100,"CharItemID":5000,"sName":"Rogue","sType":"Class","sES":"ar","bEquip":1,"iQty":1,"iStk":1}]),
+        json!([]),
+        |m, w| match m {
+            "fight" => w.object(r#"{"cmd":"uotls","unm":"player1","o":{"intState":2}}"#),
+            "die" => w.object(r#"{"cmd":"uotls","unm":"player1","o":{"intState":0,"intHP":0}}"#),
+            _ => {}
+        },
+    )
+    .run(
+        r#"
+using Skua.Core.Interfaces;
+public class ClassAndGoto {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Log($"alive {bot.Player.CurrentClass?.Name}");
+        bot.Send.Packet("fight");
+        bot.Wait.ForTrue(() => bot.Player.State == 2, 20);
+        bot.Player.Goto("player2");
+        bot.Send.Packet("die");
+        bot.Wait.ForTrue(() => bot.Player.State == 0, 20);
+        bot.Log($"dead {bot.Player.CurrentClass?.Name ?? "none"}");
+    }
+}
+"#,
+    );
+    assert_finished(outcome, &logs);
+    for expected in ["alive Rogue", "dead none"] {
+        assert!(logs.contains(&expected.into()), "{logs:?}");
+    }
+    assert!(!sent.iter().any(|p| p.contains("%goto%")), "{sent:?}");
 }
 
 #[test]
@@ -593,6 +669,83 @@ fn counter_handler_cancels_restores_and_resets_on_death_and_stop() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn the_target_survives_a_death_until_the_respawn_move() {
+    let (outcome, logs, _) = Fake::start(|m, w| match m {
+        "die" => w.object(r#"{"cmd":"ct","p":{"player1":{"intHP":0,"intState":0}}}"#),
+        "revive" => {
+            w.object(r#"{"cmd":"uotls","unm":"player1","o":{"intHP":3000,"intState":1}}"#);
+            w.send("%xt%resTimed%-1%r2%Left%");
+        }
+        _ => {}
+    })
+    .run(
+        r#"
+        using Skua.Core.Interfaces;
+        public class DeathTarget {
+            public void ScriptMain(IScriptInterface bot) {
+                bot.Map.Jump("r2", "Left");
+                bot.Combat.Attack("Treeant");
+                bot.Send.Packet("die");
+                bot.Sleep(200);
+                bot.Log($"dead {bot.Player.HasTarget} {bot.Combat.Attack("Treeant")} {bot.Player.Target?.MapID}");
+                bot.Send.Packet("revive");
+                bot.Sleep(300);
+                bot.Log($"respawned {bot.Player.Cell} {bot.Player.HasTarget}");
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    for expected in ["dead True True 2", "respawned r2 False"] {
+        assert!(logs.contains(&expected.into()), "{logs:?}");
+    }
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn a_skill_the_server_never_answers_returns_once_sent_and_holds_up_no_other_call() {
+    let (outcome, logs, sent) = Fake::start(|_, _| {}).run(
+        r#"
+using System.Diagnostics;
+using System.Threading.Tasks;
+using Skua.Core.Interfaces;
+public class Unanswered {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Options.ActionDelay = 0;
+        bot.Map.Jump("r2", "Left");
+        bot.Send.Packet("%xt%zm%afk%1%false%");
+        Stopwatch clock = Stopwatch.StartNew();
+        Task<bool> cast = Task.Run(() => bot.Skills.UseSkill(2));
+        bot.Sleep(50);
+        bot.Map.Jump("r2", "Left");
+        bot.Log($"jump {(clock.ElapsedMilliseconds < 500 ? "went first" : "waited")}");
+        bool used = cast.Result;
+        bot.Log($"skill used {used} {(clock.ElapsedMilliseconds < 2000 ? "once sent" : "after the timeout")}");
+    }
+}
+"#,
+    );
+    assert_finished(outcome, &logs);
+    for expected in ["jump went first", "skill used True once sent"] {
+        assert!(logs.contains(&expected.into()), "{logs:?}");
+    }
+    let jumps: Vec<usize> = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.contains("%moveToCell%5%r2%Left%"))
+        .map(|(i, _)| i)
+        .collect();
+    let gar = sent
+        .iter()
+        .position(|m| m.contains("%gar%") && m.contains("a2>"));
+    assert!(
+        gar.is_some_and(|gar| jumps.len() == 2 && jumps[1] < gar),
+        "{sent:?}"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn skill_readiness_checks_targets_and_reports_real_cooldown_deadlines() {
     let (outcome, logs, _) = Fake::start(|m,w| {
         if m.contains("%gar%") {
@@ -619,6 +772,30 @@ fn skill_readiness_checks_targets_and_reports_real_cooldown_deadlines() {
     ] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn using_the_auto_attack_slot_starts_the_auto_attack() {
+    let (outcome, logs, sent) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        public class AutoAttackSlot {
+            public void ScriptMain(IScriptInterface bot) {
+                bot.Map.Jump("r2", "Left");
+                bot.Log($"aa {bot.Skills.UseSkill(0)} {bot.Player.Target?.MapID}");
+                bot.Sleep(300);
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    assert!(logs.contains(&"aa True 2".into()), "{logs:?}");
+    assert!(
+        sent.iter()
+            .any(|m| m.contains("%gar%") && m.contains("aa>m:2")),
+        "{sent:?}"
+    );
 }
 
 #[test]
@@ -778,7 +955,7 @@ fn skill_info_preserves_action_metadata_and_last_use() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
-fn skill_set_updates_use_downloaded_contents_and_report_failures() {
+fn skill_sets_update_from_downloads_and_from_a_newer_bundled_copy() {
     let (outcome, logs, _) = Fake::start(|_,_| {}).run(r#"
         using System.Net;
         using System.Net.Sockets;
@@ -823,4 +1000,35 @@ fn skill_set_updates_use_downloaded_contents_and_report_failures() {
     for expected in ["downloaded True True", "failure True True"] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        using Skua.Core.Models;
+        public class StaleSkills {
+            public void ScriptMain(IScriptInterface bot) {
+                string user = Path.Combine(ClientFileSources.SkuaDIR, "UserAdvancedSkills.json");
+                string stale = File.ReadAllText(ClientFileSources.SkuaAdvancedSkillsFile) + "\n\n";
+                foreach (string file in new[] { ClientFileSources.SkuaAdvancedSkillsFile, user }) {
+                    File.WriteAllText(file, stale);
+                    File.SetLastWriteTimeUtc(file, DateTime.UnixEpoch);
+                }
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(
+        r#"
+        using Skua.Core.Interfaces;
+        using Skua.Core.Models;
+        public class SyncedSkills {
+            public void ScriptMain(IScriptInterface bot) {
+                bool Synced(string file) => !File.ReadAllText(file).EndsWith("\n\n");
+                bot.Log($"synced {Synced(ClientFileSources.SkuaAdvancedSkillsFile)} {Synced(Path.Combine(ClientFileSources.SkuaDIR, "UserAdvancedSkills.json"))}");
+            }
+        }
+    "#,
+    );
+    assert_finished(outcome, &logs);
+    assert!(logs.contains(&"synced True True".into()), "{logs:?}");
 }

@@ -38,6 +38,8 @@ pub enum Call {
         pad: String,
         #[serde(default)]
         client_only: bool,
+        #[serde(default)]
+        auto_correct: bool,
     },
     Walk {
         x: i32,
@@ -70,13 +72,14 @@ pub enum Call {
     Complete {
         quest: QuestId,
         reward: Option<ItemId>,
-        times: u32,
+        times: i64,
         #[serde(default)]
         special: bool,
     },
     Abandon {
         quest: QuestId,
     },
+    ForgetQuests,
     Pickup {
         item: ItemId,
     },
@@ -107,6 +110,9 @@ pub enum Call {
         quantity: u32,
     },
     Equip {
+        item: ItemId,
+    },
+    EquipUnchecked {
         item: ItemId,
     },
     Unequip {

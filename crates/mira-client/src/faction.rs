@@ -21,6 +21,20 @@ impl Faction {
     }
 }
 
+pub(crate) const FISHING: FactionId = FactionId(20);
+
+#[derive(Deserialize)]
+pub(crate) struct Caught {
+    #[serde(rename = "catchResult")]
+    pub(crate) result: CatchResult,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CatchResult {
+    #[serde(rename = "myRep", default, deserialize_with = "flex::int")]
+    pub(crate) rep: i64,
+}
+
 pub(crate) fn add_rep(factions: &mut [Faction], id: FactionId, gained: i64) {
     if let Some(faction) = factions.iter_mut().find(|f| f.id == id) {
         let rep = (i64::from(faction.rep) + gained).clamp(0, i64::from(u32::MAX));

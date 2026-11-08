@@ -121,6 +121,9 @@ public class AccountAndPotion
         item.sLink = bot.Flash.GetGameObject<string>($"world.invTree.{potion.ID}.sLink");
         bot.Flash.CallGameFunction("toggleItemEquip", item);
         bot.Log($"equipped {bot.Inventory.IsEquipped(11857)}");
+        bot.Inventory.EquipItem(500);
+        bot.Inventory.EquipItem(404);
+        bot.Log($"cape equipped {bot.Inventory.IsEquipped(500)}");
 
         var skill = bot.Flash.GetArrayObject<dynamic>("world.actions.active", 5);
         bot.Log($"item skill {skill.slot} {skill.nam}");
@@ -189,6 +192,7 @@ public class JoinAnother
     public void ScriptMain(IScriptInterface bot)
     {
         Core.SetOptions();
+        Bot.Events.MapChanged += map => Core.Logger($"map changed to {map}");
         Core.Join("yulgar", "Room", "Center");
         Core.Logger($"now in {Bot.Map.FullName} at {Bot.Player.Cell}");
         Core.SetOptions(false);
@@ -308,11 +312,16 @@ fn logging_out_without_auto_relogin_keeps_the_script_running() {
 #[test]
 #[ignore = "run with npm run skua:test"]
 fn core_bots_reads_the_account_equips_and_drinks_a_potion_and_hears_afk() {
-    let items = json!([{"ItemID":11857,"CharItemID":11,"sName":"Health Potion","iQty":3,"iStk":10,"sType":"Item","sES":"None","sMeta":"457","sLink":"potion","sFile":"items/potion.swf"}]);
+    let items = json!([
+        {"ItemID":11857,"CharItemID":11,"sName":"Health Potion","iQty":3,"iStk":10,"sType":"Item","sES":"None","sMeta":"457","sLink":"potion","sFile":"items/potion.swf"},
+        {"ItemID":500,"CharItemID":12,"sName":"Bare Cape","iQty":1,"iStk":1,"sType":"Cape","sES":"ba"}
+    ]);
     let data = json!({"CharID":42,"intAQ":1,"intActivationFlag":5});
     let (outcome, logs, sent) = Fake::start_config(FARM, items, json!([]), data, |m, w| {
         if m.contains("%geia%") {
             w.object(r#"{"cmd":"seia","o":{"id":457,"cd":60000,"tgt":"f"},"iRes":1}"#);
+        } else if m.contains("%equipItem%") {
+            w.object(r#"{"cmd":"equipItem","uid":1001,"ItemID":500,"strES":"ba"}"#);
         } else if m.contains("%gar%") {
             let act = m.split('%').nth(5).unwrap();
             w.object(&format!(
@@ -328,6 +337,7 @@ fn core_bots_reads_the_account_equips_and_drinks_a_potion_and_hears_afk() {
         "char 42, aq 1, verified True",
         "potion None 457 potion items/potion.swf",
         "equipped True",
+        "cape equipped True",
         "item skill 5 Item",
         "afk True",
     ] {
@@ -482,6 +492,10 @@ fn core_bots_joins_another_map_in_a_private_room() {
     assert!(
         logs.iter()
             .any(|l| l.contains("now in yulgar-") && l.ends_with("at Room")),
+        "{logs:?}"
+    );
+    assert!(
+        logs.iter().any(|l| l.ends_with("map changed to yulgar")),
         "{logs:?}"
     );
     assert!(
@@ -874,6 +888,8 @@ public class ShopRequirements {
         bot.Shops.BuyItem(9, quantity: 1);
         bot.Shops.BuyItem(404);
         bot.Log($"bundles {bot.Flash.CallGameFunction<int>("world.maximumShopBuys", new ShopItem { ID = 10, Cost = 500, Quantity = 3, MaxStack = 10 })} raw {bot.Flash.CallGameFunction<int>("world.maximumShopBuys", new { ItemID = 10, iCost = 500, iQty = 3, iStk = 10 })}");
+        object plain = bot.Flash.GetGameObject<List<Newtonsoft.Json.Linq.JObject>>("world.shopinfo.items")!.Single(i => (int)i["ItemID"]! == 10);
+        bot.Log($"plain {bot.Flash.CallGameFunction<int>("world.maximumShopBuys", plain)}");
         bot.Log("safe preflight");
     }
 }
@@ -882,7 +898,7 @@ public class ShopRequirements {
         json!([{"ItemID":5,"CharItemID":15,"sName":"Dust","iQty":2,"iStk":10,"sType":"Resource"}]);
     let (outcome, logs, sent) = Fake::start_config(FARM, items, json!([]), json!({"iBagSlots":1,"strQuests":"000"}), |m,w| {
         if m.contains("%loadShop%") {
-            w.object(r#"{"cmd":"loadShop","shopinfo":{"ShopID":1348,"sName":"Locked Shop","Location":"farm","iIndex":"7","sField":"ia1","reqItems":"12","items":[{"ItemID":9,"ShopItemID":19,"sName":"Ash","iCost":0,"iStk":10,"iQty":1,"sType":"Resource","iQSindex":2,"iQSvalue":3,"sQuest":"A Quest","iLvl":40,"FactionID":4,"sFaction":"Good","TokName":"Dust","iQtyRemain":-1,"turnin":[{"ItemID":5,"sName":"Dust","iQty":1}]}]}}"#);
+            w.object(r#"{"cmd":"loadShop","shopinfo":{"ShopID":1348,"sName":"Locked Shop","Location":"farm","iIndex":"7","sField":"ia1","reqItems":"12","items":[{"ItemID":9,"ShopItemID":19,"sName":"Ash","iCost":0,"iStk":10,"iQty":1,"sType":"Resource","iQSindex":2,"iQSvalue":3,"sQuest":"A Quest","iLvl":40,"FactionID":4,"sFaction":"Good","TokName":"Dust","iQtyRemain":-1,"turnin":[{"ItemID":5,"sName":"Dust","iQty":1}]},{"ItemID":10,"ShopItemID":20,"sName":"Bundle","iCost":500,"iStk":10,"iQty":3,"sType":"Resource"}]}}"#);
         }
     }).run(source);
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
@@ -893,6 +909,7 @@ public class ShopRequirements {
         "space one False two True max 2",
         "unmet Quest requirement not met.",
         "bundles 6 raw 2",
+        "plain 2",
         "safe preflight",
     ] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
@@ -968,6 +985,24 @@ public class Helpers {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_failed_bank_load_leaves_the_bank_unloaded_without_throwing() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class FailedLoad {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Bank.Load();
+        bot.Log($"loaded {bot.Bank.Loaded} {bot.Bank.Items.Count}");
+    }
+}
+"#;
+    let (outcome, logs, _) =
+        Fake::start_with(FARM, json!([]), json!("down"), |_, _| {}).run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(logs.contains(&"loaded False 0".into()), "{logs:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn shop_selling_protects_local_favorites_unless_disabled() {
     let source = r#"
 using Skua.Core.Interfaces;
@@ -1013,7 +1048,7 @@ using Skua.Core.Interfaces;
 public class ItemMetadata {
     public void ScriptMain(IScriptInterface bot) {
         var item = bot.Inventory.GetItem(5)!;
-        bot.Log($"item {item.Description} {item.Level}");
+        bot.Log($"item {item.Description} {item.Level} {item.Wearing}");
         bot.Send.Packet("temp-item");
         bot.Wait.ForTrue(() => bot.TempInv.Contains(6), 2);
         var temp = bot.TempInv.GetItem(6)!;
@@ -1022,13 +1057,13 @@ public class ItemMetadata {
     }
 }
 "#;
-    let items = json!([{"ItemID":5,"CharItemID":15,"sName":"Dust","iQty":2,"sDesc":"A material.","iLvl":40,"iCost":25,"iHrs":12,"iQSindex":3,"iQSvalue":2,"sQuest":"A Quest"}]);
+    let items = json!([{"ItemID":5,"CharItemID":15,"sName":"Dust","iQty":2,"sDesc":"A material.","iLvl":40,"iCost":25,"iHrs":12,"iQSindex":3,"iQSvalue":2,"sQuest":"A Quest","bWear":1}]);
     let (outcome, logs, _) = Fake::start_with(FARM, items, json!([]), |m,w| {
         if m == "temp-item" { w.object(r#"{"cmd":"addItems","items":{"6":{"ItemID":6,"sName":"Temp Dust","iQty":1,"iStk":10,"bTemp":1,"sDesc":"A temporary material.","sType":"Quest Item","sMeta":"quest","sES":"None","bCoins":1}}}"#); }
     }).run(source);
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
     for expected in [
-        "item A material. 40",
+        "item A material. 40 True",
         "metadata 25 12 3 2 A Quest",
         "temp A temporary material. Quest Item quest None True",
     ] {

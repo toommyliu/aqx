@@ -27,6 +27,7 @@ use crate::combat::{self, AUTO_ATTACK, Combat};
 use crate::event::{Direction, Event, Holder};
 use crate::faction::Faction;
 use crate::inventory::{Inventory, Item, Pool};
+use crate::map::MapFile;
 use crate::player::{BoostKind, Me};
 use crate::quest::Quest;
 use crate::room::{CombatState, Monster, Player, Room, Spot, UserEntry, Vitals, names_room};
@@ -34,7 +35,7 @@ use crate::shop::Shop;
 use crate::world::{Settings, World};
 use bank::{BankMove, BankStage};
 use equip::EquipStage;
-use fight::Fight;
+use fight::{Fight, PendingCast};
 use quests::{QuestAction, QuestCall};
 use reconnect::{Recovery, Step};
 use shops::{Trade, TradeStage};
@@ -398,6 +399,12 @@ fn latest(slot: &Slot) -> Arc<World> {
     Arc::clone(&slot.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Jump {
+    pub client_only: bool,
+    pub correct_pad: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Aggro {
     All,
@@ -433,6 +440,7 @@ enum Setting {
 
 enum Request {
     Act(Action, Reply, u64),
+    Direct(Direct, Reply, u64),
     Set(Setting, u64),
     Cancel(Cancel),
     Untarget,
@@ -451,7 +459,7 @@ enum Action {
     MoveToCell {
         cell: String,
         pad: String,
-        client_only: bool,
+        jump: Jump,
     },
     Attack {
         target: MonMapId,
@@ -467,6 +475,7 @@ enum Action {
     ExitCombat,
     Quest(QuestAction),
     AbandonQuest(QuestId),
+    ForgetQuests,
     PickDrop(ItemId),
     RequestDrop(ItemId),
     LoadShop(ShopId),
@@ -475,6 +484,7 @@ enum Action {
     Equip {
         item: ItemId,
         on: bool,
+        checked: bool,
     },
     MapItem(MapItemId),
     Rest,
@@ -489,6 +499,12 @@ enum Action {
     Send(String),
 }
 
+enum Direct {
+    Sync,
+    Send(String),
+    Cast { slot: String, target: Option<Aim> },
+}
+
 impl Action {
     fn runs_during_fight(&self) -> bool {
         matches!(
@@ -496,6 +512,7 @@ impl Action {
             Action::Ready
                 | Action::Quest(_)
                 | Action::AbandonQuest(_)
+                | Action::ForgetQuests
                 | Action::PickDrop(_)
                 | Action::RequestDrop(_)
                 | Action::MapItem(_)
@@ -553,6 +570,7 @@ enum Op {
         reply: Reply,
         item: ItemId,
         on: bool,
+        checked: bool,
         stage: EquipStage,
     },
     MapItem {
@@ -742,18 +760,14 @@ impl Handle {
     }
 
     pub fn move_to_cell(&self, cell: &str, pad: &str) -> Pending {
-        self.act(Action::MoveToCell {
-            cell: cell.to_owned(),
-            pad: pad.to_owned(),
-            client_only: false,
-        })
+        self.jump(cell, pad, Jump::default())
     }
 
-    pub fn move_to_cell_local(&self, cell: &str, pad: &str) -> Pending {
+    pub fn jump(&self, cell: &str, pad: &str, jump: Jump) -> Pending {
         self.act(Action::MoveToCell {
             cell: cell.to_owned(),
             pad: pad.to_owned(),
-            client_only: true,
+            jump,
         })
     }
 
@@ -794,8 +808,16 @@ impl Handle {
         self.act(Action::AbandonQuest(id))
     }
 
+    pub fn forget_quests(&self) -> Pending {
+        self.act(Action::ForgetQuests)
+    }
+
     pub fn accept_quest(&self, id: QuestId) -> Pending {
-        self.act(Action::Quest(QuestAction::Accept(id)))
+        self.act(Action::Quest(QuestAction::Accept { id, checked: true }))
+    }
+
+    pub fn accept_quest_unchecked(&self, id: QuestId) -> Pending {
+        self.act(Action::Quest(QuestAction::Accept { id, checked: false }))
     }
 
     pub fn load_shop(&self, id: ShopId) -> Pending {
@@ -826,6 +848,21 @@ impl Handle {
         self.act(Action::Send(text.to_owned()))
     }
 
+    pub fn send_now(&self, text: &str) -> Pending {
+        self.direct(Direct::Send(text.to_owned()))
+    }
+
+    pub fn fire_skill(&self, slot: &str, target: Option<Aim>) -> Pending {
+        self.direct(Direct::Cast {
+            slot: slot.to_owned(),
+            target,
+        })
+    }
+
+    pub fn sync(&self) -> Pending {
+        self.direct(Direct::Sync)
+    }
+
     pub fn request_rest_packet(&self) -> Pending {
         self.act(Action::RequestRestPacket)
     }
@@ -847,11 +884,27 @@ impl Handle {
     }
 
     pub fn equip(&self, item: ItemId) -> Pending {
-        self.act(Action::Equip { item, on: true })
+        self.act(Action::Equip {
+            item,
+            on: true,
+            checked: true,
+        })
+    }
+
+    pub fn equip_unchecked(&self, item: ItemId) -> Pending {
+        self.act(Action::Equip {
+            item,
+            on: true,
+            checked: false,
+        })
     }
 
     pub fn unequip(&self, item: ItemId) -> Pending {
-        self.act(Action::Equip { item, on: false })
+        self.act(Action::Equip {
+            item,
+            on: false,
+            checked: true,
+        })
     }
 
     pub fn deposit(&self, item: ItemId) -> Pending {
@@ -875,14 +928,20 @@ impl Handle {
     }
 
     pub fn complete_quest(&self, id: QuestId, reward: Option<ItemId>, times: u32) -> Pending {
-        self.complete_quest_special(id, reward, times, false)
+        self.act(Action::Quest(QuestAction::TurnIn {
+            id,
+            reward,
+            times: i64::from(times),
+            special: false,
+            checked: true,
+        }))
     }
 
-    pub fn complete_quest_special(
+    pub fn complete_quest_unchecked(
         &self,
         id: QuestId,
         reward: Option<ItemId>,
-        times: u32,
+        times: i64,
         special: bool,
     ) -> Pending {
         self.act(Action::Quest(QuestAction::TurnIn {
@@ -890,6 +949,7 @@ impl Handle {
             reward,
             times,
             special,
+            checked: false,
         }))
     }
 
@@ -963,10 +1023,18 @@ impl Handle {
     }
 
     fn act(&self, action: Action) -> Pending {
+        self.pend(|reply, epoch| Request::Act(action, reply, epoch))
+    }
+
+    fn direct(&self, direct: Direct) -> Pending {
+        self.pend(|reply, epoch| Request::Direct(direct, reply, epoch))
+    }
+
+    fn pend(&self, request: impl FnOnce(Reply, u64) -> Request) -> Pending {
         let (tx, result) = mpsc::sync_channel(1);
         let id = ActionId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let epoch = self.epoch.load(Ordering::SeqCst);
-        self.request(Request::Act(action, Reply { id, tx: Some(tx) }, epoch));
+        self.request(request(Reply { id, tx: Some(tx) }, epoch));
         Pending {
             id,
             result,
@@ -1034,6 +1102,7 @@ pub fn spawn(
         map_results,
         map_cells: HashMap::new(),
         load_cells_pending: false,
+        class_changed: false,
         relogin_out,
         relogin_results,
         server: server.clone(),
@@ -1083,6 +1152,7 @@ pub fn spawn(
         boost_check: None,
         combat: Combat::default(),
         fight: None,
+        pending_cast: None,
         cancelled: None,
         closing: None,
         logout_deadline: None,
@@ -1103,10 +1173,10 @@ pub fn spawn(
 
 enum MapCells {
     Loading(Vec<Reply>),
-    Loaded(Vec<String>),
+    Loaded(MapFile),
 }
 
-type MapResult = (String, Result<Vec<String>, ActionError>);
+type MapResult = (String, Result<MapFile, ActionError>);
 
 const MAP_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 
@@ -1119,6 +1189,7 @@ struct Session {
     map_results: mpsc::Receiver<MapResult>,
     map_cells: HashMap<String, MapCells>,
     load_cells_pending: bool,
+    class_changed: bool,
     relogin_out: mpsc::Sender<Result<Account, ApiError>>,
     relogin_results: mpsc::Receiver<Result<Account, ApiError>>,
     server: Server,
@@ -1168,6 +1239,7 @@ struct Session {
     boost_check: Option<Instant>,
     combat: Combat,
     fight: Option<Fight>,
+    pending_cast: Option<PendingCast>,
     cancelled: Option<ActionId>,
     closing: Option<Disconnect>,
     logout_deadline: Option<Instant>,
@@ -1269,6 +1341,9 @@ impl Session {
         if self.fight.as_ref().is_some_and(|f| which.covers(&f.reply)) {
             self.untarget();
         }
+        if let Some(cast) = self.pending_cast.take_if(|c| which.covers(&c.reply)) {
+            self.replies.push((cast.reply, Err(ActionError::Cancelled)));
+        }
         if let Some(reply) = self.current.as_mut().and_then(Op::reply_mut)
             && which.covers(reply)
         {
@@ -1308,7 +1383,9 @@ impl Session {
     fn take_requests(&mut self) {
         while let Ok(request) = self.requests.try_recv() {
             match request {
-                Request::Act(_, reply, epoch) if self.stale_epoch(epoch) => {
+                Request::Act(_, reply, epoch) | Request::Direct(_, reply, epoch)
+                    if self.stale_epoch(epoch) =>
+                {
                     let why = self.recovery.as_ref().map(|r| r.why.clone());
                     let why = why.or_else(|| self.stale.clone());
                     let why = why.unwrap_or(Disconnect::Ended);
@@ -1321,6 +1398,7 @@ impl Session {
                 Request::Logout => self.begin_logout(),
                 Request::Set(_, epoch) if self.stale_epoch(epoch) => {}
                 Request::Set(setting, _) => self.apply(setting),
+                Request::Direct(direct, reply, _) => self.direct(direct, reply),
                 Request::Act(Action::LoadCells, reply, _) => self.load_map_cells(Some(reply)),
                 Request::Act(Action::ExitCombat, reply, _) => {
                     if let Some(fight) = self.fight.take() {
@@ -1331,6 +1409,10 @@ impl Session {
                         && let Some(Op::Cast { reply, .. }) = self.current.take()
                     {
                         self.replies.push((reply, Err(ActionError::Interrupted)));
+                    }
+                    if let Some(cast) = self.pending_cast.take() {
+                        self.replies
+                            .push((cast.reply, Err(ActionError::Interrupted)));
                     }
                     let (fights, rest): (Vec<_>, Vec<_>) =
                         self.queue.drain(..).partition(|(action, _)| {
@@ -1352,6 +1434,26 @@ impl Session {
         }
     }
 
+    fn direct(&mut self, direct: Direct, reply: Reply) {
+        let result = match direct {
+            Direct::Sync => Ok(()),
+            Direct::Send(text) => self.ensure_ready().map(|()| self.send(&text)),
+            Direct::Cast { .. } if self.pending_cast.is_some() => Err(ActionError::Unusable(
+                "another skill is waiting to fire".into(),
+            )),
+            Direct::Cast { slot, target } => {
+                self.pending_cast = Some(PendingCast {
+                    reply,
+                    slot,
+                    target,
+                    wake: None,
+                });
+                return;
+            }
+        };
+        self.replies.push((reply, result));
+    }
+
     fn advance(&mut self, now: Instant) {
         if self.logout_deadline.is_some_and(|d| now >= d) {
             self.close(Disconnect::LoggedOut);
@@ -1367,6 +1469,7 @@ impl Session {
         }
         self.step_fight(now);
         self.run_ops(now);
+        self.step_pending_cast(now);
         self.tick_combat(now);
         self.tick_aggro(now);
         self.end_boosts(now);
@@ -1453,11 +1556,17 @@ impl Session {
             Action::AbandonQuest(id) => self.ensure_ready().map(|()| {
                 self.accepted_quests.remove(&id);
             }),
-            Action::MoveToCell {
-                cell,
-                pad,
-                client_only,
-            } => self.move_to_cell_with(&cell, &pad, client_only),
+            Action::ForgetQuests => self.ensure_ready().map(|()| {
+                self.quests = Arc::default();
+                self.accepted_quests.clear();
+            }),
+            Action::MoveToCell { cell, pad, jump } => {
+                let pad = match self.loaded_map() {
+                    Some(map) if jump.correct_pad => map.pad_in(&cell, &pad).to_owned(),
+                    _ => pad,
+                };
+                self.move_to_cell_with(&cell, &pad, jump.client_only)
+            }
             Action::UseItem(item) => self.use_item(item),
             Action::Send(text) => self.ensure_ready().map(|()| self.send(&text)),
             Action::Walk { x, y } => {
@@ -1519,13 +1628,14 @@ impl Session {
                 };
                 return self.step(op, now);
             }
-            Action::Equip { item, on } => {
+            Action::Equip { item, on, checked } => {
                 let stage = EquipStage::Waiting { wake: None };
                 return self.step(
                     Op::Equip {
                         reply,
                         item,
                         on,
+                        checked,
                         stage,
                     },
                     now,
@@ -1839,6 +1949,12 @@ impl Session {
                     (Ok(()), _, stage @ RestStage::Sent { .. }) => {
                         return Some(Op::Rest { reply, stage, mode });
                     }
+                    (Ok(()), _, RestStage::Cooling { .. })
+                        if mode == RestMode::Packet
+                            && self.cooling(Limit::RestPacket, now).is_some() =>
+                    {
+                        Ok(())
+                    }
                     (Ok(()), _, RestStage::Cooling { .. }) => {
                         let limit = if mode == RestMode::Packet {
                             Limit::RestPacket
@@ -1893,12 +2009,14 @@ impl Session {
                 reply,
                 item,
                 on,
+                checked,
                 mut stage,
-            } => match self.step_equip(item, on, &mut stage, now) {
+            } => match self.step_equip(item, on, checked, &mut stage, now) {
                 task::Poll::Pending => Some(Op::Equip {
                     reply,
                     item,
                     on,
+                    checked,
                     stage,
                 }),
                 task::Poll::Ready(result) => {
@@ -2000,6 +2118,7 @@ impl Session {
             .filter(|until| Instant::now() < *until);
         op.into_iter()
             .chain(self.fight.as_ref().and_then(|fight| fight.wake))
+            .chain(self.pending_cast.as_ref().and_then(|cast| cast.wake))
             .chain(counters)
             .chain(self.logout_deadline)
             .chain(self.recovery.as_ref().and_then(|r| match r.step {
@@ -2243,6 +2362,13 @@ impl Session {
         (now < until).then_some(until)
     }
 
+    fn loaded_map(&self) -> Option<&MapFile> {
+        match self.map_cells.get(&self.room.as_ref()?.file)? {
+            MapCells::Loaded(map) => Some(map),
+            MapCells::Loading(_) => None,
+        }
+    }
+
     fn move_to_cell(&mut self, cell: &str, pad: &str) -> Result<(), ActionError> {
         self.move_to_cell_with(cell, pad, false)
     }
@@ -2254,12 +2380,18 @@ impl Session {
         client_only: bool,
     ) -> Result<(), ActionError> {
         self.ensure_ready()?;
+        if self.room.as_ref().is_some_and(|room| room.locked(cell)) {
+            return Ok(());
+        }
+        let arrival = self
+            .loaded_map()
+            .map_or((0, 0), |map| map.arrival(cell, pad));
         let Some(room) = &mut self.room else {
             return Err(ActionError::NotReady);
         };
         room.cell = cell.to_owned();
         room.pad = pad.to_owned();
-        (room.x, room.y) = (0, 0);
+        (room.x, room.y) = arrival;
         let area = room.area;
         self.combat.disengage();
         if !client_only {
@@ -2375,9 +2507,11 @@ impl Session {
         let at = Instant::now() + wait;
         let dropped = self.current.take().and_then(Op::into_reply);
         let fighting = self.fight.take().map(|fight| fight.reply);
+        let casting = self.pending_cast.take().map(|cast| cast.reply);
         for reply in dropped
             .into_iter()
             .chain(fighting)
+            .chain(casting)
             .chain(self.queue.drain(..).map(|(_, r)| r))
         {
             self.replies
@@ -2575,10 +2709,10 @@ impl Session {
         let waker = self.waker.clone();
         thread::spawn(move || {
             let mut delays = MAP_RETRY_DELAYS.iter();
-            let cells = loop {
+            let map = loop {
                 match crate::api::map_file(&account, &file) {
                     Ok(bytes) => {
-                        break crate::map::labels(&bytes)
+                        break crate::map::read(&bytes)
                             .map_err(|e| ActionError::Http(format!("unreadable map file: {e}")));
                     }
                     Err(e) => match delays.next() {
@@ -2587,29 +2721,28 @@ impl Session {
                     },
                 }
             };
-            let _ = tx.send((file, cells));
+            let _ = tx.send((file, map));
             let _ = waker.wake();
         });
     }
 
     fn take_map_results(&mut self) {
-        while let Ok((file, cells)) = self.map_results.try_recv() {
+        while let Ok((file, map)) = self.map_results.try_recv() {
             let Some(MapCells::Loading(waiters)) = self.map_cells.remove(&file) else {
                 continue;
             };
-            let result = match cells {
-                Ok(cells) => {
+            let result = match map {
+                Ok(map) => {
                     let current = self.room.as_mut().filter(|r| r.file == file);
                     let result = if let Some(room) = current {
-                        room.cells = cells.clone();
-                        room.cells_loaded = true;
+                        room.load_map(&map);
                         Ok(())
                     } else {
                         Err(ActionError::Unusable(
                             "the map changed while loading cells".into(),
                         ))
                     };
-                    self.map_cells.insert(file, MapCells::Loaded(cells));
+                    self.map_cells.insert(file, MapCells::Loaded(map));
                     result
                 }
                 Err(e) => Err(e),
@@ -2620,9 +2753,8 @@ impl Session {
     }
 
     fn enter(&mut self, mut room: Room) {
-        if let Some(MapCells::Loaded(cells)) = self.map_cells.get(&room.file) {
-            room.cells = cells.clone();
-            room.cells_loaded = true;
+        if let Some(MapCells::Loaded(map)) = self.map_cells.get(&room.file) {
+            room.load_map(map);
         }
         let Some(me) = self.me else { return };
         let first = self.phase

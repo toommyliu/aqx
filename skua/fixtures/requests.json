@@ -11,7 +11,8 @@
     "call": "jump",
     "cell": "farm",
     "pad": "farm",
-    "client_only": false
+    "client_only": false,
+    "auto_correct": false
   },
   {
     "id": 3,
@@ -121,6 +122,11 @@
     "item": 1
   },
   {
+    "id": 22,
+    "call": "equip_unchecked",
+    "item": 1
+  },
+  {
     "id": 23,
     "call": "unequip",
     "item": 1
@@ -218,6 +224,10 @@
     "id": 39,
     "call": "abandon",
     "quest": 11
+  },
+  {
+    "id": 107,
+    "call": "forget_quests"
   },
   {
     "id": 104,

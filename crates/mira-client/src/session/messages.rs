@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use mira_protocol::{EntityId, JsonMessage, MonMapId, XmlMessage, XtMessage, packet};
+use mira_protocol::{EntityId, JsonMessage, MonMapId, QuestId, XmlMessage, XtMessage, packet};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -12,8 +12,10 @@ use crate::aura::{self, Target};
 use crate::combat::{self, ITEM_SLOT};
 use crate::enhancement::Enhanced;
 use crate::event::{Event, NoticeKind};
-use crate::faction::{self, AddedFaction, Faction, FactionData};
-use crate::inventory::{AddedItems, LoadInventory, Picked, Sold, TurnIn, Worn};
+use crate::faction::{self, AddedFaction, Caught, Faction, FactionData};
+use crate::inventory::{
+    AddedItems, LOADOUT_SLOTS, LoadInventory, Loadout, Picked, Removed, Sold, TurnIn, Worn,
+};
 use crate::player::{
     Balance, BoostUpdate, ClassChange, InitUserData, LevelUp, Me, Reward, SkillList, StatUpdate,
 };
@@ -124,7 +126,11 @@ impl Session {
                 let secs = xt.field(5).and_then(|secs| secs.parse().ok()).unwrap_or(0);
                 self.closing = Some(Disconnect::Kicked { secs });
             }
-            "zm" if xt.field(3) == Some("tryQuestComplete") => self.answer(Answer::TurnInEchoed),
+            "zm" if xt.field(3) == Some("tryQuestComplete") => {
+                if let Some(id) = xt.field(5).and_then(|id| id.parse().ok()) {
+                    self.answer(Answer::TurnInEchoed(QuestId(id)));
+                }
+            }
             "exitArea" => {
                 if let Some(eid) = xt.field(4).and_then(|eid| eid.parse().ok()) {
                     self.on_player_left(EntityId(eid));
@@ -133,6 +139,11 @@ impl Session {
             "uotls" => {
                 if let (Some(name), Some(fields)) = (xt.field(4), xt.field(5)) {
                     self.on_player_moved(name, fields);
+                }
+            }
+            "mtcid" => {
+                if let Some(id) = xt.field(4).and_then(|id| id.parse().ok()) {
+                    self.follow_door(id);
                 }
             }
             "respawnMon" => {
@@ -152,6 +163,20 @@ impl Session {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn follow_door(&mut self, id: i64) {
+        let Some((cell, pad)) = self.room.as_ref().and_then(|room| {
+            let cell = self.loaded_map()?.cell(&room.cell)?;
+            let door = cell.doors.iter().find(|door| door.id == id)?;
+            (!room.locked(&door.cell)).then(|| (door.cell.clone(), door.pad.clone()))
+        }) else {
+            return;
+        };
+        if self.move_to_cell_with(&cell, &pad, true).is_ok() {
+            self.fetch_cellmates();
+            self.aggro_cell();
         }
     }
 
@@ -288,7 +313,7 @@ impl Session {
                 }
             }
             "sars" => self.settle(&read(&json)?),
-            "aura+" | "aura++" | "aura+p" | "aura-" | "aura--" => {
+            "aura+" | "aura++" | "aura+p" | "aura=" | "aura-" | "aura--" => {
                 self.apply_aura(read(&json)?);
             }
             "clearAuras" => {
@@ -325,10 +350,15 @@ impl Session {
             "seia" => self.on_slot_filled(read(&json)?, Instant::now()),
             "sAct" => {
                 let skills: SkillList = read(&json)?;
-                if let Some(character) = &mut self.character
-                    && character.learn_skills(skills)
-                {
-                    self.combat.restart_clock(ITEM_SLOT);
+                if let Some(character) = &mut self.character {
+                    let item = character.learn_skills(skills);
+                    if std::mem::take(&mut self.class_changed) {
+                        for skill in &character.skills {
+                            self.combat.restart_clock(&skill.slot);
+                        }
+                    } else if item {
+                        self.combat.restart_clock(ITEM_SLOT);
+                    }
                 }
             }
             "loadInventoryBig"
@@ -468,6 +498,11 @@ impl Session {
                 });
                 self.on_sold(sold.char_item_id);
             }
+            "removeItem" => {
+                if let Some(event) = self.inventory.remove(&read::<Removed>(&json)?) {
+                    self.emit(event);
+                }
+            }
             "buyItem" => self.on_bought(read::<Bought>(&json)?),
             "enhanceItemShop" => {
                 let enhanced: Enhanced = read(&json)?;
@@ -511,6 +546,23 @@ impl Session {
                     self.on_worn(worn.id, on);
                 }
             }
+            "wearItem" | "unwearItem" => {
+                let worn: Worn = read(&json)?;
+                if Some(worn.uid) == self.me {
+                    self.inventory.set_worn(worn.id, json.cmd == "wearItem");
+                }
+            }
+            "wearLoadout" => {
+                let loadout: Loadout = read(&json)?;
+                if Some(loadout.uid) == self.me {
+                    for slot in LOADOUT_SLOTS {
+                        self.inventory.unwear_slot(slot);
+                        if let Some(piece) = loadout.costume.get(slot) {
+                            self.inventory.set_worn(piece.id, true);
+                        }
+                    }
+                }
+            }
             "addGoldExp" => {
                 let reward: Reward = read(&json)?;
                 if let Some(points) = self.character.as_mut().and_then(|c| c.gain(&reward)) {
@@ -535,6 +587,10 @@ impl Session {
                     });
                 }
             }
+            "CatchResult" => {
+                let caught: Caught = read(&json)?;
+                faction::add_rep(&mut self.factions, faction::FISHING, caught.result.rep);
+            }
             "levelUp" => {
                 let level: LevelUp = read(&json)?;
                 if let Some(character) = &mut self.character {
@@ -545,6 +601,7 @@ impl Session {
             "updateClass" => {
                 let class: ClassChange = read(&json)?;
                 if Some(class.uid) == self.me {
+                    self.class_changed = true;
                     if let Some(character) = &mut self.character {
                         character.change_class(&class);
                     }

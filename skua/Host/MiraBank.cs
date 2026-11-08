@@ -12,14 +12,13 @@ public sealed class MiraBank : IScriptBank
         this.protocol = protocol;
         this.state = state;
         protocol.EventReceived += data => { if (data is BankLoadedClientEvent) { Loaded = true; StrongReferenceMessenger.Default.Send(new BankLoadedMessage()); } };
-        protocol.StateReceived += section => { if (section.Section == SectionName.Session && state.Session.Phase.Phase == "closed") Loaded = false; };
     }
     public int Slots => state.Me?.BankSlots ?? 0;
     public int UsedSlots => state.Me?.BankCount ?? 0;
     readonly object loadingGate = new();
     Task? loading;
     volatile bool loaded;
-    public bool Loaded { get => loaded; set => loaded = value; }
+    public bool Loaded { get => loaded && state.Bank is not null; set => loaded = value; }
     public void Open() => Load();
     public void Load(bool waitForLoad = true)
     {
@@ -28,7 +27,8 @@ public sealed class MiraBank : IScriptBank
         {
             if (Loaded) { StrongReferenceMessenger.Default.Send(new BankLoadedMessage()); return; }
             if (loading is null || loading.IsCompleted) loading = Task.Run(() => {
-                protocol.Call(new LoadBankCall());
+                try { protocol.Call(new LoadBankCall()); }
+                catch (InvalidOperationException) { return; }
                 Loaded = true;
                 StrongReferenceMessenger.Default.Send(new BankLoadedMessage());
             });

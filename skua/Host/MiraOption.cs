@@ -9,7 +9,10 @@ public sealed class MiraOption : IScriptOption
     readonly Protocol protocol;
     readonly Dictionary<string, string>? saved;
     static readonly System.Reflection.PropertyInfo[] properties = typeof(MiraOption).GetProperties().Where(p => p.CanWrite).ToArray();
-    public MiraOption(Protocol protocol) : this(protocol, true) { }
+    public MiraOption(Protocol protocol, State state) : this(protocol, true)
+    {
+        protocol.StateReceived += section => { if (section.Section == SectionName.Settings && (aggroAllMonsters || aggroMonsters) && state.Settings.Aggro.Mode == "off") SendAggro(); };
+    }
     MiraOption(Protocol protocol, bool load)
     {
         this.protocol = protocol;
@@ -30,10 +33,15 @@ public sealed class MiraOption : IScriptOption
     public bool AggroAllMonsters
     {
         get => aggroAllMonsters;
-        set { aggroAllMonsters = value; protocol.Call(new SetAggroCall(new(value ? "all" : "off"))); }
+        set { aggroAllMonsters = value; SendAggro(); }
     }
     bool aggroMonsters;
-    public bool AggroMonsters { get => aggroMonsters; set => Set(ref aggroMonsters, value); }
+    public bool AggroMonsters
+    {
+        get => aggroMonsters;
+        set { if (aggroMonsters == value) return; Set(ref aggroMonsters, value); SendAggro(); }
+    }
+    void SendAggro() => protocol.Call(new SetAggroCall(new(aggroAllMonsters ? "all" : aggroMonsters ? "cell" : "off")));
     bool attackWithoutTarget;
     public bool AttackWithoutTarget { get => attackWithoutTarget; set => Set(ref attackWithoutTarget, value); }
     bool autoRelogin;

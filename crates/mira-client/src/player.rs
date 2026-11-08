@@ -23,11 +23,14 @@ pub struct Me {
     pub gold: u64,
     pub coins: u64,
     pub member: bool,
+    pub member_days: i64,
     pub class_name: String,
     pub class_points: u32,
     pub char_id: i64,
     pub aq: u32,
     pub email_verified: bool,
+    pub created: String,
+    pub gender: String,
     pub bag_slots: u32,
     pub house_slots: u32,
     pub bank_slots: u32,
@@ -74,10 +77,13 @@ impl Me {
         self.gold = data.gold;
         self.coins = data.coins;
         self.member = data.member_days >= 0;
+        self.member_days = data.member_days;
         self.class_points = data.class_points;
         self.char_id = data.char_id;
         self.aq = data.aq;
         self.email_verified = data.activation_flag == 5;
+        self.created.clone_from(&data.created);
+        self.gender.clone_from(&data.gender);
         self.bag_slots = data.bag_slots;
         self.house_slots = data.house_slots;
         self.bank_slots = data.bank_slots;
@@ -330,6 +336,10 @@ pub(crate) struct UserData {
     aq: u32,
     #[serde(rename = "intActivationFlag", default, deserialize_with = "flex::int")]
     activation_flag: u32,
+    #[serde(rename = "dCreated", default)]
+    created: String,
+    #[serde(rename = "strGender", default)]
+    gender: String,
     #[serde(rename = "iBagSlots", default, deserialize_with = "flex::int")]
     bag_slots: u32,
     #[serde(rename = "iHouseSlots", default, deserialize_with = "flex::int")]

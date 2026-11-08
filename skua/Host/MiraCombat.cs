@@ -36,7 +36,7 @@ public sealed class MiraCombat : IScriptCombat
     }
     void OnEvent(ClientEvent data)
     {
-        if (data is DiedClientEvent) { StopAttacking = false; Volatile.Write(ref selection, null); }
+        if (data is DiedClientEvent) StopAttacking = false;
         if (!EnableCounterHandler) return;
         if (data is CounterStartedClientEvent)
         {
@@ -87,7 +87,7 @@ public sealed class MiraCombat : IScriptCombat
     public void Exit()
     {
         var bot = (MiraBot)IScriptInterface.Instance;
-        if (bot.Player.State == 1) return;
+        if (bot.Player.State == 1 || state.Me is null) return;
         CancelAutoAttack();
         CancelTarget();
         bot.Map.Jump(bot.Player.Cell, bot.Player.Pad);

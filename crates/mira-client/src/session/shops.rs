@@ -5,7 +5,8 @@ use mira_protocol::{CharItemId, ItemId, ShopItemId, packet};
 
 use super::{ActionError, Limit, Op, Session};
 use crate::REPLY_TIMEOUT;
-use crate::inventory::Pool;
+use crate::event::Place;
+use crate::inventory::{Inventory, Pool};
 use crate::quest::Held;
 use crate::shop::{Bought, ShopItem};
 
@@ -205,8 +206,19 @@ impl Session {
             if let Some(me) = &mut self.character {
                 me.spend(listed.cost * u64::from(bought.qty), listed.coins);
             }
-            if let Some(event) = self.inventory.buy(&listed, &bought) {
-                self.emit(event);
+            let (items, place) = if bought.bank {
+                (self.bank.as_mut(), Place::Bank)
+            } else {
+                (Some(&mut self.inventory.items), Place::Inventory)
+            };
+            if let Some(items) = items {
+                let new_stack = !items.iter().any(|i| i.id == listed.id);
+                if let Some(event) = Inventory::buy(items, &listed, &bought, place) {
+                    if bought.bank && new_stack {
+                        self.stored(listed.coins, 1);
+                    }
+                    self.emit(event);
+                }
             }
             Ok(())
         } else {

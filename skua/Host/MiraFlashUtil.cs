@@ -4,16 +4,22 @@ using Skua.Core.Flash;
 
 namespace Mira.Skua;
 
-public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
+public sealed class MiraFlashUtil(Protocol protocol, State state, MiraEvent events) : IFlashUtil
 {
-    readonly ConcurrentDictionary<string, bool> preferences = new();
+    static readonly Dictionary<string, (int Bit, int On)> PreferenceBits = new()
+    {
+        ["bCloak"] = (0, 0), ["bHelm"] = (1, 0), ["bPet"] = (2, 0), ["bWAnim"] = (3, 0), ["bGoto"] = (4, 0), ["bMusicOn"] = (6, 0), ["bFriend"] = (7, 0),
+        ["bParty"] = (8, 0), ["bGuild"] = (9, 0), ["bWhisper"] = (10, 0), ["bTT"] = (11, 0), ["bFBShare"] = (12, 1), ["bDuel"] = (13, 0), ["bProf"] = (18, 0),
+    };
     System.Collections.Immutable.ImmutableDictionary<long, System.Collections.Immutable.ImmutableHashSet<int>> favorites = System.Collections.Immutable.ImmutableDictionary<long, System.Collections.Immutable.ImmutableHashSet<int>>.Empty;
-    public event FlashCallHandler? FlashCall;
+    public event FlashCallHandler? FlashCall { add => events.FlashCall += value; remove => events.FlashCall -= value; }
     public void InitializeFlash() { }
     public void Dispose() { }
     public string? Call(string function, params object[] args)
     {
-        object? value = Read(function, args);
+        object? value;
+        try { value = Read(function, args); }
+        catch (NotSupportedException) { return null; }
         return value is null ? null : JsonConvert.SerializeObject(value);
     }
     public T? Call<T>(string function, params object[] args) => (T?)Call(function, typeof(T), args);
@@ -65,6 +71,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         ("lnkDestroy", [int id]) => DestroyLink(id),
         ("getGameObject" or "getGameObjectS", [string path]) => GameObject(path),
         ("setGameObject", ["litePreference.data.favs", object value]) => SetFavorites(value),
+        ("setGameObject", ["world.questTree", IDictionary<string, object?> { Count: 0 }]) => ForgetQuests(),
         ("setGameObject" or "setGameObjectKey", _) => null,
         ("isFavoriteItem", [int id]) => Volatile.Read(ref favorites).GetValueOrDefault(state.Me?.CharId ?? 0)?.Contains(id) == true,
         ("rejectExcept", [string names]) => ((MiraDrop)IScriptInterface.Instance.Drops).RejectOffers(names.Split(',')),
@@ -83,7 +90,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         ("callGameFunction", ["world.acceptQuest", int quest]) => IScriptInterface.Instance.Quests.Accept(quest),
         ("callGameFunction", ["world.isQuestInProgress", int quest]) => IScriptInterface.Instance.Quests.IsInProgress(quest),
         ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool special]) => IScriptInterface.Instance.Quests.Complete(quest, reward, special),
-        ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool special, int times]) => Act(new CompleteCall(quest, reward < 0 ? null : reward, (uint)times, special)),
+        ("callGameFunction", ["world.tryQuestComplete", int quest, int reward, bool special, int times]) => Act(new CompleteCall(quest, reward < 0 ? null : reward, times, special)),
         ("callGameFunction", ["loaderInfo.applicationDomain.hasDefinition", "InvCat"]) => true,
         ("callGameFunction", ["loaderInfo.applicationDomain.getDefinition", "InvCat"]) => new { MISC_SLOTS = state.Me?.BagSlots ?? 0, MISC_TYPES = new[] { "Item", "Note", "Quest Item", "Resource" } },
         ("callGameFunction", ["world.myAvatar.getCPByID", int id]) => state.Inventory.ById.GetValueOrDefault(id)?.Qty ?? -1,
@@ -105,27 +112,34 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
     };
     object? GameObject(string path) => path switch
     {
-        _ when path.StartsWith("uoPref.") => preferences.GetValueOrDefault(path[7..], true),
+        _ when path.StartsWith("uoPref.") => PreferenceBits.TryGetValue(path[7..], out var preference) ? Achievement("ia1", preference.Bit) == preference.On : null,
         _ when path.StartsWith("world.lock.") => state.Combat.ActionLocks?.GetValueOrDefault(path[11..]) is { } action ? new { TS = action.Used ?? 0, CD = action.Cooldown } : null,
         _ when path.StartsWith("world.invTree.") => InventoryTree(path[14..]),
+        _ when path.StartsWith("world.uoTree.") => PlayerTree(path[13..]),
         _ when path == "world.shopinfo" || path.StartsWith("world.shopinfo.") => ShopObject(path[14..].TrimStart('.')),
-        "world.myAvatar.objData.strEmail" or "world.myAvatar.objData.dCreated" or "world.myAvatar.objData.strGender" => null,
+        "world.myAvatar.objData.strEmail" => null,
+        "world.myAvatar.objData.dCreated" => Created(),
+        "world.myAvatar.objData.strGender" => state.Me?.Gender,
         "ui.mcPopup.currentLabel" => "",
         "ui.monsterIcon.redX.visible" => false,
         "world.myAvatar.objData.guild.Name" => "",
         "world.myAvatar.objData.CharID" => state.Me?.CharId,
         "world.myAvatar.objData.intAQ" => state.Me?.Aq ?? 0,
         "sfc.myUserName" => state.Me?.Name.ToLowerInvariant() ?? "",
-        "world.myAvatar.objData.iUpgDays" => state.Me?.Member == true ? 0 : -1,
+        "world.myAvatar.objData.iUpgDays" => state.Me?.MemberDays ?? -1,
         "world.myAvatar.objData.intLevel" => state.Me?.Level,
         "world.myAvatar.objData.intGold" => state.Me?.Gold,
         "world.myAvatar.objData.intCoins" => state.Me?.Coins,
+        "world.myAvatar.objData.iBagSlots" => state.Me?.BagSlots,
+        "world.myAvatar.objData.iBankSlots" => state.Me?.BankSlots,
+        "world.myAvatar.objData.iHouseSlots" => state.Me?.HouseSlots,
         "world.myAvatar.objData.iBoostCP" => Boost("class_points"),
         "world.myAvatar.objData.iBoostXP" => Boost("xp"),
         "world.myAvatar.objData.iBoostG" => Boost("gold"),
         "world.myAvatar.objData.iBoostRep" => Boost("rep"),
         "world.myAvatar.objData.strClassName" => state.Me?.ClassName ?? "",
-        "world.strMapName" or "world.strMapFileName" => state.Room?.MapName ?? "",
+        "world.strMapName" => state.Room?.MapName ?? "",
+        "world.strMapFileName" => state.Room?.File ?? "",
         "world.questTree" => state.Quests.ScriptTree.ToDictionary(q => q.ID),
         "cDropsUI.invTree" => ((MiraDrop)IScriptInterface.Instance.Drops).VisibleOffers,
         "world.myAvatar.items" => state.Inventory.InventoryItems,
@@ -138,7 +152,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         if (state.Shop is not { } shop) return null;
         return path switch
         {
-            "" => new { ShopID = shop.Id, sName = shop.Name, bUpg = shop.Member, bLimited = shop.Limited, sMap = string.Join(',', shop.Maps), iIndex = shop.Index, sField = shop.Field, reqItems = shop.RequiredItem, items = shop.ScriptItems },
+            "" => new { ShopID = shop.Id, sName = shop.Name, bUpg = shop.Member, bLimited = shop.Limited, sMap = string.Join(',', shop.Maps), iIndex = shop.Index, sField = shop.Field, reqItems = shop.RequiredItem, items = shop.RawItems },
             "iIndex" => shop.Index,
             "sField" => shop.Field,
             "reqItems" => shop.RequiredItem,
@@ -147,7 +161,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
             "bUpg" => shop.Member,
             "bLimited" => shop.Limited,
             "sMap" => string.Join(',', shop.Maps),
-            "items" => shop.ScriptItems,
+            "items" => shop.RawItems,
             _ => null
         };
     }
@@ -156,6 +170,7 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
         var value = Newtonsoft.Json.Linq.JObject.FromObject(item);
         return ((MiraShop)IScriptInterface.Instance.Shops).MaximumBuys(value.ToObject<ShopItem>()!, value["turnin"] is { Type: not Newtonsoft.Json.Linq.JTokenType.Null });
     }
+    object? ForgetQuests() { Act(new ForgetQuestsCall()); return null; }
     object? SetFavorites(object value)
     {
         var parsed = JsonConvert.DeserializeObject<Dictionary<long, int[]>>(JsonConvert.SerializeObject(value))!;
@@ -191,6 +206,23 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
             _ => throw new NotSupportedException($"IFlashUtil game object world.invTree.{path}")
         };
     }
+    object? PlayerTree(string path)
+    {
+        string[] parts = path.Split('.', 2);
+        if (parts.Length < 2 || state.Room?.Players.FirstOrDefault(p => p.Name.Equals(parts[0], StringComparison.OrdinalIgnoreCase)) is not { } player) return null;
+        return parts[1] switch
+        {
+            "intHP" => player.Hp,
+            "intHPMax" => player.MaxHp,
+            _ => throw new NotSupportedException($"IFlashUtil game object world.uoTree.{path}")
+        };
+    }
+    string? Created()
+    {
+        if (!DateTime.TryParse(state.Me?.Created, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeLocal, out var at)) return null;
+        var offset = TimeZoneInfo.Local.GetUtcOffset(at);
+        return string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{at:ddd MMM d HH:mm:ss} GMT{(offset < TimeSpan.Zero ? '-' : '+')}{offset:hhmm} {at:yyyy}");
+    }
     int Boost(string kind) => state.Me?.Boosts.GetValueOrDefault(kind) is { } at ? (int)Math.Max(0, ((long)at - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) / 1000) : 0;
     object? ActiveSkill(int slot)
     {
@@ -216,7 +248,8 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
     }
     static int Remaining(ulong? at) => at is { } deadline ? (int)Math.Clamp((long)deadline - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), 0, int.MaxValue) : 0;
     int Cooldown(int index) => Slot(index) is { } slot ? Remaining(state.Combat.SkillTiming?.GetValueOrDefault(slot)?.Cooldown) : 0;
-    bool UseSkill(int index) => Slot(index) is { } slot && CanUseSkill(index, true) && Act(new UseSkillCall(slot, ((MiraCombat)IScriptInterface.Instance.Combat).SelectedTarget));
+    bool UseSkill(int index) => Slot(index) is { } slot && CanUseSkill(index, true) && (slot == "aa" ? AutoAttack() : Act(new UseSkillCall(slot, ((MiraCombat)IScriptInterface.Instance.Combat).SelectedTarget)));
+    static bool AutoAttack() => IScriptInterface.Instance.Combat is MiraCombat combat && (combat.SelectedTarget is { Kind: "monster" } target ? combat.Attack((int)target.Id) : combat.Attack("*"));
     bool Act(Request request) { try { protocol.Call(request); return true; } catch (InvalidOperationException) { return false; } }
     int QuestValue(int slot)
     {
@@ -229,16 +262,18 @@ public sealed class MiraFlashUtil(Protocol protocol, State state) : IFlashUtil
     int Achievement(string field, int index) => index is < 0 or > 31 || state.Me?.Quests.Achievements.TryGetValue(field, out _) != true ? -1 : (int)((state.Me.Quests.Achievements[field] >> index) & 1);
     int MaximumTurnIns(int quest)
     {
-        if (!state.Quests.Definitions.TryGetValue(quest, out var definition)) { IScriptInterface.Instance.Quests.EnsureLoad(quest); definition = state.Quests.Definitions.GetValueOrDefault(quest); }
-        if (definition is null) return 0;
-        if (definition.TurnIn.IsEmpty) return 1;
-        if (definition.Once || definition.Period is not null) return 1;
-        return definition.TurnIn.Aggregate(250, (count, item) => Math.Min(count, ((state.Inventory.ById.GetValueOrDefault(item.Id)?.Qty ?? 0) + state.Temp.Where(i => i.Id == item.Id).Sum(i => i.Qty)) / Math.Max(1, item.Qty)));
+        if (!state.Quests.Definitions.TryGetValue(quest, out var definition)) return 0;
+        int most = -1;
+        foreach (var item in definition.TurnIn)
+        {
+            var held = state.Inventory.ById.GetValueOrDefault(item.Id);
+            int qty = (held?.Qty ?? 0) + state.Temp.Where(i => i.Id == item.Id).Sum(i => i.Qty);
+            if (qty < item.Qty || held?.Equipped == true) return 0;
+            int sets = qty / Math.Max(1, item.Qty);
+            if (most == -1 || sets < most) most = sets;
+        }
+        return Math.Min(most, 250);
     }
     bool LoadQuests(string ids) { IScriptInterface.Instance.Quests.Load(ids.Split(',').Select(int.Parse).ToArray()); return true; }
-    object? SendPacket(string packet) { protocol.Call(new SendCall(packet)); Remember(packet); return null; }
-    public void Remember(string packet)
-    {
-        if (packet.Split('%') is [_, "xt", "zm", "cmd", _, "uopref", string key, string value, ..] && bool.TryParse(value, out bool on)) preferences[key] = on;
-    }
+    object? SendPacket(string packet) { protocol.Call(new SendCall(packet)); return null; }
 }

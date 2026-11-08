@@ -75,8 +75,8 @@ public sealed class MiraEvent : IScriptEvent
     public event RunToAreaHandler? RunToArea;
     void Listen()
     {
-        protocol.Call(new ListenCall(PacketDirection.In, onExtensionPacketReceived is not null));
-        protocol.Call(new ListenCall(PacketDirection.Out, onPacketReceived is not null || onCellChanged is not null || onQuestAccepted is not null || onTryBuyItem is not null || onLogout is not null));
+        protocol.Call(new ListenCall(PacketDirection.In, onExtensionPacketReceived is not null || onFlashCall is not null));
+        protocol.Call(new ListenCall(PacketDirection.Out, onFlashCall is not null || onPacketReceived is not null || onCellChanged is not null || onQuestAccepted is not null || onTryBuyItem is not null || onLogout is not null));
     }
     public void ClearHandlers()
     {
@@ -101,6 +101,13 @@ public sealed class MiraEvent : IScriptEvent
         ReloginTriggered = null;
         Listen();
     }
+    FlashCallHandler? onFlashCall;
+    internal event FlashCallHandler FlashCall
+    {
+        add { lock (subscriptions) { onFlashCall += value; Listen(); } }
+        remove { lock (subscriptions) { onFlashCall -= value; Listen(); } }
+    }
+    internal void ClearFlashCalls() { lock (subscriptions) { onFlashCall = null; Listen(); } }
     public void RaiseStopping(Exception? error) => ScriptStopping?.Invoke(error);
     void OnPacket(Packet packet)
     {
@@ -111,9 +118,13 @@ public sealed class MiraEvent : IScriptEvent
                 ['%', ..] => new JObject { ["params"] = new JObject { ["type"] = "str", ["dataObj"] = new JArray(packet.Text[1..^1].Split('%').Skip(1)) } },
                 _ => null
             };
-            if (extension is not null) onExtensionPacketReceived?.Invoke(extension);
+            onFlashCall?.Invoke("packetFromServer", [packet.Text]);
+            if (extension is null) return;
+            onExtensionPacketReceived?.Invoke(extension);
+            onFlashCall?.Invoke("pext", [extension.ToString(Newtonsoft.Json.Formatting.None)]);
             return;
         }
+        if (packet.Text.StartsWith("%xt%zm%")) onFlashCall?.Invoke("packet", [packet.Text.Trim()]);
         string[] fields = packet.Text.Split('%');
         if (fields.Length < 5) { onPacketReceived?.Invoke(packet.Text); return; }
         switch (fields[3])
@@ -125,13 +136,19 @@ public sealed class MiraEvent : IScriptEvent
         }
         onPacketReceived?.Invoke(packet.Text);
     }
+    static void SendCellChanged(string map, string cell, string pad) => StrongReferenceMessenger.Default.Send<CellChangedMessage, int>(new(map, cell, pad), (int)MessageChannels.GameEvents);
     void OnEvent(ClientEvent data)
     {
         switch (data)
         {
             case DiedClientEvent: PlayerDeath?.Invoke(); break;
             case KilledClientEvent e: MonsterKilled?.Invoke((int)e.Id); break;
-            case JoinedClientEvent e: MapChanged?.Invoke(e.Map); break;
+            case JoinedClientEvent e:
+                string map = e.Map.Split('-')[0];
+                SendCellChanged(map, e.Cell, e.Pad);
+                MapChanged?.Invoke(map);
+                break;
+            case MovedClientEvent e: SendCellChanged(state.Room?.MapName ?? "", e.Cell, e.Pad); break;
             case QuestCompletedClientEvent e: QuestTurnedIn?.Invoke((int)e.Id); ((MiraQuest)IScriptInterface.Instance.Quests).Reaccept((int)e.Id); break;
             case AwayChangedClientEvent { Away: true }: PlayerAFK?.Invoke(); break;
             case CounterStartedClientEvent: CounterAttack?.Invoke(false); break;

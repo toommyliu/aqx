@@ -9,6 +9,7 @@ use std::process::{Command, Stdio};
 use support::{Dir, FARM, Fake};
 
 const HELLO: &str = r#"
+using CommunityToolkit.Mvvm.DependencyInjection;
 using Skua.Core.Interfaces;
 
 public class Hello
@@ -19,6 +20,8 @@ public class Hello
         bot.Options.JoinMapTries = 5;
         bot.Log($"tries {bot.Options.JoinMapTries}, default delay {bot.Options.ActionDelay}, exit {bot.ShouldExit}");
         bot.ShowMessageBox("Continue?", "Question", true);
+        Ioc.Default.GetRequiredService<IThemeService>().ApplyBaseTheme(false);
+        bot.Log($"picked {Ioc.Default.GetRequiredService<IFileDialogService>().OpenFile() ?? "nothing"}");
         bot.Sleep(10);
     }
 }
@@ -39,6 +42,7 @@ public class ReadStats
         bot.Log($"coins {bot.Flash.GetGameObject<int>("world.myAvatar.objData.intCoins")}");
         bot.Log($"user {bot.Flash.GetGameObject("sfc.myUserName")}");
         bot.Log($"id {bot.Player.ID}, in r2: {string.Join(", ", bot.Map.CellPlayers!.Select(p => $"{p.Name} {p.EntID}"))}");
+        bot.Log($"names {string.Join(", ", bot.Map.PlayerNames!)}, exists {bot.Map.PlayerExists("player1")}");
         var monsters = Newtonsoft.Json.Linq.JArray.Parse(bot.Flash.Call("availableMonsters")!);
         bot.Log($"monsters in r2: {string.Join(", ", monsters.Select(m => $"{m["strMonName"]} {m["MonMapID"]} {m["intHP"]}"))}");
     }
@@ -54,7 +58,7 @@ public class Stops
     {
         bot.Events.ScriptStopping += e =>
         {
-            bot.Sleep(250);
+            bot.Sleep(3000);
             bot.Log($"stopping handler finished, crashed {e is not null}");
             return true;
         };
@@ -90,7 +94,8 @@ fn the_skua_host_runs_a_script_against_the_session() {
         [
             "version unknown",
             "tries 5, default delay 800, exit False",
-            "Question: Continue? (dismissed, as if the window were closed)"
+            "Question: Continue? (dismissed, as if the window were closed)",
+            "picked nothing"
         ]
     );
 }
@@ -146,6 +151,30 @@ fn stopping_from_the_script_unwinds_it_and_lets_its_stopping_handlers_finish() {
 }
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_stopping_handler_that_never_returns_cannot_hold_the_run_open() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class Stuck {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Events.ScriptStopping += _ => { Thread.Sleep(Timeout.Infinite); return true; };
+        bot.Stop();
+    }
+}
+"#;
+    let started = std::time::Instant::now();
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(source);
+    assert!(
+        matches!(outcome, Outcome::Stopped(_)),
+        "{outcome:?} {logs:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+}
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn a_script_that_returns_raises_no_script_stopping() {
     let (outcome, logs, _) = Fake::start(|_, _| {}).run(&STOPS.replace("MODE", "finish"));
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
@@ -167,7 +196,8 @@ fn a_script_reads_the_players_id_cell_and_combat_stats() {
         "7 14 37 0.08 1.66 0.03",
         "coins 50",
         "user \"player1\"",
-        "id 1001, in r2: Player1 1001",
+        "id 1001, in r2: player1 1001",
+        "names player1, exists True",
     ] {
         assert!(logs.contains(&expected.into()), "{logs:?}");
     }
@@ -175,6 +205,54 @@ fn a_script_reads_the_players_id_cell_and_combat_stats() {
         logs.iter()
             .any(|s| s.starts_with("monsters in r2: Treeant 2 ")),
         "{logs:?}"
+    );
+}
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn a_script_reads_the_account_from_the_flash_object_paths() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class ReadAccount
+{
+    public void ScriptMain(IScriptInterface bot)
+    {
+        bot.Log($"days {bot.Flash.GetGameObject("world.myAvatar.objData.iUpgDays")}");
+        bot.Log($"slots {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iBagSlots")} {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iBankSlots")} {bot.Flash.GetGameObject<int>("world.myAvatar.objData.iHouseSlots")}");
+        bot.Log($"hp {bot.Flash.GetGameObject<int>("world.uoTree.player2.intHP")}/{bot.Flash.GetGameObject<int>("world.uoTree.player2.intHPMax")}");
+        bot.Log($"file {bot.Flash.GetGameObject<string>("world.strMapFileName")}");
+        bot.Log($"account {bot.Flash.GetGameObject("world.myAvatar.objData.dCreated")} {bot.Flash.GetGameObject("world.myAvatar.objData.strGender")}");
+        bot.Log($"prefs {string.Join(" ", new[] { "bGoto", "bFriend", "bParty", "bGuild", "bWhisper", "bDuel" }.Select(k => bot.Flash.GetGameObject<bool>($"uoPref.{k}")))}");
+    }
+}
+"#;
+    let mut map: Value = serde_json::from_str(FARM).unwrap();
+    map["uoBranch"].as_array_mut().unwrap().push(json!({"entID":1002,"strUsername":"Player2","strFrame":"r1","intHP":1200,"intHPMax":3000,"intState":1}));
+    let (outcome, logs, _) = Fake::start_config(
+        &map.to_string(),
+        json!([]),
+        json!([]),
+        json!({"iUpgDays":27,"iBagSlots":40,"iBankSlots":50,"iHouseSlots":20,"ia1":(1 << 8) | (1 << 13),"dCreated":"2015-01-01T00:00:00","strGender":"F"}),
+        |_, _| {},
+    )
+    .run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    let [days, slots, hp, file, account, prefs] = &logs[..] else {
+        panic!("{logs:?}")
+    };
+    assert_eq!(
+        [days, slots, hp, file, prefs],
+        [
+            "days 27",
+            "slots 40 50 20",
+            "hp 1200/3000",
+            "file farm/farm.swf",
+            "prefs True True False True True False"
+        ]
+    );
+    assert!(
+        account.starts_with(r#"account "Thu Jan 1 00:00:00 GMT"#)
+            && account.ends_with(r#" 2015" "F""#),
+        "{account}"
     );
 }
 #[test]
@@ -261,6 +339,79 @@ public class Events {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn unknown_flash_calls_return_null() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class UnknownFlash {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Log($"function {bot.Flash.CallGameFunction("world.myAvatar.loadMovieAtES", "Weapon", "item.swf", "Item") is null}");
+        bot.Log($"path {bot.Flash.GetGameObject("world.ldr_map.contentLoaderInfo.url") is null}");
+        bot.Log($"call {bot.Flash.Call("walkTo", 100, 200, 8) is null}");
+    }
+}
+"#;
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert_eq!(logs, ["function True", "path True", "call True"]);
+}
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn flash_call_handlers_see_sent_and_received_packets() {
+    let source = r#"
+using Skua.Core.Interfaces;
+public class FlashCalls {
+    public void ScriptMain(IScriptInterface bot) {
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        bot.Flash.FlashCall += (name, args) => seen.Enqueue($"{name} {args[0]}");
+        bot.Send.Packet("%xt%zm%cmd%1%probe%");
+        for (int i = 0; i < 100 && seen.Count < 3; i++) bot.Sleep(20);
+        foreach (var call in seen) bot.Log(call);
+    }
+}
+"#;
+    let (outcome, logs, _) = Fake::start(|message, wire| {
+        if message.contains("%probe%") {
+            wire.send("%xt%probe%-1%You will not resist!%");
+        }
+    })
+    .run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert_eq!(
+        logs,
+        [
+            "packet %xt%zm%cmd%1%probe%",
+            "packetFromServer %xt%probe%-1%You will not resist!%",
+            r#"pext {"params":{"type":"str","dataObj":["probe","-1","You will not resist!"]}}"#,
+        ]
+    );
+}
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn moving_cells_publishes_the_cell_changed_message() {
+    let source = r#"
+using CommunityToolkit.Mvvm.Messaging;
+using Skua.Core.Interfaces;
+using Skua.Core.Messaging;
+public class CellMessages {
+    public void ScriptMain(IScriptInterface bot) {
+        string? moved = null;
+        StrongReferenceMessenger.Default.Register<CellMessages, CellChangedMessage, int>(this, (int)MessageChannels.GameEvents, (_, m) => moved = $"{m.Map} {m.Cell} {m.Pad}");
+        bot.Map.Jump("r2", "Left");
+        bot.Wait.ForTrue(() => moved is not null, 50);
+        bot.Log($"cell changed {moved}");
+    }
+}
+"#;
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(
+        logs.contains(&"cell changed farm r2 Left".into()),
+        "{logs:?}"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn a_cached_script_does_not_load_the_compiler() {
     let source = r#"
 using Skua.Core.Interfaces;
@@ -286,7 +437,8 @@ public class Cancelled {
     public void ScriptMain(IScriptInterface bot) {
         bot.Events.ScriptStopping += error => { bot.Map.Jump("r2", "Left"); bot.Log("cleanup finished"); return true; };
         bot.Log("ready to stop");
-        bot.Sleep(20000);
+        try { bot.Sleep(20000); }
+        finally { Thread.Sleep(1500); bot.Log("script unwound"); }
         bot.Log("still running");
     }
 }
@@ -298,7 +450,14 @@ public class Cancelled {
             }
         });
     assert_eq!(outcome, Outcome::Cancelled, "{logs:?}");
-    assert!(logs.contains(&"cleanup finished".into()), "{logs:?}");
+    let position = |line: &str| logs.iter().position(|s| s == line);
+    assert!(
+        matches!(
+            (position("script unwound"), position("cleanup finished")),
+            (Some(unwound), Some(cleanup)) if unwound < cleanup
+        ),
+        "{logs:?}"
+    );
     assert!(!logs.contains(&"still running".into()), "{logs:?}");
     assert!(
         sent.iter().any(|m| m.contains("%moveToCell%5%r2%Left%")),

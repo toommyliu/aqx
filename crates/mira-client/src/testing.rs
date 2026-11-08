@@ -269,13 +269,70 @@ pub fn json_message(o: Value) -> String {
     json!({"t": "xt", "b": {"r": -1, "o": o}}).to_string()
 }
 
+pub struct MapCell<'a> {
+    pub name: &'a str,
+    pub pads: &'a [(&'a str, i32, i32)],
+    pub doors: &'a [(i64, &'a str, &'a str)],
+}
+
+impl<'a> MapCell<'a> {
+    pub fn named(name: &'a str) -> Self {
+        MapCell {
+            name,
+            pads: &[],
+            doors: &[],
+        }
+    }
+}
+
 pub fn map_swf(cells: &[&str]) -> Vec<u8> {
+    let cells: Vec<_> = cells.iter().map(|name| MapCell::named(name)).collect();
+    map_swf_with(&cells)
+}
+
+pub fn map_swf_with(cells: &[MapCell]) -> Vec<u8> {
+    fn tag(body: &mut Vec<u8>, kind: u16, data: &[u8]) {
+        if data.len() < 63 {
+            body.extend_from_slice(&((kind << 6) | data.len() as u16).to_le_bytes());
+        } else {
+            body.extend_from_slice(&((kind << 6) | 63).to_le_bytes());
+            body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        }
+        body.extend_from_slice(data);
+    }
     let mut body = vec![0, 0, 24, 1, 0];
+    let mut classes = vec![2, 0];
+    for (id, class) in [(0u16, "map_fla.MainTimeline"), (1, "map_fla.Pad_1")] {
+        classes.extend_from_slice(&id.to_le_bytes());
+        classes.extend_from_slice(class.as_bytes());
+        classes.push(0);
+    }
+    tag(&mut body, 76, &classes);
+    let abc = [&[1, 0, 0, 0, 0][..], &door_setters(cells)].concat();
+    tag(&mut body, 82, &abc);
     for cell in cells {
-        body.extend_from_slice(&((43 << 6) | (cell.len() + 1) as u16).to_le_bytes());
-        body.extend_from_slice(cell.as_bytes());
-        body.push(0);
-        body.extend_from_slice(&(1u16 << 6).to_le_bytes());
+        tag(&mut body, 43, &[cell.name.as_bytes(), &[0]].concat());
+        for (depth, (name, x, y)) in (1u16..).zip(cell.pads) {
+            let mut place = vec![2 | 4 | 32];
+            place.extend_from_slice(&depth.to_le_bytes());
+            place.extend_from_slice(&1u16.to_le_bytes());
+            let mut bits = vec![false, false];
+            for (value, width) in [(20, 5), (x * 20, 20), (y * 20, 20)] {
+                bits.extend((0..width).rev().map(|i| (value >> i) & 1 == 1));
+            }
+            place.extend(bits.chunks(8).map(|byte| {
+                (0..8).fold(0u8, |acc, i| {
+                    acc << 1 | u8::from(byte.get(i) == Some(&true))
+                })
+            }));
+            place.extend_from_slice(name.as_bytes());
+            place.push(0);
+            tag(&mut body, 26, &place);
+        }
+        tag(&mut body, 1, &[]);
+        for depth in (1u16..).take(cell.pads.len()) {
+            tag(&mut body, 28, &depth.to_le_bytes());
+        }
     }
     body.extend_from_slice(&[0, 0]);
     [
@@ -284,6 +341,98 @@ pub fn map_swf(cells: &[&str]) -> Vec<u8> {
         &body,
     ]
     .concat()
+}
+
+fn door_setters(cells: &[MapCell]) -> Vec<u8> {
+    fn u30(out: &mut Vec<u8>, mut n: usize) {
+        loop {
+            let byte = (n & 127) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 128);
+        }
+    }
+    let doors: Vec<_> = (1..)
+        .zip(cells)
+        .flat_map(|(frame, cell)| cell.doors.iter().map(move |door| (frame, door)))
+        .collect();
+    let mut strings = vec!["map_fla", "MainTimeline", "tCell", "tPad", "tID"];
+    let mut names = Vec::new();
+    for (n, (frame, (_, cell, pad))) in doors.iter().enumerate() {
+        names.push((
+            format!("door{n}"),
+            format!("__setProp_door{n}_Scene1_pads_{frame}"),
+            *cell,
+            *pad,
+        ));
+    }
+    for (instance, setter, cell, pad) in &names {
+        strings.extend([instance.as_str(), setter.as_str(), cell, pad]);
+    }
+    let string = |s: &str| strings.iter().position(|t| *t == s).unwrap() + 1;
+    let mut multinames: Vec<&str> = vec!["MainTimeline", "tCell", "tPad", "tID"];
+    for (instance, setter, _, _) in &names {
+        multinames.extend([instance.as_str(), setter.as_str()]);
+    }
+    let multiname = |s: &str| multinames.iter().position(|t| *t == s).unwrap() + 1;
+    let mut abc = vec![16, 0, 46, 0];
+    u30(&mut abc, doors.len() + 1);
+    for (_, (id, _, _)) in &doors {
+        u30(&mut abc, *id as u32 as usize);
+    }
+    abc.extend([0, 0]);
+    u30(&mut abc, strings.len() + 1);
+    for s in &strings {
+        u30(&mut abc, s.len());
+        abc.extend_from_slice(s.as_bytes());
+    }
+    abc.extend([2, 0x16, 1, 0]);
+    u30(&mut abc, multinames.len() + 1);
+    for name in &multinames {
+        abc.push(7);
+        u30(&mut abc, 1);
+        u30(&mut abc, string(name));
+    }
+    u30(&mut abc, doors.len() + 1);
+    for _ in 0..=doors.len() {
+        abc.extend([0, 0, 0, 0]);
+    }
+    abc.extend([0, 1]);
+    u30(&mut abc, multiname("MainTimeline"));
+    abc.extend([0, 0, 0, 0]);
+    u30(&mut abc, names.len());
+    for (method, (_, setter, _, _)) in (1..).zip(&names) {
+        u30(&mut abc, multiname(setter));
+        abc.extend([1, 0]);
+        u30(&mut abc, method);
+    }
+    abc.extend([0, 0, 1, 0, 0]);
+    u30(&mut abc, names.len());
+    for (n, (instance, _, cell, pad)) in names.iter().enumerate() {
+        u30(&mut abc, n + 1);
+        abc.extend([2, 1, 0, 1]);
+        let mut code = vec![0xd0, 0x30];
+        for (op, operand, property) in [
+            (0x2c, string(cell), "tCell"),
+            (0x2c, string(pad), "tPad"),
+            (0x2d, n + 1, "tID"),
+        ] {
+            code.push(0x60);
+            u30(&mut code, multiname(instance));
+            code.push(op);
+            u30(&mut code, operand);
+            code.push(0x61);
+            u30(&mut code, multiname(property));
+        }
+        code.push(0x47);
+        u30(&mut abc, code.len());
+        abc.extend(code);
+        abc.extend([0, 0]);
+    }
+    abc
 }
 
 pub fn move_to_area(area: i64, name: &str) -> String {

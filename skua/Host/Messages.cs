@@ -18,6 +18,7 @@ namespace Mira.Skua;
 [JsonDerivedType(typeof(AcceptCall), "accept")]
 [JsonDerivedType(typeof(CompleteCall), "complete")]
 [JsonDerivedType(typeof(AbandonCall), "abandon")]
+[JsonDerivedType(typeof(ForgetQuestsCall), "forget_quests")]
 [JsonDerivedType(typeof(PickupCall), "pickup")]
 [JsonDerivedType(typeof(GetMapItemCall), "get_map_item")]
 [JsonDerivedType(typeof(LoadBankCall), "load_bank")]
@@ -29,6 +30,7 @@ namespace Mira.Skua;
 [JsonDerivedType(typeof(BuyCall), "buy")]
 [JsonDerivedType(typeof(SellCall), "sell")]
 [JsonDerivedType(typeof(EquipCall), "equip")]
+[JsonDerivedType(typeof(EquipUncheckedCall), "equip_unchecked")]
 [JsonDerivedType(typeof(UnequipCall), "unequip")]
 [JsonDerivedType(typeof(UseItemCall), "use_item")]
 [JsonDerivedType(typeof(SendCall), "send")]
@@ -46,7 +48,7 @@ namespace Mira.Skua;
 [JsonDerivedType(typeof(SetLoginInfoCall), "set_login_info")]
 public abstract record Request { public long Id { get; init; } }
 public sealed record JoinCall(string Map, string Cell = "Enter", string Pad = "Spawn") : Request;
-public sealed record JumpCall(string Cell, string Pad, bool ClientOnly = false) : Request;
+public sealed record JumpCall(string Cell, string Pad, bool ClientOnly = false, bool AutoCorrect = false) : Request;
 public sealed record WalkCall(int X, int Y) : Request;
 public sealed record GotoCall(string Player) : Request;
 public sealed record RestCall() : Request;
@@ -58,8 +60,9 @@ public sealed record SetSkillLastUseCall(string Slot, long At) : Request;
 public sealed record UseSkillCall(string Slot, SkillTarget? Target) : Request;
 public sealed record LoadQuestsCall(long[] Ids) : Request;
 public sealed record AcceptCall(long Quest) : Request;
-public sealed record CompleteCall(long Quest, long? Reward, uint Times, bool Special = false) : Request;
+public sealed record CompleteCall(long Quest, long? Reward, int Times, bool Special = false) : Request;
 public sealed record AbandonCall(long Quest) : Request;
+public sealed record ForgetQuestsCall() : Request;
 public sealed record PickupCall(long Item) : Request;
 public sealed record GetMapItemCall(long Item) : Request;
 public sealed record LoadCellsCall() : Request;
@@ -71,6 +74,7 @@ public sealed record LoadShopCall(long Shop) : Request;
 public sealed record BuyCall(long Listing, uint Quantity) : Request;
 public sealed record SellCall(long Item, uint Quantity) : Request;
 public sealed record EquipCall(long Item) : Request;
+public sealed record EquipUncheckedCall(long Item) : Request;
 public sealed record UnequipCall(long Item) : Request;
 public sealed record UseItemCall(long Item) : Request;
 public sealed record SendCall(string Text) : Request;
@@ -127,6 +131,10 @@ public enum ErrorKind
     Http, Closed, Stopped, Cancelled
 }
 public sealed record Error(ErrorKind Kind, string Message);
+public sealed class CallFailedException(ErrorKind kind, string message) : InvalidOperationException($"{kind}: {message}")
+{
+    public ErrorKind Kind => kind;
+}
 public sealed record SuccessReply(long Reply, JsonElement Ok);
 public sealed record FailureReply(long Reply, Error Error);
 public sealed record ReplyMessage(long Reply, JsonElement? Ok, Error? Error);

@@ -69,7 +69,7 @@ public sealed class State
 public enum EntityState { Dead, Idle, [JsonStringEnumMemberName("in_combat")] InCombat }
 public sealed record PhaseSnapshot(string Phase);
 public sealed record SessionSnapshot(PhaseSnapshot Phase, string Server, string Host);
-public sealed record MeSnapshot(long Id, string Name, int Level, ulong Exp, ulong ExpToLevel, ulong Gold, ulong Coins, bool Member, string ClassName, int ClassPoints, int ClassRank, long CharId, uint Aq, bool EmailVerified, int BagSlots, int HouseSlots, int BankSlots, int BankCount, ImmutableDictionary<string, ulong> Boosts, int Hp, int MaxHp, int Mp, int MaxMp, EntityState State, bool Away, StatsSnapshot Stats, ImmutableArray<SkillSnapshot> Skills, long? ItemSlot, QuestProgressSnapshot Quests, AurasSnapshot Auras)
+public sealed record MeSnapshot(long Id, string Name, int Level, ulong Exp, ulong ExpToLevel, ulong Gold, ulong Coins, bool Member, long MemberDays, string ClassName, int ClassPoints, int ClassRank, long CharId, uint Aq, bool EmailVerified, string Created, string Gender, int BagSlots, int HouseSlots, int BankSlots, int BankCount, ImmutableDictionary<string, ulong> Boosts, int Hp, int MaxHp, int Mp, int MaxMp, EntityState State, bool Away, StatsSnapshot Stats, ImmutableArray<SkillSnapshot> Skills, long? ItemSlot, QuestProgressSnapshot Quests, AurasSnapshot Auras)
 {
     public PlayerStats ScriptStats { get; } = new() { Strength = (int)Stats.Strength, Endurance = (int)Stats.Endurance, Dexterity = (int)Stats.Dexterity, Intellect = (int)Stats.Intellect, Wisdom = (int)Stats.Wisdom, Luck = (int)Stats.Luck, AttackPower = (int)Stats.AttackPower, SpellPower = (int)Stats.SpellPower, CriticalChance = (float)Stats.Crit, CriticalMultiplier = (float)Stats.CriticalMultiplier, Haste = (float)Stats.Haste, EvasionChance = (float)Stats.Evasion };
 }
@@ -83,8 +83,8 @@ public sealed record RoomSnapshot(string Name, string Cell, string Pad, int X, i
     public string MapName { get; } = Name.Split('-')[0];
     public List<PlayerInfo> ScriptPlayers { get; } = Players.Select(ToPlayer).ToList();
     public List<PlayerInfo> ScriptCellPlayers { get; } = Players.Where(p => p.Cell == Cell).Select(ToPlayer).ToList();
-    public List<string> ScriptPlayerNames { get; } = Players.Select(p => p.Name).ToList();
-    static PlayerInfo ToPlayer(PlayerSnapshot p) => new() { Name = p.Name, EntID = (int)p.Eid, Cell = p.Cell!, Pad = p.Pad!, HP = p.Hp, MaxHP = p.MaxHp, MP = p.Mp, AFK = p.Away, Level = p.Level ?? 0, X = p.X, Y = p.Y };
+    public List<string> ScriptPlayerNames { get; } = Players.Select(p => p.Name.ToLowerInvariant()).ToList();
+    static PlayerInfo ToPlayer(PlayerSnapshot p) => new() { Name = p.Name.ToLowerInvariant(), EntID = (int)p.Eid, Cell = p.Cell!, Pad = p.Pad!, HP = p.Hp, MaxHP = p.MaxHp, MP = p.Mp, AFK = p.Away, Level = p.Level ?? 0, X = p.X, Y = p.Y };
     public ImmutableDictionary<long, PlayerSnapshot> PlayersById { get; } = Players.ToImmutableDictionary(p => p.Eid);
     public ImmutableDictionary<long, MonsterSnapshot> MonstersById { get; } = Monsters.ToImmutableDictionary(p => p.Id);
 }
@@ -94,7 +94,7 @@ public sealed record MonsterSnapshot(long Id, long MonId, string Name, string Ce
     public Monster ToScript() => new() { ID = (int)MonId, MapID = (int)Id, Name = Name, Race = Race, FileName = File, Cell = Cell, HP = Hp, MaxHP = MaxHp, State = (int)State };
 }
 public enum InventoryPool { Bag, Misc, Class, House }
-public sealed record ItemSnapshot(long Id, long CharItemId, string Name, int Qty, int MaxStack, string Kind, string Slot, bool Equipped, bool Coins, bool Member, string Meta, string Link, string File, bool House, EnhancementSnapshot? Enhancement, ItemDetailsSnapshot Details)
+public sealed record ItemSnapshot(long Id, long CharItemId, string Name, int Qty, int MaxStack, string Kind, string Slot, bool Equipped, bool Worn, bool Coins, bool Member, string Meta, string Link, string File, bool House, EnhancementSnapshot? Enhancement, ItemDetailsSnapshot Details)
 {
     public InventoryPool Pool { get; } = Classify(Kind, Meta, House);
     public static InventoryPool Classify(string kind, string meta, bool house) => kind switch
@@ -106,7 +106,7 @@ public sealed record ItemSnapshot(long Id, long CharItemId, string Name, int Qty
         "Item" or "Note" or "Quest Item" or "Resource" => InventoryPool.Misc,
         _ => InventoryPool.Bag
     };
-    public InventoryItem ToScript() => new InventoryEntry { Description = Details.Description, Level = Details.Level, Cost = Details.Cost, Hours = Details.Hours, QuestSlot = Details.QuestSlot, QuestValue = Details.QuestValue, Quest = Details.Quest, ID = (int)Id, CharItemID = (int)CharItemId, Name = Name, Quantity = Qty, MaxStack = MaxStack, CategoryString = Kind, ItemGroup = Slot, Equipped = Equipped, Coins = Coins, Upgrade = Member, Meta = Meta, FileName = Link, FileLink = File, House = House, EnhancementLevel = Enhancement?.Level ?? 0, EnhancementPatternID = Enhancement?.Pattern ?? 0, ProcID = Enhancement?.ProcId ?? 0 };
+    public InventoryItem ToScript() => new InventoryEntry { Description = Details.Description, Level = Details.Level, Cost = Details.Cost, Hours = Details.Hours, QuestSlot = Details.QuestSlot, QuestValue = Details.QuestValue, Quest = Details.Quest, ID = (int)Id, CharItemID = (int)CharItemId, Name = Name, Quantity = Qty, MaxStack = MaxStack, CategoryString = Kind, ItemGroup = Slot, Equipped = Equipped, Wearing = Worn, Coins = Coins, Upgrade = Member, Meta = Meta, FileName = Link, FileLink = File, House = House, EnhancementLevel = Enhancement?.Level ?? 0, EnhancementPatternID = Enhancement?.Pattern ?? 0, ProcID = Enhancement?.ProcId ?? 0 };
 }
 public sealed record ItemDetailsSnapshot(string Description, int Level, ulong Cost, int? Hours, long? QuestSlot, long QuestValue, string Quest);
 public sealed class InventoryEntry : InventoryItem
@@ -128,6 +128,12 @@ public sealed record DropOfferSnapshot(long Id, string Name, int Qty, int MaxSta
 public sealed record ShopSnapshot(long Id, string Name, bool Member, bool Limited, ImmutableArray<string> Maps, bool House, ImmutableArray<ShopItemSnapshot> Items, long Index, string Field, long RequiredItem)
 {
     public List<ShopItem> ScriptItems { get; } = Items.Select(i => i.ToScript()).ToList();
+    public Newtonsoft.Json.Linq.JArray RawItems => new(Items.Zip(ScriptItems, (listing, item) =>
+    {
+        var raw = Newtonsoft.Json.Linq.JObject.FromObject(item);
+        if (listing.Merge.IsEmpty) raw.Remove("turnin");
+        return raw;
+    }));
 }
 public sealed record ShopItemSnapshot(long Listing, long Id, string Name, ulong Cost, bool Coins, bool Member, int MaxStack, int Qty, long? Faction, int RequiredRep, string Kind, string Slot, string Meta, string Link, string File, bool House, ImmutableArray<MergeCostSnapshot> Merge, long EnhancementId, long Token, int TokenQty, long QuestSlot, long QuestValue, string Quest, int Level, string FactionName, string TokenName, int? Remaining)
 {
@@ -144,16 +150,17 @@ public sealed class ShopListing : ShopItem
 }
 public sealed record MergeCostSnapshot(long Id, string Name, int Qty);
 public sealed record QuestSnapshot(long Id, string Name, ImmutableArray<QuestItemSnapshot> TurnIn, ImmutableArray<QuestItemSnapshot> Required, ImmutableArray<QuestRewardSnapshot> Rewards, bool Once, long Slot, long Value, QuestPeriodSnapshot? Period, bool Member, long Level, [property: JsonPropertyName("class")] long? ClassItem, long RequiredCp, long? Faction, long RequiredRep, long Gold, long Exp, string Description = "", string EndText = "");
-public sealed record QuestItemSnapshot(long Id, string Name, int Qty, int MaxStack, bool Temp);
-public sealed record QuestRewardSnapshot(long Id, string Name, int Qty, int MaxStack, bool Temp, double Chance, string Kind);
+public sealed record QuestItemSnapshot(long Id, string Name, int Qty, int MaxStack, bool Temp, string Description, string Category, bool Member, bool Coins);
+public sealed record QuestRewardSnapshot(long Id, string Name, int Qty, int MaxStack, bool Temp, string Description, string Category, bool Member, bool Coins, double Chance, string Kind);
 public sealed record QuestPeriodSnapshot(string Field, long Index);
 public sealed record FactionsSnapshot(ImmutableList<FactionSnapshot> Items)
 {
     public List<Faction> ScriptItems { get; } = Items.Select(f => new Faction { ID = (int)f.Id, Name = f.Name, Rank = f.Rank, TotalRep = f.Rep, Rep = f.RankProgress, RequiredRep = f.RankProgressMax ?? 0 }).ToList();
 }
 public sealed record FactionSnapshot(long Id, string Name, int Rep, int Rank, int RankProgress, int? RankProgressMax);
-public sealed record AuraState(string Name, double Duration, int Stacks, double? Value, string? Category, bool Persist, AuraCaster? Caster, ImmutableArray<StatEffectSnapshot> Effects, ulong? Expires, string Icon = "", string Description = "");
-public sealed record AurasSnapshot(ImmutableArray<AuraState> Active, ImmutableArray<AuraState> Passive);
+public sealed record AuraState(string Name, double Duration, int Stacks, double? Value, string? Category, bool Persist, AuraCaster? Caster, ImmutableArray<StatEffectSnapshot> Effects, ulong? Expires, ulong Applied, string Icon = "", string Description = "");
+public sealed record HudAuraState(string Name, string Icon, string Description, int Stacks, bool Persist, double Duration, ulong? Expires);
+public sealed record AurasSnapshot(ImmutableArray<AuraState> Active, ImmutableArray<HudAuraState> Hud);
 public sealed record StatEffectSnapshot(string Stat, string Op, double Value);
 public sealed record EnhancementSnapshot(long Id, int Level, int Pattern, int ProcId, int Plus);
 public sealed record QuestProgressSnapshot(ImmutableArray<string?> Strings, ImmutableDictionary<string, long> Achievements);

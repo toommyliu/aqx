@@ -57,11 +57,21 @@ impl Projection {
                 .map(|aura| {
                     let mut value = serde_json::to_value(aura).expect("auras serialize");
                     value["expires"] = json!(aura.expires.map(|at| self.millis(at)));
+                    value["applied"] = json!(self.millis(aura.applied));
                     value
                 })
                 .collect::<Vec<_>>()
         };
-        json!({"active": list(&auras.active), "passive": list(&auras.passive)})
+        let hud: Vec<Value> = auras
+            .hud
+            .iter()
+            .map(|hud| {
+                let mut value = serde_json::to_value(hud).expect("auras serialize");
+                value["expires"] = json!(hud.expires.map(|at| self.millis(at)));
+                value
+            })
+            .collect();
+        json!({"active": list(&auras.active), "hud": hud})
     }
     pub fn changed(&mut self, world: Arc<World>, server: &str, host: &str) -> Vec<Message> {
         let me = world.me.as_ref().map(|me| {
@@ -145,7 +155,7 @@ impl Projection {
             .keys()
             .map(|id| {
                 let status = if world.accepted_quests.contains(id) {
-                    json!(if matches!(world.turn_in_limit(*id), Some(Ok(_))) {
+                    json!(if world.holds_turn_in(*id) == Some(true) {
                         "completable"
                     } else {
                         "active"
@@ -263,6 +273,7 @@ mod tests {
                 caster: None,
                 effects: vec![],
                 expires: Some(Instant::now() + std::time::Duration::from_secs(5)),
+                applied: Instant::now(),
             });
         world.readiness.insert(
             "a1".into(),
