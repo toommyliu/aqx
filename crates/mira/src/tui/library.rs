@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::{fs, io, thread};
 
@@ -8,29 +8,28 @@ use tui_input::Input as TextInput;
 use tui_input::backend::crossterm::EventHandler;
 
 const PAGE: usize = 10;
-const MIRA_EXTENSIONS: [&str; 3] = [".ts", ".js", ".mjs"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
     #[default]
-    Mira,
+    Files,
     Skua,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 2] = [Tab::Mira, Tab::Skua];
+    pub const ALL: [Tab; 2] = [Tab::Files, Tab::Skua];
 
     pub fn label(self) -> &'static str {
         match self {
-            Tab::Mira => "mira",
+            Tab::Files => "files",
             Tab::Skua => "Skua",
         }
     }
 
     fn other(self) -> Tab {
         match self {
-            Tab::Mira => Tab::Skua,
-            Tab::Skua => Tab::Mira,
+            Tab::Files => Tab::Skua,
+            Tab::Skua => Tab::Files,
         }
     }
 }
@@ -53,15 +52,16 @@ pub enum Outcome {
 
 pub struct Picker {
     pub tab: Tab,
-    pub mira_scripts: PathBuf,
-    pub mira: Result<Vec<Entry>, String>,
+    pub home: PathBuf,
+    pub here: PathBuf,
+    pub files: Result<Vec<Entry>, String>,
     pub scripts: PathBuf,
     pub catalog: Catalog,
     pub query: TextInput,
     pub searching: bool,
     pub cursor: usize,
     pub failed: Option<String>,
-    pinned: Option<Entry>,
+    typed: Option<(PathBuf, Vec<Entry>)>,
 }
 
 impl Picker {
@@ -70,31 +70,68 @@ impl Picker {
             Ok(home) => (library::scripts(&home), library::open(&home)),
             Err(why) => (PathBuf::new(), Err(why)),
         };
-        Picker::new(tab, scripts, found).with_mira(home.join("scripts"))
+        Picker::new(tab, scripts, found).with_files(home.join("scripts"))
     }
 
     pub fn new(tab: Tab, scripts: PathBuf, found: Result<Option<Library>, String>) -> Picker {
         let mut picker = Picker {
             tab,
-            mira_scripts: PathBuf::new(),
-            mira: Ok(Vec::new()),
+            home: PathBuf::new(),
+            here: PathBuf::new(),
+            files: Ok(Vec::new()),
             scripts,
             catalog: Catalog::Missing,
             query: TextInput::default(),
             searching: false,
             cursor: 0,
             failed: None,
-            pinned: None,
+            typed: None,
         };
         picker.load(found);
         picker
     }
 
-    pub fn with_mira(mut self, folder: PathBuf) -> Picker {
-        self.mira = mira_scripts(&folder);
-        self.mira_scripts = folder;
-        self.cursor = self.cursor.min(self.shown().len().saturating_sub(1));
+    pub fn with_files(mut self, home: PathBuf) -> Picker {
+        self.browse(home.clone());
+        self.home = home;
         self
+    }
+
+    fn browse(&mut self, folder: PathBuf) {
+        self.files = list(&folder);
+        self.here = folder;
+        self.query.reset();
+        self.searching = false;
+        self.edited();
+    }
+
+    pub fn edited(&mut self) {
+        self.cursor = 0;
+        self.typed = typed_path(self.query.value(), &self.here).map(|(folder, start)| {
+            let start = start.to_lowercase();
+            let mut entries = list(&folder).unwrap_or_default();
+            entries.retain(|e| e.name.to_lowercase().starts_with(&start));
+            (folder, entries)
+        });
+        if self.typed.is_some() {
+            self.tab = Tab::Files;
+        }
+    }
+
+    fn up(&mut self) {
+        let Some(parent) = self.here.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let left = self
+            .here
+            .file_name()
+            .map(|name| format!("{}/", name.to_string_lossy()));
+        self.browse(parent);
+        self.cursor = self
+            .shown()
+            .iter()
+            .position(|e| Some(&e.path) == left.as_ref())
+            .unwrap_or(0);
     }
 
     pub fn reload(&mut self) {
@@ -113,54 +150,54 @@ impl Picker {
 
     pub fn folder(&self) -> &Path {
         match self.tab {
-            Tab::Mira => &self.mira_scripts,
+            Tab::Files => self.typed.as_ref().map_or(&self.here, |(folder, _)| folder),
             Tab::Skua => &self.scripts,
         }
     }
 
     pub fn shown(&self) -> Vec<&Entry> {
         let query = self.query.value();
-        let pinned = self
-            .pinned
-            .as_ref()
-            .filter(|_| self.pinned_tab() == Some(self.tab));
-        let pinned = pinned.map(std::slice::from_ref).unwrap_or_default();
-        let mut shown = library::search(pinned, query);
-        shown.extend(match (self.tab, &self.mira, &self.catalog) {
-            (Tab::Mira, Ok(entries), _) => library::search(entries, query),
+        match (self.tab, &self.files, &self.catalog) {
+            (Tab::Files, _, _) if let Some((_, entries)) = &self.typed => entries.iter().collect(),
+            (Tab::Files, Ok(entries), _) => library::search(entries, query),
             (Tab::Skua, _, Catalog::Ready(found)) => library::search(&found.entries, query),
             _ => Vec::new(),
-        });
-        shown
-    }
-
-    pub fn select(&mut self, script: &Path) {
-        self.tab = tab_of(script);
-        self.cursor = 0;
-        self.pinned = None;
-        let at = self
-            .shown()
-            .iter()
-            .position(|e| self.folder().join(&e.path) == script);
-        match at {
-            Some(at) => self.cursor = at,
-            None => {
-                self.pinned = Some(Entry {
-                    name: script
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned(),
-                    description: "The selected account's script.".to_owned(),
-                    tags: Vec::new(),
-                    path: script.display().to_string(),
-                });
-            }
         }
     }
 
-    fn pinned_tab(&self) -> Option<Tab> {
-        self.pinned.as_ref().map(|e| tab_of(Path::new(&e.path)))
+    pub fn select(&mut self, script: &Path) {
+        if !self.scripts.as_os_str().is_empty() && script.starts_with(&self.scripts) {
+            self.tab = Tab::Skua;
+            self.cursor = 0;
+        } else if let Some(folder) = script.parent() {
+            self.tab = Tab::Files;
+            self.browse(folder.to_path_buf());
+        }
+        if let Some(at) = self
+            .shown()
+            .iter()
+            .position(|e| self.folder().join(&e.path) == script)
+        {
+            self.cursor = at;
+        }
+    }
+
+    fn choose(&mut self, options: bool) -> Outcome {
+        let Some(entry) = self.shown().get(self.cursor).map(|e| e.path.clone()) else {
+            self.searching = false;
+            return Outcome::Nothing;
+        };
+        let path = self.folder().join(&entry);
+        if entry.ends_with('/') {
+            self.browse(path);
+            Outcome::Nothing
+        } else if !options {
+            Outcome::Run(path)
+        } else if super::skua_script(Some(&entry)).is_some() {
+            Outcome::Options(path)
+        } else {
+            Outcome::Nothing
+        }
     }
 
     pub fn key(&mut self, key: KeyEvent) -> Outcome {
@@ -174,28 +211,15 @@ impl Picker {
                 self.tab = self.tab.other();
                 self.cursor = 0;
             }
-            KeyCode::Enter => {
-                return match self.shown().get(self.cursor) {
-                    Some(entry) => Outcome::Run(self.folder().join(&entry.path)),
-                    None => {
-                        self.searching = false;
-                        Outcome::Nothing
-                    }
-                };
-            }
+            KeyCode::Enter => return self.choose(false),
             KeyCode::Esc if self.searching || !self.query.value().is_empty() => {
                 self.query.reset();
                 self.searching = false;
-                self.cursor = 0;
+                self.edited();
             }
             KeyCode::Esc => return Outcome::Close,
-            KeyCode::Right
-                if self.tab == Tab::Skua
-                    && self.query.cursor() == self.query.value().chars().count() =>
-            {
-                if let Some(entry) = self.shown().get(self.cursor) {
-                    return Outcome::Options(self.folder().join(&entry.path));
-                }
+            KeyCode::Right if self.query.cursor() == self.query.value().chars().count() => {
+                return self.choose(true);
             }
             _ if self.searching => {
                 if self
@@ -203,63 +227,85 @@ impl Picker {
                     .handle_event(&Event::Key(key))
                     .is_some_and(|changed| changed.value)
                 {
-                    self.cursor = 0;
+                    self.edited();
                 }
             }
             KeyCode::Char('/') => self.searching = true,
             KeyCode::Char('u') if self.tab == Tab::Skua => return Outcome::Update,
+            KeyCode::Left if self.tab == Tab::Files => self.up(),
             _ => {}
         }
         Outcome::Nothing
     }
 }
 
-fn tab_of(script: &Path) -> Tab {
-    if super::skua_script(script.to_str()).is_some() {
-        Tab::Skua
-    } else {
-        Tab::Mira
+fn typed_path(query: &str, here: &Path) -> Option<(PathBuf, String)> {
+    let mut chars = query.trim().trim_matches(['\'', '"']).chars();
+    let mut query = String::new();
+    while let Some(c) = chars.next() {
+        query.push(if c == '\\' {
+            chars.next().unwrap_or(c)
+        } else {
+            c
+        });
     }
+    if !["/", "~", "./", "../"]
+        .iter()
+        .any(|start| query.starts_with(start))
+    {
+        return None;
+    }
+    let (folder, start) = query.split_at(query.rfind('/').map_or(query.len(), |i| i + 1));
+    let mut resolved = PathBuf::new();
+    for part in here
+        .join(super::prompt::expand_home(Path::new(folder)))
+        .components()
+    {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            part => resolved.push(part),
+        }
+    }
+    Some((resolved, start.to_owned()))
 }
 
-fn mira_scripts(folder: &Path) -> Result<Vec<Entry>, String> {
-    let mut entries = Vec::new();
-    match walk(folder, "", &mut entries) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => {
-            return Err(format!("couldn't list {}: {e}", folder.display()));
-        }
-        _ => {}
-    }
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(entries)
-}
-
-fn walk(root: &Path, dir: &str, entries: &mut Vec<Entry>) -> io::Result<()> {
-    for found in fs::read_dir(root.join(dir))? {
-        let found = found?;
-        let Ok(name) = found.file_name().into_string() else {
-            continue;
-        };
-        if name.starts_with('.') || name == "node_modules" {
-            continue;
-        }
-        let path = format!("{dir}{name}");
-        if found.file_type()?.is_dir() {
-            walk(root, &format!("{path}/"), entries)?;
-        } else if MIRA_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
-            && !name.ends_with(".d.ts")
-            && found.path().is_file()
-        {
-            let stem = Path::new(&name).file_stem().unwrap_or_default();
-            entries.push(Entry {
-                name: stem.to_string_lossy().into_owned(),
+fn list(folder: &Path) -> Result<Vec<Entry>, String> {
+    let found = match fs::read_dir(folder) {
+        Ok(found) => found,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("couldn't list {}: {e}", folder.display())),
+    };
+    let mut entries: Vec<Entry> = found
+        .flatten()
+        .filter_map(|found| {
+            let name = found.file_name().into_string().ok()?;
+            if name.starts_with('.') || name == "node_modules" {
+                return None;
+            }
+            let path = found.path();
+            let name = if path.is_dir() {
+                format!("{name}/")
+            } else if super::prompt::script_file(&name) && path.is_file() {
+                name
+            } else {
+                return None;
+            };
+            Some(Entry {
+                name: name.clone(),
                 description: String::new(),
                 tags: Vec::new(),
-                path,
-            });
-        }
-    }
-    Ok(())
+                path: name,
+            })
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        let file = |e: &Entry| !e.path.ends_with('/');
+        (file(a), &a.path).cmp(&(file(b), &b.path))
+    });
+    Ok(entries)
 }
 
 enum Progress {

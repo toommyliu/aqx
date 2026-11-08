@@ -177,7 +177,7 @@ pub fn typed(home: &Path, script: &Script) -> String {
     typed
 }
 
-fn expand_home(typed: &Path) -> PathBuf {
+pub fn expand_home(typed: &Path) -> PathBuf {
     match (typed.strip_prefix("~"), std::env::var_os("HOME")) {
         (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => typed.to_path_buf(),
@@ -221,9 +221,7 @@ fn scripts_matching(input: &str, home: &Path) -> Vec<String> {
             let kind = entry.file_type().ok()?;
             if kind.is_dir() || (kind.is_symlink() && entry.path().is_dir()) {
                 Some(format!("{dir}{name}/"))
-            } else if SCRIPT_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
-                && !name.ends_with(".d.ts")
-            {
+            } else if script_file(&name) {
                 Some(format!("{dir}{name}"))
             } else {
                 None
@@ -235,6 +233,10 @@ fn scripts_matching(input: &str, home: &Path) -> Vec<String> {
     }
     matches.sort();
     matches
+}
+
+pub fn script_file(name: &str) -> bool {
+    SCRIPT_EXTENSIONS.iter().any(|ext| name.ends_with(ext)) && !name.ends_with(".d.ts")
 }
 
 pub fn shared_prefix(sorted: &[String]) -> &str {

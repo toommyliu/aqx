@@ -1068,11 +1068,11 @@ fn right_arrow_in_the_picker_opens_a_skua_scripts_options() {
         library::Outcome::Options("/srv/skua/Scripts/Legion/LegionToken.cs".into()),
         "→ at the end of a search opens the options of what it found"
     );
-    picker.tab = library::Tab::Mira;
+    picker.tab = library::Tab::Files;
     assert_eq!(
         picker.key(KeyEvent::from(KeyCode::Right)),
         library::Outcome::Nothing,
-        "mira scripts have no options"
+        "an empty folder has nothing to open"
     );
 
     let shown = [farmer("player1")];
@@ -1093,23 +1093,37 @@ fn right_arrow_in_the_picker_opens_a_skua_scripts_options() {
 }
 
 #[test]
-fn the_picker_opens_on_the_accounts_script_and_pins_one_it_doesnt_list() {
+fn the_picker_opens_on_the_accounts_script_wherever_it_is() {
+    let dir = std::env::temp_dir().join(format!("mira-picker-select-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for file in ["doall.cs", "farm.ts"] {
+        std::fs::write(dir.join(file), "").unwrap();
+    }
     let mut picker = skua_library();
-    picker.tab = library::Tab::Mira;
+    picker.tab = library::Tab::Files;
     picker.select(Path::new("/srv/skua/Scripts/Legion/LegionToken.cs"));
     assert_eq!(picker.tab, library::Tab::Skua);
     assert_eq!(picker.shown()[picker.cursor].name, "Legion Token");
 
-    picker.select(Path::new("/srv/farm/doall.cs"));
-    let shown = picker.shown();
+    picker.select(&dir.join("farm.ts"));
     assert_eq!(
-        (shown[0].name.as_str(), picker.cursor, shown.len()),
-        ("doall", 0, 4)
+        (picker.tab, picker.folder()),
+        (library::Tab::Files, dir.as_path())
     );
+    assert_eq!(picker.shown()[picker.cursor].name, "farm.ts");
     assert_eq!(
         picker.key(KeyEvent::from(KeyCode::Right)),
-        library::Outcome::Options("/srv/farm/doall.cs".into())
+        library::Outcome::Nothing,
+        "mira scripts have no options"
     );
+    picker.key(KeyEvent::from(KeyCode::Up));
+    assert_eq!(
+        picker.key(KeyEvent::from(KeyCode::Right)),
+        library::Outcome::Options(dir.join("doall.cs")),
+        "a Skua script outside the library still has options"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1341,7 +1355,7 @@ fn a_searched_skua_script_runs_on_the_marked_accounts() {
 }
 
 #[test]
-fn a_mira_script_picked_from_the_scripts_folder_asks_for_its_args() {
+fn the_files_tab_browses_folders_and_runs_a_script_with_its_args() {
     let dir = std::env::temp_dir().join(format!("mira-picker-tests-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let scripts = dir.join("scripts");
@@ -1363,23 +1377,24 @@ fn a_mira_script_picked_from_the_scripts_folder_asks_for_its_args() {
         names: vec!["player1".into()],
         picker: Some(
             Picker::new(
-                library::Tab::Mira,
+                library::Tab::Files,
                 PathBuf::from("/srv/skua/Scripts"),
                 Ok(None),
             )
-            .with_mira(scripts.clone()),
+            .with_files(scripts.clone()),
         ),
         ..App::default()
     };
     let s = screen(&app, &shown, 150, 30);
-    assert!(s.contains("2 scripts · "), "{s}");
-    assert!(row(&s, "frog-hunt").contains("farm"), "{s}");
-    assert!(s.contains("quests"), "{s}");
+    let mut listed = s.lines().skip_while(|l| !l.contains("│ farm/ "));
+    assert!(listed.next().is_some(), "folders come first:\n{s}");
+    assert!(listed.next().unwrap().contains("│ quests.js "), "{s}");
     for skipped in ["types", "notes", "node_modules", ".drafts"] {
         assert!(!s.contains(skipped), "{skipped}:\n{s}");
     }
+    let footer = s.lines().last().unwrap();
     assert!(
-        s.lines().last().unwrap().contains("tab Skua scripts"),
+        footer.contains("← → change folder") && footer.contains("tab Skua scripts"),
         "{s}"
     );
 
@@ -1393,6 +1408,32 @@ fn a_mira_script_picked_from_the_scripts_folder_asks_for_its_args() {
     assert_eq!(app.picker_tab, library::Tab::Skua);
     app.handle(KeyEvent::from(KeyCode::BackTab), &source, &shown);
 
+    let highlighted = |app: &App| {
+        let picker = app.picker.as_ref().unwrap();
+        (
+            picker.folder().to_path_buf(),
+            picker.shown()[picker.cursor].name.clone(),
+        )
+    };
+    app.handle(KeyEvent::from(KeyCode::Right), &source, &shown);
+    assert_eq!(
+        highlighted(&app),
+        (scripts.join("farm"), "frog-hunt.ts".into())
+    );
+    app.handle(KeyEvent::from(KeyCode::Left), &source, &shown);
+    assert_eq!(highlighted(&app), (scripts.clone(), "farm/".into()));
+    app.handle(KeyEvent::from(KeyCode::Left), &source, &shown);
+    assert_eq!(
+        highlighted(&app),
+        (dir.clone(), "scripts/".into()),
+        "the list isn't limited to the scripts folder"
+    );
+    app.handle(KeyEvent::from(KeyCode::Enter), &source, &shown);
+    assert!(source.0.borrow().is_empty(), "enter on a folder opens it");
+
+    app.handle(KeyEvent::from(KeyCode::Char('/')), &source, &shown);
+    app.paste("farm", &shown);
+    app.handle(KeyEvent::from(KeyCode::Enter), &source, &shown);
     app.handle(KeyEvent::from(KeyCode::Char('/')), &source, &shown);
     app.paste("frog", &shown);
     app.handle(KeyEvent::from(KeyCode::Enter), &source, &shown);
@@ -1404,6 +1445,82 @@ fn a_mira_script_picked_from_the_scripts_folder_asks_for_its_args() {
     let run = Action::Run(crate::config::Script {
         path: scripts.join("farm/frog-hunt.ts"),
         args: vec![("monster".into(), "Frogzard".into())],
+    });
+    assert_eq!(*source.0.borrow(), [(0, run)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_typed_or_pasted_path_lists_that_folder_and_runs_its_script() {
+    let dir = std::env::temp_dir().join(format!("mira-picker-paths-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let bots = dir.join("my bots (old)");
+    std::fs::create_dir_all(bots.join("farm")).unwrap();
+    for file in ["frog.ts", "fish.ts", "notes.txt"] {
+        std::fs::write(bots.join(file), "").unwrap();
+    }
+    let shown = [farmer("player1")];
+    let mut app = App {
+        names: vec!["player1".into()],
+        picker: Some(
+            Picker::new(
+                library::Tab::Skua,
+                PathBuf::from("/srv/skua/Scripts"),
+                Ok(None),
+            )
+            .with_files(dir.join("scripts")),
+        ),
+        ..App::default()
+    };
+    let source = Acts(RefCell::new(Vec::new()));
+    let listed = |app: &App| {
+        let picker = app.picker.as_ref().unwrap();
+        let names: Vec<String> = picker.shown().iter().map(|e| e.name.clone()).collect();
+        (picker.tab, picker.folder().to_path_buf(), names)
+    };
+
+    let dragged = format!("{}/", bots.display())
+        .replace(' ', "\\ ")
+        .replace('(', "\\(")
+        .replace(')', "\\)");
+    app.paste(&dragged, &shown);
+    assert_eq!(
+        listed(&app),
+        (
+            library::Tab::Files,
+            bots.clone(),
+            vec!["farm/".into(), "fish.ts".into(), "frog.ts".into()]
+        ),
+        "a path pasted on the Skua tab lists its folder on the files tab"
+    );
+    let s = screen(&app, &shown, 150, 30);
+    assert!(
+        s.contains("fish.ts"),
+        "a path lists its folder from an empty one:\n{s}"
+    );
+    app.paste("FR", &shown);
+    assert_eq!(
+        listed(&app).2,
+        ["frog.ts"],
+        "the last part filters by its start"
+    );
+    app.handle(KeyEvent::from(KeyCode::Esc), &source, &shown);
+    assert_eq!(listed(&app).1, dir.join("scripts"));
+
+    app.handle(KeyEvent::from(KeyCode::Char('/')), &source, &shown);
+    app.paste("../my bots (old)/far", &shown);
+    app.handle(KeyEvent::from(KeyCode::Enter), &source, &shown);
+    assert_eq!(
+        listed(&app),
+        (library::Tab::Files, bots.join("farm"), vec![]),
+        "enter opens a folder"
+    );
+
+    app.paste(&format!("'{}'", bots.join("fish.ts").display()), &shown);
+    app.handle(KeyEvent::from(KeyCode::Enter), &source, &shown);
+    let run = Action::Run(crate::config::Script {
+        path: bots.join("fish.ts"),
+        args: Vec::new(),
     });
     assert_eq!(*source.0.borrow(), [(0, run)]);
     let _ = std::fs::remove_dir_all(&dir);

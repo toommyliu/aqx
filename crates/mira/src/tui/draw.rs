@@ -645,10 +645,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
     if let Some(picker) = &app.picker {
         let keys: &[(&str, &str)] = match (picker.searching, picker.tab) {
             (true, _) => &[("↑↓", "pick"), ("enter", "run"), ("esc", "clear")],
-            (false, PickerTab::Mira) => &[
+            (false, PickerTab::Files) => &[
                 ("↑↓", "pick"),
                 ("enter", "run"),
-                ("/", "search"),
+                ("← →", "change folder"),
+                ("/", "search or type a path"),
                 ("tab", "Skua scripts"),
                 ("esc", "close"),
             ],
@@ -658,7 +659,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
                 ("→", "options"),
                 ("/", "search"),
                 ("u", "update"),
-                ("tab", "mira scripts"),
+                ("tab", "files"),
                 ("esc", "close"),
             ],
         };
@@ -2129,11 +2130,8 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, picker: &Picker) {
     }
     let folder = app.mask.hide(&picker.folder().display().to_string());
     let shown = picker.shown();
-    let about = match (picker.tab, &picker.mira, &picker.catalog) {
-        (PickerTab::Mira, Ok(entries), _) if !entries.is_empty() => {
-            format!("{} scripts · {folder}", grouped(entries.len() as u64))
-        }
-        (PickerTab::Skua, _, Catalog::Ready(library)) => format!(
+    let about = match (picker.tab, &picker.catalog) {
+        (PickerTab::Skua, Catalog::Ready(library)) => format!(
             "{} scripts · {} · {folder}",
             grouped(library.entries.len() as u64),
             library::short(&library.commit)
@@ -2171,27 +2169,41 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, picker: &Picker) {
     }
     let height =
         (inner.height as usize).saturating_sub(lines.len() + 1 + DESCRIPTION_LINES + TAG_LINES);
-    match (picker.tab, &picker.mira, &picker.catalog) {
-        (PickerTab::Mira, Err(why), _) => lines.extend(
+    match (picker.tab, &picker.files, &picker.catalog) {
+        (PickerTab::Files, Err(why), _) if picker.query.value().is_empty() => lines.extend(
             wrapped(why)
                 .into_iter()
                 .take(height)
                 .map(|l| Line::raw(l).red()),
         ),
-        (PickerTab::Mira, Ok(entries), _) if entries.is_empty() => lines.extend([
-            fit(
-                vec![Span::raw(format!("No scripts in {folder} yet."))],
+        (PickerTab::Files, Ok(entries), _)
+            if entries.is_empty()
+                && picker.query.value().is_empty()
+                && picker.here != picker.home =>
+        {
+            lines.push(fit(
+                vec![Span::raw(format!("No folders or scripts in {folder}."))],
                 width,
-            ),
-            Line::default(),
-            fit(
-                vec![
-                    Span::raw("Put your .ts and .js scripts in that folder to pick them here.")
-                        .dark_gray(),
-                ],
-                width,
-            ),
-        ]),
+            ));
+        }
+        (PickerTab::Files, Ok(entries), _)
+            if entries.is_empty() && picker.query.value().is_empty() =>
+        {
+            lines.extend([
+                fit(
+                    vec![Span::raw(format!("No scripts in {folder} yet."))],
+                    width,
+                ),
+                Line::default(),
+                fit(
+                    vec![
+                        Span::raw("Put your .ts and .js scripts in that folder to pick them here.")
+                            .dark_gray(),
+                    ],
+                    width,
+                ),
+            ])
+        }
         (PickerTab::Skua, _, Catalog::Missing) => lines.extend([
             Line::raw("mira hasn't downloaded the Skua scripts yet."),
             Line::default(),
@@ -2218,7 +2230,11 @@ fn draw_picker(f: &mut Frame, area: Rect, app: &App, picker: &Picker) {
         _ => {
             let start = (picker.cursor + 1).saturating_sub(height.max(1));
             for (i, entry) in shown.iter().enumerate().skip(start).take(height) {
-                let folder = entry.path.rsplit_once('/').map_or("", |(dir, _)| dir);
+                let folder = entry
+                    .path
+                    .trim_end_matches('/')
+                    .rsplit_once('/')
+                    .map_or("", |(dir, _)| dir);
                 let mut row = spread(
                     vec![Span::raw(entry.name.clone())],
                     vec![Span::raw(folder.to_owned()).dark_gray()],

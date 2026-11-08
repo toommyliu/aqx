@@ -385,10 +385,9 @@ impl App {
             }
         };
         if let Some(picker) = &mut self.picker {
-            if picker.searching {
-                insert(&mut picker.query);
-                picker.cursor = 0;
-            }
+            picker.searching = true;
+            insert(&mut picker.query);
+            picker.edited();
         } else if let Some(prompt) = &mut self.prompt {
             insert(&mut prompt.input);
             prompt.edited();

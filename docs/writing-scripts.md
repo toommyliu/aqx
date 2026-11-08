@@ -118,4 +118,4 @@ mira run <script> --user <user> --pass <pass> --server <server> [--arg key=value
 
 `mira servers` lists the server names. Press Ctrl+C once to stop the script and log out, or twice to exit right away.
 
-In the TUI, `o` lists the `.ts`, `.js` and `.mjs` files in the `scripts` folder next to `mira.toml`, `~/mira/scripts` by default. It skips `.d.ts` files, `node_modules`, and folders whose names start with a dot. Press `/` to search by name and folder, and `enter` to run the selected script. mira then asks for each arg the script declares.
+In the TUI, `o` lists the folders and the `.ts`, `.js`, `.mjs` and `.cs` files in the `scripts` folder next to `mira.toml`, `~/mira/scripts` by default. It skips `.d.ts` files, `node_modules`, and names that start with a dot. `→` or `enter` opens a folder and `←` goes up one. Press `/` to search the folder you're in, or type or paste a path such as `~/bots/farm.ts` to go straight to it. `enter` runs the selected script. mira then asks for each arg the script declares.

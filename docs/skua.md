@@ -43,7 +43,7 @@ mira run -a player1 ~/mira/skua/Scripts/Evil/NSoD/VoidAuras/0SmartVoidAuras.cs
 
 ## Change script options
 
-In the TUI, press `o`, select a Skua script on the Skua tab, and press `→`. The list opens on the selected account's script, so for a script the account already runs, that's `o` then `→`. A script that isn't in the library shows first on the Skua tab. `esc` goes back to the list. The **CoreBots** tab edits the CoreBots options of that account. The **Script** tab edits the options of the script, and every account that runs the script shares them. You can change options only while the account is offline or idle.
+In the TUI, press `o`, select a Skua script on the Skua tab, and press `→`. The list opens on the selected account's script, so for a script the account already runs, that's `o` then `→`. For a Skua script outside the library, the list opens on the files tab in that script's folder, and `→` works there too. `esc` goes back to the list. The **CoreBots** tab edits the CoreBots options of that account. The **Script** tab edits the options of the script, and every account that runs the script shares them. You can change options only while the account is offline or idle.
 
 From a shell, pass options to `mira run` as `--arg Name=value`. For an option outside the `Options` group, write `--arg Group:Name=value`.
 

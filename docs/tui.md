@@ -60,7 +60,7 @@ These keys act on the marked accounts, or on the selected one when nothing is ma
 | Key | Does |
 | --- | --- |
 | `i` | Log in, then run the account's `script` |
-| `o` | Pick a script and run it. The list opens on the selected account's script. The mira tab lists the scripts in the `scripts` folder next to `mira.toml`, and the Skua tab lists the Skua library. `tab` switches between them. On the Skua tab, `→` edits the selected script's options and `u` downloads or updates the library. See [Run Skua scripts](skua.md). |
+| `o` | Pick a script and run it. The list opens on the selected account's script. The files tab lists the folders and scripts in one folder, starting at the `scripts` folder next to `mira.toml`. `←` goes up a folder, and `→` or `enter` opens the selected one. To jump somewhere else, press `/` and type a path that starts with `/`, `~/`, `./` or `../`, or paste one. The list shows that folder, narrowed to names that start with whatever follows the last `/`. The Skua tab lists the Skua library. `tab` switches between them. `→` on a Skua script edits its options, and `u` on the Skua tab downloads or updates the library. See [Run Skua scripts](skua.md). |
 | `O` | Type a script path and `key=value` args. `tab` completes, and `↑` recalls an earlier run. |
 | `s`, `r` | Stop or restart the script. Stopping also leaves combat. |
 | `p` | Pause the script, or resume it. A pause lets the current step finish, such as a kill in progress, then holds the script. Skua scripts can't pause. |
