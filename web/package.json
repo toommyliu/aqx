@@ -1,0 +1,25 @@
+{
+  "name": "mira-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@floating-ui/dom": "1.8.0",
+    "@tanstack/solid-hotkeys": "0.21.3",
+    "@tanstack/solid-pacer": "0.24.0",
+    "@tanstack/solid-query": "5.107.1",
+    "@tanstack/solid-virtual": "3.13.53",
+    "lucide-solid": "1.70.0",
+    "solid-js": "1.9.18",
+    "solid-sonner": "0.3.3"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.3.7",
+    "vite-plugin-solid": "2.11.15"
+  }
+}

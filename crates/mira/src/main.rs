@@ -27,6 +27,7 @@ mod record;
 mod runner;
 mod tui;
 mod view;
+mod web;
 
 use describe::describe;
 use runner::{Job, Login, Note};
@@ -128,6 +129,14 @@ enum Command {
         /// Print nothing; read the log with mira logs or the TUI.
         #[arg(long, conflicts_with = "json")]
         quiet: bool,
+    },
+    /// Serve the web UI on 127.0.0.1. It starts the session when an account logs in.
+    Web {
+        /// The config to read instead of ./mira.toml or ~/mira/mira.toml.
+        #[arg(short, long, value_name = "PATH")]
+        config: Option<PathBuf>,
+        #[arg(long, default_value_t = web::PORT)]
+        port: u16,
     },
     /// Log out every account and end the session.
     Down {
@@ -253,6 +262,7 @@ fn main() -> ExitCode {
         Command::Tui { open, redact } => commands::open(&open, redact),
         Command::Up { open } => commands::up(&open),
         Command::Serve { open, json, quiet } => commands::serve(&open, json, quiet),
+        Command::Web { config, port } => commands::web(config.as_deref(), port),
         Command::Down { config } => commands::down(config.as_deref()),
         Command::Ps { json } => commands::ps(json),
         Command::Logs {

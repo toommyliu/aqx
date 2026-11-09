@@ -69,11 +69,13 @@ fn farmer(name: &str) -> Shown {
                 .collect(),
             quests: vec![
                 QuestProgress {
+                    id: 1,
                     name: "Spider Hunt".into(),
                     have: 4,
                     need: 10,
                 },
                 QuestProgress {
+                    id: 2,
                     name: "Free Gift".into(),
                     have: 0,
                     need: 0,
