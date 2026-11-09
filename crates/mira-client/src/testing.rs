@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
@@ -503,4 +503,65 @@ impl Harness {
         self.script.join().expect("the fake server failed");
         events
     }
+}
+
+pub fn read_request(stream: &TcpStream) -> (Vec<String>, String) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut head = Vec::new();
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let line = line.trim().to_owned();
+        if line.is_empty() {
+            break;
+        }
+        if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length: ") {
+            length = n.parse().unwrap();
+        }
+        head.push(line);
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    (head, String::from_utf8(body).unwrap())
+}
+
+pub fn serve_api(
+    replies: mpsc::Receiver<String>,
+    stop: mpsc::Receiver<()>,
+) -> (String, JoinHandle<Vec<(Instant, String)>>) {
+    let api = TcpListener::bind("127.0.0.1:0").unwrap();
+    api.set_nonblocking(true).unwrap();
+    let base = format!("http://{}", api.local_addr().unwrap());
+    let http = thread::spawn(move || {
+        let mut requests = Vec::new();
+        while matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+            let Ok((mut stream, _)) = api.accept() else {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            stream.set_nonblocking(false).unwrap();
+            let (_, body) = read_request(&stream);
+            requests.push((Instant::now(), body));
+            let reply = replies
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_default();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{reply}",
+                reply.len()
+            )
+            .unwrap();
+        }
+        requests
+    });
+    (base, http)
+}
+
+pub fn login_reply(token: &str, port: u16) -> String {
+    json!({
+        "login": {"bSuccess": 1, "sToken": token, "iUpg": 0},
+        "servers": [{"sName": "Test", "sIP": "127.0.0.1", "iPort": port, "bOnline": 1}],
+    })
+    .to_string()
 }

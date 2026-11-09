@@ -13,7 +13,7 @@ use super::*;
 use crate::quest::{QuestItem, QuestReward, QuestStatus, RewardKind};
 use crate::testing::{
     API_OK, FARM_SKILLS, Harness, JOIN_OK, LOGIN_OK, MapCell, Peer, TOKEN, json_message,
-    move_to_area,
+    login_reply, move_to_area, read_request, serve_api,
 };
 use crate::{
     Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Item, Monster, Readiness, Skill,
@@ -3150,68 +3150,6 @@ fn buys_and_sells_within_the_clients_limits() {
     assert_eq!(world.me.as_ref().unwrap().gold, 820);
     session.logout();
     harness.finish();
-}
-
-fn read_request(stream: &TcpStream) -> (Vec<String>, String) {
-    use std::io::{BufRead, BufReader};
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
-    let mut head = Vec::new();
-    let mut length = 0;
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        let line = line.trim().to_owned();
-        if line.is_empty() {
-            break;
-        }
-        if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length: ") {
-            length = n.parse().unwrap();
-        }
-        head.push(line);
-    }
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body).unwrap();
-    (head, String::from_utf8(body).unwrap())
-}
-
-fn serve_api(
-    replies: mpsc::Receiver<String>,
-    stop: mpsc::Receiver<()>,
-) -> (String, JoinHandle<Vec<(Instant, String)>>) {
-    let api = TcpListener::bind("127.0.0.1:0").unwrap();
-    api.set_nonblocking(true).unwrap();
-    let base = format!("http://{}", api.local_addr().unwrap());
-    let http = thread::spawn(move || {
-        let mut requests = Vec::new();
-        while matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
-            let Ok((mut stream, _)) = api.accept() else {
-                thread::sleep(Duration::from_millis(5));
-                continue;
-            };
-            stream.set_nonblocking(false).unwrap();
-            let (_, body) = read_request(&stream);
-            requests.push((Instant::now(), body));
-            let reply = replies
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap_or_default();
-            write!(
-                stream,
-                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{reply}",
-                reply.len()
-            )
-            .unwrap();
-        }
-        requests
-    });
-    (base, http)
-}
-
-fn login_reply(token: &str, port: u16) -> String {
-    json!({
-        "login": {"bSuccess": 1, "sToken": token, "iUpg": 0},
-        "servers": [{"sName": "Test", "sIP": "127.0.0.1", "iPort": port, "bOnline": 1}],
-    })
-    .to_string()
 }
 
 fn serve_bank(items: Value) -> (String, JoinHandle<(Vec<String>, String)>) {
