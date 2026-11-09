@@ -1,4 +1,5 @@
 use std::collections::{HashMap, VecDeque};
+use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -580,9 +581,42 @@ pub struct LastLines {
 
 type Accounts = Arc<RwLock<Vec<Arc<Account>>>>;
 
+const LOGIN_GAP: Duration = Duration::from_secs(2);
+const LOGIN_JITTER: Duration = Duration::from_secs(1);
+
+struct Spacing {
+    gap: Duration,
+    jitter: Duration,
+    next: Mutex<Option<Instant>>,
+}
+
+impl Spacing {
+    fn new(gap: Duration, jitter: Duration) -> Spacing {
+        Spacing {
+            gap,
+            jitter,
+            next: Mutex::new(None),
+        }
+    }
+
+    fn reserve(&self) -> Instant {
+        let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
+        let now = Instant::now();
+        let start = next.map_or(now, |at| at.max(now));
+        let fraction = RandomState::new().hash_one(()) as f64 / u64::MAX as f64;
+        *next = Some(start + self.gap + self.jitter.mul_f64(fraction));
+        start
+    }
+
+    fn wait(&self) {
+        thread::sleep(self.reserve().saturating_duration_since(Instant::now()));
+    }
+}
+
 pub struct Fleet {
     device: DeviceId,
     accounts: Accounts,
+    logins: Arc<Spacing>,
 }
 
 impl Fleet {
@@ -590,6 +624,7 @@ impl Fleet {
         Fleet {
             device,
             accounts: Accounts::default(),
+            logins: Arc::new(Spacing::new(LOGIN_GAP, LOGIN_JITTER)),
         }
     }
 
@@ -686,6 +721,7 @@ impl Fleet {
         let linked = Arc::new(Linked {
             account: Arc::clone(&account),
             fleet: Arc::clone(&self.accounts),
+            logins: Arc::clone(&self.logins),
             login: Login {
                 device: self.device.clone(),
                 user: config.user,
@@ -866,6 +902,7 @@ impl Backoff {
 struct Linked {
     account: Arc<Account>,
     fleet: Accounts,
+    logins: Arc<Spacing>,
     login: Login,
 }
 
@@ -991,6 +1028,9 @@ impl Linked {
             None => (1, Duration::ZERO),
         };
         for attempt in 1..=attempts {
+            if !self.hold(link, self.logins.reserve()) {
+                return None;
+            }
             let why = match self.connect(&server, &self.login.user, &self.login.pass) {
                 Ok(session) => {
                     let world = session.snapshot();
@@ -1021,17 +1061,27 @@ impl Linked {
                 );
                 board.link = Link::Waiting { why, until };
             }
-            while Instant::now() < until {
-                if self.account.board().links != link {
-                    self.account.board().link = Link::Offline { why: None };
-                    return None;
-                }
-                thread::sleep(Duration::from_millis(100).min(until - Instant::now()));
+            if !self.hold(link, until) {
+                return None;
             }
             self.account.board().link = Link::Connecting;
             delay = delay.saturating_mul(2).min(LOGIN_RETRY_MAX);
         }
         None
+    }
+
+    fn hold(&self, link: u64, until: Instant) -> bool {
+        loop {
+            if self.account.board().links != link {
+                self.account.board().link = Link::Offline { why: None };
+                return false;
+            }
+            let now = Instant::now();
+            if now >= until {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(100).min(until - now));
+        }
     }
 
     fn failed(&self, link: u64, why: String) -> Option<(Handle, String)> {
@@ -1215,11 +1265,13 @@ impl mira_script::Account for Linked {
     }
 
     fn login(&self, server: &str) -> Result<Handle, String> {
+        self.logins.wait();
         self.connect(server, &self.login.user, &self.login.pass)
             .map_err(Failure::into_reason)
     }
 
     fn login_as(&self, server: &str, username: &str, password: &str) -> Result<Handle, String> {
+        self.logins.wait();
         self.connect(server, username, password)
             .map_err(Failure::into_reason)
     }
@@ -1231,6 +1283,7 @@ impl Fleet {
         Fleet {
             device: mira_client::testing::device_id(),
             accounts: Arc::new(RwLock::new(accounts)),
+            logins: Arc::new(Spacing::new(Duration::ZERO, Duration::ZERO)),
         }
     }
 }
@@ -1306,6 +1359,7 @@ mod tests {
         Arc::new(Linked {
             account: Arc::new(account),
             fleet: Accounts::default(),
+            logins: Arc::new(Spacing::new(Duration::ZERO, Duration::ZERO)),
             login: Login {
                 device: mira_client::testing::device_id(),
                 user: "player1".into(),
@@ -1484,6 +1538,75 @@ mod tests {
     }
 
     #[test]
+    fn a_logout_while_waiting_for_a_login_slot_cancels_the_login() {
+        for (slot, logout_after) in [
+            (Duration::from_secs(5), Duration::from_millis(100)),
+            (Duration::from_millis(150), Duration::from_millis(120)),
+        ] {
+            logout_while_waiting(slot, logout_after);
+        }
+    }
+
+    fn logout_while_waiting(slot: Duration, logout_after: Duration) {
+        let (account, _inbox) = Account::queueing("player1", None);
+        account.login().unwrap();
+        let link = account.board().links;
+        let logins = Arc::new(Spacing::new(slot, Duration::ZERO));
+        logins.reserve();
+        let api = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = format!("http://{}", api.local_addr().unwrap());
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let requests = Arc::clone(&requests);
+            thread::spawn(move || {
+                for stream in api.incoming() {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    drop(stream);
+                }
+            });
+        }
+        let linked = Arc::new(Linked {
+            account: Arc::new(account),
+            fleet: Accounts::default(),
+            logins,
+            login: Login {
+                device: mira_client::testing::device_id(),
+                user: "player1".into(),
+                pass: "x".into(),
+                client_version: None,
+                relogin: None,
+                api: Some(host),
+                record: None,
+            },
+        });
+        let waiting = {
+            let linked = Arc::clone(&linked);
+            thread::spawn(move || linked.ensure_online(link, true).is_none())
+        };
+        thread::sleep(logout_after);
+        let asked = Instant::now();
+        assert_eq!(linked.account.logout(), Ok(()));
+        assert!(
+            waiting.join().unwrap(),
+            "the login is cancelled ({slot:?} slot)"
+        );
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "no login request goes out ({slot:?} slot)"
+        );
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            asked.elapsed()
+        );
+        assert!(matches!(
+            linked.account.board().link,
+            Link::Offline { why: None }
+        ));
+    }
+
+    #[test]
     fn stopping_during_a_restart_wait_ends_it() {
         let (account, _inbox) = Account::queueing("player1", None);
         account.board().run = Run::Restarting {
@@ -1572,6 +1695,31 @@ mod tests {
         fleet.refresh(vec![changed, config::Account::for_tests("player2")], path);
         assert_eq!(noted(&fleet), 1, "a change is noted once");
         assert_eq!(fleet.accounts().len(), 2, "a new name still joins");
+    }
+
+    #[test]
+    fn logins_started_together_go_out_a_gap_apart() {
+        let gap = Duration::from_millis(60);
+        let logins = Arc::new(Spacing::new(gap, Duration::from_millis(20)));
+        let begun = Instant::now();
+        let mut started: Vec<Duration> = (0..3)
+            .map(|_| {
+                let logins = Arc::clone(&logins);
+                thread::spawn(move || {
+                    logins.wait();
+                    begun.elapsed()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .collect();
+        started.sort();
+        assert!(
+            started[0] < gap,
+            "the first login waits for nothing: {started:?}"
+        );
+        assert!(started[1] >= gap && started[2] >= gap * 2, "{started:?}");
     }
 
     #[test]
