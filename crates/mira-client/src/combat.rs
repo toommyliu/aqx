@@ -12,7 +12,7 @@ use crate::room::{CombatState, Room};
 
 pub(crate) const AUTO_ATTACK: &str = "aa";
 pub(crate) const ITEM_SLOT: &str = "i1";
-const RESPAWN_DELAY: Duration = Duration::from_secs(10);
+pub(crate) const RESPAWN_DELAY: Duration = Duration::from_secs(10);
 const GLOBAL_COOLDOWN_MS: u32 = 1500;
 const SKILL_GAP: Duration = Duration::from_millis(700);
 const AUTO_GAP: Duration = Duration::from_millis(300);

@@ -615,7 +615,8 @@ export const map = view(
   { cells: true, name: true, areaId: true, cell: true, pad: true, x: true, y: true, zone: true, players: true, monsters: true },
   {
     /**
-     * Without a room in `name`, joins settings.room. Leaves combat first.
+     * Without a room in `name`, joins settings.room. Leaves combat first, and
+     * waits for the respawn when the player is dead.
      * "refused" when the map is locked, full, or for members only.
      */
     join(name: string, options: { readonly cell?: string; readonly pad?: string } = {}): Action<"joined" | "refused"> {
@@ -633,8 +634,9 @@ export const map = view(
       return act("walk", { x: checkCoordinate(x, "x"), y: checkCoordinate(y, "y") });
     },
     /**
-     * Leaves combat first when the player is in another map. "not_found" when
-     * the player isn't on this server. Another account in this mira session on
+     * Leaves combat first when the player is in another map, and waits for the
+     * respawn when the player is dead. "not_found" when the player isn't on
+     * this server. Another account in this mira session on
      * the same server is reached by joining its room, which also works in maps
      * where the server refuses goto.
      */

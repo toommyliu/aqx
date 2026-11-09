@@ -59,6 +59,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(3);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(3);
 const JOIN_PULLBACKS: u8 = 3;
+const REVIVE_WAIT: Duration = combat::RESPAWN_DELAY.saturating_add(REPLY_TIMEOUT);
 const CELL_PAD: &str = "Left";
 const VERSION_RETRIES: usize = 3;
 const WALK_SPEED: u32 = 8;
@@ -391,6 +392,13 @@ impl Cancel {
             Cancel::One(id) => reply.id == id,
             Cancel::All => true,
         }
+    }
+}
+
+fn reviving(to: JoinTarget, now: Instant) -> JoinStage {
+    JoinStage::Reviving {
+        to,
+        deadline: now + REVIVE_WAIT,
     }
 }
 
@@ -727,6 +735,10 @@ enum JoinStage {
     Cooling {
         to: JoinTarget,
         until: Instant,
+    },
+    Reviving {
+        to: JoinTarget,
+        deadline: Instant,
     },
     Sent {
         to: JoinTarget,
@@ -1780,11 +1792,51 @@ impl Session {
                         now,
                     )
                 }
+                task::Poll::Ready(Err(ActionError::Dead)) => Some(Op::Join {
+                    reply,
+                    stage: reviving(to, now),
+                    pulled,
+                }),
                 task::Poll::Ready(Err(e)) => {
                     self.replies.push((reply, Err(e)));
                     None
                 }
             },
+            Op::Join {
+                reply,
+                stage: JoinStage::Reviving { to, deadline },
+                pulled,
+            } => {
+                let started = match self.ensure_ready() {
+                    Err(e) => Err(e),
+                    Ok(()) if self.is_dead() && now < deadline => {
+                        return Some(Op::Join {
+                            reply,
+                            stage: JoinStage::Reviving { to, deadline },
+                            pulled,
+                        });
+                    }
+                    Ok(()) if self.is_dead() => Err(ActionError::Dead),
+                    Ok(()) => match to {
+                        JoinTarget::Player(name) => self.start_goto(name, now),
+                        JoinTarget::Map { map, spot } => self.start_join(map, spot, now),
+                    },
+                };
+                match started {
+                    Ok(Some(stage)) => self.step(
+                        Op::Join {
+                            reply,
+                            stage,
+                            pulled,
+                        },
+                        now,
+                    ),
+                    result => {
+                        self.replies.push((reply, result.map(|_| ())));
+                        None
+                    }
+                }
+            }
             Op::Join {
                 reply,
                 stage: JoinStage::Cooling { to, .. },
@@ -1793,14 +1845,16 @@ impl Session {
                 let state = self.character.as_ref().map(|me| me.state);
                 let in_room =
                     matches!(&to, JoinTarget::Player(name) if self.player_in_room(name).is_some());
-                let refused = match (self.ensure_ready(), state) {
-                    (Err(e), _) => Some(e),
-                    (Ok(()), Some(CombatState::Dead)) => Some(ActionError::Dead),
-                    (Ok(()), _) => None,
-                };
-                if let Some(e) = refused {
+                if let Err(e) = self.ensure_ready() {
                     self.replies.push((reply, Err(e)));
                     return None;
+                }
+                if state == Some(CombatState::Dead) {
+                    return Some(Op::Join {
+                        reply,
+                        stage: reviving(to, now),
+                        pulled,
+                    });
                 }
                 if state == Some(CombatState::InCombat) && !in_room {
                     return self.pulled_back(reply, to, pulled, now);
@@ -2124,7 +2178,10 @@ impl Session {
             | Some(Op::Leave { deadline, .. })
             | Some(Op::Pick { deadline, .. })
             | Some(Op::Join {
-                stage: JoinStage::Sent { deadline, .. } | JoinStage::Leaving { deadline, .. },
+                stage:
+                    JoinStage::Sent { deadline, .. }
+                    | JoinStage::Leaving { deadline, .. }
+                    | JoinStage::Reviving { deadline, .. },
                 ..
             }) => Some(*deadline),
             Some(Op::Join {
@@ -2290,6 +2347,9 @@ impl Session {
         now: Instant,
     ) -> Result<Option<JoinStage>, ActionError> {
         self.ensure_ready()?;
+        if self.is_dead() {
+            return Ok(Some(reviving(JoinTarget::Map { map, spot }, now)));
+        }
         let map = match self.join_room {
             Some(number) if !names_room(&map) => format!("{map}-{number}"),
             _ => map,
@@ -2311,15 +2371,11 @@ impl Session {
 
     fn start_goto(&mut self, name: String, now: Instant) -> Result<Option<JoinStage>, ActionError> {
         self.ensure_ready()?;
-        if self
-            .character
-            .as_ref()
-            .is_some_and(|me| me.state == CombatState::Dead)
-        {
-            return Err(ActionError::Dead);
-        }
         if name.eq_ignore_ascii_case(&self.username) {
             return Err(ActionError::Unusable("that's this player".into()));
+        }
+        if self.is_dead() {
+            return Ok(Some(reviving(JoinTarget::Player(name), now)));
         }
         if let Some(result) = self.goto_in_room(&name) {
             return result.map(|()| None);
@@ -2423,6 +2479,12 @@ impl Session {
         self.limits.used(Limit::Walk, now);
         self.send_action(&packet::walk(area, x, y, WALK_SPEED));
         self.ensure_ready().map(|()| None)
+    }
+
+    fn is_dead(&self) -> bool {
+        self.character
+            .as_ref()
+            .is_some_and(|me| me.state == CombatState::Dead)
     }
 
     fn player_in_room(&self, name: &str) -> Option<&Player> {

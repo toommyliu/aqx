@@ -2832,7 +2832,7 @@ fn picks_up_drops_while_the_bag_has_room() {
 }
 
 #[test]
-fn a_join_leaves_combat_before_and_after_sending_and_refuses_when_dead_without_sending() {
+fn a_join_leaves_combat_before_and_after_sending_and_waits_out_a_death_before_sending() {
     let (step, next) = mpsc::channel::<()>();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
@@ -2852,10 +2852,30 @@ fn a_join_leaves_combat_before_and_after_sending_and_refuses_when_dead_without_s
         let again = peer.expect_at(&packet::transfer("player1", "yulgar-1"));
         assert!(again - ignored >= Limit::Transfer.gap() - SLACK);
         peer.send("%xt%warning%-1%Cannot join that map.%");
-        next.recv().unwrap();
-        peer.send(&json_message(
-            json!({"cmd": "ct", "p": {"player1": {"intHP": 0, "intState": 0}}}),
-        ));
+        let dead =
+            json_message(json!({"cmd": "ct", "p": {"player1": {"intHP": 0, "intState": 0}}}));
+        let revived = json_message(
+            json!({"cmd": "uotls", "unm": "player1", "o": {"intState": 1, "intHP": 1000}}),
+        );
+        for (sent, answer) in [
+            (
+                packet::transfer("player1", "yulgar-1"),
+                "Cannot join that map.",
+            ),
+            (
+                packet::goto("player9"),
+                "Player 'player9' could not be found.",
+            ),
+        ] {
+            next.recv().unwrap();
+            peer.send(&dead);
+            next.recv().unwrap();
+            thread::sleep(Duration::from_millis(300));
+            let alive = Instant::now();
+            peer.send(&revived);
+            assert!(peer.expect_at(&sent) >= alive);
+            peer.send(&format!("%xt%warning%-1%{answer}%"));
+        }
         peer.expect(&packet::logout());
     });
     let session = &harness.session;
@@ -2867,10 +2887,22 @@ fn a_join_leaves_combat_before_and_after_sending_and_refuses_when_dead_without_s
     );
     step.send(()).unwrap();
     wait_until(session, |me| me.state == CombatState::Dead);
-    assert!(matches!(
-        session.join("yulgar-1").wait(),
-        Err(ActionError::Dead)
-    ));
+    let joining = session.join("yulgar-1");
+    step.send(()).unwrap();
+    let refused = joining.wait();
+    assert!(
+        matches!(refused, Err(ActionError::Refused(_))),
+        "{refused:?}"
+    );
+    step.send(()).unwrap();
+    wait_until(session, |me| me.state == CombatState::Dead);
+    let going = session.goto("player9");
+    step.send(()).unwrap();
+    let missing = going.wait();
+    assert!(
+        matches!(missing, Err(ActionError::NoTarget(_))),
+        "{missing:?}"
+    );
     session.logout();
     harness.finish();
 }

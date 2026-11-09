@@ -421,7 +421,8 @@ export declare const player: PlayerFields & {
 };
 export declare const map: MapFields & {
     /**
-     * Without a room in `name`, joins settings.room. Leaves combat first.
+     * Without a room in `name`, joins settings.room. Leaves combat first, and
+     * waits for the respawn when the player is dead.
      * "refused" when the map is locked, full, or for members only.
      */
     join(name: string, options?: {
@@ -432,8 +433,9 @@ export declare const map: MapFields & {
     /** Skipped if the player changes map or cell before it's sent. */
     walk(x: number, y: number): Action<void>;
     /**
-     * Leaves combat first when the player is in another map. "not_found" when
-     * the player isn't on this server. Another account in this mira session on
+     * Leaves combat first when the player is in another map, and waits for the
+     * respawn when the player is dead. "not_found" when the player isn't on
+     * this server. Another account in this mira session on
      * the same server is reached by joining its room, which also works in maps
      * where the server refuses goto.
      */
