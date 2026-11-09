@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mira_client::{
-    ActionError, CombatState, DeviceId, Event, Handle, ItemId, Phase, Server, Spot, api,
+    ActionError, CombatState, DeviceId, Event, Handle, ItemId, NoticeKind, Phase, Server, Spot, api,
 };
 use mira_script::{Cancel, Level, Outcome, Output};
 use serde::{Deserialize, Serialize};
@@ -267,7 +267,14 @@ impl Board {
             }
             _ => {}
         }
-        if let Some(text) = describe(event) {
+        let text = match event {
+            Event::Notice {
+                kind: NoticeKind::Server,
+                text,
+            } => Some(text.clone()),
+            _ => describe(event),
+        };
+        if let Some(text) = text {
             self.log.push(Channel::of(event), text);
         }
     }
@@ -1630,6 +1637,10 @@ mod tests {
                 kind: NoticeKind::Server,
                 text: "Profanity filter On.".into(),
             },
+            Event::Notice {
+                kind: NoticeKind::Warning,
+                text: "You are being sent back to town.".into(),
+            },
             Event::Chat {
                 channel: "zone".into(),
                 sender: "player2".into(),
@@ -1658,7 +1669,8 @@ mod tests {
                 (Channel::Game, "died"),
                 (Channel::Mira, "ready: level 50, 1200 gold, 2 items"),
                 (Channel::Mira, "ready: level 50, 9999 gold, 2 items"),
-                (Channel::Server, "server: Profanity filter On."),
+                (Channel::Server, "Profanity filter On."),
+                (Channel::Server, "warning: You are being sent back to town."),
                 (Channel::Chat, "[zone] player2: hi"),
                 (Channel::Chat, "[whisper] player2: psst"),
             ]
