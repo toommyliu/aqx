@@ -23,6 +23,8 @@ use http::{Failure, Reply, Request};
 
 pub const PORT: u16 = 4970;
 
+type Pair = (String, String);
+
 type Remembered = HashMap<(PathBuf, String, Option<String>), String>;
 
 pub struct Web {
@@ -301,13 +303,8 @@ impl Web {
         let mut answers = Vec::new();
         for run in &asked.runs {
             let name = names.get(run.account).map(|(name, _)| name.clone());
-            let mut args = asked.extra.clone();
-            for arg in &declared {
-                let given = run
-                    .args
-                    .iter()
-                    .find(|(key, _)| *key == arg.name)
-                    .map_or("", |(_, value)| value.trim());
+            let (mut args, values) = split_args(&declared, &asked.extra, &run.args);
+            for (arg, given) in values {
                 answers.push((arg.name.clone(), name.clone(), given.to_owned()));
                 if given.is_empty() && arg.optional {
                     continue;
@@ -726,6 +723,35 @@ fn declared(path: &Path) -> Result<Vec<Arg>, Failure> {
     aqx_script::script_args(path).map_err(Failure::bad)
 }
 
+fn split_args<'a>(
+    declared: &'a [Arg],
+    typed: &'a [Pair],
+    fields: &'a [Pair],
+) -> (Vec<Pair>, Vec<(&'a Arg, &'a str)>) {
+    let value_in = |pairs: &'a [Pair], name: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.trim())
+            .filter(|value| !value.is_empty())
+    };
+    let values = declared
+        .iter()
+        .map(|arg| {
+            let given = value_in(fields, &arg.name)
+                .or_else(|| value_in(typed, &arg.name))
+                .unwrap_or("");
+            (arg, given)
+        })
+        .collect();
+    let rest = typed
+        .iter()
+        .filter(|(key, _)| !declared.iter().any(|arg| arg.name == *key))
+        .cloned()
+        .collect();
+    (rest, values)
+}
+
 fn arg_kind(arg: &Arg) -> &'static str {
     match arg.kind {
         ArgKind::Scalar(Scalar::String) => "string",
@@ -840,4 +866,42 @@ fn write_private(path: &Path, text: &str) -> anyhow::Result<()> {
         let _ = std::fs::remove_file(&fresh);
     }
     written
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn a_declared_arg_typed_as_key_value_fills_its_empty_field_once() {
+        let declared = [
+            Arg {
+                name: "target".into(),
+                kind: ArgKind::Scalar(Scalar::Number),
+                optional: false,
+                default: None,
+            },
+            Arg {
+                name: "leader".into(),
+                kind: ArgKind::Scalar(Scalar::String),
+                optional: false,
+                default: None,
+            },
+        ];
+        let typed = pairs(&[("target", "7500"), ("leader", "player2"), ("fast", "true")]);
+        let fields = pairs(&[("target", ""), ("leader", "player1")]);
+        let (rest, values) = split_args(&declared, &typed, &fields);
+        assert_eq!(rest, pairs(&[("fast", "true")]));
+        let values: Vec<(&str, &str)> = values
+            .iter()
+            .map(|(arg, value)| (arg.name.as_str(), *value))
+            .collect();
+        assert_eq!(values, [("target", "7500"), ("leader", "player1")]);
+    }
 }
