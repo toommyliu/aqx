@@ -850,8 +850,9 @@ fn reply(reply: RequestId, result: Result<(), aqx_client::ActionError>) -> Messa
     }
 }
 fn send(writer: &mut impl Write, message: &Message) -> io::Result<()> {
-    serde_json::to_writer(&mut *writer, message)?;
-    writer.write_all(b"\n")?;
+    let mut line = serde_json::to_vec(message)?;
+    line.push(b'\n');
+    writer.write_all(&line)?;
     writer.flush()
 }
 enum Wake {
@@ -903,6 +904,39 @@ fn forward(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn each_message_reaches_the_worker_as_one_write() {
+        #[derive(Default)]
+        struct Pipe {
+            writes: Vec<Vec<u8>>,
+        }
+        impl Write for Pipe {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.writes.push(bytes.to_vec());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut pipe = Pipe::default();
+        let event = json!({"type": "joined", "map": "battleon", "cell": "Enter", "pad": "Spawn"});
+        send(
+            &mut pipe,
+            &Message::Event {
+                event: event.clone(),
+            },
+        )
+        .unwrap();
+        send(&mut pipe, &Message::Event { event }).unwrap();
+        assert_eq!(pipe.writes.len(), 2);
+        for line in &pipe.writes {
+            let text = std::str::from_utf8(line).unwrap();
+            assert!(text.ends_with('\n'));
+            assert!(text.contains(r#""map":"battleon""#));
+        }
+    }
 
     #[test]
     fn accounts_starting_together_build_a_stale_worker_once() {
