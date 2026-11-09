@@ -867,8 +867,9 @@ function SkuaOptions(props: { script: string }) {
       setBusy(false);
     }
   };
-  const value = (o: SkuaOption) => changes()[o.name] ?? o.value ?? "";
-  const set = (o: SkuaOption, v: string) => setChanges({ ...changes(), [o.name]: v });
+  const keyOf = (o: SkuaOption) => (tab() === "script" ? `${o.group}:${o.name}` : o.name);
+  const value = (o: SkuaOption) => changes()[keyOf(o)] ?? o.value ?? "";
+  const set = (o: SkuaOption, v: string) => setChanges({ ...changes(), [keyOf(o)]: v });
   return (
     <Modal
       title={`Options for ${shownName(props.script)} · ${nameOf(account)}`}
@@ -933,7 +934,7 @@ function SkuaOptions(props: { script: string }) {
               </Show>
               <For each={p().options}>
                 {(o) => {
-                  const id = `opt-${o.name}`;
+                  const id = `opt-${keyOf(o)}`;
                   return (
                     <div class="field">
                       <Switch>
