@@ -614,14 +614,18 @@ function RunArgs(props: { script: string; extra: [string, string][] }) {
   createEffect(() => {
     const d = declared();
     if (!d) return;
+    const typed = new Map(props.extra);
     const filled: Record<string, string> = {};
     for (const arg of d.args) {
-      filled[key(null, arg.name)] = arg.shared ?? arg.each[0] ?? "";
+      const given = typed.get(arg.name);
+      typed.delete(arg.name);
+      filled[key(null, arg.name)] = given ?? arg.shared ?? arg.each[0] ?? "";
       on.forEach((account, i) => {
-        filled[key(account, arg.name)] = arg.each[i] ?? arg.shared ?? "";
+        filled[key(account, arg.name)] = given ?? arg.each[i] ?? arg.shared ?? "";
       });
     }
     setAnswers(filled);
+    setExtra([...typed].map(([k, v]) => `${k}=${v}`).join(" "));
     queueMicrotask(() => focusUnlessTouch(form.querySelector<HTMLElement>("input")));
   });
   const perAccount = () => on.length > 1 && !shared();
