@@ -30,7 +30,9 @@ pub const RELOGIN_DELAY_MIN: Duration = Duration::from_secs(4);
 #[schemars(title = "mira.toml")]
 pub struct Config {
     #[serde(default)]
-    #[schemars(description = "Settings for every account. An [[account]] can override each one.")]
+    #[schemars(
+        description = "Settings for every account. An [[account]] can override each one except client_version and api."
+    )]
     pub defaults: Settings,
     #[serde(default, rename = "account")]
     #[schemars(description = "One account to log in.")]
@@ -120,8 +122,6 @@ pub struct AccountConfig {
     args: toml::Table,
     #[schemars(description = SERVER)]
     server: Option<String>,
-    #[schemars(description = CLIENT_VERSION)]
-    client_version: Option<String>,
     #[schemars(description = AUTO_START)]
     auto_start: Option<bool>,
     #[schemars(description = AUTO_RELOGIN)]
@@ -135,8 +135,6 @@ pub struct AccountConfig {
     restart_on_error: Option<bool>,
     #[schemars(description = ROOM)]
     room: Option<u32>,
-    #[schemars(description = API)]
-    api: Option<String>,
     #[serde(default, deserialize_with = "duration")]
     #[schemars(description = STALL_AFTER, schema_with = "duration_schema")]
     stall_after: Option<Duration>,
@@ -277,14 +275,14 @@ impl AccountConfig {
         let name = self.name().to_owned();
         let settings = Settings {
             server: self.server.clone(),
-            client_version: self.client_version.clone(),
+            client_version: None,
             auto_start: self.auto_start,
             auto_relogin: self.auto_relogin,
             relogin_delay: self.relogin_delay,
             relogin_attempts: self.relogin_attempts,
             restart_on_error: self.restart_on_error,
             room: self.room,
-            api: self.api.clone(),
+            api: None,
             stall_after: self.stall_after,
             on_stall: self.on_stall,
         }
@@ -440,6 +438,7 @@ mod tests {
         [defaults]
         server = "Twilly"
         client_version = "5.32"
+        api = "http://127.0.0.1:8787"
         relogin_delay = "30s"
         restart_on_error = true
         room = 1234
@@ -452,7 +451,6 @@ mod tests {
         script = "scripts/farm.ts"
         args = { target = 7500, fast = true, label = "a=b" }
         auto_start = false
-        api = "http://127.0.0.1:8787"
 
         [[account]]
         name = "healer"
@@ -465,6 +463,25 @@ mod tests {
 
     fn accounts(text: &str) -> Result<Vec<Account>, String> {
         parse(text)?.accounts(Path::new("/srv/mira"))
+    }
+
+    #[test]
+    fn client_version_and_api_are_set_for_every_account_only() {
+        for key in [
+            "client_version = \"5.32\"",
+            "api = \"http://127.0.0.1:8787\"",
+        ] {
+            let text = format!(
+                "[[account]]\nuser = \"player1\"\npassword = \"x\"\nserver = \"Twilly\"\n{key}\n"
+            );
+            let field = key.split(' ').next().unwrap();
+            assert!(
+                accounts(&text)
+                    .unwrap_err()
+                    .contains(&format!("unknown field `{field}`")),
+                "{key}"
+            );
+        }
     }
 
     #[test]
@@ -506,7 +523,7 @@ mod tests {
             healer.auto_start,
             "accounts log in when a session starts unless auto_start is off"
         );
-        assert_eq!(healer.api, None);
+        assert_eq!(healer.api.as_deref(), Some("http://127.0.0.1:8787"));
         assert_eq!(healer.script, None);
         assert_eq!(
             healer.relogin,
