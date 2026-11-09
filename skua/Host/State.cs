@@ -16,7 +16,7 @@ public sealed class State
     FactionsSnapshot factions = new([]);
     ShopSnapshot? shop;
     CombatSnapshot combat = new(null, ImmutableDictionary<string, SkillReadiness>.Empty);
-    SettingsSnapshot settings = new(CounterMode.Off, new("off"), false, null);
+    SettingsSnapshot settings = new(CounterMode.Off, new("off"), false, null, false);
     public SessionSnapshot Session => Volatile.Read(ref session);
     public MeSnapshot? Me => Volatile.Read(ref me);
     public RoomSnapshot? Room => Volatile.Read(ref room);
@@ -181,7 +181,7 @@ public sealed record QuestsSnapshot(ImmutableDictionary<long, QuestSnapshot> Def
 public sealed record CombatSnapshot(long? Target, ImmutableDictionary<string, SkillReadiness> Readiness, ulong? GlobalCooldown = null, ImmutableDictionary<string, SkillTiming>? SkillTiming = null, ImmutableDictionary<string, ActionLock>? ActionLocks = null);
 public sealed record SkillTiming(ulong? LastUse, ulong? Cooldown);
 public sealed record ActionLock(ulong? Used, ulong Cooldown);
-public sealed record SettingsSnapshot(CounterMode CounterHold, AggroMode Aggro, bool AntiAfk, uint? Room);
+public sealed record SettingsSnapshot(CounterMode CounterHold, AggroMode Aggro, bool AntiAfk, uint? Room, bool AutoRelogin);
 [JsonConverter(typeof(ReadinessConverter))]
 public sealed record SkillReadiness(string Kind, ulong? At = null);
 public sealed class ReadinessConverter : JsonConverter<SkillReadiness>

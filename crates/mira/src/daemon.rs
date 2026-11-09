@@ -556,7 +556,7 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
     let first: Vec<String> = match &wanted.accounts[..] {
         [] => accounts
             .iter()
-            .filter(|a| a.autologin)
+            .filter(|a| a.auto_start)
             .map(|a| a.name.clone())
             .collect(),
         names => names

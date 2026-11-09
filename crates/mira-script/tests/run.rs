@@ -1885,7 +1885,19 @@ impl Account for Relogins {
         if server == "Full" {
             return Err("Full is full".into());
         }
-        let harness = serve(|_| {});
+        let options = Options {
+            reconnect: Some(mira_client::Reconnect::new(
+                "pass1".into(),
+                Duration::from_secs(60),
+            )),
+            ..Options::default()
+        };
+        let harness = Harness::start(options, |listener| {
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready();
+            peer.expect_logout();
+        });
+        harness.session.ready().wait().unwrap();
         let session = harness.session.clone();
         self.0.lock().unwrap().push(harness);
         Ok(session)
@@ -1906,6 +1918,7 @@ fn auth_lists_servers_and_relogs_without_ending_the_run() {
           script.log(server.name, server.players, server.capacity, server.members);
           script.log(auth.server);
           settings.counterHold = "all";
+          settings.autoRelogin = false;
           try {
             yield* auth.relogin("Full");
           } catch (e) {
@@ -1940,7 +1953,8 @@ fn auth_lists_servers_and_relogs_without_ending_the_run() {
                 {
                     thread::sleep(Duration::from_millis(1));
                 }
-                *during.lock().unwrap() = Some(session.snapshot().settings.counter_hold);
+                let settings = session.snapshot().settings.clone();
+                *during.lock().unwrap() = Some((settings.counter_hold, settings.auto_relogin));
             }
         },
     );
@@ -1959,11 +1973,15 @@ fn auth_lists_servers_and_relogs_without_ending_the_run() {
             "Other battleon-1"
         ]
     );
-    assert_eq!(*seen.lock().unwrap(), Some(mira_client::CounterHold::All));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some((mira_client::CounterHold::All, false)),
+        "the new session keeps the run's settings"
+    );
 }
 
 #[test]
-fn logout_restart_and_auto_relogin_end_the_run_their_own_way() {
+fn logout_and_restart_end_the_run_their_own_way() {
     let ended = |source: &str| {
         let harness = serve(|_| {});
         let dir = Dir::new();
@@ -1990,20 +2008,68 @@ fn logout_restart_and_auto_relogin_end_the_run_their_own_way() {
         ),
         Ok(Outcome::Restart)
     );
-    assert_eq!(
-        ended(
-            r#"import { settings, wait } from "mira";
-            export default function* () {
-              settings.autoRelogin = { delayMs: 1500, server: "Twilly" };
-              yield* wait.ms(60_000);
-            }"#
-        ),
-        Ok(Outcome::Relogin(mira_script::AutoRelogin {
-            delay: Duration::from_millis(1500),
-            attempts: 5,
-            server: Some("Twilly".into()),
-        }))
-    );
+}
+
+#[test]
+fn a_dropped_connection_ends_the_run_and_auto_relogin_decides_whether_the_account_comes_back() {
+    for (on, top_level) in [(true, false), (false, false), (false, true)] {
+        let (logged, drop_now) = mpsc::channel::<()>();
+        let options = Options {
+            reconnect: Some(mira_client::Reconnect::new(
+                "pass1".into(),
+                Duration::from_secs(60),
+            )),
+            ..Options::default()
+        };
+        let harness = Harness::start(options, move |listener| {
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready();
+            let _ = drop_now.recv();
+        });
+        harness.session.ready().wait().unwrap();
+        let dir = Dir::new();
+        let path = dir.file(
+            "main.ts",
+            &if top_level {
+                format!(
+                    r#"import {{ script, settings, wait }} from "mira";
+                    settings.autoRelogin = {on};
+                    export default function* () {{
+                      script.log(true, settings.autoRelogin);
+                      yield* wait.ms(60_000);
+                    }}"#
+                )
+            } else {
+                format!(
+                    r#"import {{ script, settings, wait }} from "mira";
+                    export default function* () {{
+                      const before = settings.autoRelogin;
+                      settings.autoRelogin = {on};
+                      script.log(before, settings.autoRelogin);
+                      yield* wait.ms(60_000);
+                    }}"#
+                )
+            },
+        );
+        let (outcome, outputs) = run_in(&harness, &path, &Cancel::default(), move |out| {
+            if matches!(out, Output::Log { .. }) {
+                let _ = logged.send(());
+            }
+        });
+        assert!(
+            matches!(outcome, Ok(Outcome::Disconnected(_))),
+            "{outcome:?}"
+        );
+        assert_eq!(logs(&outputs), [format!("true {on}")]);
+        let phase = harness.session.snapshot().phase.clone();
+        assert_eq!(
+            matches!(phase, mira_client::Phase::Reconnecting { .. }),
+            on,
+            "{phase:?}"
+        );
+        harness.session.logout();
+        harness.finish();
+    }
 }
 
 #[test]

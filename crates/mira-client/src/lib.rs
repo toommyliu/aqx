@@ -33,8 +33,8 @@ pub use quest::{
 };
 pub use room::{CombatState, Monster, Player, Room, Spot};
 pub use session::{
-    ActionError, ActionId, Aggro, CounterHold, DEFAULT_CLIENT_VERSION, DEFAULT_RECONNECT_ATTEMPTS,
-    Disconnect, Handle, Jump, Load, Locate, Options, Pending, Phase, Reconnect, Update, spawn,
+    ActionError, ActionId, Aggro, CounterHold, DEFAULT_CLIENT_VERSION, Disconnect, Handle, Jump,
+    Load, Locate, Options, Pending, Phase, Reconnect, Update, spawn,
 };
 pub use shop::{MergeCost, Shop, ShopItem};
 pub use world::{ActionLock, Settings, SkillTiming, World};

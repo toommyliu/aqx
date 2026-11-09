@@ -65,7 +65,7 @@ impl Account for LoginAccount {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
-fn automatic_relogin_restarts_the_script_and_rotates_eligible_servers() {
+fn automatic_relogin_waits_for_the_account_and_never_logs_in_on_its_own() {
     let account = Arc::new(LoginAccount::default());
     let (outcome, logs, _) = Fake::start(|msg, wire| {
         if msg == "disconnect" {
@@ -75,24 +75,11 @@ fn automatic_relogin_restarts_the_script_and_rotates_eligible_servers() {
     .run_account(
         r#"
 using Skua.Core.Interfaces;
-public class Recovery {
-    static int runs;
+public class Offline {
     public void ScriptMain(IScriptInterface bot) {
-        bot.Log($"run {++runs}");
-        if (bot.Servers.LastName == "Fallback") {
-            bool fired = false;
-            bot.Handlers.RegisterOnce(1, _ => fired = true);
-            bot.Wait.ForTrue(() => fired, 2);
-            bot.Log($"restarted handler {fired}");
-            return;
-        }
-        bot.Handlers.RegisterOnce(10000, _ => bot.Log("stale handler"));
+        bot.Log($"run relogin {bot.Options.AutoRelogin}");
         bot.Options.AutoRelogin = true;
-        bot.Options.ReloginServer = "Preferred";
-        bot.Options.ReloginTryDelay = 20;
-        bot.Options.ReloginTries = 2;
         bot.Events.ReloginTriggered += kicked => bot.Log($"relogin kicked {kicked}");
-        bot.Events.ScriptStopping += _ => { bot.Log("stopping"); return true; };
         bot.Send.Packet("disconnect");
         bot.Sleep(20000);
         bot.Log("old script continued");
@@ -104,21 +91,27 @@ public class Recovery {
         account.clone(),
         |_| {},
     );
-    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
-    assert_eq!(logs.iter().filter(|s| *s == "run 1").count(), 2, "{logs:?}");
-    assert!(!logs.contains(&"run 2".into()), "{logs:?}");
+    assert!(
+        !matches!(outcome, Outcome::Failed(_)),
+        "{outcome:?} {logs:?}"
+    );
+    assert_eq!(
+        logs.iter().filter(|s| s.starts_with("run ")).count(),
+        1,
+        "{logs:?}"
+    );
+    assert!(
+        logs.contains(&"run relogin False".into()),
+        "an account without auto_relogin: {logs:?}"
+    );
     assert!(logs.contains(&"relogin kicked False".into()), "{logs:?}");
-    assert!(logs.contains(&"restarted handler True".into()), "{logs:?}");
     assert!(!logs.contains(&"old script continued".into()));
-    assert_eq!(*account.attempts.lock().unwrap(), ["Preferred", "Fallback"]);
-    for session in account.sessions.lock().unwrap().drain(..) {
-        session.finish();
-    }
+    assert!(account.attempts.lock().unwrap().is_empty());
 }
 
 #[test]
 #[ignore = "run with npm run skua:test"]
-fn a_reconnecting_session_stops_the_script_and_automatic_relogin_restarts_it() {
+fn a_reconnecting_session_stops_the_script_and_starts_it_again_once_back() {
     let account = Arc::new(LoginAccount::default());
     let (outcome, logs, _) = Fake::reconnecting(|msg, wire| {
         if msg == "disconnect" {
@@ -127,14 +120,22 @@ fn a_reconnecting_session_stops_the_script_and_automatic_relogin_restarts_it() {
     })
     .run_account(
         r#"
+using System;
 using Skua.Core.Interfaces;
 public class Reconnected {
     public void ScriptMain(IScriptInterface bot) {
-        bot.Log($"run on {bot.Servers.LastName}");
-        if (bot.Servers.LastName == "Fallback") return;
-        bot.Options.AutoRelogin = true;
-        bot.Options.ReloginServer = "Fallback";
-        bot.Options.ReloginTryDelay = 20;
+        bool again = Environment.GetEnvironmentVariable("MIRA_TEST_RUN") == "1";
+        bot.Log($"run again {again} on {bot.Servers.LastName} relogin {bot.Options.AutoRelogin} to {bot.Options.ReloginServer}");
+        if (again) {
+            bool fired = false;
+            bot.Handlers.RegisterOnce(1, _ => fired = true);
+            bot.Wait.ForTrue(() => fired, 2);
+            bot.Log($"restarted handler {fired}");
+            return;
+        }
+        Environment.SetEnvironmentVariable("MIRA_TEST_RUN", "1");
+        bot.Handlers.RegisterOnce(10000, _ => bot.Log("stale handler"));
+        bot.Events.ReloginTriggered += kicked => bot.Log($"relogin kicked {kicked}");
         bot.Events.ScriptStopping += _ => { bot.Log("stopping"); return true; };
         bot.Send.Packet("disconnect");
         for (;;) { bot.Map.Jump("r2", "Left"); bot.Sleep(100); }
@@ -147,12 +148,56 @@ public class Reconnected {
         |_| {},
     );
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(
+        logs.contains(&"run again False on Test relogin True to Test".into()),
+        "{logs:?}"
+    );
     assert!(logs.contains(&"stopping".into()), "{logs:?}");
-    assert!(logs.contains(&"run on Fallback".into()), "{logs:?}");
-    assert_eq!(*account.attempts.lock().unwrap(), ["Fallback"]);
-    for session in account.sessions.lock().unwrap().drain(..) {
-        session.finish();
+    assert!(logs.contains(&"relogin kicked False".into()), "{logs:?}");
+    assert!(
+        logs.contains(&"run again True on Test relogin True to Test".into()),
+        "{logs:?}"
+    );
+    assert!(logs.contains(&"restarted handler True".into()), "{logs:?}");
+    assert!(!logs.contains(&"stale handler".into()), "{logs:?}");
+    assert!(
+        account.attempts.lock().unwrap().is_empty(),
+        "the session logs back in by itself"
+    );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn turning_auto_relogin_off_leaves_the_account_logged_out() {
+    let (outcome, logs, sent) = Fake::reconnecting(|msg, wire| {
+        if msg == "disconnect" {
+            wire.hang_up();
+        }
+    })
+    .run_account(
+        r#"
+using Skua.Core.Interfaces;
+public class StayOut {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Log("run");
+        bot.Options.AutoRelogin = false;
+        bot.Send.Packet("disconnect");
+        bot.Sleep(20000);
     }
+}
+"#,
+        &Cancel::default(),
+        Default::default(),
+        Arc::new(LoginAccount::default()),
+        |_| {},
+    );
+    assert!(
+        !matches!(outcome, Outcome::Failed(_)),
+        "{outcome:?} {logs:?}"
+    );
+    assert_eq!(logs.iter().filter(|s| *s == "run").count(), 1, "{logs:?}");
+    let joins = sent.iter().filter(|m| m.contains("%moveToCell%")).count();
+    assert_eq!(joins, 1, "the account never logged back in: {sent:?}");
 }
 
 #[test]
@@ -308,7 +353,6 @@ fn automatic_relogin_restarts_past_a_stopping_handler_that_never_returns() {
         std::thread::sleep(Duration::from_secs(20));
         deadline.cancel();
     });
-    let account = Arc::new(LoginAccount::default());
     let (outcome, logs, _) = Fake::reconnecting(|msg, wire| {
         if msg == "disconnect" {
             wire.hang_up();
@@ -316,15 +360,15 @@ fn automatic_relogin_restarts_past_a_stopping_handler_that_never_returns() {
     })
     .run_account(
         r#"
+using System;
 using System.Threading;
 using Skua.Core.Interfaces;
 public class Stuck {
     public void ScriptMain(IScriptInterface bot) {
-        bot.Log($"run on {bot.Servers.LastName}");
-        if (bot.Servers.LastName == "Fallback") return;
-        bot.Options.AutoRelogin = true;
-        bot.Options.ReloginServer = "Fallback";
-        bot.Options.ReloginTryDelay = 20;
+        bool again = Environment.GetEnvironmentVariable("MIRA_TEST_RUN") == "1";
+        bot.Log($"run again {again}");
+        if (again) return;
+        Environment.SetEnvironmentVariable("MIRA_TEST_RUN", "1");
         bot.Events.ScriptStopping += _ => { Thread.Sleep(Timeout.Infinite); return true; };
         bot.Send.Packet("disconnect");
         for (;;) { bot.Map.Jump("r2", "Left"); bot.Sleep(100); }
@@ -333,20 +377,16 @@ public class Stuck {
 "#,
         &cancel,
         Default::default(),
-        account.clone(),
+        Arc::new(LoginAccount::default()),
         |_| {},
     );
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
-    assert!(logs.contains(&"run on Fallback".into()), "{logs:?}");
-    for session in account.sessions.lock().unwrap().drain(..) {
-        session.finish();
-    }
+    assert!(logs.contains(&"run again True".into()), "{logs:?}");
 }
 
 #[test]
 #[ignore = "run with npm run skua:test"]
 fn automatic_relogin_drops_the_previous_runs_flash_callbacks() {
-    let account = Arc::new(LoginAccount::default());
     let (outcome, logs, _) = Fake::reconnecting(|msg, wire| {
         if msg == "disconnect" {
             wire.hang_up();
@@ -354,19 +394,18 @@ fn automatic_relogin_drops_the_previous_runs_flash_callbacks() {
     })
     .run_account(
         r#"
+using System;
 using Skua.Core.Interfaces;
 public class Callbacks {
     public void ScriptMain(IScriptInterface bot) {
-        string run = bot.Servers.LastName;
+        string run = Environment.GetEnvironmentVariable("MIRA_TEST_RUN") ?? "first";
         bot.Flash.FlashCall += (name, args) => { if (name == "packet" && args[0].ToString()!.Contains("probe")) bot.Log($"{run} saw probe"); };
-        if (run == "Fallback") {
+        if (run == "second") {
             bot.Send.Packet("%xt%zm%cmd%1%probe%");
             bot.Sleep(300);
             return;
         }
-        bot.Options.AutoRelogin = true;
-        bot.Options.ReloginServer = "Fallback";
-        bot.Options.ReloginTryDelay = 20;
+        Environment.SetEnvironmentVariable("MIRA_TEST_RUN", "second");
         bot.Send.Packet("disconnect");
         for (;;) { bot.Map.Jump("r2", "Left"); bot.Sleep(100); }
     }
@@ -374,15 +413,12 @@ public class Callbacks {
 "#,
         &Cancel::default(),
         Default::default(),
-        account.clone(),
+        Arc::new(LoginAccount::default()),
         |_| {},
     );
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
     let probes: Vec<&String> = logs.iter().filter(|l| l.ends_with("saw probe")).collect();
-    assert_eq!(probes, ["Fallback saw probe"], "{logs:?}");
-    for session in account.sessions.lock().unwrap().drain(..) {
-        session.finish();
-    }
+    assert_eq!(probes, ["second saw probe"], "{logs:?}");
 }
 
 #[test]
@@ -552,48 +588,6 @@ public class Deadlines {
     assert_eq!(outcome, Outcome::Finished, "{logs:?}");
     assert!(logs.contains(&"timed out True".into()), "{logs:?}");
     assert!(logs.contains(&"cancelled True".into()), "{logs:?}");
-}
-
-#[test]
-#[ignore = "run with npm run skua:test"]
-fn safe_relogin_delay_can_be_cancelled_before_any_login() {
-    let account = Arc::new(LoginAccount::default());
-    let cancel = Cancel::default();
-    let trigger = cancel.clone();
-    let (outcome, logs, _) = Fake::start(|msg, wire| {
-        if msg == "disconnect" {
-            wire.hang_up();
-        }
-    })
-    .run_account(
-        r#"
-using Skua.Core.Interfaces;
-public class SafeRecovery {
-    public void ScriptMain(IScriptInterface bot) {
-        bot.Options.AutoRelogin = true;
-        bot.Options.SafeRelogin = true;
-        bot.Options.ReloginTryDelay = 0;
-        bot.Events.ReloginTriggered += _ => bot.Log("waiting safely");
-        bot.Send.Packet("disconnect");
-        bot.Sleep(20000);
-    }
-}
-"#,
-        &cancel,
-        Default::default(),
-        account.clone(),
-        move |log| {
-            if log == "waiting safely" {
-                let cancel = trigger.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(150));
-                    cancel.cancel();
-                });
-            }
-        },
-    );
-    assert_eq!(outcome, Outcome::Cancelled, "{logs:?}");
-    assert!(account.attempts.lock().unwrap().is_empty());
 }
 
 #[test]

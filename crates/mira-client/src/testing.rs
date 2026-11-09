@@ -43,6 +43,28 @@ impl Peer {
         }
     }
 
+    pub fn accept_within(listener: &TcpListener, wait: Duration) -> Option<Peer> {
+        listener.set_nonblocking(true).unwrap();
+        let until = Instant::now() + wait;
+        let accepted = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break Some(stream),
+                Err(_) if Instant::now() < until => thread::sleep(Duration::from_millis(5)),
+                Err(_) => break None,
+            }
+        };
+        listener.set_nonblocking(false).unwrap();
+        let stream = accepted?;
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        Some(Peer {
+            stream,
+            buf: Vec::new(),
+        })
+    }
+
     pub fn set_read_timeout(&self, timeout: Duration) {
         self.stream.set_read_timeout(Some(timeout)).unwrap();
     }

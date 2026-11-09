@@ -1,14 +1,13 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use mira_client::{Aggro, CounterHold, Handle, ItemId, MonMapId, QuestId, Settings, World};
 use rquickjs::module::{Declarations, Exports, ModuleDef};
 use rquickjs::{Constructor, Ctx, Exception, Function, JsLifetime, Object, Result, Symbol, Value};
 
 use crate::engine::Loaded;
-use crate::{AutoRelogin, Level, Output, views};
+use crate::{Level, Output, views};
 
 pub struct Internals<'js> {
     pub step: Symbol<'js>,
@@ -31,7 +30,6 @@ pub struct Host<'js> {
     packet_handlers: Cell<u32>,
     server: RefCell<String>,
     args: RefCell<String>,
-    auto_relogin: RefCell<Option<AutoRelogin>>,
     restart: Cell<bool>,
 }
 
@@ -49,13 +47,15 @@ impl<'js> Host<'js> {
             world: RefCell::new(None),
             version: Cell::new(0),
             session: RefCell::new(None),
-            settings: RefCell::new(Settings::default()),
+            settings: RefCell::new(Settings {
+                auto_relogin: true,
+                ..Settings::default()
+            }),
             spawned: RefCell::new(Vec::new()),
             halted: RefCell::new(Vec::new()),
             packet_handlers: Cell::new(0),
             server: RefCell::new(String::new()),
             args: RefCell::new("{}".into()),
-            auto_relogin: RefCell::new(None),
             restart: Cell::new(false),
         }
     }
@@ -66,10 +66,6 @@ impl<'js> Host<'js> {
 
     pub fn set_args(&self, json: String) {
         self.args.replace(json);
-    }
-
-    pub fn auto_relogin(&self) -> Option<AutoRelogin> {
-        self.auto_relogin.borrow().clone()
     }
 
     pub fn restart_requested(&self) -> bool {
@@ -137,7 +133,7 @@ fn host<'a, 'js>(ctx: &'a Ctx<'js>) -> rquickjs::runtime::UserDataGuard<'a, Host
 
 pub struct Native;
 
-const NAMES: [&str; 25] = [
+const NAMES: [&str; 26] = [
     "miraVersion",
     "versionCompare",
     "setCounterHold",
@@ -145,6 +141,7 @@ const NAMES: [&str; 25] = [
     "setAntiAfk",
     "setRoom",
     "setAutoRelogin",
+    "autoRelogin",
     "server",
     "restart",
     "args",
@@ -296,17 +293,19 @@ impl ModuleDef for Native {
         )?;
         exports.export(
             "setAutoRelogin",
-            Function::new(
-                ctx.clone(),
-                |ctx: Ctx<'js>, delay: Option<f64>, attempts: u32, server: Option<String>| {
-                    let policy = delay.map(|ms| AutoRelogin {
-                        delay: Duration::from_secs_f64(ms / 1000.0),
-                        attempts,
-                        server,
-                    });
-                    host(&ctx).auto_relogin.replace(policy);
-                },
-            )?,
+            Function::new(ctx.clone(), |ctx: Ctx<'js>, on: bool| {
+                let host = host(&ctx);
+                host.settings.borrow_mut().auto_relogin = on;
+                host.session().map(|s| s.set_auto_relogin(on)).is_some()
+            })?,
+        )?;
+        exports.export(
+            "autoRelogin",
+            Function::new(ctx.clone(), |ctx: Ctx<'js>| {
+                host(&ctx)
+                    .session()
+                    .is_some_and(|s| s.snapshot().settings.auto_relogin)
+            })?,
         )?;
         exports.export(
             "server",

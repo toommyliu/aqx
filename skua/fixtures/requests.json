@@ -247,6 +247,15 @@
     "call": "logout"
   },
   {
+    "id": 201,
+    "call": "await_online"
+  },
+  {
+    "id": 202,
+    "call": "set_auto_relogin",
+    "on": false
+  },
+  {
     "id": 102,
     "call": "cancel_relogin",
     "request": 103

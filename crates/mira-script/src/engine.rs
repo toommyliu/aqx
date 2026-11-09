@@ -225,13 +225,9 @@ impl<'js> Engine<'js> {
             .map(|(id, _)| *id)
             .collect();
         let halted = roots.into_iter().try_for_each(|id| self.halt(id));
-        let (stopped, restart, relogin) = match self.ctx.userdata::<Host>() {
-            Some(host) => (
-                host.stop_requested(),
-                host.restart_requested(),
-                host.auto_relogin(),
-            ),
-            None => (None, false, None),
+        let (stopped, restart) = match self.ctx.userdata::<Host>() {
+            Some(host) => (host.stop_requested(), host.restart_requested()),
+            None => (None, false),
         };
         if let Some(reason) = stopped {
             return Outcome::Stopped(reason);
@@ -246,10 +242,7 @@ impl<'js> Engine<'js> {
             return Outcome::Restart;
         }
         if let Some(reason) = self.closed.take() {
-            return match relogin {
-                Some(policy) => Outcome::Relogin(policy),
-                None => Outcome::Disconnected(reason),
-            };
+            return Outcome::Disconnected(reason);
         }
         if let Err(e) = driven.and(halted) {
             return Outcome::Failed(caught(&self.ctx, e));
@@ -276,7 +269,9 @@ impl<'js> Engine<'js> {
                         if !self.wants_packets() => {}
                     Ok(Wake::Update(
                         generation,
-                        Update::Event(Event::Phase(Phase::Closed { reason })),
+                        Update::Event(Event::Phase(
+                            Phase::Closed { reason } | Phase::Reconnecting { reason, .. },
+                        )),
                     )) if generation == self.generation => {
                         self.closed = Some(reason.to_string());
                         return Ok(());
@@ -307,7 +302,12 @@ impl<'js> Engine<'js> {
                 Ok(Wake::Cancel) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
                 Ok(Wake::Resume) => continue,
                 Ok(Wake::Update(generation, _)) if generation != self.generation => continue,
-                Ok(Wake::Update(_, Update::Event(Event::Phase(Phase::Closed { reason })))) => {
+                Ok(Wake::Update(
+                    _,
+                    Update::Event(Event::Phase(
+                        Phase::Closed { reason } | Phase::Reconnecting { reason, .. },
+                    )),
+                )) => {
                     self.closed = Some(reason.to_string());
                     return Ok(());
                 }

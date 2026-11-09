@@ -3,9 +3,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use mira_client::{DeviceId, Event, Handle, Options, Reconnect, Server, api};
+use mira_client::{DeviceId, Event, Handle, Options, Phase, Reconnect, Server, api};
 use mira_script::skua::SkuaScript;
 use mira_script::{Cancel, LoadError, Outcome, Output, Script, Start};
 use serde_json::{Map, Value};
@@ -15,7 +15,7 @@ pub struct Login {
     pub user: String,
     pub pass: String,
     pub client_version: Option<String>,
-    pub reconnect: Option<crate::config::Reconnect>,
+    pub relogin: Option<crate::config::Relogin>,
     pub api: Option<String>,
     pub record: Option<crate::record::Recorder>,
 }
@@ -35,7 +35,7 @@ impl Login {
         let options = Options {
             client_version: self.client_version.clone(),
             trace_packets: self.record.is_some(),
-            reconnect: self.reconnect.map(|r| Reconnect {
+            reconnect: self.relogin.map(|r| Reconnect {
                 password: pass.to_owned(),
                 delay: r.delay,
                 attempts: r.attempts,
@@ -134,13 +134,7 @@ impl Job {
 
 pub enum Note<'a> {
     Restarting,
-    Relogging {
-        server: &'a str,
-        delay: Duration,
-        attempt: u32,
-        attempts: u32,
-    },
-    ReloginFailed(String),
+    Reconnecting(&'a str),
     Session(&'a Handle),
 }
 
@@ -170,42 +164,25 @@ pub fn drive(
         note(Note::Session(&session));
         match ended.outcome {
             Outcome::Restart => note(Note::Restarting),
-            Outcome::Relogin(policy) => {
-                let target = policy.server.clone().unwrap_or_else(|| server.clone());
-                let mut delay = policy.delay;
-                let relogged = (1..=policy.attempts).find_map(|attempt| {
-                    note(Note::Relogging {
-                        server: &target,
-                        delay,
-                        attempt,
-                        attempts: policy.attempts,
-                    });
-                    if !wait(delay, &job.cancel) {
-                        return Some(None);
+            Outcome::Disconnected(why) if reconnecting(&session) => {
+                note(Note::Reconnecting(&why));
+                match back_online(&session, &job.cancel) {
+                    Some(Phase::Ready) => note(Note::Restarting),
+                    Some(Phase::Closed { reason }) => {
+                        return Ran {
+                            outcome: Outcome::Disconnected(reason.to_string()),
+                            session,
+                            server,
+                        };
                     }
-                    delay = delay.saturating_mul(2);
-                    match account.login(&target) {
-                        Ok(session) => Some(Some(session)),
-                        Err(e) => {
-                            note(Note::ReloginFailed(e));
-                            None
-                        }
+                    _ => {
+                        return Ran {
+                            outcome: Outcome::Cancelled,
+                            session,
+                            server,
+                        };
                     }
-                });
-                let Some(Some(relogged)) = relogged else {
-                    let outcome = if job.cancel.is_cancelled() {
-                        Outcome::Cancelled
-                    } else {
-                        Outcome::Disconnected("couldn't log back in".into())
-                    };
-                    return Ran {
-                        outcome,
-                        session,
-                        server,
-                    };
-                };
-                note(Note::Session(&relogged));
-                (session, server) = (relogged, target);
+                }
             }
             outcome => {
                 return Ran {
@@ -235,13 +212,117 @@ pub fn drive(
     }
 }
 
-fn wait(delay: Duration, cancel: &Cancel) -> bool {
-    let until = Instant::now() + delay;
-    while Instant::now() < until {
-        if cancel.is_cancelled() {
-            return false;
+fn reconnecting(session: &Handle) -> bool {
+    matches!(session.snapshot().phase, Phase::Reconnecting { .. })
+}
+
+fn back_online(session: &Handle, cancel: &Cancel) -> Option<Phase> {
+    while !cancel.is_cancelled() {
+        match &session.snapshot().phase {
+            phase @ (Phase::Ready | Phase::Closed { .. }) => return Some(phase.clone()),
+            _ => thread::sleep(Duration::from_millis(100)),
         }
-        thread::sleep(Duration::from_millis(100).min(until - Instant::now()));
     }
-    !cancel.is_cancelled()
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use mira_client::testing::{Harness, Peer, login_reply, serve_api};
+    use mira_client::{DEFAULT_CLIENT_VERSION, Reconnect};
+    use mira_script::{Account, Level};
+
+    use super::*;
+
+    struct Offline;
+
+    impl Account for Offline {
+        fn servers(&self) -> Result<Vec<Server>, String> {
+            Err("no logins in this test".into())
+        }
+
+        fn login(&self, _: &str) -> Result<Handle, String> {
+            Err("no logins in this test".into())
+        }
+    }
+
+    #[test]
+    fn a_reconnected_session_starts_the_script_again() {
+        let (replies_in, replies) = mpsc::channel();
+        let (stop_in, stop) = mpsc::channel();
+        let (base, api) = serve_api(replies, stop);
+        let (started_in, started) = mpsc::channel::<()>();
+        let options = Options {
+            reconnect: Some(Reconnect::new("pass1".into(), Duration::from_millis(100))),
+            ..Options::default()
+        };
+        let harness = Harness::start_with_api(options, base, move |listener| {
+            let port = listener.local_addr().unwrap().port();
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready();
+            started.recv().unwrap();
+            replies_in.send(login_reply("tok2", port)).unwrap();
+            drop(peer);
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready_with_token(DEFAULT_CLIENT_VERSION, "tok2");
+            peer.expect_logout();
+        });
+        harness.session.ready().wait().unwrap();
+        let dir = std::env::temp_dir().join(format!("mira-runner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("main.ts");
+        std::fs::write(
+            &path,
+            r#"import { script, wait } from "mira";
+            export default function* () {
+              script.log("started");
+              yield* wait.ms(60_000);
+            }"#,
+        )
+        .unwrap();
+        let cancel = Cancel::default();
+        let runs = Rc::new(std::cell::Cell::new(0));
+        let job = Job::new(&path, &cancel, {
+            let (cancel, runs) = (cancel.clone(), Rc::clone(&runs));
+            move |out| {
+                if let Output::Log {
+                    level: Level::Log, ..
+                } = out
+                {
+                    runs.set(runs.get() + 1);
+                    match runs.get() {
+                        1 => started_in.send(()).unwrap(),
+                        _ => cancel.cancel(),
+                    }
+                }
+            }
+        });
+        let script = job.load().unwrap();
+        let account: Arc<dyn Account> = Arc::new(Offline);
+        let mut notes = Vec::new();
+        let ran = drive(
+            &job,
+            script,
+            &Map::new(),
+            &account,
+            harness.session.clone(),
+            "Test".into(),
+            |note| match note {
+                Note::Restarting => notes.push("restarting"),
+                Note::Reconnecting(_) => notes.push("reconnecting"),
+                Note::Session(_) => {}
+            },
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(ran.outcome, Outcome::Cancelled);
+        assert_eq!(runs.get(), 2, "the script ran once per session");
+        assert_eq!(notes, ["reconnecting", "restarting"]);
+        assert!(ran.session.same_session(&harness.session));
+        harness.session.logout();
+        harness.finish();
+        stop_in.send(()).unwrap();
+        assert_eq!(api.join().unwrap().len(), 1);
+    }
 }

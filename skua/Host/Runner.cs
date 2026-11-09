@@ -24,6 +24,9 @@ public static class Runner
         {
             protocol.Call(new ListenCall(PacketDirection.In, false));
             if (protocol.Stopping.IsCancellationRequested) return 0;
+            bot.AccountAutoRelogin = state.Settings.AutoRelogin;
+            bot.Options.AutoRelogin = bot.AccountAutoRelogin;
+            ((MiraOption)bot.Options).HomeServer = state.Session.Server;
             typeof(IScriptInterface).GetProperty(nameof(IScriptInterface.Instance))!.SetValue(null, bot);
             Ioc.Default.ConfigureServices(new Services(bot));
             string bundledSkills = new[] { Path.Combine(compiler.Root, "Skills", "AdvancedSkills.json"), Path.Combine(AppContext.BaseDirectory, "AdvancedSkills.json") }.FirstOrDefault(File.Exists) ?? "";
@@ -57,7 +60,6 @@ public static class Runner
                     catch (Exception e) { error = e; }
                 }) { IsBackground = true, Name = "Script thread" };
                 bool recover = false;
-                int delay = 0;
                 Task stopping = Task.CompletedTask;
                 using (MiraBackground background = new(bot, protocol))
                 {
@@ -65,7 +67,6 @@ public static class Runner
                     script.Start();
                     while (!script.Join(20) && !bot.ShouldExit) { }
                     recover = bot.Disconnected && bot.Options.AutoRelogin && !protocol.Stopping.IsCancellationRequested;
-                    delay = bot.Options.SafeRelogin || bot.Kicked ? 70000 : bot.Options.ReloginTryDelay;
                     if (bot.ShouldExit) script.Join(TimeSpan.FromSeconds(8));
                     if (!script.IsAlive && (bot.ShouldExit || error is not null)) stopping = bot.RaiseStopping(error is OperationCanceledException ? null : error);
                     if (recover) Await(stopping, TimeSpan.FromSeconds(2));
@@ -78,10 +79,12 @@ public static class Runner
                     bot.Resume();
                     try
                     {
-                        Task.Delay(Math.Max(0, delay), protocol.Stopping).GetAwaiter().GetResult();
-                        if (bot.Servers.EnsureRelogin(protocol.Stopping).GetAwaiter().GetResult()) { context.Unload(); continue; }
+                        protocol.Call(new AwaitOnlineCall(), protocol.Stopping);
+                        context.Unload();
+                        continue;
                     }
                     catch (OperationCanceledException) { }
+                    catch (CallFailedException) { }
                     bot.RequestStop();
                 }
                 context.Unload();

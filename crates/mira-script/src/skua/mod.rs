@@ -1,7 +1,7 @@
 pub mod library;
 pub mod protocol;
 mod state;
-use crate::{Cancel, Ended, Level, LoadError, Outcome, Output, Relogged, Start, restore};
+use crate::{Cancel, Ended, Level, LoadError, Outcome, Output, Relogged, Start, restore_after_run};
 use mira_client::{ActionId, Direction, Handle, Pending, Phase, Update};
 use protocol::{Call, Message, RequestId, Worker};
 use serde_json::{Value, json};
@@ -14,6 +14,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 const STOP_BUDGET: Duration = Duration::from_secs(10);
+const AWAIT_ONLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 pub struct SkuaScript {
     path: PathBuf,
     skua: PathBuf,
@@ -268,7 +269,7 @@ impl SkuaScript {
         let result = self.drive(&mut session, &mut server, start.args, start.account);
         session.cancel_all();
         if !matches!(session.snapshot().phase, Phase::Closed { .. }) {
-            restore(
+            restore_after_run(
                 &session,
                 if session.same_session(&original) {
                     before
@@ -562,6 +563,29 @@ impl SkuaScript {
                             session.logout();
                             None
                         }
+                        Call::SetAutoRelogin { on } => {
+                            session.set_auto_relogin(on);
+                            None
+                        }
+                        Call::AwaitOnline => {
+                            relogging = Some((id, Instant::now() + AWAIT_ONLINE));
+                            let (session, tx) = (session.clone(), tx.clone());
+                            thread::spawn(move || {
+                                let result = loop {
+                                    match &session.snapshot().phase {
+                                        Phase::Ready => break Ok(()),
+                                        Phase::Closed { reason } => {
+                                            break Err(format!(
+                                                "the account stayed offline: {reason}"
+                                            ));
+                                        }
+                                        _ => thread::sleep(Duration::from_millis(100)),
+                                    }
+                                };
+                                let _ = tx.send(Wake::Online(id, result));
+                            });
+                            continue;
+                        }
                         Call::CancelRelogin { request } => {
                             if relogging.is_some_and(|(pending, _)| pending == request) {
                                 relogging = None;
@@ -696,13 +720,20 @@ impl SkuaScript {
                     };
                     send(&mut stdin, &message)?;
                 }
-                Wake::Relogged(reply, result) => {
+                wake @ (Wake::Relogged(..) | Wake::Online(..)) => {
+                    let (reply, result) = match wake {
+                        Wake::Relogged(reply, result) => (reply, result.map(Relogged::take)),
+                        Wake::Online(reply, result) => {
+                            (reply, result.map(|()| (session.clone(), server.clone())))
+                        }
+                        _ => unreachable!(),
+                    };
                     if !relogging.is_some_and(|(id, _)| id == reply) {
                         continue;
                     }
                     relogging = None;
                     match result {
-                        Ok(relogged) => {
+                        Ok((next, name)) => {
                             for (_, (reply, _)) in actions.drain() {
                                 send(
                                     &mut stdin,
@@ -712,7 +743,6 @@ impl SkuaScript {
                                     },
                                 )?;
                             }
-                            let (next, name) = relogged.take();
                             *session = next;
                             suppress_close = false;
                             ended = false;
@@ -812,6 +842,7 @@ enum Wake {
     Ended(u64),
     Servers(RequestId, Result<Vec<mira_client::Server>, String>),
     Relogged(RequestId, Result<Relogged, String>),
+    Online(RequestId, Result<(), String>),
 }
 struct Forwarding(Arc<AtomicU64>);
 impl Drop for Forwarding {

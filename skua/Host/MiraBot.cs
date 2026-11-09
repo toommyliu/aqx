@@ -68,6 +68,7 @@ public sealed class MiraBot(Protocol protocol, State state, string path) : IScri
     public DialogResult ShowMessageBox(string message, string caption, params string[] buttons) { ShowMessageBox(message, caption, false); return DialogResult.Cancelled; }
 
     CancellationTokenSource stop = new();
+    public bool AccountAutoRelogin { get; set; }
     public bool Disconnected { get; private set; }
     public bool Kicked { get; private set; }
     public void OnDisconnected(bool kicked) { if (((MiraServers)Servers).LoggingOut && !Options.AutoRelogin) return; Disconnected = true; Kicked = kicked; RequestStop(); }
@@ -76,7 +77,7 @@ public sealed class MiraBot(Protocol protocol, State state, string path) : IScri
         skills?.Stop();
         drops?.Stop();
         Quests.UnregisterAllQuests();
-        Options.AutoRelogin = false;
+        Options.AutoRelogin = AccountAutoRelogin;
         Options.AggroAllMonsters = false;
         Options.AggroMonsters = false;
         Options.SkipCutscenes = false;

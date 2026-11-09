@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use mira_client::testing::{API_OK, Harness, Peer, TOKEN, json_message};
+use mira_client::testing::{API_OK, Harness, Peer, TOKEN, json_message, login_reply};
 use mira_client::{Handle, Options, Reconnect, Server};
 use mira_protocol::{AreaId, EntityId, packet};
 use mira_script::skua::SkuaScript;
@@ -101,7 +101,7 @@ impl Fake {
     }
     pub fn reconnecting(response: impl FnMut(&str, &mut Wire) + Send + 'static) -> Self {
         let options = Options {
-            reconnect: Some(Reconnect::new("pass1".into(), Duration::from_secs(60))),
+            reconnect: Some(Reconnect::new("pass1".into(), Duration::from_millis(100))),
             ..Options::default()
         };
         Self::start_options(options, FARM, json!([]), json!([]), json!({}), response)
@@ -115,11 +115,14 @@ impl Fake {
         mut response: impl FnMut(&str, &mut Wire) + Send + 'static,
     ) -> Self {
         let map = map.to_owned();
+        let reconnects = options.reconnect.is_some();
+        let (game_port, port) = mpsc::channel::<u16>();
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let (api_stop, stop) = mpsc::channel();
         let api = thread::spawn(move || {
+            let mut game = None;
             while matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
                 let Ok((mut stream, _)) = listener.accept() else {
                     thread::sleep(Duration::from_millis(5));
@@ -132,6 +135,7 @@ impl Fake {
                 let mut reader = BufReader::new(&stream);
                 let mut length = 0;
                 let mut map_file = false;
+                let mut login = false;
                 loop {
                     let mut line = String::new();
                     reader.read_line(&mut line).unwrap();
@@ -139,6 +143,7 @@ impl Fake {
                         break;
                     }
                     map_file |= line.starts_with("GET /gamefiles/maps/farm/farm.swf");
+                    login |= line.starts_with("POST /login/now");
                     if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
                         length = value.trim().parse().unwrap();
                     }
@@ -147,6 +152,9 @@ impl Fake {
                 reader.read_exact(&mut body).unwrap();
                 let body = if map_file {
                     map_swf()
+                } else if login {
+                    let game = *game.get_or_insert_with(|| port.recv().unwrap());
+                    login_reply(TOKEN, game).into_bytes()
                 } else {
                     bank.to_string().into_bytes()
                 };
@@ -162,55 +170,66 @@ impl Fake {
         let sent = Arc::new(Mutex::new(Vec::new()));
         let observed = sent.clone();
         let harness = Harness::start_with_api(options, base, move |listener| {
-            let mut peer = Peer::accept(&listener);
-            peer.set_read_timeout(Duration::from_secs(30));
-            peer.expect(&packet::version_check());
-            peer.send(API_OK);
-            peer.expect(&packet::login(
-                "player1",
-                mira_client::DEFAULT_CLIENT_VERSION,
-                TOKEN,
-            ));
-            peer.send("%xt%loginResponse%-1%true%1001%player1%Welcome%0%sVersion=R0048%5.31%");
-            peer.expect(&packet::first_join());
-            peer.expect(&packet::clear_ignore_list());
-            peer.send(&json_message(serde_json::from_str(&map).unwrap()));
-            peer.send("<msg t='sys'><body action='joinOK' r='0'><uLs r='5'></uLs></body></msg>");
-            peer.send("%xt%server%-1%You joined \"farm-1\"!%");
-            let first = peer.recv();
-            observed.lock().unwrap().push(first.clone());
-            assert!(first.contains("%moveToCell%"), "{first}");
-            peer.expect(&packet::retrieve_user_data(AreaId(5), EntityId(1001)));
-            let mut user =
-                json!({"intLevel":50,"intGold":1000,"intCoins":0,"iUpgDays":-1,"iBagSlots":30});
-            user.as_object_mut()
-                .unwrap()
-                .extend(data.as_object().unwrap().clone());
-            peer.send(&json_message(
-                json!({"cmd":"initUserData","uid":1001,"data":user}),
-            ));
-            peer.expect(&packet::retrieve_inventory(AreaId(5), EntityId(1001)));
-            peer.send(&json_message(json!({"cmd":"sAct","actions":{"active":[
-                {"ref":"aa","nam":"Auto Attack","cd":2000,"mp":-10,"tgt":"h","tgtMax":1},
-                {"ref":"a1","nam":"Strike","cd":3000,"mp":10,"tgt":"h","tgtMax":1},
-                {"ref":"a2","nam":"Guard","cd":3000,"mp":10,"tgt":"s","tgtMax":1},
-                {"ref":"a3","nam":"Cleave","cd":6000,"mp":20,"tgt":"h","tgtMax":1},
-                {"ref":"a4","nam":"Finisher","cd":12000,"mp":30,"tgt":"h","tgtMax":1},
-                {"ref":"i1","nam":"Item","cd":60000,"mp":0,"tgt":"f","tgtMax":1}
-            ]}})));
-            peer.send(&json_message(
-                json!({"cmd":"loadInventoryBig","items":items,"hitems":[]}),
-            ));
-            loop {
-                let message = peer.recv();
-                observed.lock().unwrap().push(message.clone());
-                if message.contains("%cmd%1%logout%") {
-                    break;
-                }
-                let mut wire = Wire(&mut peer, false);
-                response(&message, &mut wire);
-                if wire.1 {
-                    break;
+            game_port
+                .send(listener.local_addr().unwrap().port())
+                .unwrap();
+            let mut next = Some(Peer::accept(&listener));
+            while let Some(mut peer) = next.take() {
+                peer.set_read_timeout(Duration::from_secs(30));
+                peer.expect(&packet::version_check());
+                peer.send(API_OK);
+                peer.expect(&packet::login(
+                    "player1",
+                    mira_client::DEFAULT_CLIENT_VERSION,
+                    TOKEN,
+                ));
+                peer.send("%xt%loginResponse%-1%true%1001%player1%Welcome%0%sVersion=R0048%5.31%");
+                peer.expect(&packet::first_join());
+                peer.expect(&packet::clear_ignore_list());
+                peer.send(&json_message(serde_json::from_str(&map).unwrap()));
+                peer.send(
+                    "<msg t='sys'><body action='joinOK' r='0'><uLs r='5'></uLs></body></msg>",
+                );
+                peer.send("%xt%server%-1%You joined \"farm-1\"!%");
+                let first = peer.recv();
+                observed.lock().unwrap().push(first.clone());
+                assert!(first.contains("%moveToCell%"), "{first}");
+                peer.expect(&packet::retrieve_user_data(AreaId(5), EntityId(1001)));
+                let mut user =
+                    json!({"intLevel":50,"intGold":1000,"intCoins":0,"iUpgDays":-1,"iBagSlots":30});
+                user.as_object_mut()
+                    .unwrap()
+                    .extend(data.as_object().unwrap().clone());
+                peer.send(&json_message(
+                    json!({"cmd":"initUserData","uid":1001,"data":user}),
+                ));
+                peer.expect(&packet::retrieve_inventory(AreaId(5), EntityId(1001)));
+                peer.send(&json_message(json!({"cmd":"sAct","actions":{"active":[
+                    {"ref":"aa","nam":"Auto Attack","cd":2000,"mp":-10,"tgt":"h","tgtMax":1},
+                    {"ref":"a1","nam":"Strike","cd":3000,"mp":10,"tgt":"h","tgtMax":1},
+                    {"ref":"a2","nam":"Guard","cd":3000,"mp":10,"tgt":"s","tgtMax":1},
+                    {"ref":"a3","nam":"Cleave","cd":6000,"mp":20,"tgt":"h","tgtMax":1},
+                    {"ref":"a4","nam":"Finisher","cd":12000,"mp":30,"tgt":"h","tgtMax":1},
+                    {"ref":"i1","nam":"Item","cd":60000,"mp":0,"tgt":"f","tgtMax":1}
+                ]}})));
+                peer.send(&json_message(
+                    json!({"cmd":"loadInventoryBig","items":items,"hitems":[]}),
+                ));
+                let hung_up = loop {
+                    let message = peer.recv();
+                    observed.lock().unwrap().push(message.clone());
+                    if message.contains("%cmd%1%logout%") {
+                        break false;
+                    }
+                    let mut wire = Wire(&mut peer, false);
+                    response(&message, &mut wire);
+                    if wire.1 {
+                        break true;
+                    }
+                };
+                drop(peer);
+                if hung_up && reconnects {
+                    next = Peer::accept_within(&listener, Duration::from_secs(3));
                 }
             }
         });

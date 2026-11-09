@@ -189,7 +189,8 @@
         "aggro": "off",
         "counter_hold": "off",
         "anti_afk": false,
-        "room": null
+        "room": null,
+        "auto_relogin": true
       }
     }
   },

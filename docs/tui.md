@@ -4,7 +4,7 @@
 
 The accounts live in a session that runs in the background. The first `mira` starts it, and later ones attach to it. `q` detaches and leaves everything running. `Q` logs every account out and ends the session. The session also ends on its own once every account is offline after something logged in, and the TUI then prints the last few lines of each account's log.
 
-`mira ACCOUNT...` logs in only the accounts you name. Without names, a new session logs in every account with `autologin` on. `mira ACCOUNT... --script PATH [--arg KEY=VALUE]...` runs that script on the named accounts instead of their own. `mira tui` does the same as `mira`. `mira --redact` shows your accounts as `account 1`, `account 2` and so on, and your home folder as `~`, so you can share a screenshot.
+`mira ACCOUNT...` logs in only the accounts you name. Without names, a new session logs in every account with `auto_start` on. `mira ACCOUNT... --script PATH [--arg KEY=VALUE]...` runs that script on the named accounts instead of their own. `mira tui` does the same as `mira`. `mira --redact` shows your accounts as `account 1`, `account 2` and so on, and your home folder as `~`, so you can share a screenshot.
 
 ## Write mira.toml
 
@@ -25,7 +25,7 @@ name = "healer"
 user = "player2"
 password = "change-me"
 server = "Yorumi"
-autologin = false
+auto_start = false
 ```
 
 mira looks for `./mira.toml`, then `~/mira/mira.toml`. Set `MIRA_HOME` to use another folder in place of `~/mira`, or pass `-c PATH` to read a specific file. The file holds passwords, so run `chmod 600` on it. mira warns when other users can read it.
@@ -40,16 +40,17 @@ mira looks for `./mira.toml`, then `~/mira/mira.toml`. Set `MIRA_HOME` to use an
 | `client_version` | Log in with exactly this client version instead of the server's minimum. |
 | `script` | Script to run each time the account logs in, relative to `mira.toml`. |
 | `args` | Arguments for that script. Values are strings, numbers or booleans. |
-| `autologin` | Log the account in when a session starts without naming accounts. Defaults to `true`. |
+| `auto_start` | Log the account in when a session starts without naming accounts. Defaults to `true`. |
 | `room` | Room number to join. Scripts read it as `settings.room`. |
 | `api` | Host that takes the login. Defaults to `https://game.aq.com`. |
-| `reconnect` | Seconds to wait before logging back in after a failed login, a lost connection or a kick, doubling up to 5 minutes. A wrong password isn't retried. Off unless set. |
-| `reconnect_attempts` | How many times in a row to try before the account goes offline. Defaults to 5. Needs `reconnect`. |
+| `auto_relogin` | Log back in to `server` after a failed login, a lost connection or a kick, then start the script again. A wrong password isn't retried. Defaults to `true`. |
+| `relogin_delay` | The wait before the first try, like `"5s"`. It doubles after each failed try, up to 5 minutes, and is never shorter than a kick's lockout. A connection that lasts 5 minutes starts the wait over. At least `"4s"`. Defaults to `"5s"`. |
+| `relogin_attempts` | How many failed tries in a row before the account goes offline. No limit unless set. |
 | `restart_on_error` | Run the script again when it throws, after 10 seconds, doubling up to 5 minutes. A run that lasts 5 minutes starts the wait over. Defaults to `false`. |
 | `stall_after` | How long a running script can go without progress before the account counts as stalled, like `"90s"`, `"5m"` or `"1h"`. Progress is a kill, an item change, a quest turn-in or a map join. Defaults to `"5m"`. |
 | `on_stall` | What a stall does: `warn` logs a warning, `restart` restarts the script, and `relogin` logs out, back in, and starts the script again. Defaults to `warn`. |
 
-Script paths you type in the TUI also resolve relative to `mira.toml`. The session checks the file every 2 seconds and adds any `[[account]]` with a new name, offline. Edits to accounts that are already in the session, `autologin` included, take effect when it restarts, and each changed account's log says so. Run `mira down`, then `mira`, to apply them.
+Script paths you type in the TUI also resolve relative to `mira.toml`. The session checks the file every 2 seconds and adds any `[[account]]` with a new name, offline. Edits to accounts that are already in the session, `auto_start` included, take effect when it restarts, and each changed account's log says so. Run `mira down`, then `mira`, to apply them.
 
 ## Keys
 

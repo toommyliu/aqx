@@ -45,6 +45,8 @@ namespace Mira.Skua;
 [JsonDerivedType(typeof(ReloginCall), "relogin")]
 [JsonDerivedType(typeof(CancelReloginCall), "cancel_relogin")]
 [JsonDerivedType(typeof(LogoutCall), "logout")]
+[JsonDerivedType(typeof(AwaitOnlineCall), "await_online")]
+[JsonDerivedType(typeof(SetAutoReloginCall), "set_auto_relogin")]
 [JsonDerivedType(typeof(SetLoginInfoCall), "set_login_info")]
 public abstract record Request { public long Id { get; init; } }
 public sealed record JoinCall(string Map, string Cell = "Enter", string Pad = "Spawn") : Request;
@@ -89,6 +91,8 @@ public sealed record ServersCall() : Request;
 public sealed record ReloginCall(string? Server, int TimeoutMs = 30000) : Request;
 public sealed record CancelReloginCall(long Request) : Request;
 public sealed record LogoutCall() : Request;
+public sealed record AwaitOnlineCall() : Request;
+public sealed record SetAutoReloginCall(bool On) : Request;
 public sealed record SetLoginInfoCall(string Username, string Password) : Request;
 public enum PacketDirection { In, Out }
 public enum LogLevel { Log, Warn, Error }

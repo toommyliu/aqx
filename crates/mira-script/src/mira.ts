@@ -18,7 +18,8 @@
  * A run can hold 100 pending handler calls and 100 pending actions. Past
  * either limit, the run ends.
  *
- * A dropped connection ends the run, unless `settings.autoRelogin` is on.
+ * A dropped connection ends the run. With `settings.autoRelogin` on, mira logs
+ * back in to the same server and starts the script again from the top.
  */
 
 const STEP: unique symbol = Symbol("step");
@@ -332,17 +333,12 @@ interface Settings {
    */
   counterHold: "off" | "all" | "attacks";
   aggro: "off" | "cell" | readonly MonsterRef[];
-  /** After a dropped connection, log back in and restart the script in a fresh context. */
-  autoRelogin:
-    | false
-    | {
-        /** The wait before the first attempt. It doubles after each failed one. */
-        readonly delayMs: number;
-        /** Default 5. */
-        readonly attempts?: number;
-        /** Default the server the account was on. */
-        readonly server?: string;
-      };
+  /**
+   * After a dropped connection, log back in and start the script again in a
+   * fresh context. Starts as the account's auto_relogin. Off, the account stays
+   * logged out.
+   */
+  autoRelogin: boolean;
 }
 
 type Task = Generator<Step, unknown, unknown>;
@@ -379,7 +375,8 @@ interface Native {
   setAggro(mode: "off" | "cell" | "only", ids: number[]): boolean;
   setAntiAfk(on: boolean): boolean;
   setRoom(room: number | null): boolean;
-  setAutoRelogin(delayMs: number | null, attempts: number, server: string | null): void;
+  setAutoRelogin(on: boolean): boolean;
+  autoRelogin(): boolean;
   setSpawnPoint(cell: string, pad: string): boolean;
   untarget(): boolean;
   server(): string;
@@ -1040,7 +1037,7 @@ export const packets = Object.freeze({
 });
 
 const COUNTER_HOLDS: readonly Settings["counterHold"][] = ["off", "all", "attacks"];
-const config: Settings = { room: null, antiAfk: false, counterHold: "off", aggro: "off", autoRelogin: false };
+const config: Omit<Settings, "autoRelogin"> & { autoRelogin?: boolean } = { room: null, antiAfk: false, counterHold: "off", aggro: "off" };
 let aggroWatched = false;
 
 function applyAggro(): boolean {
@@ -1102,21 +1099,12 @@ export const settings: Settings = Object.seal({
     }
   },
   get autoRelogin() {
-    return config.autoRelogin;
+    return config.autoRelogin ?? native.autoRelogin();
   },
-  set autoRelogin(policy) {
-    if (policy === false) {
-      native.setAutoRelogin(null, 0, null);
-      config.autoRelogin = false;
-      return;
-    }
-    if (policy === null || typeof policy !== "object") throw new TypeError("settings.autoRelogin must be false or { delayMs }");
-    if (typeof policy.delayMs !== "number") throw new TypeError("settings.autoRelogin's delayMs must be a number");
-    if (!(policy.delayMs >= 0 && policy.delayMs < Infinity)) throw new RangeError(`settings.autoRelogin can't wait ${policy.delayMs} ms`);
-    const attempts = policy.attempts === undefined ? 5 : checkCount(policy.attempts, "settings.autoRelogin's attempts");
-    const server = policy.server === undefined ? null : checkText(policy.server, "settings.autoRelogin's server");
-    native.setAutoRelogin(policy.delayMs, attempts, server);
-    config.autoRelogin = Object.freeze({ ...policy });
+  set autoRelogin(on) {
+    if (typeof on !== "boolean") throw new TypeError("settings.autoRelogin must be true or false");
+    native.setAutoRelogin(on);
+    config.autoRelogin = on;
   },
 });
 

@@ -157,6 +157,10 @@ pub enum Call {
         request: RequestId,
     },
     Logout,
+    AwaitOnline,
+    SetAutoRelogin {
+        on: bool,
+    },
     Relogin {
         server: Option<String>,
         #[serde(default = "login_timeout")]

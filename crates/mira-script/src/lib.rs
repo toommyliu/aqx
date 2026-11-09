@@ -14,7 +14,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
-use std::time::Duration;
 
 use mira_client::{Handle, Phase, Server, Settings, Update};
 use rquickjs::{Context, Runtime};
@@ -48,15 +47,7 @@ pub enum Outcome {
     LoggedOut,
     Cancelled,
     Disconnected(String),
-    Relogin(AutoRelogin),
     Failed(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AutoRelogin {
-    pub delay: Duration,
-    pub attempts: u32,
-    pub server: Option<String>,
 }
 
 pub trait Account: Send + Sync {
@@ -288,6 +279,7 @@ impl Script {
         let ended = self.context.with(|ctx| {
             let loaded = ctx.userdata::<native::Host>().and_then(|host| {
                 host.attach(start.session.clone());
+                start.session.set_auto_relogin(host.settings().auto_relogin);
                 host.set_server(&start.server);
                 host.set_args(Value::Object(start.args.clone()).to_string());
                 host.take_loaded()
@@ -313,7 +305,7 @@ impl Script {
         let open = !matches!(ended.session.snapshot().phase, Phase::Closed { .. });
         if open {
             let same = ended.session.same_session(&start.session);
-            restore(
+            restore_after_run(
                 &ended.session,
                 if same { before } else { Settings::default() },
             );
@@ -322,7 +314,18 @@ impl Script {
     }
 }
 
+fn restore_after_run(session: &Handle, settings: Settings) {
+    restore(
+        session,
+        Settings {
+            auto_relogin: true,
+            ..settings
+        },
+    );
+}
+
 fn restore(session: &Handle, settings: Settings) {
+    session.set_auto_relogin(settings.auto_relogin);
     session.set_counter_hold(settings.counter_hold);
     session.set_aggro(settings.aggro);
     session.set_anti_afk(settings.anti_afk);

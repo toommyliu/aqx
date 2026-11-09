@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use mira_client::{
-    ActionError, Aggro, Aim, Auras, BoostKind, CombatState, CounterHold,
-    DEFAULT_RECONNECT_ATTEMPTS, DeviceId, Disconnect, Event, Handle, Item, ItemId, MapItemId, Me,
-    MonMapId, Monster, Options, Pending, Phase, QuestId, QuestStatus, Readiness, Reconnect, Room,
-    Server, ShopId, ShopItemId, SkillTarget, World, api,
+    ActionError, Aggro, Aim, Auras, BoostKind, CombatState, CounterHold, DeviceId, Disconnect,
+    Event, Handle, Item, ItemId, MapItemId, Me, MonMapId, Monster, Options, Pending, Phase,
+    QuestId, QuestStatus, Readiness, Reconnect, Room, Server, ShopId, ShopItemId, SkillTarget,
+    World, api,
 };
 use mira_script::{Cancel, Level, Outcome, Output};
 
@@ -89,13 +89,16 @@ enum Command {
         /// Also print every packet sent and received, with the token and personal fields redacted.
         #[arg(long)]
         packets: bool,
-        /// After a lost connection or a kick, log in again after this many seconds, doubling
-        /// between attempts. Off unless given.
-        #[arg(long, value_name = "SECS")]
-        reconnect: Option<u64>,
-        /// How many times in a row to try reconnecting before giving up.
-        #[arg(long, value_name = "N", default_value_t = DEFAULT_RECONNECT_ATTEMPTS, requires = "reconnect")]
-        reconnect_attempts: u32,
+        /// Stay logged out after a lost connection or a kick.
+        #[arg(long, conflicts_with_all = ["relogin_delay", "relogin_attempts"])]
+        no_auto_relogin: bool,
+        /// The wait before the first try to log back in, like 5s. It doubles after each failed
+        /// try, up to 5 minutes. At least 4s.
+        #[arg(long, value_name = "DURATION", default_value = "5s", value_parser = relogin_delay)]
+        relogin_delay: Duration,
+        /// How many failed tries in a row before giving up. No limit unless given.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        relogin_attempts: Option<u32>,
     },
     /// Set up a folder for scripts: mira.d.ts, tsconfig.json, a sample script and mira.toml.
     Init {
@@ -228,12 +231,13 @@ fn main() -> ExitCode {
             client_version,
             json,
             packets,
-            reconnect,
-            reconnect_attempts,
+            no_auto_relogin,
+            relogin_delay,
+            relogin_attempts,
         } => {
-            let reconnect = reconnect.map(|secs| Reconnect {
-                attempts: reconnect_attempts,
-                ..Reconnect::new(pass.clone(), Duration::from_secs(secs))
+            let reconnect = (!no_auto_relogin).then(|| Reconnect {
+                attempts: relogin_attempts,
+                ..Reconnect::new(pass.clone(), relogin_delay)
             });
             login(
                 &user,
@@ -325,7 +329,10 @@ fn run_from(with: RunWith) -> anyhow::Result<ExitCode> {
             user: with.user.expect("clap requires --user"),
             pass: with.pass.expect("clap requires --pass"),
             client_version: with.client_version,
-            reconnect: None,
+            relogin: Some(config::Relogin {
+                delay: config::RELOGIN_DELAY_DEFAULT,
+                attempts: None,
+            }),
             api: None,
             record: recorder(&with.record)?,
         };
@@ -362,7 +369,7 @@ fn run_from(with: RunWith) -> anyhow::Result<ExitCode> {
         user: account.user,
         pass: account.password,
         client_version: with.client_version.or(account.client_version),
-        reconnect: None,
+        relogin: account.relogin,
         api: account.api,
         record: recorder(&with.record)?,
     };
@@ -507,17 +514,10 @@ fn run(
                 *current.lock().unwrap_or_else(PoisonError::into_inner) = session.clone();
             }
             Note::Restarting => println!("{}restarting the script", stamp(started)),
-            Note::Relogging {
-                server,
-                delay,
-                attempt,
-                attempts,
-            } => println!(
-                "{}the session closed; logging back in to {server} in {:.1} s (attempt {attempt} of {attempts})",
-                stamp(started),
-                delay.as_secs_f64(),
+            Note::Reconnecting(why) => println!(
+                "{}disconnected: {why}; the script starts again once the account is back",
+                stamp(started)
             ),
-            Note::ReloginFailed(e) => eprintln!("mira: couldn't log back in: {e}"),
         },
     );
     let closing = ran.session.subscribe();
@@ -553,7 +553,7 @@ fn run(
             eprintln!("mira: {why}");
             ExitCode::FAILURE
         }
-        Outcome::Restart | Outcome::Relogin(_) => unreachable!("handled by the runner"),
+        Outcome::Restart => unreachable!("handled by the runner"),
     })
 }
 
@@ -1203,4 +1203,12 @@ fn describe_monsters(monsters: &[&Monster]) -> String {
 
 fn stamp(started: Instant) -> String {
     format!("[{:>8.3}] ", started.elapsed().as_secs_f64())
+}
+
+fn relogin_delay(text: &str) -> Result<Duration, String> {
+    match config::parse_duration(text) {
+        Some(delay) if delay >= config::RELOGIN_DELAY_MIN => Ok(delay),
+        Some(_) => Err("the wait is at least 4s".into()),
+        None => Err(format!("{text:?} isn't a duration like \"5s\" or \"1m\"")),
+    }
 }

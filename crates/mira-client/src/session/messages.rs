@@ -387,6 +387,7 @@ impl Session {
                     .map(Faction::from)
                     .collect();
                 self.ready_once = true;
+                self.ready_since = Some(Instant::now());
                 self.reconnects = 0;
                 self.boost_check = Some(Instant::now() + BOOST_CHECK);
                 if let Some(Recovery { why, .. }) = self.recovery.take() {

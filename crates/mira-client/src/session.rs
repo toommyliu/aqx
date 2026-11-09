@@ -66,8 +66,8 @@ const WALK_SPEED: u32 = 8;
 const AGGRO_EVERY: Duration = Duration::from_millis(500);
 const AFK_EVERY: Duration = Duration::from_millis(500);
 const BOOST_CHECK: Duration = Duration::from_millis(2167);
-pub const DEFAULT_RECONNECT_ATTEMPTS: u32 = 5;
 const MAX_RECONNECT_WAIT: Duration = Duration::from_secs(300);
+const STABLE_CONNECTION: Duration = Duration::from_secs(300);
 const STAGE_WIDTH: i32 = 960;
 const STAGE_HEIGHT: i32 = 500;
 const REDACTED_KEYS: [&str; 2] = ["strEmail", "strIP"];
@@ -201,7 +201,7 @@ pub struct Options {
 pub struct Reconnect {
     pub password: String,
     pub delay: Duration,
-    pub attempts: u32,
+    pub attempts: Option<u32>,
 }
 
 impl Reconnect {
@@ -209,8 +209,12 @@ impl Reconnect {
         Reconnect {
             password,
             delay,
-            attempts: DEFAULT_RECONNECT_ATTEMPTS,
+            attempts: None,
         }
+    }
+
+    fn allows(&self, failures: u32) -> bool {
+        self.attempts.is_none_or(|attempts| failures < attempts)
     }
 
     fn wait(&self, made: u32, lockout: Duration) -> Duration {
@@ -238,7 +242,7 @@ fn jitter(wait: Duration) -> Duration {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
-    wait.mul_f64(0.8 + f64::from(nanos % 1000) / 1000.0 * 0.4)
+    wait.mul_f64(1.0 + f64::from(nanos % 1000) / 1000.0 * 0.2)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -448,6 +452,7 @@ enum Setting {
     AntiAfk(bool),
     Room(Option<u32>),
     Locate(Locate),
+    AutoRelogin(bool),
 }
 
 pub type Locate = Box<dyn Fn(&str) -> Option<Spot> + Send>;
@@ -1006,6 +1011,10 @@ impl Handle {
         self.set(Setting::Locate(Box::new(locate)));
     }
 
+    pub fn set_auto_relogin(&self, on: bool) {
+        self.set(Setting::AutoRelogin(on));
+    }
+
     fn set(&self, setting: Setting) {
         let epoch = self.epoch.load(Ordering::SeqCst);
         self.request(Request::Set(setting, epoch));
@@ -1138,7 +1147,10 @@ pub fn spawn(
         epoch: Arc::clone(&epoch),
         stale: None,
         ready_once: false,
+        ready_since: None,
         reconnects: 0,
+        backoff: 0,
+        auto_relogin: true,
         recovery: None,
         bank: None,
         procs: Arc::default(),
@@ -1226,7 +1238,10 @@ struct Session {
     epoch: Arc<AtomicU64>,
     stale: Option<Disconnect>,
     ready_once: bool,
+    ready_since: Option<Instant>,
     reconnects: u32,
+    backoff: u32,
+    auto_relogin: bool,
     recovery: Option<Recovery>,
     bank: Option<Arc<Vec<Item>>>,
     procs: Arc<HashMap<u32, String>>,
@@ -1409,6 +1424,7 @@ impl Session {
             Setting::AntiAfk(on) => self.anti_afk = on,
             Setting::Room(room) => self.join_room = room,
             Setting::Locate(locate) => self.locate = Some(locate),
+            Setting::AutoRelogin(on) => self.auto_relogin = on,
         }
     }
 
@@ -2310,6 +2326,7 @@ impl Session {
                 aggro: self.aggro.as_ref().map(|(aggro, _)| aggro.clone()),
                 anti_afk: self.anti_afk,
                 room: self.join_room,
+                auto_relogin: self.auto_relogin && self.options.reconnect.is_some(),
             },
         });
         self.subscribers.retain(|subscriber| match subscriber {
@@ -2649,15 +2666,22 @@ impl Session {
                 );
             }
         }
-        let plan =
-            self.options.reconnect.as_ref().filter(|plan| {
-                self.ready_once && why.retryable() && self.reconnects < plan.attempts
-            });
-        let Some(wait) = plan.map(|plan| plan.wait(self.reconnects, why.lockout())) else {
+        if self
+            .ready_since
+            .take()
+            .is_some_and(|since| since.elapsed() >= STABLE_CONNECTION)
+        {
+            self.backoff = 0;
+        }
+        let plan = self.options.reconnect.as_ref().filter(|plan| {
+            self.auto_relogin && self.ready_once && why.retryable() && plan.allows(self.reconnects)
+        });
+        let Some(wait) = plan.map(|plan| plan.wait(self.backoff, why.lockout())) else {
             self.recovery = None;
             return self.set_phase(Phase::Closed { reason: why });
         };
         self.reconnects += 1;
+        self.backoff += 1;
         let at = Instant::now() + wait;
         let dropped = self.current.take().and_then(Op::into_reply);
         let fighting = self.fight.take().map(|fight| fight.reply);

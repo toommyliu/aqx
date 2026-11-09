@@ -21,7 +21,7 @@ const FOLLOW_EVERY: Duration = Duration::from_millis(250);
 
 #[derive(clap::Args, Debug, Default)]
 pub struct Open {
-    /// Accounts to log in, by name or user. Without any, a new session logs in every account with autologin on.
+    /// Accounts to log in, by name or user. Without any, a new session logs in every account with auto_start on.
     #[arg(value_name = "ACCOUNT")]
     pub accounts: Vec<String>,
     /// The config to read instead of ./mira.toml or ~/mira/mira.toml.

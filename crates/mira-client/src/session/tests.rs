@@ -4535,7 +4535,7 @@ fn clears_the_away_mark_before_acting_only_when_asked() {
 fn reconnect_every(delay: Duration, attempts: u32) -> Options {
     Options {
         reconnect: Some(Reconnect {
-            attempts,
+            attempts: Some(attempts),
             ..Reconnect::new("pass1".into(), delay)
         }),
         ..Options::default()
@@ -4668,7 +4668,12 @@ fn waits_out_a_kick_and_gives_up_after_the_configured_attempts() {
 #[test]
 fn reconnects_only_when_asked_and_only_after_a_retryable_disconnect() {
     type Case = (bool, fn(TcpListener), Disconnect);
-    let cases: [Case; 4] = [
+    let dropped: fn(TcpListener) = |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::move_to_cell(AreaId(42), "r2", "Left"));
+    };
+    let cases: [Case; 5] = [
         (
             false,
             |listener| {
@@ -4677,6 +4682,7 @@ fn reconnects_only_when_asked_and_only_after_a_retryable_disconnect() {
             },
             Disconnect::ConnectionLost(String::new()),
         ),
+        (true, dropped, Disconnect::ConnectionLost(String::new())),
         (
             true,
             |listener| {
@@ -4713,9 +4719,16 @@ fn reconnects_only_when_asked_and_only_after_a_retryable_disconnect() {
         } else {
             Options::default()
         };
+        let turned_off = std::ptr::fn_addr_eq(script, dropped);
         let harness = Harness::start_with_api(options, base, script);
-        if harness.session.ready().wait().is_ok() && expected == Disconnect::LoggedOut {
-            harness.session.logout();
+        if harness.session.ready().wait().is_ok() {
+            assert_eq!(harness.session.snapshot().settings.auto_relogin, asked);
+            if expected == Disconnect::LoggedOut {
+                harness.session.logout();
+            } else if turned_off {
+                harness.session.set_auto_relogin(false);
+                harness.session.move_to_cell("r2", "Left");
+            }
         }
         let events = harness.finish();
         thread::sleep(Duration::from_millis(150));
@@ -5433,4 +5446,20 @@ fn raw_bank_replies_merge_items_and_publish_load_events() {
         qty: 3,
         place: Place::Bank
     }));
+}
+
+#[test]
+fn a_reconnect_waits_at_least_its_delay_and_the_lockout_and_at_most_five_minutes() {
+    let plan = Reconnect::new("pass1".into(), Duration::from_secs(5));
+    let within = |wait: Duration, at_least: Duration| {
+        assert!(
+            wait >= at_least && wait <= at_least.mul_f64(1.2),
+            "{wait:?}"
+        );
+    };
+    within(plan.wait(0, Duration::ZERO), Duration::from_secs(5));
+    within(plan.wait(3, Duration::ZERO), Duration::from_secs(40));
+    within(plan.wait(20, Duration::ZERO), Duration::from_secs(300));
+    assert!(plan.wait(0, Duration::from_secs(70)) == Duration::from_secs(70));
+    assert!(plan.allows(1_000_000));
 }

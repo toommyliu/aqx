@@ -2,7 +2,6 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use mira_client::DEFAULT_RECONNECT_ATTEMPTS;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 
@@ -10,17 +9,21 @@ pub const FILE_NAME: &str = "mira.toml";
 const SERVER: &str = "Server to join, as mira servers lists it. Required here or on each account.";
 const CLIENT_VERSION: &str =
     "Log in with exactly this client version instead of the server's minimum.";
-const AUTOLOGIN: &str =
+const AUTO_START: &str =
     "Log the account in when a session starts without naming accounts. Defaults to true.";
-const RECONNECT: &str = "After a lost connection or a kick, log back in after this many seconds, doubling the wait up to 5 minutes. Off unless set.";
-const RECONNECT_ATTEMPTS: &str =
-    "How many times in a row to try reconnecting before the account goes offline. Defaults to 5.";
+const AUTO_RELOGIN: &str =
+    "Log back in after a lost connection or a kick, then start the script again. Defaults to true.";
+const RELOGIN_DELAY: &str = "How long to wait before the first try to log back in, like \"5s\". The wait doubles after each failed try, up to 5 minutes, and is never shorter than a kick's lockout. At least 4s. Defaults to 5s.";
+const RELOGIN_ATTEMPTS: &str =
+    "How many failed tries in a row before the account goes offline. No limit unless set.";
 const RESTART_ON_ERROR: &str = "Run the script again when it throws, after 10 seconds, doubling up to 5 minutes. Defaults to false.";
 const ROOM: &str = "Room number to join; scripts read it as settings.room.";
 const API: &str = "Host that takes the login. Defaults to https://game.aq.com.";
 const STALL_AFTER: &str = "How long a running script can go without progress before the account counts as stalled, like \"90s\", \"5m\" or \"1h\". Defaults to 5m.";
 const ON_STALL: &str = "What happens when the account stalls. Defaults to warn.";
 const STALL_AFTER_DEFAULT: Duration = Duration::from_secs(300);
+pub const RELOGIN_DELAY_DEFAULT: Duration = Duration::from_secs(5);
+pub const RELOGIN_DELAY_MIN: Duration = Duration::from_secs(4);
 
 #[derive(Deserialize, JsonSchema, Debug, Default)]
 #[serde(deny_unknown_fields)]
@@ -41,12 +44,15 @@ pub struct Settings {
     pub server: Option<String>,
     #[schemars(description = CLIENT_VERSION)]
     pub client_version: Option<String>,
-    #[schemars(description = AUTOLOGIN)]
-    pub autologin: Option<bool>,
-    #[schemars(description = RECONNECT)]
-    pub reconnect: Option<u64>,
-    #[schemars(description = RECONNECT_ATTEMPTS)]
-    pub reconnect_attempts: Option<u32>,
+    #[schemars(description = AUTO_START)]
+    pub auto_start: Option<bool>,
+    #[schemars(description = AUTO_RELOGIN)]
+    pub auto_relogin: Option<bool>,
+    #[serde(default, deserialize_with = "duration")]
+    #[schemars(description = RELOGIN_DELAY, schema_with = "duration_schema")]
+    pub relogin_delay: Option<Duration>,
+    #[schemars(description = RELOGIN_ATTEMPTS)]
+    pub relogin_attempts: Option<u32>,
     #[schemars(description = RESTART_ON_ERROR)]
     pub restart_on_error: Option<bool>,
     #[schemars(description = ROOM)]
@@ -79,9 +85,10 @@ impl Settings {
             client_version: self
                 .client_version
                 .or_else(|| defaults.client_version.clone()),
-            autologin: self.autologin.or(defaults.autologin),
-            reconnect: self.reconnect.or(defaults.reconnect),
-            reconnect_attempts: self.reconnect_attempts.or(defaults.reconnect_attempts),
+            auto_start: self.auto_start.or(defaults.auto_start),
+            auto_relogin: self.auto_relogin.or(defaults.auto_relogin),
+            relogin_delay: self.relogin_delay.or(defaults.relogin_delay),
+            relogin_attempts: self.relogin_attempts.or(defaults.relogin_attempts),
             restart_on_error: self.restart_on_error.or(defaults.restart_on_error),
             room: self.room.or(defaults.room),
             api: self.api.or_else(|| defaults.api.clone()),
@@ -115,12 +122,15 @@ pub struct AccountConfig {
     server: Option<String>,
     #[schemars(description = CLIENT_VERSION)]
     client_version: Option<String>,
-    #[schemars(description = AUTOLOGIN)]
-    autologin: Option<bool>,
-    #[schemars(description = RECONNECT)]
-    reconnect: Option<u64>,
-    #[schemars(description = RECONNECT_ATTEMPTS)]
-    reconnect_attempts: Option<u32>,
+    #[schemars(description = AUTO_START)]
+    auto_start: Option<bool>,
+    #[schemars(description = AUTO_RELOGIN)]
+    auto_relogin: Option<bool>,
+    #[serde(default, deserialize_with = "duration")]
+    #[schemars(description = RELOGIN_DELAY, schema_with = "duration_schema")]
+    relogin_delay: Option<Duration>,
+    #[schemars(description = RELOGIN_ATTEMPTS)]
+    relogin_attempts: Option<u32>,
     #[schemars(description = RESTART_ON_ERROR)]
     restart_on_error: Option<bool>,
     #[schemars(description = ROOM)]
@@ -135,9 +145,9 @@ pub struct AccountConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Reconnect {
+pub struct Relogin {
     pub delay: Duration,
-    pub attempts: u32,
+    pub attempts: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,12 +157,12 @@ pub struct Account {
     pub password: String,
     pub server: String,
     pub client_version: Option<String>,
-    pub autologin: bool,
+    pub auto_start: bool,
     pub room: Option<u32>,
     pub api: Option<String>,
     pub stall_after: Duration,
     pub on_stall: OnStall,
-    pub reconnect: Option<Reconnect>,
+    pub relogin: Option<Relogin>,
     pub restart_on_error: bool,
     pub script: Option<Script>,
 }
@@ -268,9 +278,10 @@ impl AccountConfig {
         let settings = Settings {
             server: self.server.clone(),
             client_version: self.client_version.clone(),
-            autologin: self.autologin,
-            reconnect: self.reconnect,
-            reconnect_attempts: self.reconnect_attempts,
+            auto_start: self.auto_start,
+            auto_relogin: self.auto_relogin,
+            relogin_delay: self.relogin_delay,
+            relogin_attempts: self.relogin_attempts,
             restart_on_error: self.restart_on_error,
             room: self.room,
             api: self.api.clone(),
@@ -281,18 +292,28 @@ impl AccountConfig {
         let server = settings.server.ok_or_else(|| {
             format!("account {name} has no server; set `server` on it or in [defaults]")
         })?;
-        let reconnect = match (settings.reconnect, settings.reconnect_attempts) {
-            (Some(secs), attempts) => Some(Reconnect {
-                delay: Duration::from_secs(secs),
-                attempts: attempts.unwrap_or(DEFAULT_RECONNECT_ATTEMPTS),
-            }),
-            (None, None) => None,
-            (None, Some(_)) => {
+        let relogin = match settings.auto_relogin {
+            Some(false)
+                if settings.relogin_delay.is_some() || settings.relogin_attempts.is_some() =>
+            {
                 return Err(format!(
-                    "account {name} sets reconnect_attempts but not reconnect"
+                    "account {name} sets relogin_delay or relogin_attempts with auto_relogin off"
                 ));
             }
+            Some(false) => None,
+            Some(true) | None => Some(Relogin {
+                delay: settings.relogin_delay.unwrap_or(RELOGIN_DELAY_DEFAULT),
+                attempts: settings.relogin_attempts,
+            }),
         };
+        if relogin.is_some_and(|r| r.delay < RELOGIN_DELAY_MIN) {
+            return Err(format!("account {name}: relogin_delay is at least 4s"));
+        }
+        if settings.relogin_attempts == Some(0) {
+            return Err(format!(
+                "account {name}: relogin_attempts is at least 1; turn auto_relogin off instead"
+            ));
+        }
         let script = match &self.script {
             Some(path) => Some(Script {
                 path: dir.join(path),
@@ -306,12 +327,12 @@ impl AccountConfig {
             password: self.password.clone(),
             server,
             client_version: settings.client_version,
-            autologin: settings.autologin.unwrap_or(true),
+            auto_start: settings.auto_start.unwrap_or(true),
             room: settings.room,
             api: settings.api,
             stall_after: settings.stall_after.unwrap_or(STALL_AFTER_DEFAULT),
             on_stall: settings.on_stall.unwrap_or_default(),
-            reconnect,
+            relogin,
             restart_on_error: settings.restart_on_error.unwrap_or(false),
             script,
             name,
@@ -362,7 +383,7 @@ fn duration<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Duration>, 
     })
 }
 
-fn parse_duration(text: &str) -> Option<Duration> {
+pub fn parse_duration(text: &str) -> Option<Duration> {
     let text = text.trim();
     let split = text
         .find(|c: char| !c.is_ascii_digit())
@@ -399,12 +420,12 @@ impl Account {
             password: "x".into(),
             server: "Twilly".into(),
             client_version: None,
-            autologin: false,
+            auto_start: false,
             room: None,
             api: None,
             stall_after: STALL_AFTER_DEFAULT,
             on_stall: OnStall::Warn,
-            reconnect: None,
+            relogin: None,
             restart_on_error: false,
             script: None,
         }
@@ -419,7 +440,7 @@ mod tests {
         [defaults]
         server = "Twilly"
         client_version = "5.32"
-        reconnect = 30
+        relogin_delay = "30s"
         restart_on_error = true
         room = 1234
         stall_after = "90s"
@@ -430,7 +451,7 @@ mod tests {
         password = "x"
         script = "scripts/farm.ts"
         args = { target = 7500, fast = true, label = "a=b" }
-        autologin = false
+        auto_start = false
         api = "http://127.0.0.1:8787"
 
         [[account]]
@@ -438,7 +459,7 @@ mod tests {
         user = "player2"
         password = "y"
         server = "Yorumi"
-        reconnect_attempts = 2
+        relogin_attempts = 2
         restart_on_error = false
     "#;
 
@@ -452,17 +473,17 @@ mod tests {
         assert_eq!(first.name, "player1", "an account is named after its user");
         assert_eq!(first.server, "Twilly");
         assert_eq!(first.client_version.as_deref(), Some("5.32"));
-        assert!(!first.autologin);
+        assert!(!first.auto_start);
         assert_eq!(first.api.as_deref(), Some("http://127.0.0.1:8787"));
         assert_eq!(
             (first.room, first.stall_after, first.on_stall),
             (Some(1234), Duration::from_secs(90), OnStall::Relogin)
         );
         assert_eq!(
-            first.reconnect,
-            Some(Reconnect {
+            first.relogin,
+            Some(Relogin {
                 delay: Duration::from_secs(30),
-                attempts: DEFAULT_RECONNECT_ATTEMPTS
+                attempts: None
             })
         );
         assert!(first.restart_on_error);
@@ -482,16 +503,16 @@ mod tests {
         );
         assert_eq!(healer.server, "Yorumi");
         assert!(
-            healer.autologin,
-            "accounts log in when a session starts unless autologin is off"
+            healer.auto_start,
+            "accounts log in when a session starts unless auto_start is off"
         );
         assert_eq!(healer.api, None);
         assert_eq!(healer.script, None);
         assert_eq!(
-            healer.reconnect,
-            Some(Reconnect {
+            healer.relogin,
+            Some(Relogin {
                 delay: Duration::from_secs(30),
-                attempts: 2
+                attempts: Some(2)
             })
         );
         assert!(!healer.restart_on_error, "an account overrides a default");
@@ -524,11 +545,27 @@ mod tests {
         assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
         assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
         assert_eq!(parse_duration("45"), Some(Duration::from_secs(45)));
-        assert!(
-            accounts(&one("server = \"Twilly\"\nreconnect_attempts = 3"))
-                .unwrap_err()
-                .contains("not reconnect")
+        let relogin = |extra: &str| accounts(&one(&format!("server = \"Twilly\"\n{extra}")));
+        assert_eq!(
+            relogin("").unwrap()[0].relogin,
+            Some(Relogin {
+                delay: Duration::from_secs(5),
+                attempts: None
+            }),
+            "an account logs back in by default"
         );
+        assert_eq!(relogin("auto_relogin = false").unwrap()[0].relogin, None);
+        for bad in [
+            "auto_relogin = false\nrelogin_attempts = 3",
+            "auto_relogin = false\nrelogin_delay = \"10s\"",
+            "relogin_delay = \"3s\"",
+            "relogin_attempts = 0",
+            "autologin = false",
+            "reconnect = 30",
+            "reconnect_attempts = 2",
+        ] {
+            assert!(relogin(bad).is_err(), "{bad}");
+        }
         assert!(
             accounts(&one("server = \"Twilly\"\nargs = { n = 1 }"))
                 .unwrap_err()

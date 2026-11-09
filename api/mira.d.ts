@@ -20,7 +20,8 @@
  * A run can hold 100 pending handler calls and 100 pending actions. Past
  * either limit, the run ends.
  *
- * A dropped connection ends the run, unless `settings.autoRelogin` is on.
+ * A dropped connection ends the run. With `settings.autoRelogin` on, mira logs
+ * back in to the same server and starts the script again from the top.
  */
 declare const STEP: unique symbol;
 interface Step {
@@ -393,15 +394,12 @@ interface Settings {
      */
     counterHold: "off" | "all" | "attacks";
     aggro: "off" | "cell" | readonly MonsterRef[];
-    /** After a dropped connection, log back in and restart the script in a fresh context. */
-    autoRelogin: false | {
-        /** The wait before the first attempt. It doubles after each failed one. */
-        readonly delayMs: number;
-        /** Default 5. */
-        readonly attempts?: number;
-        /** Default the server the account was on. */
-        readonly server?: string;
-    };
+    /**
+     * After a dropped connection, log back in and start the script again in a
+     * fresh context. Starts as the account's auto_relogin. Off, the account stays
+     * logged out.
+     */
+    autoRelogin: boolean;
 }
 export declare const MIRA_VERSION: string;
 /**

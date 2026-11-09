@@ -55,6 +55,7 @@ pub struct Settings {
     pub aggro: Option<Aggro>,
     pub anti_afk: bool,
     pub room: Option<u32>,
+    pub auto_relogin: bool,
 }
 
 impl World {

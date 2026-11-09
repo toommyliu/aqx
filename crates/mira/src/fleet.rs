@@ -606,7 +606,7 @@ impl Fleet {
                 user: config.user,
                 pass: config.password,
                 client_version: config.client_version,
-                reconnect: config.reconnect,
+                relogin: config.relogin,
                 api: config.api,
                 record: None,
             },
@@ -901,8 +901,8 @@ impl Linked {
             board.rep_from.clear();
         }
         self.account.say(format!("logging in to {server}"));
-        let (attempts, mut delay) = match self.login.reconnect {
-            Some(reconnect) => (reconnect.attempts.max(1), reconnect.delay),
+        let (attempts, mut delay) = match self.login.relogin {
+            Some(relogin) => (relogin.attempts.unwrap_or(u32::MAX).max(1), relogin.delay),
             None => (1, Duration::ZERO),
         };
         for attempt in 1..=attempts {
@@ -1037,47 +1037,42 @@ impl Linked {
                 let args = loaded.parse_args(&script.args).map_err(|e| (e, false))?;
                 Ok((loaded, args))
             });
-        let (how, restartable) = match loaded {
-            Err((why, restartable)) => (Ended::Failed(why), restartable),
-            Ok((loaded, args)) => {
-                let relogin: Arc<dyn mira_script::Account> = Arc::clone(self) as _;
-                let ran = runner::drive(&job, loaded, &args, &relogin, session, server, |note| {
-                    match note {
-                    Note::Session(session) => {
-                        let server = match &self.account.board().link {
-                            Link::Session { server, .. } => server.clone(),
-                            _ => self.account.server.clone(),
-                        };
-                        self.attach(session, &server);
-                    }
-                    Note::Restarting => self.account.say("restarting the script"),
-                    Note::Relogging {
-                        server,
-                        delay,
-                        attempt,
-                        attempts,
-                    } => self.account.say(format!(
-                        "the session closed; logging back in to {server} in {:.1} s (attempt {attempt} of {attempts})",
-                        delay.as_secs_f64()
-                    )),
-                    Note::ReloginFailed(e) => self.account.say(format!("couldn't log back in: {e}")),
+        let (how, restartable) =
+            match loaded {
+                Err((why, restartable)) => (Ended::Failed(why), restartable),
+                Ok((loaded, args)) => {
+                    let relogin: Arc<dyn mira_script::Account> = Arc::clone(self) as _;
+                    let ran =
+                        runner::drive(&job, loaded, &args, &relogin, session, server, |note| {
+                            match note {
+                                Note::Session(session) => {
+                                    let server = match &self.account.board().link {
+                                        Link::Session { server, .. } => server.clone(),
+                                        _ => self.account.server.clone(),
+                                    };
+                                    self.attach(session, &server);
+                                }
+                                Note::Restarting => self.account.say("restarting the script"),
+                                Note::Reconnecting(_) => self
+                                    .account
+                                    .say("the script starts again once the account is back"),
+                            }
+                        });
+                    self.attach(&ran.session, &ran.server);
+                    let how = match ran.outcome {
+                        Outcome::Finished => Ended::Finished,
+                        Outcome::Stopped(reason) => Ended::Stopped(reason),
+                        Outcome::Cancelled => Ended::Stopped(None),
+                        Outcome::LoggedOut => Ended::Stopped(Some("the script logged out".into())),
+                        Outcome::Disconnected(why) => Ended::Closed(why),
+                        Outcome::Failed(why) => Ended::Failed(why),
+                        Outcome::Restart => unreachable!("handled by the runner"),
+                    };
+                    leave_combat(&ran.session);
+                    let restartable = matches!(how, Ended::Failed(_));
+                    (how, restartable)
                 }
-                });
-                self.attach(&ran.session, &ran.server);
-                let how = match ran.outcome {
-                    Outcome::Finished => Ended::Finished,
-                    Outcome::Stopped(reason) => Ended::Stopped(reason),
-                    Outcome::Cancelled => Ended::Stopped(None),
-                    Outcome::LoggedOut => Ended::Stopped(Some("the script logged out".into())),
-                    Outcome::Disconnected(why) => Ended::Closed(why),
-                    Outcome::Failed(why) => Ended::Failed(why),
-                    Outcome::Restart | Outcome::Relogin(_) => unreachable!("handled by the runner"),
-                };
-                leave_combat(&ran.session);
-                let restartable = matches!(how, Ended::Failed(_));
-                (how, restartable)
-            }
-        };
+            };
         let (how, restartable) = match how {
             Ended::Failed(_) if cancel.is_cancelled() => (Ended::Stopped(None), false),
             how => (how, restartable),
@@ -1224,7 +1219,7 @@ mod tests {
                 user: "player1".into(),
                 pass: "x".into(),
                 client_version: None,
-                reconnect: None,
+                relogin: None,
                 api: None,
                 record: None,
             },
@@ -1454,7 +1449,7 @@ mod tests {
         };
         assert_eq!(noted(&fleet), 0, "an unchanged account says nothing");
         let changed = config::Account {
-            autologin: true,
+            auto_start: true,
             ..unchanged
         };
         fleet.refresh(vec![changed.clone()], path);

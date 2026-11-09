@@ -45,7 +45,7 @@ public sealed class MiraOption : IScriptOption
     bool attackWithoutTarget;
     public bool AttackWithoutTarget { get => attackWithoutTarget; set => Set(ref attackWithoutTarget, value); }
     bool autoRelogin;
-    public bool AutoRelogin { get => autoRelogin; set => Set(ref autoRelogin, value); }
+    public bool AutoRelogin { get => autoRelogin; set { if (autoRelogin == value) return; Set(ref autoRelogin, value); protocol.Call(new SetAutoReloginCall(value)); } }
     bool autoReloginAny;
     public bool AutoReloginAny { get => autoReloginAny; set => Set(ref autoReloginAny, value); }
     bool retryRelogin = true;
@@ -78,8 +78,9 @@ public sealed class MiraOption : IScriptOption
     public bool LagKiller { get => lagKiller; set => Set(ref lagKiller, value); }
     int loadTimeout = 30000;
     public int LoadTimeout { get => loadTimeout; set => Set(ref loadTimeout, value); }
-    string? reloginServer = "Twilly";
-    public string? ReloginServer { get => reloginServer; set => Set(ref reloginServer, value); }
+    string? reloginServer;
+    internal string? HomeServer { get; set; }
+    public string? ReloginServer { get => reloginServer ?? HomeServer; set => Set(ref reloginServer, value); }
     bool magnetise;
     public bool Magnetise { get => magnetise; set => Set(ref magnetise, value); }
     int nameColor = 0xFFFFFF;
