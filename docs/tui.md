@@ -30,7 +30,7 @@ auto_start = false
 
 mira looks for `./mira.toml`, then `~/mira/mira.toml`. Set `MIRA_HOME` to use another folder in place of `~/mira`, or pass `-c PATH` to read a specific file. The file holds passwords, so run `chmod 600` on it. mira warns when other users can read it.
 
-`[defaults]` takes every key below except `user`, `password`, `name`, `script` and `args`, and applies it to each account. An `[[account]]` can override any of them except `client_version` and `api`, which only `[defaults]` sets.
+`[defaults]` takes every key below except `user`, `password`, `name`, `script` and `args`, and applies it to each account. An `[[account]]` can override any of them except `client_version`, which only `[defaults]` sets.
 
 | Key | Meaning |
 | --- | --- |
@@ -42,7 +42,6 @@ mira looks for `./mira.toml`, then `~/mira/mira.toml`. Set `MIRA_HOME` to use an
 | `args` | Arguments for that script. Values are strings, numbers or booleans. |
 | `auto_start` | Log the account in when a session starts without naming accounts. Defaults to `true`. |
 | `room` | Room number to join. Scripts read it as `settings.room`. |
-| `api` | Host that takes the login. Defaults to `https://game.aq.com`. |
 | `auto_relogin` | Log back in to `server` after a failed login, a lost connection or a kick, then start the script again. A wrong password isn't retried. Defaults to `true`. |
 | `relogin_delay` | The wait before the first try, like `"5s"`. It doubles after each failed try, up to 5 minutes, and is never shorter than a kick's lockout. A connection that lasts 5 minutes starts the wait over. At least `"4s"`. Defaults to `"5s"`. |
 | `relogin_attempts` | How many failed tries in a row before the account goes offline. No limit unless set. |
