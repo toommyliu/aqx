@@ -221,10 +221,11 @@ pub fn load_quietly(path: &Path) -> Result<Vec<Account>, String> {
     let at = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let path = std::path::absolute(path).map_err(|e| at(&e))?;
     let text = std::fs::read_to_string(&path).map_err(|e| at(&e))?;
-    let config = parse(&text).map_err(|e| at(&e))?;
-    config
-        .accounts(path.parent().unwrap_or(Path::new(".")))
-        .map_err(|e| at(&e))
+    read(&text, path.parent().unwrap_or(Path::new("."))).map_err(|e| at(&e))
+}
+
+pub fn read(text: &str, dir: &Path) -> Result<Vec<Account>, String> {
+    parse(text)?.accounts(dir)
 }
 
 fn password<'de, D: serde::Deserializer<'de>>(given: D) -> Result<String, D::Error> {
