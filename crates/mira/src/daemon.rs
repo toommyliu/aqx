@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,7 @@ pub struct Paths {
     pub socket: PathBuf,
     lock: PathBuf,
     pub log: PathBuf,
+    last: PathBuf,
 }
 
 pub fn paths_for(config: &Path) -> anyhow::Result<Paths> {
@@ -89,6 +90,44 @@ fn paths_in(dir: &Path, config: &Path) -> Paths {
         socket: dir.join(format!("{base}.sock")),
         lock: dir.join(format!("{base}.lock")),
         log: dir.join(format!("{base}.log")),
+        last: dir.join(format!("{base}.last.json")),
+    }
+}
+
+pub struct Ended {
+    pub at: SystemTime,
+    pub accounts: Vec<LastLines>,
+}
+
+fn last_path(config: &Path) -> Option<PathBuf> {
+    Some(paths_for(&std::path::absolute(config).ok()?).ok()?.last)
+}
+
+pub fn last_session_at(config: &Path) -> Option<SystemTime> {
+    std::fs::metadata(last_path(config)?)
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+pub fn last_session(config: &Path) -> Option<Ended> {
+    read_ended(&last_path(config)?)
+}
+
+fn read_ended(path: &Path) -> Option<Ended> {
+    let at = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    let accounts = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    Some(Ended { at, accounts })
+}
+
+fn keep_last_lines(path: &Path, fleet: &Fleet) {
+    let written = serde_json::to_vec(&fleet.last_lines())
+        .map_err(std::io::Error::other)
+        .and_then(|json| std::fs::write(path, json));
+    if let Err(e) = written {
+        eprintln!(
+            "mira: couldn't keep the last lines in {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -104,7 +143,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 const BUILD: &str = env!("MIRA_BUILD");
 
 pub struct Session {
@@ -624,7 +663,12 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
             server.end();
         })?;
     }
-    server.run_until_done(print, move || drop((removed, held)));
+    let last = paths.last.clone();
+    let ending = Arc::clone(&fleet);
+    server.run_until_done(print, move || {
+        keep_last_lines(&last, &ending);
+        drop((removed, held));
+    });
     Ok(())
 }
 
@@ -755,6 +799,25 @@ mod tests {
     }
 
     #[test]
+    fn an_ended_session_leaves_each_accounts_last_lines_behind() {
+        let dir = std::env::temp_dir().join(format!("mira-last-tests-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let account = Account::detached("player1");
+        account.say("couldn't log in: the server refused");
+        let fleet = Fleet::of(vec![Arc::new(account)]);
+        let path = dir.join("mira.last.json");
+        keep_last_lines(&path, &fleet);
+        let ended = read_ended(&path).expect("the last lines are kept");
+        assert_eq!(ended.accounts, fleet.last_lines());
+        assert_eq!(
+            ended.accounts[0].lines.last().map(|l| l.text.as_str()),
+            Some("couldn't log in: the server refused")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn end_answers_at_once_and_the_session_finishes_when_idle() {
         let dir = std::env::temp_dir().join(format!("mira-end-tests-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -853,6 +916,7 @@ mod tests {
             }],
             drops: vec![stack.clone()],
             quests: vec![QuestProgress {
+                id: 1,
                 name: "Quest".into(),
                 have: 1,
                 need: 2,
@@ -1040,7 +1104,8 @@ mod tests {
              Frame.accounts.game.misc_used Frame.accounts.game.mp Frame.accounts.game.pad \
              Frame.accounts.game.players Frame.accounts.game.players.level \
              Frame.accounts.game.players.name Frame.accounts.game.quests \
-             Frame.accounts.game.quests.have Frame.accounts.game.quests.name \
+             Frame.accounts.game.quests.have Frame.accounts.game.quests.id \
+             Frame.accounts.game.quests.name \
              Frame.accounts.game.quests.need Frame.accounts.game.skills \
              Frame.accounts.game.skills.name Frame.accounts.game.skills.ready \
              Frame.accounts.game.target Frame.accounts.game.target.hp \
@@ -1065,7 +1130,7 @@ mod tests {
              Servers.refusal";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (2, pinned),
+            (3, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

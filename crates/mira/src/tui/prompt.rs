@@ -81,6 +81,11 @@ impl Recent {
         self.runs.drain(..excess);
     }
 
+    pub fn forget(&mut self, forgotten: impl Fn(&Path) -> bool) {
+        self.runs.retain(|run| !forgotten(&run.path));
+        self.offered.retain(|offered| !forgotten(&offered.path));
+    }
+
     pub fn offer(&mut self, script: Script) {
         let known = self.offered.iter().any(|kept| kept.path == script.path);
         if self.offered.len() < RECENT_KEPT && !known {
@@ -389,6 +394,15 @@ mod tests {
             *paths.last().unwrap(),
             Path::new("/srv/50.ts"),
             "running a script again moves it to the end"
+        );
+        recent.forget(|path| path == Path::new("/srv/50.ts"));
+        assert_eq!(recent.scripts().len(), RECENT_KEPT - 1);
+        assert!(
+            recent
+                .scripts()
+                .iter()
+                .all(|s| s.path != Path::new("/srv/50.ts")),
+            "a forgotten script leaves the history"
         );
     }
 

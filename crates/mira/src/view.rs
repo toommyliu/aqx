@@ -136,6 +136,7 @@ pub struct Stack {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuestProgress {
+    pub id: i64,
     pub name: String,
     pub have: u32,
     pub need: u32,
@@ -408,6 +409,7 @@ fn lists(world: &World, me: &Me, board: &Board, game: &mut Game) {
         .iter()
         .filter_map(|id| world.quests.get(id))
         .map(|q| QuestProgress {
+            id: q.id.0,
             name: q.name.clone(),
             have: q.turn_in.iter().map(|n| held(n.id).min(n.qty)).sum(),
             need: q.turn_in.iter().map(|n| n.qty).sum(),

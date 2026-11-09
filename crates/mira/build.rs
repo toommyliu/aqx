@@ -34,4 +34,36 @@ fn main() {
         hasher.write(&std::fs::read(source).unwrap_or_default());
     }
     println!("cargo:rustc-env=MIRA_BUILD={:016x}", hasher.finish());
+    embed_web(&workspace.join("web/dist"));
+}
+
+fn embed_web(dist: &Path) {
+    println!("cargo:rerun-if-changed={}", dist.display());
+    let mut files = Vec::new();
+    let mut pending = vec![dist.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    let mut table = String::from("&[\n");
+    for file in &files {
+        println!("cargo:rerun-if-changed={}", file.display());
+        let served = file.strip_prefix(dist).expect("listed under dist");
+        let absolute = std::fs::canonicalize(file).expect("listed files exist");
+        table.push_str(&format!(
+            "    ({:?}, include_bytes!({:?})),\n",
+            format!("/{}", served.display()),
+            absolute.display().to_string()
+        ));
+    }
+    table.push(']');
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    std::fs::write(out.join("web_assets.rs"), table).expect("OUT_DIR is writable");
 }

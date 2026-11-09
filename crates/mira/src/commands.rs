@@ -285,6 +285,13 @@ pub fn serve(open: &Open, json: bool, quiet: bool) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+pub fn web(config: Option<&Path>, port: u16) -> anyhow::Result<ExitCode> {
+    let path = config_path(config)?;
+    config::load(&path).map_err(anyhow::Error::msg)?;
+    crate::web::serve(path, port)?;
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn down(config: Option<&Path>) -> anyhow::Result<ExitCode> {
     let path = config_path(config)?;
     let Some(session) = daemon::session_for(&path)? else {

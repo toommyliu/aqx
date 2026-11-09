@@ -1,0 +1,9 @@
+{
+  "name": "mira",
+  "short_name": "mira",
+  "display": "standalone",
+  "start_url": "/",
+  "background_color": "#111214",
+  "theme_color": "#111214",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}

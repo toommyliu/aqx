@@ -272,7 +272,7 @@ fn typed_path(query: &str, here: &Path) -> Option<(PathBuf, String)> {
     Some((resolved, start.to_owned()))
 }
 
-fn list(folder: &Path) -> Result<Vec<Entry>, String> {
+pub(crate) fn list(folder: &Path) -> Result<Vec<Entry>, String> {
     let found = match fs::read_dir(folder) {
         Ok(found) => found,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
