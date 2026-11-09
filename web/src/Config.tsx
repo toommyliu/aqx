@@ -1184,24 +1184,25 @@ function Toml(props: {
 }) {
   const [text, setText] = createSignal(props.file.text);
   const [status, setStatus] = createSignal("");
-  let base = props.file;
-  createEffect(() => props.onDirty(text() !== base.text));
+  const [base, setBase] = createSignal(props.file);
+  createEffect(() => props.onDirty(text() !== base().text));
   createEffect(
     on(
       () => props.file,
       (file) => {
-        if (text() !== base.text) return;
+        if (text() !== base().text) return;
         setText(file.text);
-        base = file;
+        setBase(file);
       },
       { defer: true },
     ),
   );
   onCleanup(() => props.onDirty(false));
-  const rawStatus = () => status() || (text() !== base.text ? "Unsaved changes" : props.file.path);
+  const rawStatus = () => status() || (text() !== base().text ? "Unsaved changes" : props.file.path);
   const save = createMutation(() => ({
-    mutationFn: (now: string) => api.saveConfig(base.version, { text: now }),
+    mutationFn: (now: string) => api.saveConfig(base().version, { text: now }),
     onSuccess: (next) => {
+      setBase(next);
       setText(next.text);
       props.onSaved(next);
       setStatus(saved());
@@ -1255,7 +1256,7 @@ function Toml(props: {
         <button type="button" onClick={() => props.onClose()}>
           Close
         </button>
-        <button type="submit" class="primary" disabled={save.isPending || text() === base.text}>
+        <button type="submit" class="primary" disabled={save.isPending || text() === base().text}>
           {save.isPending ? "Saving…" : "Save"}
         </button>
       </div>
