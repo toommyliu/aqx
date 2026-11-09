@@ -36,6 +36,18 @@ aqx init
 
 ## How it works
 
-aqx doesn't open a game window or load Flash. It talks to the AQW server directly, the same way the game client does.
-
-Skua scripts normally need Skua, which runs only on Windows. aqx runs them in a small .NET helper instead and performs actions in the game on the helper's behalf.
+```mermaid
+flowchart LR
+    subgraph ui[You]
+        cli[CLI]
+        tui[TUI]
+        web[Web UI]
+    end
+    subgraph scripts[Scripts]
+        ts[TypeScript]
+        skua[Skua]
+    end
+    ui -->|control| aqx["aqx<br/>(runs in the background)"]
+    scripts -->|tell it what to do| aqx
+    aqx -->|plays on| server[AQW servers]
+```
