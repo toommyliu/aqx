@@ -1,6 +1,6 @@
 using Newtonsoft.Json.Linq;
 
-namespace Mira.Skua;
+namespace Aqx.Skua;
 
 static class QuestModels
 {

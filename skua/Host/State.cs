@@ -1,7 +1,7 @@
 using System.Collections.Immutable;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-namespace Mira.Skua;
+namespace Aqx.Skua;
 
 public sealed class State
 {

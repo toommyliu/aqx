@@ -1,4 +1,4 @@
-import * as Api from "mira";
+import * as Api from "aqx";
 
 export default function* (): Api.Script {
     Api.settings.room = 1;

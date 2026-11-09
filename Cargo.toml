@@ -8,9 +8,9 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
-mira-protocol = { path = "crates/mira-protocol" }
-mira-client = { path = "crates/mira-client" }
-mira-script = { path = "crates/mira-script" }
+aqx-protocol = { path = "crates/aqx-protocol" }
+aqx-client = { path = "crates/aqx-client" }
+aqx-script = { path = "crates/aqx-script" }
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }

@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Collections.Concurrent;
-namespace Mira.Skua;
+namespace Aqx.Skua;
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "call")]
 [JsonDerivedType(typeof(JoinCall), "join")]
 [JsonDerivedType(typeof(JumpCall), "jump")]

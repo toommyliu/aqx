@@ -1,6 +1,6 @@
-# mira
+# aqx
 
-mira is a headless AQW client written in Rust. You run and script your accounts from a CLI, a TUI, or a web UI. Scripts are TypeScript files, and a compatibility layer runs most Skua scripts unchanged. Inspired by [aqw-python](https://github.com/Froztt13/aqw-python).
+aqx is a headless AQW client written in Rust. You run and script your accounts from a CLI, a TUI, or a web UI. Scripts are TypeScript files, and a compatibility layer runs most Skua scripts unchanged. Inspired by [aqw-python](https://github.com/Froztt13/aqw-python).
 
 ## Requirements
 
@@ -11,31 +11,31 @@ mira is a headless AQW client written in Rust. You run and script your accounts 
 ## Install
 
 ```sh
-git clone https://github.com/toommyliu/mira.git
-cd mira
+git clone https://github.com/toommyliu/aqx.git
+cd aqx
 
-# Build the web UI. cargo install embeds it in the mira binary.
+# Build the web UI. cargo install embeds it in the aqx binary.
 npm --prefix web ci
 npm --prefix web run build
 
 # Optional: fetch Skua to run Skua scripts.
 git submodule update --init --depth 1 skua/vendor/Skua
 
-cargo install --path crates/mira
+cargo install --path crates/aqx
 
-# Set up a scripts folder with mira.toml, in ~/mira by default.
-mira init
+# Set up a scripts folder with aqx.toml, in ~/aqx by default.
+aqx init
 ```
 
 ## Docs
 
 - [Run accounts from the TUI](docs/tui.md)
 - [Run accounts from the browser](docs/web.md)
-- [Write a mira script](docs/writing-scripts.md)
+- [Write an aqx script](docs/writing-scripts.md)
 - [Run Skua scripts](docs/skua.md)
 
 ## How it works
 
-mira doesn't open a game window or load Flash. It talks to the AQW server directly, the same way the game client does.
+aqx doesn't open a game window or load Flash. It talks to the AQW server directly, the same way the game client does.
 
-Skua scripts normally need Skua, which runs only on Windows. mira runs them in a small .NET helper instead and performs actions in the game on the helper's behalf.
+Skua scripts normally need Skua, which runs only on Windows. aqx runs them in a small .NET helper instead and performs actions in the game on the helper's behalf.

@@ -3,7 +3,7 @@ using System.Runtime.Loader;
 using CommunityToolkit.Mvvm.DependencyInjection;
 using Skua.Core.Models;
 
-namespace Mira.Skua;
+namespace Aqx.Skua;
 
 public static class Runner
 {
@@ -16,7 +16,7 @@ public static class Runner
         Console.SetOut(Console.Error);
         State state = new();
         using Protocol protocol = new(output, new StreamReader(Console.OpenStandardInput()), state);
-        MiraBot bot = new(protocol, state, path) { Config = new ScriptConfig(options) };
+        AqxBot bot = new(protocol, state, path) { Config = new ScriptConfig(options) };
         protocol.StopRequested += bot.RequestStop;
         protocol.Disconnected += bot.OnDisconnected;
         if (protocol.Stopping.IsCancellationRequested) bot.RequestStop();
@@ -26,7 +26,7 @@ public static class Runner
             if (protocol.Stopping.IsCancellationRequested) return 0;
             bot.AccountAutoRelogin = state.Settings.AutoRelogin;
             bot.Options.AutoRelogin = bot.AccountAutoRelogin;
-            ((MiraOption)bot.Options).HomeServer = state.Session.Server;
+            ((AqxOption)bot.Options).HomeServer = state.Session.Server;
             typeof(IScriptInterface).GetProperty(nameof(IScriptInterface.Instance))!.SetValue(null, bot);
             Ioc.Default.ConfigureServices(new Services(bot));
             string bundledSkills = new[] { Path.Combine(compiler.Root, "Skills", "AdvancedSkills.json"), Path.Combine(AppContext.BaseDirectory, "AdvancedSkills.json") }.FirstOrDefault(File.Exists) ?? "";
@@ -61,7 +61,7 @@ public static class Runner
                 }) { IsBackground = true, Name = "Script thread" };
                 bool recover = false;
                 Task stopping = Task.CompletedTask;
-                using (MiraBackground background = new(bot, protocol))
+                using (AqxBackground background = new(bot, protocol))
                 {
                     background.Start();
                     script.Start();
@@ -73,9 +73,9 @@ public static class Runner
                 }
                 if (recover && !script.IsAlive && bot.PrepareRestart())
                 {
-                    ((MiraEvent)bot.Events).RaiseRelogin(bot.Kicked);
+                    ((AqxEvent)bot.Events).RaiseRelogin(bot.Kicked);
                     bot.Events.ClearHandlers();
-                    ((MiraEvent)bot.Events).ClearFlashCalls();
+                    ((AqxEvent)bot.Events).ClearFlashCalls();
                     bot.Resume();
                     try
                     {
@@ -100,13 +100,13 @@ public static class Runner
     {
         try { handlers.Wait(timeout ?? Timeout.InfiniteTimeSpan); } catch (AggregateException e) { Console.Error.WriteLine(e.InnerException?.Message); }
     }
-    sealed class Services(MiraBot bot) : IServiceProvider
+    sealed class Services(AqxBot bot) : IServiceProvider
     {
-        readonly IGetScriptsService scripts = new MiraGetScriptsService();
+        readonly IGetScriptsService scripts = new AqxGetScriptsService();
         readonly IQuestDataLoaderService quests = new global::Skua.Core.Services.QuestDataLoaderService(bot.Quests, bot.Player, bot.Flash, bot.Wait);
-        readonly IDialogService dialogs = new MiraDialogService(bot);
-        readonly IFileDialogService files = new MiraFileDialogService();
-        readonly IThemeService themes = new MiraThemeService();
-        public object? GetService(Type type) => type == typeof(IQuestDataLoaderService) ? quests : type == typeof(IGetScriptsService) ? scripts : type == typeof(IScriptInterface) ? bot : type == typeof(IScriptManager) ? bot.Manager : type == typeof(IDialogService) ? dialogs : type == typeof(IFileDialogService) ? files : type == typeof(IThemeService) ? themes : typeof(MiraBot).GetProperties().FirstOrDefault(p => p.PropertyType == type)?.GetValue(bot);
+        readonly IDialogService dialogs = new AqxDialogService(bot);
+        readonly IFileDialogService files = new AqxFileDialogService();
+        readonly IThemeService themes = new AqxThemeService();
+        public object? GetService(Type type) => type == typeof(IQuestDataLoaderService) ? quests : type == typeof(IGetScriptsService) ? scripts : type == typeof(IScriptInterface) ? bot : type == typeof(IScriptManager) ? bot.Manager : type == typeof(IDialogService) ? dialogs : type == typeof(IFileDialogService) ? files : type == typeof(IThemeService) ? themes : typeof(AqxBot).GetProperties().FirstOrDefault(p => p.PropertyType == type)?.GetValue(bot);
     }
 }

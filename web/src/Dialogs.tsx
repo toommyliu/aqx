@@ -170,8 +170,8 @@ export function Dialogs() {
 }
 
 type PickerTab = "files" | "skua" | "recent";
-const [pickerTab, setPickerTab] = persisted<PickerTab>("mira-picker-tab", ["recent", "skua", "files"], "recent");
-const optionsTab = persisted<"corebots" | "script">("mira-options-tab", ["corebots", "script"], "corebots");
+const [pickerTab, setPickerTab] = persisted<PickerTab>("aqx-picker-tab", ["recent", "skua", "files"], "recent");
+const optionsTab = persisted<"corebots" | "script">("aqx-options-tab", ["corebots", "script"], "corebots");
 const touch = () => !matchMedia("(pointer: fine)").matches;
 const focusUnlessTouch = (el: HTMLElement | null | undefined) => {
   if (!touch()) el?.focus();
@@ -1012,7 +1012,7 @@ function End() {
         </>
       }
     >
-      <p>Every account logs out and the session ends. mira web keeps running, so you can log back in from here.</p>
+      <p>Every account logs out and the session ends. aqx web keeps running, so you can log back in from here.</p>
     </Modal>
   );
 }
@@ -1041,7 +1041,7 @@ function Restart() {
         </>
       }
     >
-      <p>Every online account logs out, then logs back in and starts its script again. Changes saved to mira.toml apply.</p>
+      <p>Every online account logs out, then logs back in and starts its script again. Changes saved to aqx.toml apply.</p>
     </Modal>
   );
 }

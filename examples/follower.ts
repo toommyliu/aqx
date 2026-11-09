@@ -1,4 +1,4 @@
-import { combat, inventory, map, script, wait, type Script } from "mira";
+import { combat, inventory, map, script, wait, type Script } from "aqx";
 
 export default function* (): Script {
   const { target, class: className } = script.args<{ target: string; class?: string }>({

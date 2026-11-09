@@ -143,7 +143,7 @@ export function App() {
           <Icon name={collapsed() ? "showList" : "hideList"} />
         </button>
         <div class="title">
-          <h1 class="brand">mira</h1>
+          <h1 class="brand">aqx</h1>
           <SessionStatus />
         </div>
         <RedactButton />
@@ -217,13 +217,13 @@ function SessionStatus() {
                 <span
                   class="badge warn"
                   tabindex="0"
-                  data-tip="mira.toml changed after this session started. Restart it from the Session menu to apply changes to accounts already in it."
+                  data-tip="aqx.toml changed after this session started. Restart it from the Session menu to apply changes to accounts already in it."
                 >
                   config changed
                 </span>
               </Show>
               <Show when={s().otherBuild}>
-                <span class="badge warn" tabindex="0" data-tip="The session runs an older mira build. Restart it from the Session menu to use this one.">
+                <span class="badge warn" tabindex="0" data-tip="The session runs an older aqx build. Restart it from the Session menu to use this one.">
                   older build
                 </span>
               </Show>
@@ -251,10 +251,10 @@ function store(key: string, value: string) {
   }
 }
 
-const [collapsed, setCollapsedSignal] = createSignal(stored("mira-sidebar") === "hidden");
+const [collapsed, setCollapsedSignal] = createSignal(stored("aqx-sidebar") === "hidden");
 const setCollapsed = (hidden: boolean) => {
   setCollapsedSignal(hidden);
-  store("mira-sidebar", hidden ? "hidden" : "shown");
+  store("aqx-sidebar", hidden ? "hidden" : "shown");
 };
 
 type Theme = "system" | "light" | "dark";
@@ -262,7 +262,7 @@ const THEMES: Theme[] = ["system", "light", "dark"];
 
 function readTheme(): Theme {
   try {
-    const saved = localStorage.getItem("mira-theme");
+    const saved = localStorage.getItem("aqx-theme");
     return saved === "light" || saved === "dark" ? saved : "system";
   } catch {
     return "system";
@@ -299,7 +299,7 @@ function ThemeButton() {
     setTheme(now);
     applyTheme(now);
     try {
-      localStorage.setItem("mira-theme", now);
+      localStorage.setItem("aqx-theme", now);
     } catch {
       return;
     }

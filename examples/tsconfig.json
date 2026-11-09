@@ -10,7 +10,7 @@
     "erasableSyntaxOnly": true,
     "strict": true,
     "noEmit": true,
-    "paths": { "mira": ["../api/mira.d.ts"] }
+    "paths": { "aqx": ["../api/aqx.d.ts"] }
   },
   "include": ["**/*.ts"]
 }

@@ -6,7 +6,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Skua.Core.Models;
 
-namespace Mira.Skua;
+namespace Aqx.Skua;
 
 public sealed record Built(byte[] Image, string Path);
 public sealed class ScriptCompiler(string root)

@@ -62,7 +62,7 @@ export type Account = {
   game: Game | null;
 };
 
-export type Channel = "mira" | "script" | "server" | "chat" | "game";
+export type Channel = "aqx" | "script" | "server" | "chat" | "game";
 
 export type Line = { seq: number; at_ms: number; channel: Channel; text: string };
 

@@ -19,7 +19,7 @@ import {
 const saved = () =>
   `Saved at ${clock(Date.now()).slice(0, 5)}.${session()?.kind === "running" ? " Restart the session to apply it to online accounts." : ""}`;
 
-const configTab = persisted<"accounts" | "defaults" | "toml">("mira-config-tab", ["accounts", "defaults", "toml"], "accounts");
+const configTab = persisted<"accounts" | "defaults" | "toml">("aqx-config-tab", ["accounts", "defaults", "toml"], "accounts");
 
 const ACCOUNT_KEYS = ["user", "password", "name", "script", "args"];
 const IDENTITY = new Set(ACCOUNT_KEYS);
@@ -237,7 +237,7 @@ export function Config(props: { start: ConfigStart }) {
     { id: "toml", label: "Raw" },
   ] as const;
   return (
-    <Modal title="mira.toml" onClose={close} canClose={canClose} lightDismiss={false} wide tall>
+    <Modal title="aqx.toml" onClose={close} canClose={canClose} lightDismiss={false} wide tall>
       <Show when={confirming()}>
         <div class="confirm" role="alert">
           <span class="grow">You have unsaved changes.</span>
@@ -274,7 +274,7 @@ export function Config(props: { start: ConfigStart }) {
           )}
         </For>
       </div>
-      <Switch fallback={<p class="muted">Loading mira.toml…</p>}>
+      <Switch fallback={<p class="muted">Loading aqx.toml…</p>}>
         <Match when={file.error}>
           <p class="error">{file.error?.message}</p>
         </Match>
@@ -398,7 +398,7 @@ function FormEditor(props: {
     await client.refetchQueries({ queryKey: ["config"] });
     reset(props.file);
     setError("");
-    setStatus("Reloaded mira.toml. Make your change again.");
+    setStatus("Reloaded aqx.toml. Make your change again.");
   };
   const editing = () => draft.accounts.find((a) => a.id === current());
   const edit = (id: string, fn: (a: AccountDraft) => void) => setDraft("accounts", (a) => a.id === id, produce(fn));
@@ -417,7 +417,7 @@ function FormEditor(props: {
     const gone = draft.accounts[at];
     setDraft("accounts", (all) => all.filter((a) => a.id !== id));
     setCurrent(draft.accounts[Math.min(at, draft.accounts.length - 1)]?.id ?? "");
-    setStatus(`Removed ${gone?.name || gone?.user || "the new account"}. Save to write it to mira.toml.`);
+    setStatus(`Removed ${gone?.name || gone?.user || "the new account"}. Save to write it to aqx.toml.`);
   };
   const statusText = () => {
     const n = tried() ? problems().length : 0;
@@ -436,7 +436,7 @@ function FormEditor(props: {
       <Show when={props.tab === "accounts"}>
         <div class="split">
           <div class="split-list">
-            <ul class="entries" aria-label="Accounts in mira.toml">
+            <ul class="entries" aria-label="Accounts in aqx.toml">
               <For each={draft.accounts}>
                 {(a) => (
                   <li>
@@ -1217,7 +1217,7 @@ function Toml(props: {
     >
       <div class="raw">
         <label for="config-text" class="visually-hidden">
-          mira.toml
+          aqx.toml
         </label>
         <textarea
           id="config-text"
@@ -1308,7 +1308,7 @@ function Reference(props: { schema: ConfigSchema }) {
   return (
     <aside class="reference" aria-labelledby={heading}>
       <h3 id={heading} class="visually-hidden">
-        Keys mira.toml takes
+        Keys aqx.toml takes
       </h3>
       <section>
         <h4>

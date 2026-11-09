@@ -5,7 +5,7 @@ using Skua.Core.Interfaces;
 using Skua.Core.Models;
 using Skua.Core.Models.Skills;
 
-namespace Mira.Skua;
+namespace Aqx.Skua;
 
 public static class Settings
 {

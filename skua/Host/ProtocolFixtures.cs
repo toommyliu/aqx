@@ -1,6 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-namespace Mira.Skua;
+namespace Aqx.Skua;
 
 public static class ProtocolFixtures
 {

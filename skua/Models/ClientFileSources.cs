@@ -5,7 +5,7 @@ namespace Skua.Core.Models;
 public static class ClientFileSources
 {
     public static string AssemblyVersion { get; } = Assembly.GetEntryAssembly()?.GetName().Version?.ToString() ?? "0.0.0.0";
-    public static string SkuaDIR { get; } = Environment.GetEnvironmentVariable("MIRA_SKUA_DATA") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Skua");
+    public static string SkuaDIR { get; } = Environment.GetEnvironmentVariable("AQX_SKUA_DATA") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Skua");
     public static string SkuaSettingsDIR { get; } = Path.Combine(SkuaDIR, "Skua.settings.json");
     public static string SkuaScriptsDIR { get; } = Path.Combine(SkuaDIR, "Scripts");
     public static string SkuaThemesDIR { get; } = Path.Combine(SkuaDIR, "themes");

@@ -1,14 +1,14 @@
 # Run accounts from the TUI
 
-`mira` with no command opens the TUI for the accounts in `mira.toml`. You log accounts in, run scripts on them, and watch their logs from one terminal.
+`aqx` with no command opens the TUI for the accounts in `aqx.toml`. You log accounts in, run scripts on them, and watch their logs from one terminal.
 
-The accounts live in a session that runs in the background. The first `mira` starts it, and later ones attach to it. `q` detaches and leaves everything running. `Q` logs every account out and ends the session. The session also ends on its own once every account is offline after something logged in, and the TUI then prints the last few lines of each account's log.
+The accounts live in a session that runs in the background. The first `aqx` starts it, and later ones attach to it. `q` detaches and leaves everything running. `Q` logs every account out and ends the session. The session also ends on its own once every account is offline after something logged in, and the TUI then prints the last few lines of each account's log.
 
-`mira ACCOUNT...` logs in only the accounts you name. Without names, a new session logs in every account with `auto_start` on. `mira ACCOUNT... --script PATH [--arg KEY=VALUE]...` runs that script on the named accounts instead of their own. `mira tui` does the same as `mira`. `mira --redact` shows your accounts as `account 1`, `account 2` and so on, and your home folder as `~`, so you can share a screenshot.
+`aqx ACCOUNT...` logs in only the accounts you name. Without names, a new session logs in every account with `auto_start` on. `aqx ACCOUNT... --script PATH [--arg KEY=VALUE]...` runs that script on the named accounts instead of their own. `aqx tui` does the same as `aqx`. `aqx --redact` shows your accounts as `account 1`, `account 2` and so on, and your home folder as `~`, so you can share a screenshot.
 
-## Write mira.toml
+## Write aqx.toml
 
-`mira init` sets up `~/mira`, or the folder you name. It writes `mira.d.ts`, a `tsconfig.json` that points at it, a sample script, `mira.schema.json` and `keys.schema.json` for editor completion, and a `.gitignore` that keeps `mira.toml` out of git. In a terminal it also asks for one account and writes a `mira.toml` that runs the sample. Running it again updates `mira.d.ts` and the schemas and leaves your other files alone. `mira schema` prints the schema.
+`aqx init` sets up `~/aqx`, or the folder you name. It writes `aqx.d.ts`, a `tsconfig.json` that points at it, a sample script, `aqx.schema.json` and `keys.schema.json` for editor completion, and a `.gitignore` that keeps `aqx.toml` out of git. In a terminal it also asks for one account and writes an `aqx.toml` that runs the sample. Running it again updates `aqx.d.ts` and the schemas and leaves your other files alone. `aqx schema` prints the schema.
 
 ```toml
 [defaults]
@@ -28,17 +28,17 @@ server = "Yorumi"
 auto_start = false
 ```
 
-mira looks for `./mira.toml`, then `~/mira/mira.toml`. Set `MIRA_HOME` to use another folder in place of `~/mira`, or pass `-c PATH` to read a specific file. The file holds passwords, so run `chmod 600` on it. mira warns when other users can read it.
+aqx looks for `./aqx.toml`, then `~/aqx/aqx.toml`. Set `AQX_HOME` to use another folder in place of `~/aqx`, or pass `-c PATH` to read a specific file. The file holds passwords, so run `chmod 600` on it. aqx warns when other users can read it.
 
 `[defaults]` takes every key below except `user`, `password`, `name`, `script` and `args`, and applies it to each account. An `[[account]]` can override any of them except `client_version`, which only `[defaults]` sets.
 
 | Key | Meaning |
 | --- | --- |
 | `user`, `password` | The login. Required. |
-| `name` | What mira calls the account. Defaults to `user`. |
-| `server` | Server to join, as `mira servers` lists it. Required here or in `[defaults]`. |
+| `name` | What aqx calls the account. Defaults to `user`. |
+| `server` | Server to join, as `aqx servers` lists it. Required here or in `[defaults]`. |
 | `client_version` | Log in with exactly this client version instead of the server's minimum. |
-| `script` | Script to run each time the account logs in, relative to `mira.toml`. |
+| `script` | Script to run each time the account logs in, relative to `aqx.toml`. |
 | `args` | Arguments for that script. Values are strings, numbers or booleans. |
 | `auto_start` | Log the account in when a session starts without naming accounts. Defaults to `true`. |
 | `room` | Room number to join. Scripts read it as `settings.room`. |
@@ -49,7 +49,7 @@ mira looks for `./mira.toml`, then `~/mira/mira.toml`. Set `MIRA_HOME` to use an
 | `stall_after` | How long a running script can go without progress before the account counts as stalled, like `"90s"`, `"5m"` or `"1h"`. Progress is a kill, an item change, a quest turn-in or a map join. Defaults to `"5m"`. |
 | `on_stall` | What a stall does: `warn` logs a warning, `restart` restarts the script, and `relogin` logs out, back in, and starts the script again. Defaults to `warn`. |
 
-Script paths you type in the TUI also resolve relative to `mira.toml`. The session checks the file every 2 seconds and adds any `[[account]]` with a new name, offline. Edits to accounts that are already in the session, `auto_start` included, take effect when it restarts, and each changed account's log says so. Run `mira down`, then `mira`, to apply them.
+Script paths you type in the TUI also resolve relative to `aqx.toml`. The session checks the file every 2 seconds and adds any `[[account]]` with a new name, offline. Edits to accounts that are already in the session, `auto_start` included, take effect when it restarts, and each changed account's log says so. Run `aqx down`, then `aqx`, to apply them.
 
 ## Keys
 
@@ -60,11 +60,11 @@ These keys act on the marked accounts, or on the selected one when nothing is ma
 | Key | Does |
 | --- | --- |
 | `i` | Log in, then run the account's `script` |
-| `o` | Pick a script and run it. The list opens on the selected account's script. The files tab lists the folders and scripts in one folder, starting at the `scripts` folder next to `mira.toml`. `←` goes up a folder, and `→` or `enter` opens the selected one. To jump somewhere else, press `/` and type a path that starts with `/`, `~/`, `./` or `../`, or paste one. The list shows that folder, narrowed to names that start with whatever follows the last `/`. The Skua tab lists the Skua library. `tab` switches between them. `→` on a Skua script edits its options, and `u` on the Skua tab downloads or updates the library. See [Run Skua scripts](skua.md). |
+| `o` | Pick a script and run it. The list opens on the selected account's script. The files tab lists the folders and scripts in one folder, starting at the `scripts` folder next to `aqx.toml`. `←` goes up a folder, and `→` or `enter` opens the selected one. To jump somewhere else, press `/` and type a path that starts with `/`, `~/`, `./` or `../`, or paste one. The list shows that folder, narrowed to names that start with whatever follows the last `/`. The Skua tab lists the Skua library. `tab` switches between them. `→` on a Skua script edits its options, and `u` on the Skua tab downloads or updates the library. See [Run Skua scripts](skua.md). |
 | `O` | Type a script path and `key=value` args. `tab` completes, and `↑` recalls an earlier run. |
 | `s`, `r` | Stop or restart the script. Stopping also leaves combat. |
 | `p` | Pause the script, or resume it. A pause lets the current step finish, such as a kill in progress, then holds the script. Skua scripts can't pause. |
-| `c` | Log in to another server, then run the script that was running. The list marks the servers that are offline or full, and members-only servers when the account is online and free, and won't switch to them. The account stays on the new server until it logs out, auto relogin included. Logging out, or a script's `auth.logout()`, sends the next login back to the `server` in `mira.toml`. |
+| `c` | Log in to another server, then run the script that was running. The list marks the servers that are offline or full, and members-only servers when the account is online and free, and won't switch to them. The account stays on the new server until it logs out, auto relogin included. Logging out, or a script's `auth.logout()`, sends the next login back to the `server` in `aqx.toml`. |
 | `x` | Log out |
 
 These act on the focused pane:
@@ -111,15 +111,15 @@ The area under the account shows its log or one of its lists. Each view has a nu
 
 `esc` goes back to the log. A search stays on when you pick another account or move focus, and opening another view clears it. The side panel labels each list with its number, and clicking a list there opens it. With the side panel hidden (`z`), the divider shows every view as a tab instead.
 
-The log sorts lines into channels: `mira`, `script`, `server`, `chat` and `game`. The divider lists them, with the one shown highlighted. `[` and `]` move one channel left or right, and stop at the ends. `main`, the default, shows everything except chat and game events. `all` shows every channel. Clicking a channel shows it.
+The log sorts lines into channels: `aqx`, `script`, `server`, `chat` and `game`. The divider lists them, with the one shown highlighted. `[` and `]` move one channel left or right, and stop at the ends. `main`, the default, shows everything except chat and game events. `all` shows every channel. Clicking a channel shows it.
 
 Opening the drops list focuses the main pane. There `↑` `↓` move, `space` marks a drop, `a` marks them all, and `enter` accepts the marked drops, or the one under the cursor.
 
 ### Change the keys
 
-Press `?`, then `e`, to change keys in the TUI. Pick a command and press `enter`, then the new key. `backspace` puts the default back, and keys that differ from the default show in blue. A key that's already taken shows an error and changes nothing, so to swap two keys, move one to a spare key first. `esc` cancels a change, so it can't be picked this way. `esc` in the list goes back to `?`. mira saves each change to `keys.toml` right away and leaves the rest of the file, comments included, as it was. A key you pick there replaces every key that command had.
+Press `?`, then `e`, to change keys in the TUI. Pick a command and press `enter`, then the new key. `backspace` puts the default back, and keys that differ from the default show in blue. A key that's already taken shows an error and changes nothing, so to swap two keys, move one to a spare key first. `esc` cancels a change, so it can't be picked this way. `esc` in the list goes back to `?`. aqx saves each change to `keys.toml` right away and leaves the rest of the file, comments included, as it was. A key you pick there replaces every key that command had.
 
-You can also write `keys.toml` yourself. It lives in `~/mira`, or in `MIRA_HOME` when it's set. Each line gives a command a key, or a list of keys. A command you leave out keeps its default, and an empty list unbinds it:
+You can also write `keys.toml` yourself. It lives in `~/aqx`, or in `AQX_HOME` when it's set. Each line gives a command a key, or a list of keys. A command you leave out keeps its default, and an empty list unbinds it:
 
 ```toml
 #:schema ./keys.schema.json
@@ -129,9 +129,9 @@ pick_script = "ctrl+o"
 details = []
 ```
 
-A key is a character such as `o`, `O` or `?`, or one of `up`, `down`, `left`, `right`, `enter`, `esc`, `tab`, `space`, `backspace`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown` and `f1` to `f12`. Put `ctrl+`, `alt+` or `shift+` in front for a combination. `shift+` works with letters and `tab`; for other shifted characters, write the character itself, like `!`. `mira` refuses to open the TUI when the file names a command it doesn't know, a key it can't read, or one key for two commands, and says which. `ctrl+c` always asks to end the session, and keys inside the script picker, the run prompt and other dialogs stay the same. `?`, the footer and the side panel show the keys you set. mira reads the file when the TUI opens, so edits you make by hand show up the next time you open it.
+A key is a character such as `o`, `O` or `?`, or one of `up`, `down`, `left`, `right`, `enter`, `esc`, `tab`, `space`, `backspace`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown` and `f1` to `f12`. Put `ctrl+`, `alt+` or `shift+` in front for a combination. `shift+` works with letters and `tab`; for other shifted characters, write the character itself, like `!`. `aqx` refuses to open the TUI when the file names a command it doesn't know, a key it can't read, or one key for two commands, and says which. `ctrl+c` always asks to end the session, and keys inside the script picker, the run prompt and other dialogs stay the same. `?`, the footer and the side panel show the keys you set. aqx reads the file when the TUI opens, so edits you make by hand show up the next time you open it.
 
-`mira init` writes `keys.schema.json`, so an editor can complete the command names:
+`aqx init` writes `keys.schema.json`, so an editor can complete the command names:
 
 | Command | Default | Command | Default |
 | --- | --- | --- | --- |
@@ -158,32 +158,32 @@ A key is a character such as `o`, `O` or `?`, or one of `up`, `down`, `left`, `r
 
 ### Script args
 
-Before a run starts, mira asks in the footer for each arg the script declares that you didn't type. It shows the type it expects and rejects an answer that doesn't fit. An optional arg says so, and shows its default when the script writes it as a plain value. `enter` on an empty answer skips it, so the script uses its default. With several accounts marked, it asks each account in turn, so each can get its own answer. Press `tab` before the first answer to give one answer for all of them; mira keeps that choice for the next run. mira remembers your answers until you quit and offers them the next time. Typing replaces an offered answer, and `backspace` edits it.
+Before a run starts, aqx asks in the footer for each arg the script declares that you didn't type. It shows the type it expects and rejects an answer that doesn't fit. An optional arg says so, and shows its default when the script writes it as a plain value. `enter` on an empty answer skips it, so the script uses its default. With several accounts marked, it asks each account in turn, so each can get its own answer. Press `tab` before the first answer to give one answer for all of them; aqx keeps that choice for the next run. aqx remembers your answers until you quit and offers them the next time. Typing replaces an offered answer, and `backspace` edits it.
 
-mira keeps the scripts you run in its data folder (`~/Library/Application Support/mira/history` on macOS), one entry per script with the args you last typed for it, and `↑` walks back through them, newest first, in later sessions. After them come the scripts your accounts are running, even ones started with `mira ctl` or from another terminal. Answers to asked args stay out of that file.
+aqx keeps the scripts you run in its data folder (`~/Library/Application Support/aqx/history` on macOS), one entry per script with the args you last typed for it, and `↑` walks back through them, newest first, in later sessions. After them come the scripts your accounts are running, even ones started with `aqx ctl` or from another terminal. Answers to asked args stay out of that file.
 
 ## Sessions from the shell
 
-Each config gets its own session, so accounts from different `mira.toml` files can run at the same time.
+Each config gets its own session, so accounts from different `aqx.toml` files can run at the same time.
 
 | Command | Does |
 | --- | --- |
-| `mira up [ACCOUNT...] [-c PATH]` | Start the session in the background without opening the TUI |
-| `mira serve [ACCOUNT...] [-c PATH] [--json \| --quiet]` | Run the session in the foreground and print its log, for systemd. `ctrl+c` logs everyone out; a second one exits at once. |
-| `mira ps [--json]` | List every running session's accounts: state, script, where, uptime and status |
-| `mira logs [ACCOUNT] [-f] [--all]` | Print an account's recent log, or every account's when only one session runs. `-f` keeps printing, and `--all` adds game lines. |
-| `mira ctl ACCOUNT login\|logout\|stop\|restart\|pause\|resume\|relogin` | Drive an account in whichever session has it |
-| `mira ctl ACCOUNT run SCRIPT [--arg KEY=VALUE]...` | Run a script, stopping the one running. Logs the account in if it's offline. |
-| `mira down [-c PATH]` | Log out every account and end the session |
+| `aqx up [ACCOUNT...] [-c PATH]` | Start the session in the background without opening the TUI |
+| `aqx serve [ACCOUNT...] [-c PATH] [--json \| --quiet]` | Run the session in the foreground and print its log, for systemd. `ctrl+c` logs everyone out; a second one exits at once. |
+| `aqx ps [--json]` | List every running session's accounts: state, script, where, uptime and status |
+| `aqx logs [ACCOUNT] [-f] [--all]` | Print an account's recent log, or every account's when only one session runs. `-f` keeps printing, and `--all` adds game lines. |
+| `aqx ctl ACCOUNT login\|logout\|stop\|restart\|pause\|resume\|relogin` | Drive an account in whichever session has it |
+| `aqx ctl ACCOUNT run SCRIPT [--arg KEY=VALUE]...` | Run a script, stopping the one running. Logs the account in if it's offline. |
+| `aqx down [-c PATH]` | Log out every account and end the session |
 
-`ACCOUNT` is a name or a username. Sessions keep their sockets, locks and logs in mira's data folder (`~/Library/Application Support/mira/sessions` on macOS), which only you can open. Set `MIRA_SESSIONS` to use another folder. When `mira` attaches to a session that was already running, the TUI says when that session started, and warns if `mira.toml` changed after it. When the running session is from another build of mira, `mira` asks whether to restart it with this one, and restarts it without asking when the two builds can't talk to each other. A restart logs the online accounts out and back in, and their scripts start again.
+`ACCOUNT` is a name or a username. Sessions keep their sockets, locks and logs in aqx's data folder (`~/Library/Application Support/aqx/sessions` on macOS), which only you can open. Set `AQX_SESSIONS` to use another folder. When `aqx` attaches to a session that was already running, the TUI says when that session started, and warns if `aqx.toml` changed after it. When the running session is from another build of aqx, `aqx` asks whether to restart it with this one, and restarts it without asking when the two builds can't talk to each other. A restart logs the online accounts out and back in, and their scripts start again.
 
 ## Other tools
 
 | Command | Does |
 | --- | --- |
-| `mira check SCRIPT...` | Compile scripts and the files they import, without logging in or running them |
-| `mira skua update\|list [QUERY]\|path` | Download or update the Skua script library, search it, or print its folder. See [Run Skua scripts](skua.md). |
-| `mira run -a ACCOUNT [SCRIPT] [--arg KEY=VALUE]...` | Log one account from `mira.toml` in, run its script or the one named, and log out when it ends |
-| `mira run ... --record FILE` | Also write every packet to `FILE` as JSON lines, with the token and personal fields redacted |
-| `mira view FILE [--cmd NAME]... [--full]` | Print a recording one packet per line, only the named commands if any, cut at 160 characters unless `--full` |
+| `aqx check SCRIPT...` | Compile scripts and the files they import, without logging in or running them |
+| `aqx skua update\|list [QUERY]\|path` | Download or update the Skua script library, search it, or print its folder. See [Run Skua scripts](skua.md). |
+| `aqx run -a ACCOUNT [SCRIPT] [--arg KEY=VALUE]...` | Log one account from `aqx.toml` in, run its script or the one named, and log out when it ends |
+| `aqx run ... --record FILE` | Also write every packet to `FILE` as JSON lines, with the token and personal fields redacted |
+| `aqx view FILE [--cmd NAME]... [--full]` | Print a recording one packet per line, only the named commands if any, cut at 160 characters unless `--full` |

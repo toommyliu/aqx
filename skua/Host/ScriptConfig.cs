@@ -2,7 +2,7 @@ using System.Reflection;
 using Skua.Core.Interfaces;
 using Skua.Core.Models;
 
-namespace Mira.Skua;
+namespace Aqx.Skua;
 
 public sealed class ScriptConfig(IReadOnlyDictionary<string, string> overrides) : IScriptOptionContainer
 {

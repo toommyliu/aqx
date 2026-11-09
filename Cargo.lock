@@ -101,6 +101,78 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqx"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aqx-client",
+ "aqx-protocol",
+ "aqx-script",
+ "clap",
+ "ctrlc",
+ "dirs",
+ "flate2",
+ "libc",
+ "ratatui",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tiny_http",
+ "toml",
+ "toml_edit",
+ "tui-input",
+ "unicode-width",
+]
+
+[[package]]
+name = "aqx-client"
+version = "0.1.0"
+dependencies = [
+ "aqx-protocol",
+ "base64 0.22.1",
+ "dirs",
+ "flate2",
+ "getrandom 0.2.17",
+ "mio",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "ureq",
+]
+
+[[package]]
+name = "aqx-protocol"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "quick-xml",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "aqx-script"
+version = "0.1.0"
+dependencies = [
+ "aqx-client",
+ "aqx-protocol",
+ "flate2",
+ "rquickjs",
+ "semver",
+ "serde",
+ "serde_json",
+ "swc_common",
+ "swc_ecma_ast",
+ "swc_ecma_parser",
+ "swc_ecma_visit",
+ "swc_ts_fast_strip",
+ "tar",
+ "ureq",
+]
+
+[[package]]
 name = "ar_archive_writer"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1241,78 +1313,6 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mira"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "ctrlc",
- "dirs",
- "flate2",
- "libc",
- "mira-client",
- "mira-protocol",
- "mira-script",
- "ratatui",
- "schemars",
- "serde",
- "serde_json",
- "tiny_http",
- "toml",
- "toml_edit",
- "tui-input",
- "unicode-width",
-]
-
-[[package]]
-name = "mira-client"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "dirs",
- "flate2",
- "getrandom 0.2.17",
- "mio",
- "mira-protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "ureq",
-]
-
-[[package]]
-name = "mira-protocol"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "flate2",
- "quick-xml",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "mira-script"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "mira-client",
- "mira-protocol",
- "rquickjs",
- "semver",
- "serde",
- "serde_json",
- "swc_common",
- "swc_ecma_ast",
- "swc_ecma_parser",
- "swc_ecma_visit",
- "swc_ts_fast_strip",
- "tar",
- "ureq",
 ]
 
 [[package]]

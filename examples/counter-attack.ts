@@ -1,4 +1,4 @@
-import { combat, settings, map, script, type Script } from "mira";
+import { combat, settings, map, script, type Script } from "aqx";
 
 export default function* (): Script {
   // stop skills that would attack the monster

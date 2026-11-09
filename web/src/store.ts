@@ -58,7 +58,7 @@ export function persisted<T extends string>(key: string, allowed: readonly T[], 
 const [session, setSession] = createSignal<Session | null>(null);
 const [accounts, setAccounts] = createStore<Account[]>([]);
 
-export const [redaction, setRedaction] = persisted<"on" | "off">("mira-redact", ["on", "off"], "off");
+export const [redaction, setRedaction] = persisted<"on" | "off">("aqx-redact", ["on", "off"], "off");
 
 const HOME = /\/(?:Users|home)\/[^/\s]+/g;
 const ROOM = /\b([A-Za-z]\w*)-\d+\b/g;
@@ -143,8 +143,8 @@ function perAccount<T extends string>(key: string, allowed: readonly T[], fallba
   return [get, set];
 }
 
-const [view, setView] = perAccount<View>("mira-views", VIEWS.map((v) => v.id), "log");
-const [gameLines, setGameLines] = perAccount<GameLines>("mira-game-lines", ["shown", "hidden"], "hidden");
+const [view, setView] = perAccount<View>("aqx-views", VIEWS.map((v) => v.id), "log");
+const [gameLines, setGameLines] = perAccount<GameLines>("aqx-game-lines", ["shown", "hidden"], "hidden");
 const [search, setSearch] = createSignal("");
 const [dialog, setDialog] = createSignal<Dialog | null>(null);
 const [acting, setActing] = createSignal<number[]>([]);
