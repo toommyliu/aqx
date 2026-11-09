@@ -11,7 +11,7 @@ pub struct Projection {
     instant: Instant,
     unix: u64,
     previous: Option<Arc<World>>,
-    sent: HashMap<S, String>,
+    sent: HashMap<S, Value>,
 }
 
 impl Projection {
@@ -126,8 +126,8 @@ impl Projection {
                 S::Session,
                 json!({"phase": world.phase, "server": server, "host": host}),
             ),
-            (S::Me, json!(me)),
-            (S::Room, json!(room)),
+            (S::Me, me.into()),
+            (S::Room, room.into()),
             (S::Temp, json!(world.temp)),
             (S::Drops, json!(world.drops)),
             (S::Factions, json!(world.factions)),
@@ -228,9 +228,8 @@ impl Projection {
         ));
         let mut sections = Vec::new();
         for (section, value) in values {
-            let text = value.to_string();
-            if self.sent.get(&section) != Some(&text) {
-                self.sent.insert(section, text);
+            if self.sent.get(&section) != Some(&value) {
+                self.sent.insert(section, value.clone());
                 sections.push(Message::State {
                     state: Section { section, value },
                 });
