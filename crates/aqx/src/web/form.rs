@@ -99,11 +99,21 @@ pub fn apply(text: &str, form: Form, keys: &Keys) -> Result<String, String> {
 }
 
 fn fields_of(table: &dyn TableLike) -> Map<String, Value> {
+    entries_of(table).filter(|(key, _)| key != SECRET).collect()
+}
+
+fn entries_of(table: &dyn TableLike) -> impl Iterator<Item = (String, Value)> + '_ {
     table
         .iter()
-        .filter(|(key, _)| *key != SECRET)
-        .filter_map(|(key, item)| Some((key.to_owned(), json_of(item.as_value()?))))
-        .collect()
+        .filter_map(|(key, item)| Some((key.to_owned(), json_of_item(item)?)))
+}
+
+fn json_of_item(item: &Item) -> Option<Value> {
+    match item {
+        Item::Value(value) => Some(json_of(value)),
+        Item::Table(table) => Some(entries_of(table).collect::<Map<_, _>>().into()),
+        Item::None | Item::ArrayOfTables(_) => None,
+    }
 }
 
 fn json_of(value: &toml_edit::Value) -> Value {
@@ -162,8 +172,8 @@ fn set_fields(
             Some(wanted) => {
                 let same = table
                     .get(key)
-                    .and_then(Item::as_value)
-                    .is_some_and(|now| json_of(now) == *wanted);
+                    .and_then(json_of_item)
+                    .is_some_and(|now| now == *wanted);
                 if !same {
                     set(table, key, toml_of(wanted)?);
                 }
@@ -204,6 +214,9 @@ args = { target = 7500 }
 name = "healer"
 user = "player2"
 password = "secret-two"
+
+[account.args]
+leader = "player1"
 "#;
 
     fn keys() -> Keys {
@@ -221,6 +234,7 @@ password = "secret-two"
         assert!(!text.contains("secret"), "{text}");
         assert_eq!(read["accounts"][0]["hasPassword"], true);
         assert_eq!(read["accounts"][0]["fields"]["args"]["target"], 7500);
+        assert_eq!(read["accounts"][1]["fields"]["args"]["leader"], "player1");
         assert_eq!(read["defaults"]["server"], "Twilly");
     }
 
