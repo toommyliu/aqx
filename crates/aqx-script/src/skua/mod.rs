@@ -624,10 +624,12 @@ impl SkuaScript {
                     }
                 }
                 Wake::Update(g, update) if g == generation => {
-                    for message in
-                        projection.changed(session.snapshot(), server, session.server_host())
-                    {
-                        send(&mut stdin, &message)?;
+                    if let Update::State = update {
+                        for message in
+                            projection.changed(session.snapshot(), server, session.server_host())
+                        {
+                            send(&mut stdin, &message)?;
+                        }
                     }
                     match &update {
                         Update::Event(aqx_client::Event::Phase(Phase::Ready)) => {
