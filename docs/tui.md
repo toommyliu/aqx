@@ -30,7 +30,7 @@ auto_start = false
 
 mira looks for `./mira.toml`, then `~/mira/mira.toml`. Set `MIRA_HOME` to use another folder in place of `~/mira`, or pass `-c PATH` to read a specific file. The file holds passwords, so run `chmod 600` on it. mira warns when other users can read it.
 
-`[defaults]` takes every key below except `user`, `password`, `name`, `script` and `args`, and applies it to each account. An `[[account]]` can override any of them.
+`[defaults]` takes every key below except `user`, `password`, `name`, `script` and `args`, and applies it to each account. An `[[account]]` can override any of them except `client_version` and `api`, which only `[defaults]` sets.
 
 | Key | Meaning |
 | --- | --- |
