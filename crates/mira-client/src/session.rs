@@ -110,6 +110,7 @@ pub enum Disconnect {
     LoggedOut,
     LoggedInElsewhere,
     Kicked { secs: u64 },
+    LockedOut(String),
     InvalidSession,
     Ended,
     ConnectionLost(String),
@@ -127,6 +128,7 @@ impl fmt::Display for Disconnect {
                 f,
                 "the server kicked the account; it can log in again in {secs} s"
             ),
+            Disconnect::LockedOut(text) => write!(f, "login refused for now: {text}"),
             Disconnect::InvalidSession => f.write_str("the server says the session is invalid"),
             Disconnect::Ended => f.write_str("the server ended the session"),
             Disconnect::ConnectionLost(e) => write!(f, "connection lost: {e}"),
@@ -143,6 +145,7 @@ impl Disconnect {
                 | Disconnect::Ended
                 | Disconnect::InvalidSession
                 | Disconnect::Kicked { .. }
+                | Disconnect::LockedOut(_)
         )
     }
 

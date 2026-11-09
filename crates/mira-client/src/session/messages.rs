@@ -203,6 +203,9 @@ impl Session {
                 let message = xt.field(7).unwrap_or_default();
                 let why = match required_version(message) {
                     Some(version) => Disconnect::ClientVersion(version),
+                    None if message.ends_with("Access will be restored shortly.") => {
+                        Disconnect::LockedOut(message.to_owned())
+                    }
                     None => Disconnect::Rejected(message.to_owned()),
                 };
                 self.close(why);

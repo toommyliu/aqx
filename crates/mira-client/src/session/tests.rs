@@ -4620,7 +4620,7 @@ fn waits_out_a_kick_and_gives_up_after_the_configured_attempts() {
     let (stop_in, stop) = mpsc::channel();
     let (base, api) = serve_api(replies, stop);
     let (kicked_in, kicked) = mpsc::channel();
-    let options = reconnect_every(Duration::from_millis(100), 2);
+    let options = reconnect_every(Duration::from_millis(100), 3);
     let harness = Harness::start_with_api(options, base, move |listener| {
         let port = listener.local_addr().unwrap().port();
         let kick = |peer: &mut Peer| {
@@ -4636,6 +4636,13 @@ fn waits_out_a_kick_and_gives_up_after_the_configured_attempts() {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
         kick(&mut peer);
+        replies_in.send(login_reply(TOKEN, port)).unwrap();
+        let mut peer = Peer::accept(&listener);
+        peer.expect(&packet::version_check());
+        peer.send(API_OK);
+        peer.recv();
+        peer.send("%xt%loginResponse%-1%0%-1%%Your account was automatically disconnected due to network latency or server issue.  Access will be restored shortly.%");
+        peer.wait_for_close();
         let full = json!({
             "login": {"bSuccess": 1, "sToken": TOKEN, "iUpg": 0},
             "servers": [{"sName": "Test", "sIP": "127.0.0.1", "iPort": port, "bOnline": 1,
@@ -4653,7 +4660,7 @@ fn waits_out_a_kick_and_gives_up_after_the_configured_attempts() {
     let events = harness.finish();
     stop_in.send(()).unwrap();
     let requests = api.join().unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 4, "the lockout refusal is retried");
     let first = kicked.recv().unwrap();
     let second = kicked.recv().unwrap();
     assert!(requests[0].0 - first >= Duration::from_secs(1) - SLACK);
