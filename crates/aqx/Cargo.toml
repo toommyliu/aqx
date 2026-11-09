@@ -6,7 +6,6 @@ publish.workspace = true
 
 [dependencies]
 aqx-client.workspace = true
-aqx-protocol.workspace = true
 aqx-script.workspace = true
 anyhow.workspace = true
 clap.workspace = true
@@ -25,4 +24,5 @@ tui-input.workspace = true
 unicode-width.workspace = true
 
 [dev-dependencies]
+aqx-protocol.workspace = true
 aqx-client = { workspace = true, features = ["test-support"] }

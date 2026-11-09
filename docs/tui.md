@@ -186,4 +186,3 @@ Each config gets its own session, so accounts from different `aqx.toml` files ca
 | `aqx skua update\|list [QUERY]\|path` | Download or update the Skua script library, search it, or print its folder. See [Run Skua scripts](skua.md). |
 | `aqx run -a ACCOUNT [SCRIPT] [--arg KEY=VALUE]...` | Log one account from `aqx.toml` in, run its script or the one named, and log out when it ends |
 | `aqx run ... --record FILE` | Also write every packet to `FILE` as JSON lines, with the token and personal fields redacted |
-| `aqx view FILE [--cmd NAME]... [--full]` | Print a recording one packet per line, only the named commands if any, cut at 160 characters unless `--full` |

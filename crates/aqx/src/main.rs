@@ -127,16 +127,6 @@ enum Command {
     },
     /// Print the JSON Schema of aqx.toml, for editor completion and checks.
     Schema,
-    /// Print a run --record file one packet per line.
-    View {
-        file: PathBuf,
-        /// Only show these commands, like --cmd moveToArea --cmd goto.
-        #[arg(long, value_name = "NAME")]
-        cmd: Vec<String>,
-        /// Don't cut lines at 160 characters.
-        #[arg(long)]
-        full: bool,
-    },
     /// Log in, run a script until it ends, then log out.
     Run {
         /// The script, a .ts, .js or .cs file. With --account, defaults to the account's own script.
@@ -198,9 +188,6 @@ fn main() -> ExitCode {
         Command::Schema => {
             println!("{}", config::schema());
             Ok(ExitCode::SUCCESS)
-        }
-        Command::View { file, cmd, full } => {
-            record::view(&file, &cmd, full).map(|()| ExitCode::SUCCESS)
         }
         Command::Run {
             script,
