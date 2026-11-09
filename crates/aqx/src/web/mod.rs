@@ -19,6 +19,7 @@ use crate::control::{Action, Want};
 use crate::daemon::{self, Session, Wanted};
 use crate::tui::library::{Update, list};
 use crate::tui::prompt::{self, History, Recent};
+use crate::view::{Shown, State};
 use http::{Failure, Reply, Request};
 
 pub const PORT: u16 = 4970;
@@ -161,16 +162,7 @@ impl Web {
 
     fn roster_of(&self, session: Option<&Session>) -> Result<Vec<(String, String)>, Failure> {
         if let Some(session) = session {
-            let frame = session
-                .source()
-                .frame(&Want {
-                    selected: usize::MAX,
-                    since: u64::MAX,
-                    full: false,
-                })
-                .map_err(Failure::internal)?;
-            return Ok(frame
-                .accounts
+            return Ok(shown(session)?
                 .into_iter()
                 .map(|a| (a.name, a.user))
                 .collect());
@@ -463,12 +455,19 @@ impl Web {
     }
 
     fn save_skua_options(&self, asked: OptionsRequest) -> Result<Reply, Failure> {
+        let user = self.user_of(Some(asked.account), &asked.name)?;
+        if let Some(session) = self.session()?
+            && shown(&session)?
+                .get(asked.account)
+                .is_some_and(|a| !editable(&a.state))
+        {
+            return Err(Failure::conflict(
+                "Options can change while the account is offline or idle.",
+            ));
+        }
         let home = config::skua_home().map_err(Failure::internal)?;
         let saved = match asked.tab.as_str() {
-            "corebots" => {
-                let user = self.user_of(Some(asked.account), &asked.name)?;
-                skua_options::core_bots_options(&user, &home, &asked.changes)
-            }
+            "corebots" => skua_options::core_bots_options(&user, &home, &asked.changes),
             "script" => {
                 let script = self.script_path(&asked.script)?;
                 skua_options::script_options(&script, &home, &asked.changes)
@@ -695,6 +694,22 @@ struct Outcome {
     error: Option<String>,
 }
 
+fn shown(session: &Session) -> Result<Vec<Shown>, Failure> {
+    let frame = session
+        .source()
+        .frame(&Want {
+            selected: usize::MAX,
+            since: u64::MAX,
+            full: false,
+        })
+        .map_err(Failure::internal)?;
+    Ok(frame.accounts)
+}
+
+fn editable(state: &State) -> bool {
+    matches!(state, State::Offline { .. } | State::Online)
+}
+
 fn all_servers() -> Result<Reply, Failure> {
     let device = aqx_client::DeviceId::load().map_err(Failure::internal)?;
     let servers = aqx_client::api::servers(&device).map_err(Failure::internal)?;
@@ -903,5 +918,20 @@ mod tests {
             .map(|(arg, value)| (arg.name.as_str(), *value))
             .collect();
         assert_eq!(values, [("target", "7500"), ("leader", "player1")]);
+    }
+
+    #[test]
+    fn skua_options_save_only_while_the_account_is_offline_or_idle() {
+        let states = [
+            State::Offline { why: None },
+            State::Online,
+            State::Busy(crate::view::Step::LoggingIn),
+            State::Reconnecting(String::new()),
+            State::Running,
+            State::Paused,
+            State::Stalled,
+        ];
+        let saves: Vec<bool> = states.iter().map(editable).collect();
+        assert_eq!(saves, [true, true, false, false, false, false, false]);
     }
 }
