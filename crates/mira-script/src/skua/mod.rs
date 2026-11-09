@@ -361,6 +361,7 @@ impl SkuaScript {
         let mut actions: HashMap<ActionId, (RequestId, Pending)> = HashMap::new();
         let mut ended = false;
         let mut offline = false;
+        let mut awaiting_online = None;
         let mut listening = [false; 2];
         let mut stopping = None;
         if self.cancel.is_cancelled() {
@@ -569,21 +570,13 @@ impl SkuaScript {
                         }
                         Call::AwaitOnline => {
                             relogging = Some((id, Instant::now() + AWAIT_ONLINE));
-                            let (session, tx) = (session.clone(), tx.clone());
-                            thread::spawn(move || {
-                                let result = loop {
-                                    match &session.snapshot().phase {
-                                        Phase::Ready => break Ok(()),
-                                        Phase::Closed { reason } => {
-                                            break Err(format!(
-                                                "the account stayed offline: {reason}"
-                                            ));
-                                        }
-                                        _ => thread::sleep(Duration::from_millis(100)),
-                                    }
-                                };
-                                let _ = tx.send(Wake::Online(id, result));
-                            });
+                            if let Phase::Closed { reason } = &session.snapshot().phase {
+                                let _ = tx.send(Wake::Online(id, Err(stayed_offline(reason))));
+                            } else if offline {
+                                awaiting_online = Some(id);
+                            } else {
+                                let _ = tx.send(Wake::Online(id, Ok(())));
+                            }
                             continue;
                         }
                         Call::CancelRelogin { request } => {
@@ -636,11 +629,19 @@ impl SkuaScript {
                     {
                         send(&mut stdin, &message)?;
                     }
-                    if matches!(
-                        update,
-                        Update::Event(mira_client::Event::Phase(Phase::Ready))
-                    ) {
-                        offline = false;
+                    match &update {
+                        Update::Event(mira_client::Event::Phase(Phase::Ready)) => {
+                            offline = false;
+                            if let Some(id) = awaiting_online.take() {
+                                let _ = tx.send(Wake::Online(id, Ok(())));
+                            }
+                        }
+                        Update::Event(mira_client::Event::Phase(Phase::Closed { reason })) => {
+                            if let Some(id) = awaiting_online.take() {
+                                let _ = tx.send(Wake::Online(id, Err(stayed_offline(reason))));
+                            }
+                        }
+                        _ => {}
                     }
                     match update {
                         Update::Event(mira_client::Event::Phase(
@@ -683,6 +684,23 @@ impl SkuaScript {
                             )?;
                         }
                         Update::Done { id, result } => {
+                            if let Err(mira_client::ActionError::Closed(reason)) = &result
+                                && !offline
+                                && !suppress_close
+                                && relogging.is_none()
+                                && stopping.is_none()
+                            {
+                                offline = true;
+                                send(
+                                    &mut stdin,
+                                    &Message::Disconnected {
+                                        disconnected: matches!(
+                                            reason,
+                                            mira_client::Disconnect::Kicked { .. }
+                                        ),
+                                    },
+                                )?;
+                            }
                             if let Some((request, _)) = actions.remove(&id) {
                                 send(&mut stdin, &reply(request, result))?;
                             }
@@ -815,6 +833,9 @@ impl Drop for Process {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+fn stayed_offline(reason: &mira_client::Disconnect) -> String {
+    format!("the account stayed offline: {reason}")
 }
 fn reply(reply: RequestId, result: Result<(), mira_client::ActionError>) -> Message {
     match result {

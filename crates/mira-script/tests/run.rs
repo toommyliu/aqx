@@ -2011,6 +2011,55 @@ fn logout_and_restart_end_the_run_their_own_way() {
 }
 
 #[test]
+fn a_kick_during_an_action_ends_the_run_as_a_disconnect_so_it_can_restart() {
+    let options = Options {
+        reconnect: Some(mira_client::Reconnect::new(
+            "pass1".into(),
+            Duration::from_secs(60),
+        )),
+        ..Options::default()
+    };
+    let harness = Harness::start(options, |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        peer.expect(&packet::transfer("player1", "yulgar-1"));
+        peer.send("%xt%logoutWarning%-1%%30%");
+        thread::sleep(Duration::from_millis(200));
+        peer.send("<msg t='sys'><body action='logout' r='0'></body></msg>");
+        peer.wait_for_close();
+    });
+    harness.session.ready().wait().unwrap();
+    let dir = Dir::new();
+    let path = dir.file(
+        "main.ts",
+        r#"import { map } from "mira";
+        export default function* () {
+          yield* map.join("yulgar-1");
+        }"#,
+    );
+    let (outcome, _) = run_in(&harness, &path, &Cancel::default(), |_| {});
+    assert_eq!(
+        outcome,
+        Ok(Outcome::Disconnected(
+            "the server kicked the account; it can log in again in 30 s".into()
+        ))
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !matches!(
+        harness.session.snapshot().phase,
+        mira_client::Phase::Reconnecting { .. }
+    ) {
+        assert!(
+            Instant::now() < deadline,
+            "the session never started reconnecting"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    harness.session.logout();
+    harness.finish();
+}
+
+#[test]
 fn a_dropped_connection_ends_the_run_and_auto_relogin_decides_whether_the_account_comes_back() {
     for (on, top_level) in [(true, false), (false, false), (false, true)] {
         let (logged, drop_now) = mpsc::channel::<()>();

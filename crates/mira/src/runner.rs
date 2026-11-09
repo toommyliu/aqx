@@ -3,7 +3,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const CLOSING: Duration = Duration::from_secs(10);
 
 use mira_client::{DeviceId, Event, Handle, Options, Phase, Reconnect, Server, api};
 use mira_script::skua::SkuaScript;
@@ -164,7 +166,7 @@ pub fn drive(
         note(Note::Session(&session));
         match ended.outcome {
             Outcome::Restart => note(Note::Restarting),
-            Outcome::Disconnected(why) if reconnecting(&session) => {
+            Outcome::Disconnected(why) if reconnecting(&session, &job.cancel) => {
                 note(Note::Reconnecting(&why));
                 match back_online(&session, &job.cancel) {
                     Some(Phase::Ready) => note(Note::Restarting),
@@ -212,8 +214,17 @@ pub fn drive(
     }
 }
 
-fn reconnecting(session: &Handle) -> bool {
-    matches!(session.snapshot().phase, Phase::Reconnecting { .. })
+fn reconnecting(session: &Handle, cancel: &Cancel) -> bool {
+    let until = Instant::now() + CLOSING;
+    loop {
+        match session.snapshot().phase {
+            Phase::Reconnecting { .. } => return true,
+            Phase::Ready if Instant::now() < until && !cancel.is_cancelled() => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            _ => return false,
+        }
+    }
 }
 
 fn back_online(session: &Handle, cancel: &Cancel) -> Option<Phase> {

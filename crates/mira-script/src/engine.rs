@@ -317,6 +317,16 @@ impl<'js> Engine<'js> {
                 }
                 Ok(Wake::Update(_, Update::State)) => continue,
                 Ok(Wake::Update(_, Update::Packet(Direction::Out, _))) => {}
+                Ok(Wake::Update(
+                    _,
+                    Update::Done {
+                        result: Err(ActionError::Closed(reason)),
+                        ..
+                    },
+                )) => {
+                    self.closed = Some(reason.to_string());
+                    return Ok(());
+                }
                 Ok(Wake::Update(_, Update::Done { id, result })) => self.answer(id, result)?,
                 Ok(Wake::External(id, external)) => {
                     self.on_external(id, external)?;

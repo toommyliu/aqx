@@ -168,6 +168,40 @@ public class Reconnected {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn a_kick_while_an_action_waits_still_restarts_the_script() {
+    let (outcome, logs, _) = Fake::reconnecting(|msg, wire| {
+        if msg.contains("%tfer%") {
+            wire.send("%xt%logoutWarning%-1%%1%");
+            std::thread::sleep(Duration::from_millis(200));
+            wire.hang_up();
+        }
+    })
+    .run_account(
+        r#"
+using System;
+using Skua.Core.Interfaces;
+public class KickedMidJoin {
+    public void ScriptMain(IScriptInterface bot) {
+        bool again = Environment.GetEnvironmentVariable("MIRA_TEST_RUN") == "1";
+        bot.Log($"run again {again}");
+        if (again) return;
+        Environment.SetEnvironmentVariable("MIRA_TEST_RUN", "1");
+        bot.Map.Join("yulgar");
+        bot.Log("join returned");
+    }
+}
+"#,
+        &Cancel::default(),
+        Default::default(),
+        Arc::new(LoginAccount::default()),
+        |_| {},
+    );
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert!(logs.contains(&"run again True".into()), "{logs:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn turning_auto_relogin_off_leaves_the_account_logged_out() {
     let (outcome, logs, sent) = Fake::reconnecting(|msg, wire| {
         if msg == "disconnect" {
