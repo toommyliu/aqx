@@ -837,7 +837,7 @@ function SkuaOptions(props: { script: string }) {
   const account = acting()[0] ?? selected() ?? 0;
   const client = useQueryClient();
   const key = ["skuaOptions", account, props.script];
-  const name = nameOf(account);
+  const name = accounts[account]?.name ?? "";
   const options = createQuery(() => ({ queryKey: key, queryFn: () => api.skuaOptions(account, name, props.script), staleTime: 0 }));
   const loaded = () => options.data;
   const [tab, setTab] = optionsTab;
