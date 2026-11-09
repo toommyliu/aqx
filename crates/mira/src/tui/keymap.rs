@@ -28,6 +28,7 @@ pub(super) enum Command {
     Stop,
     Restart,
     Pause,
+    SwitchServer,
     View(View),
     PreviousChannel,
     NextChannel,
@@ -143,6 +144,12 @@ pub(super) const COMMANDS: &[Entry] = &[
         "pause",
         &["p"],
         "Pause the script, or resume it.",
+    ),
+    entry(
+        Command::SwitchServer,
+        "switch_server",
+        &["c"],
+        "Log in to another server, then run the script again.",
     ),
     entry(
         Command::View(View::Log),

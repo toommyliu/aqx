@@ -65,6 +65,7 @@ These keys act on the marked accounts, or on the selected one when nothing is ma
 | `O` | Type a script path and `key=value` args. `tab` completes, and `↑` recalls an earlier run. |
 | `s`, `r` | Stop or restart the script. Stopping also leaves combat. |
 | `p` | Pause the script, or resume it. A pause lets the current step finish, such as a kill in progress, then holds the script. Skua scripts can't pause. |
+| `c` | Log in to another server, then run the script that was running. The list marks the servers that are offline or full, and members-only servers when the account is online and free, and won't switch to them. The account stays on the new server until it logs out, auto relogin included. Logging out, or a script's `auth.logout()`, sends the next login back to the `server` in `mira.toml`. |
 | `x` | Log out |
 
 These act on the focused pane:
@@ -152,9 +153,9 @@ A key is a character such as `o`, `O` or `?`, or one of `up`, `down`, `left`, `r
 | `stop` | `s` | `wider_sidebar` | `>` |
 | `restart` | `r` | `page_up` | `pageup` |
 | `pause` | `p` | `page_down` | `pagedown` |
-| `help` | `?` | `oldest` | `home` |
-| `detach` | `q` | `newest` | `end` |
-| `end_session` | `Q` | | |
+| `switch_server` | `c` | `oldest` | `home` |
+| `help` | `?` | `newest` | `end` |
+| `detach` | `q` | `end_session` | `Q` |
 
 ### Script args
 

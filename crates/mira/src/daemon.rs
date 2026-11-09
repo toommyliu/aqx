@@ -5,6 +5,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
@@ -13,7 +14,7 @@ use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{self, Script};
-use crate::control::{Action, Frame, Source, Want};
+use crate::control::{Action, Frame, ServerChoice, Source, Want};
 use crate::fleet::{Fleet, LastLines, Line};
 
 const STARTUP: Duration = Duration::from_secs(10);
@@ -29,6 +30,7 @@ enum Request {
     Hello,
     Frame(Want),
     Act { account: usize, action: Action },
+    Servers { accounts: Vec<usize> },
     Configured,
     Resumable,
     LastLines,
@@ -50,6 +52,7 @@ enum Reply {
     Done,
     Refused(String),
     Configured(Vec<Script>),
+    Servers(Vec<ServerChoice>),
     Resumable(Vec<(String, Option<Script>)>),
     LastLines(Vec<LastLines>),
 }
@@ -101,7 +104,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 const BUILD: &str = env!("MIRA_BUILD");
 
 pub struct Session {
@@ -168,7 +171,7 @@ impl Session {
 
 pub fn connect(socket: &Path) -> Option<Session> {
     let stream = UnixStream::connect(socket).ok()?;
-    let remote = Remote::new(stream).ok()?;
+    let remote = Remote::new(stream, socket).ok()?;
     match remote.request(&Request::Hello) {
         Ok(Reply::Hello {
             protocol,
@@ -205,14 +208,16 @@ pub fn sessions() -> anyhow::Result<Vec<Session>> {
 
 struct Remote {
     io: Mutex<(BufReader<UnixStream>, UnixStream)>,
+    socket: PathBuf,
 }
 
 impl Remote {
-    fn new(stream: UnixStream) -> std::io::Result<Remote> {
+    fn new(stream: UnixStream, socket: &Path) -> std::io::Result<Remote> {
         stream.set_read_timeout(Some(REPLY_WITHIN))?;
         let reader = BufReader::new(stream.try_clone()?);
         Ok(Remote {
             io: Mutex::new((reader, stream)),
+            socket: socket.to_path_buf(),
         })
     }
 
@@ -257,6 +262,25 @@ impl Source for Remote {
             Reply::Refused(why) => Err(why),
             other => Err(format!("the session answered {other:?}")),
         }
+    }
+
+    fn servers(&self, accounts: &[usize]) -> Receiver<Result<Vec<ServerChoice>, String>> {
+        let (tx, rx) = mpsc::channel();
+        let socket = self.socket.clone();
+        let accounts = accounts.to_vec();
+        thread::spawn(move || {
+            let asked = UnixStream::connect(&socket)
+                .and_then(|stream| Remote::new(stream, &socket))
+                .map_err(|_| "the mira session ended".to_owned())
+                .and_then(|remote| remote.request(&Request::Servers { accounts }));
+            let _ = tx.send(match asked {
+                Ok(Reply::Servers(servers)) => Ok(servers),
+                Ok(Reply::Refused(why)) => Err(why),
+                Ok(other) => Err(format!("the session answered {other:?}")),
+                Err(why) => Err(why),
+            });
+        });
+        rx
     }
 
     fn configured(&self) -> Vec<Script> {
@@ -444,7 +468,12 @@ impl Server {
                     Err(why) => Reply::Refused(why),
                 },
                 Ok(Request::Act {
-                    action: Action::Login | Action::Relogin | Action::Restart | Action::Run(_),
+                    action:
+                        Action::Login
+                        | Action::Relogin
+                        | Action::Switch(_)
+                        | Action::Restart
+                        | Action::Run(_),
                     ..
                 }) if self.down.load(Ordering::SeqCst) => {
                     Reply::Refused("the session is ending".into())
@@ -452,6 +481,11 @@ impl Server {
                 Ok(Request::Act { account, action }) => match self.fleet.act(account, action) {
                     Ok(()) => Reply::Done,
                     Err(why) => Reply::Refused(why),
+                },
+                Ok(Request::Servers { accounts }) => match self.fleet.servers(&accounts).recv() {
+                    Ok(Ok(servers)) => Reply::Servers(servers),
+                    Ok(Err(why)) => Reply::Refused(why),
+                    Err(_) => Reply::Refused("the server list didn't arrive".into()),
                 },
                 Ok(Request::Configured) => Reply::Configured(self.fleet.configured()),
                 Ok(Request::Resumable) => Reply::Resumable(self.fleet.resumable()),
@@ -665,6 +699,11 @@ mod tests {
         assert!(source.frame(&later).unwrap().log.is_empty());
         assert_eq!(source.act(0, Action::Logout), Err("already offline".into()));
         assert_eq!(source.act(7, Action::Stop), Err("no such account".into()));
+        assert_eq!(
+            source.servers(&[7]).recv().unwrap(),
+            Err("no such account".into()),
+            "the server list comes back over its own connection"
+        );
         assert!(
             session.resumable().unwrap().is_empty(),
             "nobody is online to resume"
@@ -877,6 +916,7 @@ mod tests {
             Action::Pause,
             Action::Resume,
             Action::Relogin,
+            Action::Switch("Twilly".into()),
             Action::Run(script.clone()),
             Action::PickUp(vec![1]),
         ];
@@ -888,6 +928,7 @@ mod tests {
         let mut requests = vec![
             Request::Hello,
             Request::Frame(want),
+            Request::Servers { accounts: vec![0] },
             Request::Configured,
             Request::Resumable,
             Request::LastLines,
@@ -914,6 +955,13 @@ mod tests {
             Reply::Done,
             Reply::Refused(String::new()),
             Reply::Configured(vec![script.clone()]),
+            Reply::Servers(vec![ServerChoice {
+                name: "Twilly".into(),
+                players: 1,
+                capacity: 2,
+                members: false,
+                refusal: Some("is full".into()),
+            }]),
             Reply::Resumable(vec![("player1".into(), Some(script))]),
             Reply::LastLines(vec![LastLines {
                 name: "player1".into(),
@@ -965,7 +1013,8 @@ mod tests {
              =LoggingIn =Online =Paused =Resumable =Running =Stalled =chat =game =login \
              =logout =mira =pause =relogin =restart =resume =script =server =stop Act \
              Act.account Act.action Act.action.pick_up Act.action.run Act.action.run.args \
-             Act.action.run.path Busy Configured Configured.args Configured.path Frame \
+             Act.action.run.path Act.action.switch Busy Configured Configured.args \
+             Configured.path Frame \
              Frame.accounts Frame.accounts.game Frame.accounts.game.area \
              Frame.accounts.game.auras Frame.accounts.game.auras.name \
              Frame.accounts.game.auras.stacks Frame.accounts.game.away \
@@ -1011,10 +1060,12 @@ mod tests {
              Hello.build Hello.config Hello.protocol Hello.started_ms LastLines \
              LastLines.lines LastLines.lines.at_ms LastLines.lines.channel \
              LastLines.lines.seq LastLines.lines.text LastLines.name LastLines.user Offline \
-             Offline.why Reconnecting Refused Resumable Resumable.args Resumable.path";
+             Offline.why Reconnecting Refused Resumable Resumable.args Resumable.path Servers \
+             Servers.accounts Servers.capacity Servers.members Servers.name Servers.players \
+             Servers.refusal";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (1, pinned),
+            (2, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

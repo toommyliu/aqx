@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthChar;
 
 use super::keymap::{COMMANDS, Command};
 use super::library::{Catalog, Picker, Tab as PickerTab};
+use super::servers::{Listing, Servers};
 use super::skua::{Pane, Skua, Tab};
 use super::{App, Filter, Hit, Rebind, Scope, Section, View};
 use crate::fleet::{Channel, Line as LogLine};
@@ -61,6 +62,7 @@ pub(super) const KEY_GROUPS: [(&str, &[KeyRow]); 4] = [
             (&[Command::TypeScript], "type a script"),
             (&[Command::Stop, Command::Restart], "stop / restart"),
             (&[Command::Pause], "pause / resume"),
+            (&[Command::SwitchServer], "switch server"),
         ],
     ),
     (
@@ -346,6 +348,9 @@ pub(super) fn draw(f: &mut Frame, app: &App, shown: &[Shown]) {
     draw_footer(f, footer, app, shown);
     if let Some(picker) = &app.picker {
         draw_picker(f, body, app, picker);
+    }
+    if let Some(servers) = &app.servers {
+        draw_servers(f, body, servers);
     }
     if let Some(skua) = &app.skua {
         draw_skua(f, body, app, skua, shown.get(skua.account));
@@ -644,6 +649,18 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, shown: &[Shown]) {
             ))),
             area,
         );
+    }
+    if let Some(servers) = &app.servers {
+        let keys: &[(&str, &str)] = match servers.listing {
+            Listing::Ready(_) => &[("↑↓", "pick"), ("enter", "switch"), ("esc", "close")],
+            _ => &[("esc", "close")],
+        };
+        let line = [
+            vec![Span::raw(format!(" switch {who}   ")).bold()],
+            hints(keys),
+        ]
+        .concat();
+        return f.render_widget(Paragraph::new(Line::from(clip(line, width))), area);
     }
     if let Some(picker) = &app.picker {
         let keys: &[(&str, &str)] = match (picker.searching, picker.tab) {
@@ -2198,6 +2215,62 @@ fn cut(text: &str, width: usize, most: usize) -> Vec<String> {
         *last = wrap(last, width.saturating_sub(1))[0].to_owned() + "…";
     }
     kept
+}
+
+fn draw_servers(f: &mut Frame, area: Rect, servers: &Servers) {
+    f.buffer_mut()
+        .set_style(area, Style::new().fg(Color::DarkGray));
+    let mut lines = match &servers.listing {
+        Listing::Loading(_) => vec![Line::raw("Loading the server list…").dark_gray()],
+        Listing::Failed(why) => {
+            vec![Line::raw(format!("Couldn't load the server list: {why}")).red()]
+        }
+        Listing::Ready(list) if list.is_empty() => vec![Line::raw("The server list is empty.")],
+        Listing::Ready(list) => {
+            let name_width = list
+                .iter()
+                .map(|s| s.name.chars().count())
+                .max()
+                .unwrap_or(0);
+            list.iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    let load = format!("{}/{}", s.players, s.capacity);
+                    let mut notes = Vec::new();
+                    if s.name.eq_ignore_ascii_case(&servers.current) {
+                        notes.push("current");
+                    }
+                    match s.refusal.as_deref() {
+                        Some(why) => notes.push(why.strip_prefix("is ").unwrap_or(why)),
+                        None if s.members => notes.push("members"),
+                        None => {}
+                    }
+                    let text = format!("{:name_width$}  {load:>11}  {}", s.name, notes.join(", "));
+                    let row = Line::raw(text);
+                    let row = if s.refusal.is_some() {
+                        row.dark_gray()
+                    } else {
+                        row.white()
+                    };
+                    if i == servers.cursor {
+                        row.reversed()
+                    } else {
+                        row
+                    }
+                })
+                .collect()
+        }
+    };
+    if let Some(why) = &servers.refused {
+        lines.extend([Line::default(), Line::raw(why.clone()).red()]);
+    }
+    let widest = lines.iter().map(Line::width).max().unwrap_or(0).max(32) as u16;
+    let rect = centered(area, widest + 4, lines.len() as u16 + 2);
+    f.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(" Servers ")
+        .padding(Padding::horizontal(1));
+    f.render_widget(Paragraph::new(lines).block(block), rect);
 }
 
 fn draw_picker(f: &mut Frame, area: Rect, app: &App, picker: &Picker) {

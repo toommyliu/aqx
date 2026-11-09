@@ -1,3 +1,4 @@
+use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use mira_client::ItemId;
@@ -32,13 +33,24 @@ pub enum Action {
     Pause,
     Resume,
     Relogin,
+    Switch(String),
     Run(Script),
     PickUp(Vec<i64>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerChoice {
+    pub name: String,
+    pub players: u32,
+    pub capacity: u32,
+    pub members: bool,
+    pub refusal: Option<String>,
 }
 
 pub trait Source {
     fn frame(&self, want: &Want) -> Result<Frame, String>;
     fn act(&self, account: usize, action: Action) -> Result<(), String>;
+    fn servers(&self, accounts: &[usize]) -> Receiver<Result<Vec<ServerChoice>, String>>;
     fn configured(&self) -> Vec<Script>;
     fn end(&self) -> Result<(), String>;
 }
@@ -77,6 +89,7 @@ impl Source for Fleet {
                 account.relogin();
                 Ok(())
             }
+            Action::Switch(server) => account.switch(server),
             Action::Run(script) => {
                 account.run(script);
                 Ok(())
@@ -84,6 +97,10 @@ impl Source for Fleet {
             Action::PickUp(ids) => account.pick_up(ids.into_iter().map(ItemId).collect()),
         }
         .map_err(str::to_owned)
+    }
+
+    fn servers(&self, accounts: &[usize]) -> Receiver<Result<Vec<ServerChoice>, String>> {
+        self.server_choices(accounts)
     }
 
     fn end(&self) -> Result<(), String> {

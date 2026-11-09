@@ -4,6 +4,7 @@ mod keymap;
 mod library;
 mod mask;
 mod prompt;
+mod servers;
 mod skua;
 #[cfg(test)]
 mod tests;
@@ -33,6 +34,7 @@ pub use keymap::{Keymap, SCHEMA_NAME as KEYS_SCHEMA_NAME, keymap_path, schema as
 use library::{Picker, Update};
 use mask::Mask;
 use prompt::{History, Prompt, Recent};
+use servers::Servers;
 use skua::Skua;
 
 const NOTE_FOR: Duration = Duration::from_secs(4);
@@ -197,6 +199,7 @@ struct App {
     skua: Option<Skua>,
     picker: Option<Picker>,
     picker_tab: library::Tab,
+    servers: Option<Servers>,
     update: Option<Update>,
     targets: Vec<(String, Option<String>)>,
     share_args: bool,
@@ -243,6 +246,9 @@ pub fn run(
         app.frame = (started.elapsed().as_millis() / FRAME.as_millis()) as usize;
         if let Some(skua) = &mut app.skua {
             skua.poll();
+        }
+        if let Some(servers) = &mut app.servers {
+            servers.poll();
         }
         app.poll_update();
         let shown = match gather(source, &mut app) {
@@ -654,7 +660,7 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent, shown: &[Shown]) {
-        if self.picker.is_some() {
+        if self.picker.is_some() || self.servers.is_some() {
             return;
         }
         match mouse.kind {
@@ -884,6 +890,18 @@ impl App {
             }
             return None;
         }
+        if let Some(servers) = &mut self.servers {
+            match servers.key(key) {
+                servers::Outcome::Close => self.servers = None,
+                servers::Outcome::Switch(server) => {
+                    self.servers = None;
+                    let done = format!("switching to {server}");
+                    self.act(source, &done, Action::Switch(server));
+                }
+                servers::Outcome::Nothing => {}
+            }
+            return None;
+        }
         if let Some(picker) = &mut self.picker {
             let outcome = picker.key(key);
             self.picker_tab = picker.tab;
@@ -986,6 +1004,12 @@ impl App {
             }
             Command::Pause => self.act(source, "paused", Action::Pause),
             Command::PickScript => self.open_picker(),
+            Command::SwitchServer => {
+                if let Some(account) = shown.get(self.selected) {
+                    let listed = source.servers(&self.targets());
+                    self.servers = Some(Servers::open(account.server.clone(), listed));
+                }
+            }
             Command::TypeScript => self.prompt = Some(Prompt::new(&self.home)),
             Command::Mark if picking => {
                 if let Some(drop) = self.drops(shown).get(self.cursor)

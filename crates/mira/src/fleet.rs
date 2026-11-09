@@ -13,6 +13,7 @@ use mira_script::{Cancel, Level, Outcome, Output};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{self, OnStall, Script};
+use crate::control::ServerChoice;
 use crate::describe::describe;
 use crate::runner::{self, Job, Login, Note};
 
@@ -162,6 +163,7 @@ pub struct Board {
     queued_logins: usize,
     last_progress: Instant,
     stalled: bool,
+    switched: Option<String>,
 }
 
 impl Default for Board {
@@ -181,6 +183,7 @@ impl Default for Board {
             queued_logins: 0,
             last_progress: Instant::now(),
             stalled: false,
+            switched: None,
         }
     }
 }
@@ -280,6 +283,7 @@ pub struct Account {
     pub name: String,
     pub user: String,
     pub server: String,
+    api: Option<String>,
     script: Option<Script>,
     restart_on_error: bool,
     room: Option<u32>,
@@ -314,6 +318,32 @@ impl Account {
 
     pub fn idle(&self) -> bool {
         self.board().idle()
+    }
+
+    fn server_for(&self, board: &Board) -> String {
+        board
+            .switched
+            .clone()
+            .unwrap_or_else(|| self.server.clone())
+    }
+
+    pub fn switch(&self, server: String) -> Result<(), &'static str> {
+        {
+            let mut board = self.board();
+            if let Link::Session {
+                session,
+                server: on,
+                ..
+            } = &board.link
+                && on.eq_ignore_ascii_case(&server)
+                && !closed(session)
+            {
+                return Err("already on that server");
+            }
+            board.switched = Some(server);
+        }
+        self.relogin();
+        Ok(())
     }
 
     pub fn relogin(&self) {
@@ -433,6 +463,7 @@ impl Account {
 
     pub fn logout(&self) -> Result<(), &'static str> {
         let mut board = self.board();
+        board.switched = None;
         board.runs += 1;
         board.links += 1;
         let pending = board.queued_runs + board.queued_logins > 0;
@@ -562,6 +593,52 @@ impl Fleet {
             .clone()
     }
 
+    pub fn server_choices(
+        &self,
+        accounts: &[usize],
+    ) -> Receiver<Result<Vec<ServerChoice>, String>> {
+        let (tx, rx) = mpsc::channel();
+        let all = self.accounts();
+        let Some(targets) = accounts
+            .iter()
+            .map(|&i| all.get(i).cloned())
+            .collect::<Option<Vec<_>>>()
+            .filter(|t| !t.is_empty())
+        else {
+            let _ = tx.send(Err("no such account".into()));
+            return rx;
+        };
+        let device = self.device.clone();
+        let free = targets.iter().any(|account| {
+            account
+                .board()
+                .session()
+                .filter(|s| !closed(s))
+                .is_some_and(|s| s.snapshot().me.as_ref().is_some_and(|me| !me.member))
+        });
+        let account = Arc::clone(&targets[0]);
+        thread::spawn(move || {
+            let listed = match &account.api {
+                Some(host) => api::servers_on(host, &device),
+                None => api::servers(&device),
+            };
+            let choices = listed.map_err(|e| e.to_string()).map(|servers| {
+                servers
+                    .iter()
+                    .map(|server| ServerChoice {
+                        name: server.name.clone(),
+                        players: server.players,
+                        capacity: server.capacity,
+                        members: server.members_only,
+                        refusal: server.refusal(!free).map(str::to_owned),
+                    })
+                    .collect()
+            });
+            let _ = tx.send(choices);
+        });
+        rx
+    }
+
     pub fn add_new(&self, configs: Vec<config::Account>) -> Vec<String> {
         let mut accounts = self
             .accounts
@@ -588,6 +665,7 @@ impl Fleet {
             name: config.name,
             user: config.user.clone(),
             server: config.server,
+            api: config.api.clone(),
             script: config.script,
             restart_on_error: config.restart_on_error,
             room: config.room,
@@ -880,8 +958,7 @@ impl Linked {
     }
 
     fn ensure_online(&self, link: u64, login: bool) -> Option<(Handle, String)> {
-        let server = self.account.server.clone();
-        {
+        let server = {
             let mut board = self.account.board();
             if login {
                 board.queued_logins -= 1;
@@ -899,7 +976,8 @@ impl Linked {
             board.link = Link::Connecting;
             board.stats = Stats::default();
             board.rep_from.clear();
-        }
+            self.account.server_for(&board)
+        };
         self.account.say(format!("logging in to {server}"));
         let (attempts, mut delay) = match self.login.relogin {
             Some(relogin) => (relogin.attempts.unwrap_or(u32::MAX).max(1), relogin.delay),
@@ -1046,9 +1124,12 @@ impl Linked {
                         runner::drive(&job, loaded, &args, &relogin, session, server, |note| {
                             match note {
                                 Note::Session(session) => {
-                                    let server = match &self.account.board().link {
-                                        Link::Session { server, .. } => server.clone(),
-                                        _ => self.account.server.clone(),
+                                    let server = {
+                                        let board = self.account.board();
+                                        match &board.link {
+                                            Link::Session { server, .. } => server.clone(),
+                                            _ => self.account.server_for(&board),
+                                        }
                                     };
                                     self.attach(session, &server);
                                 }
@@ -1059,6 +1140,9 @@ impl Linked {
                             }
                         });
                     self.attach(&ran.session, &ran.server);
+                    if matches!(ran.outcome, Outcome::LoggedOut) {
+                        self.account.board().switched = None;
+                    }
                     let how = match ran.outcome {
                         Outcome::Finished => Ended::Finished,
                         Outcome::Stopped(reason) => Ended::Stopped(reason),
@@ -1160,6 +1244,7 @@ impl Account {
             name: name.into(),
             user: name.into(),
             server: "Test".into(),
+            api: None,
             script,
             restart_on_error: false,
             room: None,
@@ -1304,6 +1389,30 @@ mod tests {
                 Some("/srv/farm.ts".into())
             ]
         );
+    }
+
+    #[test]
+    fn a_switched_server_holds_until_a_logout() {
+        let (account, inbox) = Account::queueing("player1", Some(farm()));
+        assert_eq!(account.switch("Twilly".into()), Ok(()));
+        let linked = linked(account);
+        let taken: Vec<Option<PathBuf>> = (0..3).map(|_| take(&linked, &inbox)).collect();
+        assert_eq!(
+            taken,
+            [
+                Some("logout".into()),
+                Some("login".into()),
+                Some("/srv/farm.ts".into())
+            ],
+            "a switch logs out, back in, and reruns the script"
+        );
+        let account = &linked.account;
+        let login_server = || account.server_for(&account.board());
+        assert_eq!(login_server(), "Twilly");
+        account.relogin();
+        assert_eq!(login_server(), "Twilly", "a relogin keeps it");
+        let _ = account.logout();
+        assert_eq!(login_server(), "Test");
     }
 
     #[test]

@@ -37,6 +37,18 @@ impl Server {
     pub fn full(&self) -> bool {
         self.capacity > 0 && self.players >= self.capacity
     }
+
+    pub fn refusal(&self, member: bool) -> Option<&'static str> {
+        if self.members_only && !member {
+            Some("is for members only")
+        } else if !self.online {
+            Some("is offline")
+        } else if self.full() {
+            Some("is full")
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -298,16 +310,10 @@ impl Account {
                 names.join(", ")
             )));
         };
-        let refusal = if server.members_only && !self.member {
-            "is for members only"
-        } else if !server.online {
-            "is offline"
-        } else if server.full() {
-            "is full"
-        } else {
-            return Ok(server);
-        };
-        Err(ApiError::NoServer(format!("{} {refusal}", server.name)))
+        match server.refusal(self.member) {
+            Some(refusal) => Err(ApiError::NoServer(format!("{} {refusal}", server.name))),
+            None => Ok(server),
+        }
     }
 }
 

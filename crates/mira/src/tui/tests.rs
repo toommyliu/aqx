@@ -6,7 +6,10 @@ use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::style::Color;
 
+use std::sync::mpsc::{self, Receiver};
+
 use super::*;
+use crate::control::ServerChoice;
 use crate::fleet::{Fleet, Stats};
 use crate::view::{Game, Player, QuestProgress, Shown, Stack, Standing, State};
 
@@ -774,6 +777,10 @@ impl Source for Frozen {
         Ok(())
     }
 
+    fn servers(&self, _: &[usize]) -> Receiver<Result<Vec<ServerChoice>, String>> {
+        mpsc::channel().1
+    }
+
     fn configured(&self) -> Vec<crate::config::Script> {
         Vec::new()
     }
@@ -1259,6 +1266,25 @@ impl Source for Acts {
     fn act(&self, account: usize, action: Action) -> Result<(), String> {
         self.0.borrow_mut().push((account, action));
         Ok(())
+    }
+
+    fn servers(&self, _: &[usize]) -> Receiver<Result<Vec<ServerChoice>, String>> {
+        let choice = |name: &str, players, refusal: Option<&str>, members| ServerChoice {
+            name: name.into(),
+            players,
+            capacity: 1000,
+            members,
+            refusal: refusal.map(str::to_owned),
+        };
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(vec![
+            choice("Twilly", 900, None, false),
+            choice("Gravelyn", 1000, Some("is full"), false),
+            choice("Sir Ver", 10, None, true),
+            choice("Yorumi", 0, Some("is offline"), false),
+        ]))
+        .unwrap();
+        rx
     }
 
     fn configured(&self) -> Vec<crate::config::Script> {
@@ -1853,4 +1879,66 @@ fn arrows_move_between_cards_on_the_dashboard() {
     );
     press(&mut app, &shown, KeyCode::Enter);
     assert!(!app.grid, "enter opens the account");
+}
+
+#[test]
+fn switching_servers_relogs_the_marked_accounts_onto_an_open_server() {
+    let shown = [farmer("player1"), farmer("player2")];
+    let source = Acts(RefCell::new(Vec::new()));
+    let mut app = App {
+        names: vec!["player1".into(), "player2".into()],
+        marked: BTreeSet::from([0, 1]),
+        ..App::default()
+    };
+    let key = |app: &mut App, code| app.handle(KeyEvent::from(code), &source, &shown);
+    let footer = |app: &App| {
+        screen(app, &shown, 150, 30)
+            .lines()
+            .last()
+            .unwrap()
+            .to_owned()
+    };
+    key(&mut app, KeyCode::Char('c'));
+    let s = screen(&app, &shown, 150, 30);
+    assert!(
+        row(&s, "900/1000").contains("Twilly       900/1000  current"),
+        "{s}"
+    );
+    assert!(row(&s, "Gravelyn").contains("full"), "{s}");
+    assert!(row(&s, "Sir Ver").contains("members"), "{s}");
+    assert!(row(&s, "Yorumi").contains("offline"), "{s}");
+    assert!(
+        footer(&app).contains("switch player1, player2   ↑↓ pick  enter switch  esc close"),
+        "{}",
+        footer(&app)
+    );
+
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Enter);
+    assert!(app.servers.is_some(), "a full server keeps the list open");
+    assert!(source.0.borrow().is_empty());
+    assert!(screen(&app, &shown, 150, 30).contains("Gravelyn is full"));
+
+    key(&mut app, KeyCode::Down);
+    key(&mut app, KeyCode::Enter);
+    assert!(app.servers.is_none());
+    assert_eq!(
+        *source.0.borrow(),
+        [
+            (0, Action::Switch("Sir Ver".into())),
+            (1, Action::Switch("Sir Ver".into())),
+        ]
+    );
+    assert!(
+        app.note
+            .as_ref()
+            .is_some_and(|(note, _)| note.contains("switching to Sir Ver")),
+        "{:?}",
+        app.note
+    );
+
+    key(&mut app, KeyCode::Char('c'));
+    key(&mut app, KeyCode::Esc);
+    assert!(app.servers.is_none());
+    assert_eq!(source.0.borrow().len(), 2, "esc switches nothing");
 }
