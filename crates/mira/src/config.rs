@@ -18,7 +18,6 @@ const RELOGIN_ATTEMPTS: &str =
     "How many failed tries in a row before the account goes offline. No limit unless set.";
 const RESTART_ON_ERROR: &str = "Run the script again when it throws, after 10 seconds, doubling up to 5 minutes. Defaults to false.";
 const ROOM: &str = "Room number to join; scripts read it as settings.room.";
-const API: &str = "Host that takes the login. Defaults to https://game.aq.com.";
 const STALL_AFTER: &str = "How long a running script can go without progress before the account counts as stalled, like \"90s\", \"5m\" or \"1h\". Defaults to 5m.";
 const ON_STALL: &str = "What happens when the account stalls. Defaults to warn.";
 const STALL_AFTER_DEFAULT: Duration = Duration::from_secs(300);
@@ -31,7 +30,7 @@ pub const RELOGIN_DELAY_MIN: Duration = Duration::from_secs(4);
 pub struct Config {
     #[serde(default)]
     #[schemars(
-        description = "Settings for every account. An [[account]] can override each one except client_version and api."
+        description = "Settings for every account. An [[account]] can override each one except client_version."
     )]
     pub defaults: Settings,
     #[serde(default, rename = "account")]
@@ -59,8 +58,6 @@ pub struct Settings {
     pub restart_on_error: Option<bool>,
     #[schemars(description = ROOM)]
     pub room: Option<u32>,
-    #[schemars(description = API)]
-    pub api: Option<String>,
     #[serde(default, deserialize_with = "duration")]
     #[schemars(description = STALL_AFTER, schema_with = "duration_schema")]
     pub stall_after: Option<Duration>,
@@ -93,7 +90,6 @@ impl Settings {
             relogin_attempts: self.relogin_attempts.or(defaults.relogin_attempts),
             restart_on_error: self.restart_on_error.or(defaults.restart_on_error),
             room: self.room.or(defaults.room),
-            api: self.api.or_else(|| defaults.api.clone()),
             stall_after: self.stall_after.or(defaults.stall_after),
             on_stall: self.on_stall.or(defaults.on_stall),
         }
@@ -157,7 +153,6 @@ pub struct Account {
     pub client_version: Option<String>,
     pub auto_start: bool,
     pub room: Option<u32>,
-    pub api: Option<String>,
     pub stall_after: Duration,
     pub on_stall: OnStall,
     pub relogin: Option<Relogin>,
@@ -283,7 +278,6 @@ impl AccountConfig {
             relogin_attempts: self.relogin_attempts,
             restart_on_error: self.restart_on_error,
             room: self.room,
-            api: None,
             stall_after: self.stall_after,
             on_stall: self.on_stall,
         }
@@ -328,7 +322,6 @@ impl AccountConfig {
             client_version: settings.client_version,
             auto_start: settings.auto_start.unwrap_or(true),
             room: settings.room,
-            api: settings.api,
             stall_after: settings.stall_after.unwrap_or(STALL_AFTER_DEFAULT),
             on_stall: settings.on_stall.unwrap_or_default(),
             relogin,
@@ -421,7 +414,6 @@ impl Account {
             client_version: None,
             auto_start: false,
             room: None,
-            api: None,
             stall_after: STALL_AFTER_DEFAULT,
             on_stall: OnStall::Warn,
             relogin: None,
@@ -439,7 +431,6 @@ mod tests {
         [defaults]
         server = "Twilly"
         client_version = "5.32"
-        api = "http://127.0.0.1:8787"
         relogin_delay = "30s"
         restart_on_error = true
         room = 1234
@@ -467,20 +458,28 @@ mod tests {
     }
 
     #[test]
-    fn client_version_and_api_are_set_for_every_account_only() {
-        for key in [
-            "client_version = \"5.32\"",
-            "api = \"http://127.0.0.1:8787\"",
-        ] {
-            let text = format!(
+    fn client_version_is_set_for_every_account_only_and_api_is_refused() {
+        let account = |key: &str| {
+            format!(
                 "[[account]]\nuser = \"player1\"\npassword = \"x\"\nserver = \"Twilly\"\n{key}\n"
-            );
-            let field = key.split(' ').next().unwrap();
+            )
+        };
+        for (text, field) in [
+            (account("client_version = \"5.32\""), "client_version"),
+            (account("api = \"http://127.0.0.1:8787\""), "api"),
+            (
+                format!(
+                    "[defaults]\napi = \"http://127.0.0.1:8787\"\n{}",
+                    account("")
+                ),
+                "api",
+            ),
+        ] {
             assert!(
                 accounts(&text)
                     .unwrap_err()
                     .contains(&format!("unknown field `{field}`")),
-                "{key}"
+                "{text}"
             );
         }
     }
@@ -492,7 +491,6 @@ mod tests {
         assert_eq!(first.server, "Twilly");
         assert_eq!(first.client_version.as_deref(), Some("5.32"));
         assert!(!first.auto_start);
-        assert_eq!(first.api.as_deref(), Some("http://127.0.0.1:8787"));
         assert_eq!(
             (first.room, first.stall_after, first.on_stall),
             (Some(1234), Duration::from_secs(90), OnStall::Relogin)
@@ -524,7 +522,6 @@ mod tests {
             healer.auto_start,
             "accounts log in when a session starts unless auto_start is off"
         );
-        assert_eq!(healer.api.as_deref(), Some("http://127.0.0.1:8787"));
         assert_eq!(healer.script, None);
         assert_eq!(
             healer.relogin,

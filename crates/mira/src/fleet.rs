@@ -291,7 +291,6 @@ pub struct Account {
     pub name: String,
     pub user: String,
     pub server: String,
-    api: Option<String>,
     script: Option<Script>,
     restart_on_error: bool,
     room: Option<u32>,
@@ -658,24 +657,21 @@ impl Fleet {
                 .filter(|s| !closed(s))
                 .is_some_and(|s| s.snapshot().me.as_ref().is_some_and(|me| !me.member))
         });
-        let account = Arc::clone(&targets[0]);
         thread::spawn(move || {
-            let listed = match &account.api {
-                Some(host) => api::servers_on(host, &device),
-                None => api::servers(&device),
-            };
-            let choices = listed.map_err(|e| e.to_string()).map(|servers| {
-                servers
-                    .iter()
-                    .map(|server| ServerChoice {
-                        name: server.name.clone(),
-                        players: server.players,
-                        capacity: server.capacity,
-                        members: server.members_only,
-                        refusal: server.refusal(!free).map(str::to_owned),
-                    })
-                    .collect()
-            });
+            let choices = api::servers(&device)
+                .map_err(|e| e.to_string())
+                .map(|servers| {
+                    servers
+                        .iter()
+                        .map(|server| ServerChoice {
+                            name: server.name.clone(),
+                            players: server.players,
+                            capacity: server.capacity,
+                            members: server.members_only,
+                            refusal: server.refusal(!free).map(str::to_owned),
+                        })
+                        .collect()
+                });
             let _ = tx.send(choices);
         });
         rx
@@ -707,7 +703,6 @@ impl Fleet {
             name: config.name,
             user: config.user.clone(),
             server: config.server,
-            api: config.api.clone(),
             script: config.script,
             restart_on_error: config.restart_on_error,
             room: config.room,
@@ -728,7 +723,7 @@ impl Fleet {
                 pass: config.password,
                 client_version: config.client_version,
                 relogin: config.relogin,
-                api: config.api,
+                api: None,
                 record: None,
             },
         });
@@ -1304,7 +1299,6 @@ impl Account {
             name: name.into(),
             user: name.into(),
             server: "Test".into(),
-            api: None,
             script,
             restart_on_error: false,
             room: None,

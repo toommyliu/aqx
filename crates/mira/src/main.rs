@@ -370,7 +370,7 @@ fn run_from(with: RunWith) -> anyhow::Result<ExitCode> {
         pass: account.password,
         client_version: with.client_version.or(account.client_version),
         relogin: account.relogin,
-        api: account.api,
+        api: None,
         record: recorder(&with.record)?,
     };
     run(
