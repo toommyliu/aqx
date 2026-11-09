@@ -2051,8 +2051,12 @@ fn a_dropped_connection_ends_the_run_and_auto_relogin_decides_whether_the_accoun
                 )
             },
         );
+        let session = harness.session.clone();
         let (outcome, outputs) = run_in(&harness, &path, &Cancel::default(), move |out| {
             if matches!(out, Output::Log { .. }) {
+                while session.snapshot().settings.auto_relogin != on {
+                    thread::sleep(Duration::from_millis(1));
+                }
                 let _ = logged.send(());
             }
         });
