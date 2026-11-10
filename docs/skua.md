@@ -2,6 +2,9 @@
 
 aqx runs most [Skua](https://github.com/auqw/Skua) scripts unchanged. A worker built with .NET compiles and runs them. aqx keeps the Skua script library and its settings in one folder, `~/aqx/skua`.
 
+<img width="2930" height="1820" alt="skua" src="https://github.com/user-attachments/assets/3a4928bd-2762-4ae1-afe0-23152d2abfe0" />
+
+
 ## Set up Skua support
 
 1. Install the [.NET 10 SDK](https://dotnet.microsoft.com/download).
