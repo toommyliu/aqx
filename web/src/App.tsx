@@ -573,7 +573,6 @@ function AccountList(props: { onOpen: (i: number | null) => void }) {
               type="button"
               class="ghost overview"
               aria-current={selected() === null ? "page" : undefined}
-              data-tip={`All ${accounts.length} accounts at a glance`}
               onClick={() => props.onOpen(null)}
             >
               <Icon name="users" />
