@@ -10,6 +10,7 @@ import { For, Match, Show, Switch, createEffect, createSignal, on, onCleanup, on
 import { Toaster, useSonner } from "solid-sonner";
 import { AccountPanel } from "./Account";
 import { Dialogs, logOut, openPicker, openServers } from "./Dialogs";
+import { inBrowserTab } from "./hotkeys";
 import {
   accounts,
   act,
@@ -84,7 +85,7 @@ function Shortcuts() {
   bind("account.logout", () => logOut(here()));
   createHotkeys(
     () => JUMPS.slice(0, accounts.length).map((hotkey, i) => ({ hotkey, callback: () => select(i) })),
-    () => ({ enabled: dialog() === null }),
+    () => ({ enabled: !inBrowserTab && dialog() === null }),
   );
   bind("account.next", () => step(1));
   bind("account.previous", () => step(-1));
