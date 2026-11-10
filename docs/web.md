@@ -4,15 +4,13 @@
 
 ## Build it
 
-The UI is built into the `aqx` binary, so build it before you build aqx. It needs Node 24 or newer.
+Building aqx builds the UI and embeds it in the binary. It needs Node 24 or newer.
 
 ```sh
-npm --prefix web ci
-npm --prefix web run build
 cargo install --path crates/aqx
 ```
 
-An aqx built without these steps still runs, but `aqx web` answers every page with a note to build the UI first.
+An aqx built without Node still runs, but `aqx web` answers every page with a note to build the UI first.
 
 ## Start it
 

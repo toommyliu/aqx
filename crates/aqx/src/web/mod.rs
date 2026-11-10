@@ -94,7 +94,7 @@ pub fn serve(config: PathBuf, port: u16, up: bool) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("couldn't listen on {address}: {e}"))?;
     if !http::built() {
         eprintln!(
-            "aqx: the web UI isn't built into this aqx; run npm --prefix web ci && npm --prefix web run build, then build aqx again"
+            "aqx: the web UI isn't built into this aqx; install Node 24 or newer, then build aqx again"
         );
     }
     if up && daemon::session_for(&web.config)?.is_none() {

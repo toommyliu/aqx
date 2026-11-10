@@ -217,7 +217,7 @@ pub fn asset(path: &str) -> Reply {
                     cache: "no-store",
                     compressible: false,
                     gzipped: None,
-                    body: b"The web UI isn't built into this aqx. Run npm --prefix web ci && npm --prefix web run build, then build aqx again.".to_vec(),
+                    body: b"The web UI isn't built into this aqx. Install Node 24 or newer, then build aqx again.".to_vec(),
                 };
             }
         },

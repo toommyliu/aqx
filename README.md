@@ -5,7 +5,7 @@ aqx is a headless AQW client written in Rust. You run and script your accounts f
 ## Requirements
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.85 or newer
-- [Node](https://nodejs.org/en/download) 24 or newer, to build the web UI
+- [Node](https://nodejs.org/en/download) 24 or newer, which cargo uses to build the web UI
 - The [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0), only to run Skua scripts
 
 ## Install
@@ -14,13 +14,10 @@ aqx is a headless AQW client written in Rust. You run and script your accounts f
 git clone https://github.com/toommyliu/aqx.git
 cd aqx
 
-# Build the web UI. cargo install embeds it in the aqx binary.
-npm --prefix web ci
-npm --prefix web run build
-
 # Optional: fetch Skua to run Skua scripts.
 git submodule update --init --depth 1 skua/vendor/Skua
 
+# Build aqx and its web UI, and put aqx on your PATH.
 cargo install --path crates/aqx
 
 # Set up a scripts folder with aqx.toml, in ~/aqx by default.
