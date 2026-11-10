@@ -17,10 +17,10 @@ An aqx built without these steps still runs, but `aqx web` answers every page wi
 ## Start it
 
 ```sh
-aqx web [-c PATH] [--port N]
+aqx web [-c PATH] [--port N] [--up]
 ```
 
-`-c` picks the config, the same way it does for `aqx up`. `aqx web` attaches to that config's session when one is running. When none is, the page lists the accounts as offline, and the first account you log in or run a script on starts the session. The session still ends on its own once every account is offline, and `aqx web` keeps running so you can start it again. Each account's log keeps its last lines from the session that ended, and the overview shows each account's last line, until the next session starts. The Session menu restarts the session, which applies changes to `aqx.toml`, and logs everyone out.
+`-c` picks the config, the same way it does for `aqx up`. `aqx web` attaches to that config's session when one is running. When none is, the page lists the accounts as offline, and the first account you log in or run a script on starts the session. `--up` starts it right away instead, and logs in the accounts with `auto_start` on, as `aqx up -d` does. With a session already running, `--up` changes nothing. Stopping `aqx web` leaves the session running either way. The session still ends on its own once every account is offline, and `aqx web` keeps running so you can start it again. Each account's log keeps its last lines from the session that ended, and the overview shows each account's last line, until the next session starts. The Session menu restarts the session, which applies changes to `aqx.toml`, and logs everyone out.
 
 `aqx web` listens on `127.0.0.1` only and has no login. It refuses requests whose `Host` isn't `localhost`, `127.0.0.1`, `[::1]` or a `*.ts.net` name.
 

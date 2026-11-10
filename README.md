@@ -26,9 +26,8 @@ cargo install --path crates/aqx
 # Set up a scripts folder with aqx.toml, in ~/aqx by default.
 aqx init
 
-# Log in the accounts in aqx.toml, then open the web UI at http://127.0.0.1:4970.
-aqx up -d
-aqx web
+# Log in the accounts in aqx.toml and serve the web UI at http://127.0.0.1:4970.
+aqx web --up
 ```
 
 ## Docs
