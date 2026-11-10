@@ -753,8 +753,8 @@ function Skill(props: { n: number; skill: Game["skills"][number] }) {
   createEffect(() => {
     const { ready, left_ms } = props.skill;
     const next = performance.now() + left_ms;
-    const animating = ready < 1 && left_ms > 0 && !stillMotion.matches;
-    if (animating && Math.abs(next - end) < DRIFT_MS) return;
+    const animating = ready > 0 && ready < 1 && left_ms > 0 && !stillMotion.matches;
+    if (animating && fill.getAnimations().length > 0 && Math.abs(next - end) < DRIFT_MS) return;
     end = next;
     const gap = (1 - ready) * 100;
     for (const [el, sign] of [[fill, -1], [label, 1]] as const) {
