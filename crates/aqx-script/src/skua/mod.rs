@@ -147,6 +147,8 @@ pub struct Setting {
     pub kind: Kind,
     pub choices: Vec<String>,
     pub value: Option<String>,
+    #[serde(default)]
+    pub default: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]

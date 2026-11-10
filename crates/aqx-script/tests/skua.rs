@@ -621,6 +621,68 @@ fn core_bots_options_edit_only_the_given_keys_in_the_lowercase_users_file() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn core_bots_defaults_match_what_core_bots_uses_for_a_missing_key() {
+    let source = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skua/vendor/Scripts/CoreBots.cs"),
+    )
+    .unwrap();
+    let initial = |property: &str| {
+        let line = source
+            .lines()
+            .find(|l| l.contains(&format!(" {property} {{ get; set; }} = ")))
+            .unwrap_or_else(|| panic!("CoreBots has no property {property}"));
+        let value = line.rsplit(" = ").next().unwrap().trim_end_matches(';');
+        match value {
+            "true" => "True".to_owned(),
+            "false" => "False".to_owned(),
+            other => other
+                .trim_start_matches("ClassUseMode.")
+                .trim_matches('"')
+                .to_owned(),
+        }
+    };
+    let user = format!("Nobody{}", std::process::id());
+    let listed = skua::core_bots_options(&user, &data(), &[]).unwrap();
+    let default = |key: &str| {
+        listed
+            .options
+            .iter()
+            .find(|o| o.name == key)
+            .unwrap_or_else(|| panic!("no CoreBots row {key}"))
+            .default
+            .clone()
+    };
+    let mut keys = vec![
+        ("PrivateRooms", "PrivateRooms"),
+        ("PublicDifficult", "PublicDifficult"),
+        ("BankMiscAC", "BankMiscAC"),
+        ("LoggerInChat", "LoggerInChat"),
+        ("MessageBoxCheck", "ForceOffMessageboxes"),
+        ("RestCheck", "ShouldRest"),
+        ("AntiLag", "AntiLag"),
+        ("PrivateRoomNr", "PrivateRoomNumber"),
+        ("ActionDelayNr", "ActionDelay"),
+        ("ExitCombatNr", "ExitCombatDelay"),
+        ("HuntDelayNr", "HuntDelay"),
+        ("QuestTriesNr", "AcceptandCompleteTries"),
+        ("QuestMaxNr", "LoadedQuestLimit"),
+        ("StopLocationSelect", "CustomStopLocation"),
+    ]
+    .into_iter()
+    .map(|(key, property)| (key.to_owned(), property.to_owned()))
+    .collect::<Vec<_>>();
+    for role in ["Solo", "Farm", "Dodge", "Boss"] {
+        keys.push((format!("{role}EquipCheck"), format!("{role}GearOn")));
+        keys.push((format!("{role}ModeSelect"), format!("{role}UseMode")));
+    }
+    for (key, property) in keys {
+        assert_eq!(default(&key), Some(initial(&property)), "{key}");
+    }
+    assert!(listed.options.iter().all(|o| o.value.is_none()));
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn includes_compile_together_and_errors_surface_before_a_session() {
     let dir = Dir::new();
     std::fs::write(

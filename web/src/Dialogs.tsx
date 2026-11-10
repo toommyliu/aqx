@@ -903,6 +903,7 @@ function SkuaOptions(props: { script: string }) {
   };
   const keyOf = (o: SkuaOption) => (tab() === "script" ? `${o.group}:${o.name}` : o.name);
   const value = (o: SkuaOption) => changes()[keyOf(o)] ?? o.value ?? "";
+  const effective = (o: SkuaOption) => changes()[keyOf(o)] ?? o.value ?? o.default ?? "";
   const set = (o: SkuaOption, v: string) => setChanges({ ...changes(), [keyOf(o)]: v });
   return (
     <Modal
@@ -977,7 +978,7 @@ function SkuaOptions(props: { script: string }) {
                             <input
                               id={id}
                               type="checkbox"
-                              checked={value(o).toLowerCase() === "true"}
+                              checked={effective(o).toLowerCase() === "true"}
                               onChange={(e) => set(o, e.currentTarget.checked ? "True" : "False")}
                             />
                             {o.label}
@@ -985,7 +986,7 @@ function SkuaOptions(props: { script: string }) {
                         </Match>
                         <Match when={o.kind === "choice"}>
                           <label for={id}>{o.label}</label>
-                          <select id={id} value={value(o)} onChange={(e) => set(o, e.currentTarget.value)}>
+                          <select id={id} value={effective(o)} onChange={(e) => set(o, e.currentTarget.value)}>
                             <For each={o.choices}>{(c) => <option value={c}>{c}</option>}</For>
                           </select>
                         </Match>
@@ -996,6 +997,7 @@ function SkuaOptions(props: { script: string }) {
                             type="text"
                             inputmode={o.kind === "number" ? "decimal" : undefined}
                             value={value(o)}
+                            placeholder={o.default ?? undefined}
                             onInput={(e) => set(o, e.currentTarget.value)}
                           />
                         </Match>
