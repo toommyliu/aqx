@@ -1909,7 +1909,8 @@ table.keys {
     justify-content: center;
   }
 
-  .toggle {
+  .toolbar button,
+  .toolbar input[type="search"] {
     min-height: 36px;
   }
 
