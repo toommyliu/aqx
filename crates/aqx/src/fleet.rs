@@ -153,7 +153,7 @@ pub struct Board {
     pub stats: Stats,
     pub touched: HashMap<ItemId, Instant>,
     pub rep_from: HashMap<String, u32>,
-    last: Option<Script>,
+    pub last: Option<Script>,
     runs: u64,
     links: u64,
     queued_runs: usize,

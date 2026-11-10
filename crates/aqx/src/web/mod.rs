@@ -260,11 +260,33 @@ impl Web {
     fn args(&self, r: &Request) -> Result<Reply, Failure> {
         let path = self.script_path(&r.query("script").unwrap_or_default())?;
         let declared = declared(&path)?;
-        let names = self.roster()?;
-        let accounts: Vec<String> = r
+        let session = self.session()?;
+        let running = match &session {
+            Some(session) => shown(session)?,
+            None => Vec::new(),
+        };
+        let names = match &session {
+            Some(_) => running.iter().map(|a| a.name.clone()).collect(),
+            None => self
+                .roster_of(None)?
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+        };
+        let accounts: Vec<(String, Option<&[(String, String)]>)> = r
             .indices("accounts")
             .into_iter()
-            .filter_map(|i| names.get(i).map(|(name, _)| name.clone()))
+            .filter_map(|i| {
+                let current = running
+                    .get(i)
+                    .filter(|a| {
+                        a.script
+                            .as_deref()
+                            .is_some_and(|s| resolve(&self.home, s) == path)
+                    })
+                    .and_then(|a| a.args.as_deref());
+                Some((names.get(i)?.clone(), current))
+            })
             .collect();
         let runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
         let recall = |name: &str, account: Option<&str>| {
@@ -275,16 +297,14 @@ impl Web {
         let args: Vec<Value> = declared
             .iter()
             .map(|arg| {
-                let each: Vec<Option<String>> = accounts
-                    .iter()
-                    .map(|a| recall(&arg.name, Some(a)))
-                    .collect();
+                let (each, shared) =
+                    prefill(&arg.name, &accounts, |account| recall(&arg.name, account));
                 json!({
                     "name": arg.name,
                     "kind": arg_kind(arg),
                     "optional": arg.optional,
                     "default": arg.default,
-                    "shared": recall(&arg.name, None),
+                    "shared": shared,
                     "each": each,
                 })
             })
@@ -749,6 +769,37 @@ fn declared(path: &Path) -> Result<Vec<Arg>, Failure> {
     aqx_script::script_args(path).map_err(Failure::bad)
 }
 
+fn prefill(
+    name: &str,
+    accounts: &[(String, Option<&[(String, String)]>)],
+    recall: impl Fn(Option<&str>) -> Option<String>,
+) -> (Vec<Option<String>>, Option<String>) {
+    let current: Vec<Option<String>> = accounts
+        .iter()
+        .map(|(_, args)| {
+            args.map(|args| {
+                args.iter()
+                    .rev()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_default()
+            })
+        })
+        .collect();
+    let each = accounts
+        .iter()
+        .zip(&current)
+        .map(|((account, _), now)| now.clone().or_else(|| recall(Some(account))))
+        .collect();
+    let agreed = match current.split_first() {
+        Some((Some(first), rest)) if rest.iter().all(|now| now.as_ref() == Some(first)) => {
+            Some(first.clone())
+        }
+        _ => None,
+    };
+    (each, agreed.or_else(|| recall(None)))
+}
+
 fn split_args<'a>(
     declared: &'a [Arg],
     typed: &'a [Pair],
@@ -902,6 +953,34 @@ mod tests {
         list.iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn the_args_form_prefers_what_the_accounts_are_running_with() {
+        let running = pairs(&[("target", "200")]);
+        let other = pairs(&[("target", "300")]);
+        let recall =
+            |account: Option<&str>| Some(if account.is_some() { "50" } else { "100" }.to_owned());
+        let form = |accounts: &[(&str, Option<&[(String, String)]>)]| {
+            let accounts: Vec<_> = accounts.iter().map(|(n, a)| (n.to_string(), *a)).collect();
+            prefill("target", &accounts, recall)
+        };
+        let some = |v: &str| Some(v.to_owned());
+        assert_eq!(
+            form(&[("player1", Some(&running)), ("player2", Some(&running))]),
+            (vec![some("200"), some("200")], some("200")),
+            "accounts that agree replace the remembered shared answer"
+        );
+        assert_eq!(
+            form(&[("player1", Some(&running)), ("player2", Some(&other))]),
+            (vec![some("200"), some("300")], some("100")),
+            "accounts that disagree keep the remembered shared answer"
+        );
+        assert_eq!(
+            form(&[("player1", Some(&running)), ("player2", None)]),
+            (vec![some("200"), some("50")], some("100")),
+            "an account not running the script falls back to its remembered answer"
+        );
     }
 
     #[test]

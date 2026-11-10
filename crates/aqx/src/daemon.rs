@@ -143,7 +143,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 6;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -937,6 +937,7 @@ mod tests {
             state,
             server: "Twilly".into(),
             script: Some("/srv/farm.ts".into()),
+            args: None,
             status: String::new(),
             up: Some(Duration::from_secs(1)),
             stats: crate::fleet::Stats::default(),
@@ -1063,7 +1064,7 @@ mod tests {
              Act.account Act.action Act.action.pick_up Act.action.run Act.action.run.args \
              Act.action.run.path Act.action.switch Busy Configured Configured.args \
              Configured.path Frame \
-             Frame.accounts Frame.accounts.game Frame.accounts.game.area \
+             Frame.accounts Frame.accounts.args Frame.accounts.game Frame.accounts.game.area \
              Frame.accounts.game.auras Frame.accounts.game.auras.name \
              Frame.accounts.game.auras.stacks Frame.accounts.game.away \
              Frame.accounts.game.bag_slots Frame.accounts.game.bag_used \
@@ -1114,7 +1115,7 @@ mod tests {
              Servers.refusal";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (5, pinned),
+            (6, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

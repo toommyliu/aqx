@@ -639,7 +639,8 @@ function RunArgs(props: { script: string; extra: [string, string][] }) {
     for (const arg of d.args) {
       const given = typed.get(arg.name);
       typed.delete(arg.name);
-      filled[key(null, arg.name)] = given ?? arg.shared ?? arg.each[0] ?? "";
+      filled[key(null, arg.name)] =
+        given ?? (on.length === 1 ? (arg.each[0] ?? arg.shared) : (arg.shared ?? arg.each[0])) ?? "";
       on.forEach((account, i) => {
         filled[key(account, arg.name)] = given ?? arg.each[i] ?? arg.shared ?? "";
       });
