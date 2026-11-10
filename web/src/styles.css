@@ -1235,6 +1235,19 @@ legend {
   font-weight: 600;
 }
 
+.entry.removed > .ellipsis {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.entry > .edited {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 textarea.code {
   width: 100%;
   min-height: 50dvh;
