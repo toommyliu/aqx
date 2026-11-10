@@ -641,6 +641,7 @@ mod tests {
             state,
             server: String::new(),
             script: None,
+            args: None,
             status: String::new(),
             up: None,
             stats: crate::fleet::Stats::default(),

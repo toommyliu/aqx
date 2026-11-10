@@ -14,6 +14,7 @@ pub struct Shown {
     pub state: State,
     pub server: String,
     pub script: Option<String>,
+    pub args: Option<Vec<(String, String)>>,
     pub status: String,
     pub up: Option<Duration>,
     pub stats: Stats,
@@ -195,13 +196,19 @@ impl Shown {
             state,
             State::Online | State::Running | State::Paused | State::Stalled
         );
-        let script = match &board.run {
+        let path = match &board.run {
             Run::Idle => None,
             Run::Starting { script }
             | Run::Running { script, .. }
             | Run::Restarting { script, .. }
-            | Run::Ended { script, .. } => Some(script.display().to_string()),
+            | Run::Ended { script, .. } => Some(script),
         };
+        let script = path.map(|p| p.display().to_string());
+        let args = board
+            .last
+            .as_ref()
+            .filter(|last| Some(&last.path) == path)
+            .map(|last| last.args.clone());
         let status = match &board.run {
             Run::Starting { .. } => "starting".into(),
             Run::Running { .. } => board.status.clone(),
@@ -241,6 +248,7 @@ impl Shown {
             state,
             server,
             script,
+            args,
             status,
             up,
             stats: board.stats,
@@ -487,6 +495,7 @@ mod item_id {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     use aqx_client::testing::{Harness, Peer, json_message};
     use aqx_client::{Event, Options};
@@ -494,6 +503,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::config::Script;
 
     #[test]
     fn a_cooling_skill_fills_over_its_whole_cooldown() {
@@ -541,6 +551,14 @@ mod tests {
                 since: Instant::now(),
             };
             board.rep_from = HashMap::from([("Good".to_owned(), 1000)]);
+            board.run = Run::Ended {
+                script: PathBuf::from("/srv/farm.ts"),
+                how: Ended::Finished,
+            };
+            board.last = Some(Script {
+                path: PathBuf::from("/srv/farm.ts"),
+                args: vec![("monster".into(), "Frogzard".into())],
+            });
         }
         for event in harness.events.iter() {
             account.board().record(&event);
@@ -551,6 +569,14 @@ mod tests {
 
         let shown = Shown::of(&account, true, Instant::now());
         assert_eq!(shown.state, State::Online);
+        assert_eq!(
+            (shown.script.as_deref(), shown.args.as_deref()),
+            (
+                Some("/srv/farm.ts"),
+                Some([("monster".to_owned(), "Frogzard".to_owned())].as_slice())
+            ),
+            "the shown script carries the args it last ran with"
+        );
         assert_eq!((shown.stats.drops, shown.gold_gained), (2, Some(0)));
         let game = shown.game.expect("an online account has a game");
         assert_eq!(

@@ -233,6 +233,7 @@ pub fn offline(account: &config::Account) -> Shown {
         state: State::Offline { why: None },
         server: String::new(),
         script: None,
+        args: None,
         status: String::new(),
         up: None,
         stats: Stats::default(),

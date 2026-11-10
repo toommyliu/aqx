@@ -260,11 +260,33 @@ impl Web {
     fn args(&self, r: &Request) -> Result<Reply, Failure> {
         let path = self.script_path(&r.query("script").unwrap_or_default())?;
         let declared = declared(&path)?;
-        let names = self.roster()?;
-        let accounts: Vec<String> = r
+        let session = self.session()?;
+        let running = match &session {
+            Some(session) => shown(session)?,
+            None => Vec::new(),
+        };
+        let names = match &session {
+            Some(_) => running.iter().map(|a| a.name.clone()).collect(),
+            None => self
+                .roster_of(None)?
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+        };
+        let accounts: Vec<(String, Option<&[(String, String)]>)> = r
             .indices("accounts")
             .into_iter()
-            .filter_map(|i| names.get(i).map(|(name, _)| name.clone()))
+            .filter_map(|i| {
+                let current = running
+                    .get(i)
+                    .filter(|a| {
+                        a.script
+                            .as_deref()
+                            .is_some_and(|s| resolve(&self.home, s) == path)
+                    })
+                    .and_then(|a| a.args.as_deref());
+                Some((names.get(i)?.clone(), current))
+            })
             .collect();
         let runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
         let recall = |name: &str, account: Option<&str>| {
@@ -277,7 +299,16 @@ impl Web {
             .map(|arg| {
                 let each: Vec<Option<String>> = accounts
                     .iter()
-                    .map(|a| recall(&arg.name, Some(a)))
+                    .map(|(name, current)| match current {
+                        Some(args) => Some(
+                            args.iter()
+                                .rev()
+                                .find(|(key, _)| *key == arg.name)
+                                .map(|(_, value)| value.clone())
+                                .unwrap_or_default(),
+                        ),
+                        None => recall(&arg.name, Some(name)),
+                    })
                     .collect();
                 json!({
                     "name": arg.name,
