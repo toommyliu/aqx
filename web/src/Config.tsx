@@ -65,6 +65,7 @@ type AccountDraft = {
   hasPassword: boolean;
   args: Arg[];
   overrides: Record<string, string>;
+  removed: boolean;
 };
 type Draft = { defaults: Record<string, string>; accounts: AccountDraft[] };
 type Problem = { id: string; account: string | null; message: string };
@@ -115,6 +116,7 @@ function draftOf(file: ConfigFile): Draft {
       hasPassword: a.hasPassword,
       args: argsOf(a.fields.args),
       overrides: strings(a.fields, (k) => !IDENTITY.has(k)),
+      removed: false,
     })),
   };
 }
@@ -129,7 +131,10 @@ const blank = (id: string): AccountDraft => ({
   hasPassword: false,
   args: [],
   overrides: {},
+  removed: false,
 });
+
+const label = (a: AccountDraft) => a.name || a.user || "New account";
 
 function fieldsOf(values: Record<string, string>, kinds: Map<string, Kind>): Fields {
   const out: Fields = {};
@@ -172,6 +177,7 @@ function problemsOf(
   };
   for (const s of defaults) check(`defaults-${s.key}`, null, draft.defaults[s.key] ?? "", s, false);
   for (const a of draft.accounts) {
+    if (a.removed) continue;
     const at = `acct-${a.id}`;
     if (!a.user.trim()) out.push({ id: `${at}-user`, account: a.id, message: "Every account needs a username" });
     if (!a.password && !a.hasPassword) out.push({ id: `${at}-password`, account: a.id, message: "A new account needs a password" });
@@ -202,10 +208,12 @@ function problemsOf(
   return out;
 }
 
-const canonical = (draft: Draft) =>
-  JSON.stringify(draft, (_, v: unknown) =>
+const canonical = (value: Draft | AccountDraft) =>
+  JSON.stringify(value, (_, v: unknown) =>
     v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v,
   );
+
+const storedOf = (draft: Draft) => new Map(draft.accounts.map((a) => [a.id, canonical(a)]));
 
 const shown = (v: string) => (v === "true" ? "yes" : v === "false" ? "no" : v);
 
@@ -328,6 +336,7 @@ function FormEditor(props: {
         : undefined;
   const [current, setCurrent] = createSignal(initial ?? opened.accounts[0]?.id ?? "");
   const [base, setBase] = createSignal(canonical(opened));
+  const [stored, setStored] = createSignal(storedOf(opened));
   const [draft, setDraft] = createStore<Draft>(structuredClone(opened));
   const [tried, setTried] = createSignal(false);
   const [status, setStatus] = createSignal("");
@@ -342,8 +351,10 @@ function FormEditor(props: {
   });
   const reset = (file: ConfigFile) => {
     version = file.version;
-    setDraft(reconcile(draftOf(file)));
-    setBase(canonical(draftOf(file)));
+    const next = draftOf(file);
+    setBase(canonical(next));
+    setStored(storedOf(next));
+    setDraft(reconcile(next));
     setTried(false);
   };
   createEffect(() => props.onDirty(dirty()));
@@ -370,10 +381,11 @@ function FormEditor(props: {
     mutationFn: (form: { defaults: Fields; accounts: EditedAccount[] }) => api.saveConfig(version, { form }),
     onSuccess: (next) => {
       const at = draft.accounts.findIndex((a) => a.id === current());
+      const kept = draft.accounts.slice(0, Math.max(0, at)).filter((a) => !a.removed).length;
       version = next.version;
       props.onSaved(next);
       reset(next);
-      setCurrent(draft.accounts[Math.max(0, at)]?.id ?? "");
+      setCurrent(draft.accounts[Math.min(kept, draft.accounts.length - 1)]?.id ?? "");
       setStatus(saved());
     },
     onError: (e: Error) => setError(e.message),
@@ -391,7 +403,7 @@ function FormEditor(props: {
       return;
     }
     setError("");
-    save.mutate({ defaults: fieldsOf(draft.defaults, kinds()), accounts: draft.accounts.map((a) => accountOf(a, kinds())) });
+    save.mutate({ defaults: fieldsOf(draft.defaults, kinds()), accounts: draft.accounts.filter((a) => !a.removed).map((a) => accountOf(a, kinds())) });
   };
   const client = useQueryClient();
   const reload = async () => {
@@ -401,6 +413,7 @@ function FormEditor(props: {
     setStatus("Reloaded aqx.toml. Make your change again.");
   };
   const editing = () => draft.accounts.find((a) => a.id === current());
+  const edited = (a: AccountDraft) => !a.removed && canonical(a) !== stored().get(a.id);
   const edit = (id: string, fn: (a: AccountDraft) => void) => setDraft("accounts", (a) => a.id === id, produce(fn));
   const focusUser = () => queueMicrotask(() => document.getElementById(`acct-${current()}-user`)?.focus());
   const add = () => {
@@ -412,12 +425,19 @@ function FormEditor(props: {
   onMount(() => {
     if (props.start.kind === "new") focusUser();
   });
-  const remove = (id: string) => {
-    const at = draft.accounts.findIndex((a) => a.id === id);
-    const gone = draft.accounts[at];
-    setDraft("accounts", (all) => all.filter((a) => a.id !== id));
+  const remove = (account: AccountDraft) => {
+    if (account.from !== null) {
+      edit(account.id, (a) => void (a.removed = true));
+      queueMicrotask(() => document.getElementById(`acct-${account.id}-keep`)?.focus());
+      return;
+    }
+    const at = draft.accounts.findIndex((a) => a.id === account.id);
+    setDraft("accounts", (all) => all.filter((a) => a.id !== account.id));
     setCurrent(draft.accounts[Math.min(at, draft.accounts.length - 1)]?.id ?? "");
-    setStatus(`Removed ${gone?.name || gone?.user || "the new account"}. Save to write it to aqx.toml.`);
+  };
+  const keep = (id: string) => {
+    edit(id, (a) => void (a.removed = false));
+    queueMicrotask(() => document.getElementById(`acct-${id}-remove`)?.focus());
   };
   const statusText = () => {
     const n = tried() ? problems().length : 0;
@@ -443,10 +463,19 @@ function FormEditor(props: {
                     <button
                       type="button"
                       class="entry"
+                      classList={{ removed: a.removed }}
                       aria-current={current() === a.id ? "true" : undefined}
                       onClick={() => setCurrent(a.id)}
                     >
-                      <span class="ellipsis">{a.name || a.user || "New account"}</span>
+                      <span class="ellipsis">{label(a)}</span>
+                      <Show when={a.removed}>
+                        <span class="visually-hidden"> (removed)</span>
+                      </Show>
+                      <Show when={edited(a)}>
+                        <span class="edited">
+                          <span class="visually-hidden">(unsaved changes)</span>
+                        </span>
+                      </Show>
                     </button>
                   </li>
                 )}
@@ -459,17 +488,34 @@ function FormEditor(props: {
           </div>
           <Show when={editing()} keyed fallback={<p class="muted">No accounts yet.</p>}>
             {(account) => (
-              <AccountEditor
-                account={account}
-                file={props.file}
-                settings={accountSettings()}
-                defaults={draft.defaults}
-                onStall={schema().OnStall.oneOf}
-                problem={(id) => problemAt().get(id)}
-                edit={(fn) => edit(account.id, fn)}
-                onRemove={() => remove(account.id)}
-                onDeclared={(script, args) => setDeclared(script, args)}
-              />
+              <Show
+                when={!account.removed}
+                fallback={
+                  <section class="editor" aria-labelledby={`acct-${account.id}-heading`}>
+                    <div class="editor-head">
+                      <h3 id={`acct-${account.id}-heading`} class="grow ellipsis">
+                        {label(account)}
+                      </h3>
+                      <button type="button" id={`acct-${account.id}-keep`} class="ghost" onClick={() => keep(account.id)}>
+                        Keep account
+                      </button>
+                    </div>
+                    <p class="muted">Saving removes this account from aqx.toml.</p>
+                  </section>
+                }
+              >
+                <AccountEditor
+                  account={account}
+                  file={props.file}
+                  settings={accountSettings()}
+                  defaults={draft.defaults}
+                  onStall={schema().OnStall.oneOf}
+                  problem={(id) => problemAt().get(id)}
+                  edit={(fn) => edit(account.id, fn)}
+                  onRemove={() => remove(account)}
+                  onDeclared={(script, args) => setDeclared(script, args)}
+                />
+              </Show>
             )}
           </Show>
         </div>
@@ -485,7 +531,7 @@ function FormEditor(props: {
                   id={`defaults-${s.key}`}
                   value={draft.defaults[s.key] ?? ""}
                   unset="Unset"
-                  required={s.key === "server" && draft.accounts.some((a) => !a.overrides.server?.trim())}
+                  required={s.key === "server" && draft.accounts.some((a) => !a.removed && !a.overrides.server?.trim())}
                   placeholder={s.key === "client_version" ? props.file.clientVersion : undefined}
                   onStall={schema().OnStall.oneOf}
                   error={problemAt().get(`defaults-${s.key}`)}
@@ -539,7 +585,7 @@ function AccountEditor(props: {
   const pinned = (key: string) => key === "server" && !props.defaults.server?.trim();
   const overridden = () => props.settings.filter((s) => props.account.overrides[s.key] !== undefined || pinned(s.key));
   const available = () => props.settings.filter((s) => props.account.overrides[s.key] === undefined && !pinned(s.key));
-  const title = () => props.account.name || props.account.user || "New account";
+  const title = () => label(props.account);
   const override = (key: string) => {
     props.edit((a) => {
       a.overrides[key] = "";
@@ -591,7 +637,7 @@ function AccountEditor(props: {
           <h3 id={heading} class="grow ellipsis">
             {title()}
           </h3>
-          <button type="button" class="ghost danger" onClick={() => props.onRemove()}>
+          <button type="button" id={`${at()}-remove`} class="ghost danger" onClick={() => props.onRemove()}>
             Remove account
           </button>
         </div>
