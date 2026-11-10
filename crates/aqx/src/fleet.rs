@@ -14,7 +14,6 @@ use aqx_script::{Cancel, Level, Outcome, Output};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{self, OnStall, Script};
-use crate::control::ServerChoice;
 use crate::describe::describe;
 use crate::runner::{self, Job, Login, Note};
 
@@ -628,49 +627,6 @@ impl Fleet {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
-    }
-
-    pub fn server_choices(
-        &self,
-        accounts: &[usize],
-    ) -> Receiver<Result<Vec<ServerChoice>, String>> {
-        let (tx, rx) = mpsc::channel();
-        let all = self.accounts();
-        let Some(targets) = accounts
-            .iter()
-            .map(|&i| all.get(i).cloned())
-            .collect::<Option<Vec<_>>>()
-            .filter(|t| !t.is_empty())
-        else {
-            let _ = tx.send(Err("no such account".into()));
-            return rx;
-        };
-        let device = self.device.clone();
-        let free = targets.iter().any(|account| {
-            account
-                .board()
-                .session()
-                .filter(|s| !closed(s))
-                .is_some_and(|s| s.snapshot().me.as_ref().is_some_and(|me| !me.member))
-        });
-        thread::spawn(move || {
-            let choices = api::servers(&device)
-                .map_err(|e| e.to_string())
-                .map(|servers| {
-                    servers
-                        .iter()
-                        .map(|server| ServerChoice {
-                            name: server.name.clone(),
-                            players: server.players,
-                            capacity: server.capacity,
-                            members: server.members_only,
-                            refusal: server.refusal(!free).map(str::to_owned),
-                        })
-                        .collect()
-                });
-            let _ = tx.send(choices);
-        });
-        rx
     }
 
     pub fn add_new(&self, configs: Vec<config::Account>) -> Vec<String> {

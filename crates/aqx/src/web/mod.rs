@@ -139,7 +139,6 @@ impl Web {
             ("/api/args", false) => self.args(r),
             ("/api/recent", false) => Ok(self.recent()),
             ("/api/recent/forget", true) => self.forget(r.body()?),
-            ("/api/servers", false) => self.servers(r),
             ("/api/servers/all", false) => all_servers(),
             ("/api/files", false) => self.files(r),
             ("/api/skua", false) => Ok(skua_library(r.query("q").unwrap_or_default())),
@@ -406,18 +405,6 @@ impl Web {
         history.save(recent).map_err(Failure::internal)?;
         drop(runs);
         Ok(self.recent())
-    }
-
-    fn servers(&self, r: &Request) -> Result<Reply, Failure> {
-        let session = self
-            .session()?
-            .ok_or_else(|| Failure::conflict("aqx isn't running"))?;
-        let listed = session.source().servers(&r.indices("accounts"));
-        match listed.recv() {
-            Ok(Ok(servers)) => Ok(Reply::json(&servers)),
-            Ok(Err(why)) => Err(Failure::conflict(why)),
-            Err(_) => Err(Failure::internal("the server list didn't arrive")),
-        }
     }
 
     fn files(&self, r: &Request) -> Result<Reply, Failure> {

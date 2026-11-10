@@ -1126,6 +1126,10 @@ dialog::backdrop {
   flex: 1;
 }
 
+.dialog-foot > .start {
+  margin-right: auto;
+}
+
 .picker .toolbar {
   padding: 0 0 6px;
 }
@@ -1163,6 +1167,9 @@ legend {
 }
 
 .entries {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   list-style: none;
   margin: 6px -6px 0;
   padding: 0;
@@ -1233,6 +1240,14 @@ legend {
 .entry[aria-current="true"] {
   background: var(--raised);
   font-weight: 600;
+}
+
+.entry[aria-disabled="true"]:not([aria-current="true"]) {
+  background: transparent;
+}
+
+.entry[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
 }
 
 .entry.removed > .ellipsis {
