@@ -13,6 +13,12 @@ pub fn announce(port: u16, serve: bool) {
             return;
         }
     };
+    if !connected() {
+        if serve {
+            eprintln!("aqx: tailscale isn't connected, so aqx web isn't on your tailnet yet");
+        }
+        return;
+    }
     let urls = status.urls(port);
     for url in &urls {
         println!("and on your tailnet at {url}");
@@ -46,6 +52,24 @@ fn read_status() -> anyhow::Result<Status> {
         .output()?;
     anyhow::ensure!(output.status.success(), "{}", output.status);
     Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn connected() -> bool {
+    Command::new("tailscale")
+        .args(["status", "--json"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .is_ok_and(|output| running(&output.stdout))
+}
+
+fn running(status: &[u8]) -> bool {
+    #[derive(Deserialize)]
+    struct Backend {
+        #[serde(rename = "BackendState")]
+        state: String,
+    }
+    serde_json::from_slice::<Backend>(status).is_ok_and(|backend| backend.state == "Running")
 }
 
 #[derive(Deserialize)]
@@ -162,5 +186,13 @@ mod tests {
         assert!(status.taken(8443));
         assert!(!status.taken(4970));
         assert!(!self::status("{}").taken(4970));
+    }
+
+    #[test]
+    fn only_a_running_tailscale_counts_as_connected() {
+        assert!(running(br#"{"BackendState": "Running", "Self": {}}"#));
+        assert!(!running(br#"{"BackendState": "Stopped"}"#));
+        assert!(!running(br#"{"BackendState": "NeedsLogin"}"#));
+        assert!(!running(b""));
     }
 }
