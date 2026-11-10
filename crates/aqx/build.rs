@@ -2,7 +2,8 @@ use std::hash::{DefaultHasher, Hasher};
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest = std::env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+    let workspace = Path::new(&manifest).join("../..");
     let mut sources = vec![workspace.join("Cargo.toml"), workspace.join("Cargo.lock")];
     let crates = workspace.join("crates");
     println!("cargo:rerun-if-changed={}", crates.display());
