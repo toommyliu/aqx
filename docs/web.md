@@ -56,7 +56,7 @@ Press `?` to list the keys on a computer. Pick Change on a row, then press the n
 | `x` | Tick or untick the account under the cursor, or the open one |
 | `shift`+`↑` `↓` | Tick a run of accounts in the list |
 | `mod`+`a` | Select every account, or none when they're all selected. In the log, the lists and text fields it selects text instead |
-| `mod`+`1`–`9` | Open accounts 1 to 9, numbered in `aqx.toml` order. Hold `mod` to see each account's number |
+| `mod`+`1`–`9` | Open accounts 1 to 9, numbered in `aqx.toml` order. Hold `mod` to see each account's number. Only in the installed app; a browser tab keeps these keys for switching tabs |
 | `/` | Search the log or list |
 | `esc` | Clear the search, then leave select mode |
 | `?` | List and change the keys |

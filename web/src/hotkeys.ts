@@ -20,6 +20,8 @@ export const appHotkeys = defineAppHotkeys({
   "app.keys": { hotkey: "?", meta: { name: "Keys", group: app } },
 });
 
+export const inBrowserTab = matchMedia("(display-mode: browser)").matches;
+
 export const fixedKeys: ReadonlySet<string> = new Set(
   Object.entries(appHotkeys)
     .filter(([, key]) => key.meta?.group === app)

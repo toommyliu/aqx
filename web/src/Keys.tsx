@@ -6,7 +6,7 @@ import {
 } from "@tanstack/solid-hotkeys";
 import { For, Show, createMemo, createSignal } from "solid-js";
 import { type AppHotkeyId, detectPlatform } from "@tanstack/hotkeys";
-import { fixedKeys } from "./hotkeys";
+import { fixedKeys, inBrowserTab } from "./hotkeys";
 import { setDialog } from "./store";
 import { KeyCaps, Modal } from "./ui";
 
@@ -136,7 +136,10 @@ export function Keys() {
         )}
       </For>
       <p class="muted small">
-        {format("Mod+1")} to {format("Mod+9")} open the first nine accounts; hold {detectPlatform() === "mac" ? "⌘" : "Ctrl"} to see their numbers. In lists, ↑ ↓ move, Home and End jump, and Enter opens. Tabs move with ← →. In the script picker, ← goes up a
+        <Show when={!inBrowserTab}>
+          {format("Mod+1")} to {format("Mod+9")} open the first nine accounts; hold {detectPlatform() === "mac" ? "⌘" : "Ctrl"} to see their numbers.{" "}
+        </Show>
+        In lists, ↑ ↓ move, Home and End jump, and Enter opens. Tabs move with ← →. In the script picker, ← goes up a
         folder. Esc closes a dialog.
       </p>
     </Modal>
