@@ -40,6 +40,7 @@ fn main() {
     let dist = out.join("web");
     if !build_web(&workspace.join("web"), &dist) {
         let _ = std::fs::remove_dir_all(&dist);
+        println!("cargo:rerun-if-changed={}", dist.display());
     }
     embed_web(&dist, &out);
 }
