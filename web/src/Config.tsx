@@ -4,7 +4,7 @@ import { For, Index, Match, Show, Switch, createEffect, createMemo, createSignal
 import { createStore, produce, reconcile } from "solid-js/store";
 import { type ConfigStart, persisted, session, setDialog } from "./store";
 import { ScriptPicker } from "./Dialogs";
-import { Icon, Modal, anchor, arrows, clock } from "./ui";
+import { Icon, Modal, anchor, arrows, clock, serverList } from "./ui";
 import {
   type ConfigFile,
   type ConfigSchema,
@@ -1512,7 +1512,7 @@ function ServerSelect(props: {
   invalid: boolean;
   onChange: (v: string) => void;
 }) {
-  const servers = createQuery(() => ({ queryKey: ["servers", "all"], queryFn: api.allServers, staleTime: 60_000 }));
+  const servers = serverList();
   const match = () => (servers.data ?? []).find((s) => s.name.toLowerCase() === props.value.toLowerCase());
   return (
     <select

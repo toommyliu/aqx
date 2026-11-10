@@ -1,6 +1,6 @@
 import { createDebouncedValue } from "@tanstack/solid-pacer";
 import { createMutation, createQuery, keepPreviousData, useQueryClient } from "@tanstack/solid-query";
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, lazy, on, onMount } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, lazy, on, onCleanup, onMount } from "solid-js";
 
 const Config = lazy(() => import("./Config").then((m) => ({ default: m.Config })));
 const Keys = lazy(() => import("./Keys").then((m) => ({ default: m.Keys })));
@@ -21,10 +21,11 @@ import {
   targetsOf,
   hide,
 } from "./store";
-import { Icon, Modal, VirtualList, arrows } from "./ui";
+import { Icon, Modal, VirtualList, arrows, serverList } from "./ui";
 import {
   type DeclaredArg,
   type Problem,
+  type Server,
   type SkuaOption,
   type SkuaPane,
   api,
@@ -810,37 +811,114 @@ function RunArgs(props: { script: string; extra: [string, string][] }) {
   );
 }
 
+const REFRESH_GAP_MS = 10_000;
+
+const sameServer = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+function refusal(server: Server, free: boolean) {
+  if (server.members && free) return "members only";
+  if (!server.online) return "offline";
+  if (server.capacity > 0 && server.players >= server.capacity) return "full";
+  return null;
+}
+
 function Servers() {
-  const on = acting();
-  const listed = createQuery(() => ({ queryKey: ["servers", on], queryFn: () => api.servers(on), staleTime: 0 }));
-  const servers = () => listed.data;
-  const currentServer = () => accounts[on[0] ?? 0]?.server ?? "";
+  const chosen = acting();
+  const listed = serverList();
+  const free = () => chosen.some((i) => accounts[i]?.game?.member === false);
+  const current = () => (chosen.length === 1 ? (accounts[chosen[0] ?? 0]?.server ?? "") : "");
+  const isCurrent = (s: Server) => current() !== "" && sameServer(s.name, current());
+  const pickable = (s: Server) => !isCurrent(s) && refusal(s, free()) === null;
+  const [pickedName, setPickedName] = createSignal<string | null>(null);
+  const picked = () => {
+    const name = pickedName();
+    return name === null ? undefined : listed.data?.find((s) => sameServer(s.name, name) && pickable(s));
+  };
+  const [error, setError] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [cooling, setCooling] = createSignal(false);
+  createEffect(
+    on(
+      () => Math.max(listed.dataUpdatedAt, listed.errorUpdatedAt),
+      (at) => {
+        const left = at + REFRESH_GAP_MS - Date.now();
+        setCooling(left > 0);
+        if (left <= 0) return;
+        const timer = setTimeout(() => setCooling(false), left);
+        onCleanup(() => clearTimeout(timer));
+      },
+    ),
+  );
   let list!: HTMLUListElement;
   createEffect(() => {
-    if (servers()) queueMicrotask(() => focusUnlessTouch(list?.querySelector<HTMLElement>("[aria-current=true], [data-nav]")));
+    if (listed.data) queueMicrotask(() => focusUnlessTouch(list?.querySelector<HTMLElement>("[aria-current=true], [data-nav]")));
   });
+  const switchNow = async () => {
+    const s = picked();
+    if (!s || busy()) return;
+    const mine = dialog();
+    setBusy(true);
+    setError("");
+    try {
+      const outcomes = await api.act(targetsOf(chosen), { switch: s.name });
+      const done = `switching to ${s.name}`;
+      const failed = outcomes.filter((o) => o.error !== null);
+      report(outcomes.filter((o) => o.error === null), done);
+      if (failed.length === 0) {
+        if (dialog() === mine) close();
+        return;
+      }
+      setError(failed.map((o) => `${nameOf(o.account)}: ${o.error}`).join("; "));
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <Modal title={on.length === 1 ? `Switch ${nameOf(on[0] ?? 0)} to another server` : `Switch ${on.length} accounts`} onClose={close}>
-      <Switch fallback={<p class="muted" aria-live="polite">Loading the servers…</p>}>
-        <Match when={listed.error}>
-          <p class="error">{message(listed.error)}</p>
-        </Match>
-        <Match when={servers()}>
-          {(list_) => (
+    <Modal
+      title={chosen.length === 1 ? `Switch ${nameOf(chosen[0] ?? 0)} to another server` : `Switch ${chosen.length} accounts`}
+      onClose={close}
+      footer={
+        <>
+          <button
+            type="button"
+            class="start"
+            aria-disabled={cooling() || listed.isFetching ? "true" : undefined}
+            data-tip={cooling() ? `Refreshed less than ${REFRESH_GAP_MS / 1000} seconds ago` : undefined}
+            onClick={() => {
+              if (!cooling() && !listed.isFetching) void listed.refetch();
+            }}
+          >
+            {listed.isFetching ? "Refreshing…" : "Refresh"}
+          </button>
+          <button type="button" onClick={close}>
+            Cancel
+          </button>
+          <button type="button" class="primary" disabled={!picked() || busy()} onClick={() => void switchNow()}>
+            {busy() ? "Switching…" : picked() ? `Switch to ${picked()?.name}` : "Switch"}
+          </button>
+        </>
+      }
+    >
+      <Switch fallback={listed.error ? null : <p class="muted" aria-live="polite">Loading the servers…</p>}>
+        <Match when={listed.data}>
+          {(servers) => (
             <ul class="entries" ref={list} aria-label="Servers" onKeyDown={(e) => arrows(e, list)}>
-              <For each={list_()}>
+              <For each={servers()}>
                 {(s) => (
                   <li>
                     <button
                       type="button"
                       data-nav
                       class="entry server"
-                      aria-current={s.name.toLowerCase() === currentServer().toLowerCase() ? "true" : undefined}
-                      aria-disabled={s.refusal ? "true" : undefined}
+                      aria-current={isCurrent(s) ? "true" : undefined}
+                      aria-disabled={refusal(s, free()) ? "true" : undefined}
+                      aria-pressed={picked() === s}
                       onClick={() => {
-                        if (s.refusal) return fail(`${s.name} ${s.refusal}`);
-                        close();
-                        void act({ switch: s.name }, `switching to ${s.name}`, on);
+                        if (!pickable(s)) return;
+                        setPickedName(s.name);
+                        setError("");
                       }}
                     >
                       <span class="ellipsis">{s.name}</span>
@@ -849,8 +927,8 @@ function Servers() {
                       </span>
                       <span class="muted note">
                         {[
-                          s.name.toLowerCase() === currentServer().toLowerCase() ? "current" : "",
-                          s.refusal ? s.refusal.replace(/^is /, "") : s.members ? "members" : "",
+                          isCurrent(s) ? "current" : "",
+                          refusal(s, free()) ?? (s.members ? "members" : ""),
                         ]
                           .filter(Boolean)
                           .join(" · ")}
@@ -863,6 +941,13 @@ function Servers() {
           )}
         </Match>
       </Switch>
+      <Show when={error() || (listed.error && message(listed.error))}>
+        {(why) => (
+          <p class="error" role="alert">
+            {why()}
+          </p>
+        )}
+      </Show>
     </Modal>
   );
 }

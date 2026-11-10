@@ -309,8 +309,10 @@ export function Since(props: { at: number; prefix: string }) {
   );
 }
 
+export const serverList = () => createQuery(() => ({ queryKey: ["servers"], queryFn: api.servers, staleTime: 60_000 }));
+
 export function ServerName(props: { name: string }) {
-  const servers = createQuery(() => ({ queryKey: ["servers", "all"], queryFn: api.allServers, staleTime: 60_000 }));
+  const servers = serverList();
   const canonical = () =>
     servers.data?.find((s) => s.name.toLowerCase() === props.name.toLowerCase())?.name ?? props.name;
   return <>{canonical()}</>;

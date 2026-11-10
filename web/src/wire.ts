@@ -28,6 +28,7 @@ export type Game = {
   max_mp: number;
   dead: boolean;
   away: boolean;
+  member: boolean;
   class: string;
   class_rank: number;
   level: number;
@@ -92,12 +93,12 @@ export type Outcome = { account: number; error: string | null };
 
 export type Target = { account: number; name: string };
 
-export type ServerChoice = {
+export type Server = {
   name: string;
   players: number;
   capacity: number;
   members: boolean;
-  refusal: string | null;
+  online: boolean;
 };
 
 export type Folder = {
@@ -219,10 +220,7 @@ export const api = {
     call<Declared>(`/api/args?${q({ script, accounts: accounts.join(",") })}`),
   recent: () => call<{ runs: Recent[]; hidden: string[] }>("/api/recent"),
   forgetRecent: (path: string) => call<{ runs: Recent[]; hidden: string[] }>("/api/recent/forget", { path }),
-  allServers: () =>
-    call<{ name: string; players: number; capacity: number; members: boolean; online: boolean }[]>("/api/servers/all"),
-  servers: (accounts: number[]) =>
-    call<ServerChoice[]>(`/api/servers?${q({ accounts: accounts.join(",") })}`),
+  servers: () => call<Server[]>("/api/servers/all"),
   files: (dir: string) => call<Folder>(`/api/files?${q({ dir })}`),
   skua: (query: string) => call<SkuaLibrary>(`/api/skua?${q({ q: query })}`),
   updateSkua: () => call<{ message: string }>("/api/skua/update", {}),
