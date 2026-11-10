@@ -4,7 +4,7 @@
 
 ## Write aqx.toml
 
-`aqx init` sets up `~/aqx`, or the folder you name. It writes `aqx.d.ts`, a `tsconfig.json` that points at it, a sample script, `aqx.schema.json` for editor completion, and a `.gitignore` that keeps `aqx.toml` out of git. In a terminal it also asks for one account and writes an `aqx.toml` that runs the sample. Running it again updates `aqx.d.ts` and the schema and leaves your other files alone. `aqx schema` prints the schema.
+`aqx init` sets up `~/aqx`, or the folder you name. It writes `aqx.d.ts`, a `tsconfig.json` that points at it, a sample script, `aqx.schema.json` for editor completion, and a `.gitignore` that keeps `aqx.toml` out of git. In a terminal it also asks for one account and writes an `aqx.toml` that runs the sample. Running it again updates `aqx.d.ts` and the schema and leaves your other files alone.
 
 ```toml
 [defaults]
