@@ -641,7 +641,9 @@ function RunArgs(props: { script: string; extra: [string, string][] }) {
     for (const [name] of perAccount() ? [] : props.extra) {
       if (!d.args.some((arg) => arg.name === name)) continue;
       const value = straight(answers()[key(null, name)] ?? "");
-      if (value) sent.set(name, value);
+      const reread = typedRun(`x ${name}=${value}`);
+      const keeps = typeof reread !== "string" && reread.extra.length === 1 && reread.extra[0]?.[1] === value;
+      if (value && keeps) sent.set(name, value);
       else sent.delete(name);
     }
     setError("");
