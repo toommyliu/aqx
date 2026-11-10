@@ -188,16 +188,15 @@ function problemsOf(
     if (!a.user.trim()) out.push({ id: `${at}-user`, account: a.id, message: "Every account needs a username" });
     if (!a.password && !a.hasPassword) out.push({ id: `${at}-password`, account: a.id, message: "A new account needs a password" });
     const known = declared[a.script.trim()];
-    const noun = isSkua(a.script) ? "option" : "arg";
     a.args.forEach((r, i) => {
       const key = argName(a.script, r.key);
       const arg = known?.find((d) => d.name === key);
       if (!key && r.value.trim()) out.push({ id: `${at}-arg${i}-key`, account: a.id, message: "Name this arg" });
-      else if (known && key && !arg)
+      else if (known && key && !arg && !isSkua(a.script))
         out.push({
           id: `${at}-arg${i}-key`,
           account: a.id,
-          message: known.length > 0 ? `The script has no ${noun} named ${key}` : `The script has no ${noun}s`,
+          message: known.length > 0 ? `The script has no arg named ${key}` : "The script takes no args",
         });
       if (r.kind === "number" && !(r.value.trim() && Number.isFinite(Number(r.value))))
         out.push({ id: arg ? `${at}-argd-${key}` : `${at}-arg${i}-value`, account: a.id, message: "Use a number" });
@@ -1068,12 +1067,13 @@ function Args(props: {
     if (k) props.onDeclared(script(), k);
   });
   const names = () => new Set((known() ?? []).map((d) => d.name));
-  const valueOf = (name: string) => props.args.find((r) => argName(script(), r.key) === name)?.value ?? "";
-  const answer = (name: string, kind: ArgKind, v: string) =>
+  const rowOf = (name: string) => props.args.find((r) => argName(script(), r.key) === name);
+  const valueOf = (name: string) => rowOf(name)?.value ?? "";
+  const answer = (name: string, kind: ArgKind, v: string | null) =>
     props.edit((a) => {
       const at = a.args.findIndex((r) => argName(script(), r.key) === name);
       const row = a.args[at];
-      if (v === "") {
+      if (v === null) {
         if (row) a.args.splice(at, 1);
         return;
       }
@@ -1116,7 +1116,7 @@ function Args(props: {
                     value={valueOf(d.name)}
                     aria-required={d.optional ? undefined : "true"}
                     aria-invalid={error() ? "true" : undefined}
-                    onInput={(e) => answer(d.name, argKind(d), e.currentTarget.value)}
+                    onInput={(e) => answer(d.name, argKind(d), e.currentTarget.value || null)}
                   />
                 }
               >
@@ -1130,7 +1130,7 @@ function Args(props: {
                   ]}
                   labelledBy={`${id}-label`}
                   invalid={!!error()}
-                  onChange={(v) => answer(d.name, argKind(d), v)}
+                  onChange={(v) => answer(d.name, argKind(d), v || null)}
                 />
               </Show>
               <Show when={error()}>{(message) => <p class="error small">{message()}</p>}</Show>
@@ -1164,11 +1164,11 @@ function Args(props: {
                     ]}
                     labelledBy={`${id}-label`}
                     invalid={!!error()}
-                    onChange={(v) => answer(key, kind, v)}
+                    onChange={(v) => answer(key, kind, v || null)}
                   />
                 </Match>
                 <Match when={o.kind === "choice"}>
-                  <select id={id} value={value()} onChange={(e) => answer(key, kind, e.currentTarget.value)}>
+                  <select id={id} value={value()} onChange={(e) => answer(key, kind, e.currentTarget.value || null)}>
                     <option value="">{unset}</option>
                     <For each={o.choices}>{(c) => <option value={c}>{c}</option>}</For>
                   </select>
@@ -1177,7 +1177,7 @@ function Args(props: {
                   <input
                     id={id}
                     type="text"
-                    placeholder={unset}
+                    placeholder={o.kind === "text" && rowOf(key) ? "" : unset}
                     inputmode={o.kind === "number" ? "decimal" : "text"}
                     spellcheck={false}
                     autocapitalize="off"
@@ -1185,8 +1185,18 @@ function Args(props: {
                     autocomplete="off"
                     value={value()}
                     aria-invalid={error() ? "true" : undefined}
-                    onInput={(e) => answer(key, kind, e.currentTarget.value)}
+                    onInput={(e) => answer(key, kind, o.kind === "text" ? e.currentTarget.value : e.currentTarget.value || null)}
                   />
+                  <Show when={o.kind === "text" && rowOf(key)}>
+                    <button
+                      type="button"
+                      class="icon-button"
+                      aria-label={`Use the shared ${o.label || o.name}`}
+                      onClick={() => answer(key, kind, null)}
+                    >
+                      <Icon name="close" />
+                    </button>
+                  </Show>
                 </Match>
               </Switch>
               <Show when={o.description}>
