@@ -54,6 +54,26 @@ export function logOut(on: number[]) {
   });
 }
 
+export async function openScriptOptions(on: number[]) {
+  const [i] = on;
+  const script = i === undefined ? null : accounts[i]?.script;
+  if (i === undefined || !script) return;
+  if (script.endsWith(".cs")) {
+    setActing([i]);
+    setDialog({ kind: "skua", script });
+    return;
+  }
+  try {
+    const declared = await api.args(script, [i]);
+    if (declared.args.length === 0) return say("This script takes no args");
+    if (dialog() !== null) return;
+    setActing([i]);
+    setDialog({ kind: "run", script, extra: [] });
+  } catch (e) {
+    fail(message(e));
+  }
+}
+
 export function openServers(on: number[]) {
   if (on.length === 0) return;
   setActing(on);

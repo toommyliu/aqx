@@ -9,7 +9,7 @@ import {
 import { For, Match, Show, Switch, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 import { Toaster, useSonner } from "solid-sonner";
 import { AccountPanel } from "./Account";
-import { Dialogs, logOut, openPicker, openServers } from "./Dialogs";
+import { Dialogs, logOut, openPicker, openServers, openScriptOptions } from "./Dialogs";
 import { inBrowserTab } from "./hotkeys";
 import {
   accounts,
@@ -81,6 +81,7 @@ function Shortcuts() {
   bind("account.stop", () => act("stop", "stopping", here()));
   bind("account.restart", () => act("restart", "restarting", here()));
   bind("account.pause", () => pauseOrResume(here()));
+  bind("account.options", () => void openScriptOptions(here()));
   bind("account.server", () => openServers(here()));
   bind("account.logout", () => logOut(here()));
   createHotkeys(
