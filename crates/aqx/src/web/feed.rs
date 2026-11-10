@@ -14,6 +14,7 @@ use crate::view::{Shown, State};
 
 const TICK: Duration = Duration::from_millis(250);
 const HEARTBEAT: Duration = Duration::from_secs(15);
+const DRIFT: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -46,8 +47,50 @@ pub struct Feed {
     kind: Option<Kind>,
     started_ms: Option<u64>,
     since: u64,
-    sent: Vec<String>,
+    sent: Vec<Steady>,
     ended: Option<SystemTime>,
+}
+
+struct Steady {
+    rest: Shown,
+    up_since: Option<Instant>,
+    ready_at: Vec<Option<Instant>>,
+}
+
+impl Steady {
+    fn of(shown: &Shown, at: Instant) -> Steady {
+        let mut rest = shown.clone();
+        let up_since = rest.up.take().map(|up| at - up);
+        let skills = rest.game.iter_mut().flat_map(|g| &mut g.skills);
+        let ready_at = skills
+            .map(|skill| {
+                (skill.left_ms > 0 && skill.ready > 0.0).then(|| {
+                    skill.ready = 0.0;
+                    at + Duration::from_millis(std::mem::take(&mut skill.left_ms).into())
+                })
+            })
+            .collect();
+        Steady {
+            rest,
+            up_since,
+            ready_at,
+        }
+    }
+
+    fn matches(&self, now: &Steady) -> bool {
+        let near = |a: &Option<Instant>, b: &Option<Instant>| match (a, b) {
+            (Some(a), Some(b)) => a.max(b).duration_since(*a.min(b)) <= DRIFT,
+            (None, None) => true,
+            _ => false,
+        };
+        self.rest == now.rest
+            && near(&self.up_since, &now.up_since)
+            && self
+                .ready_at
+                .iter()
+                .zip(&now.ready_at)
+                .all(|(a, b)| near(a, b))
+    }
 }
 
 impl Feed {
@@ -69,7 +112,7 @@ impl Feed {
         self.since
     }
 
-    pub fn see(&mut self, seen: Seen) -> String {
+    pub fn see(&mut self, seen: Seen, at: Instant) -> String {
         let mut out = String::new();
         let (kind, accounts, log) = match seen {
             Seen::Idle(accounts) => (Kind::None, accounts, Vec::new()),
@@ -115,30 +158,31 @@ impl Feed {
             };
             event(&mut out, "session", None, &data.to_string());
         }
-        let shown: Vec<String> = accounts
-            .iter()
-            .map(|a| serde_json::to_string(a).expect("accounts serialize"))
-            .collect();
-        if shown.len() != self.sent.len() {
+        let json = |a: &Shown| serde_json::to_string(a).expect("accounts serialize");
+        if accounts.len() != self.sent.len() {
+            let shown: Vec<String> = accounts.iter().map(json).collect();
             event(
                 &mut out,
                 "accounts",
                 None,
                 &format!("[{}]", shown.join(",")),
             );
+            self.sent = accounts.iter().map(|a| Steady::of(a, at)).collect();
         } else {
-            for (i, (now, before)) in shown.iter().zip(&self.sent).enumerate() {
-                if now != before {
+            for (i, (account, before)) in accounts.iter().zip(&mut self.sent).enumerate() {
+                let now = Steady::of(account, at);
+                if !before.matches(&now) {
+                    let account = json(account);
                     event(
                         &mut out,
                         "account",
                         None,
-                        &format!("{{\"i\":{i},\"account\":{now}}}"),
+                        &format!("{{\"i\":{i},\"account\":{account}}}"),
                     );
+                    *before = now;
                 }
             }
         }
-        self.sent = shown;
         if let (Some(last), Some(started)) = (log.last(), self.started_ms) {
             self.since = last.seq + 1;
             let id = format!("{started}:{}", last.seq);
@@ -293,7 +337,7 @@ pub fn run(config: &Path, request: Request) {
             }
         };
         let idle_now = matches!(seen, Seen::Idle(_));
-        let mut text = feed.see(seen);
+        let mut text = feed.see(seen, Instant::now());
         if idle_now {
             text.push_str(&feed.ended(idle.ended(config)));
         }
@@ -363,29 +407,104 @@ mod tests {
 
     #[test]
     fn only_what_changed_is_sent_again() {
+        let at = Instant::now();
         let mut feed = Feed::resuming(None);
         feed.session_is(Some(7));
-        let first = feed.see(running(
-            vec![shown("player1", ""), shown("player2", "")],
-            vec![line(0, "logged in")],
-        ));
+        let first = feed.see(
+            running(
+                vec![shown("player1", ""), shown("player2", "")],
+                vec![line(0, "logged in")],
+            ),
+            at,
+        );
         assert_eq!(events(&first), ["session", "accounts", "log"]);
         assert!(first.contains("id: 7:0\n"));
         assert_eq!(feed.since(), 1);
 
-        let same = feed.see(running(
-            vec![shown("player1", ""), shown("player2", "")],
-            vec![],
-        ));
+        let same = feed.see(
+            running(vec![shown("player1", ""), shown("player2", "")], vec![]),
+            at,
+        );
         assert_eq!(same, "", "nothing changed, so nothing is sent");
 
-        let one = feed.see(running(
-            vec![shown("player1", ""), shown("player2", "killing")],
-            vec![],
-        ));
+        let one = feed.see(
+            running(
+                vec![shown("player1", ""), shown("player2", "killing")],
+                vec![],
+            ),
+            at,
+        );
         assert_eq!(events(&one), ["account"]);
         assert!(one.contains("\"i\":1"));
         assert!(!one.contains("player1"));
+
+        let fighting = |up_ms: u64, left_ms: u32, ready: f32| Shown {
+            up: Some(Duration::from_millis(up_ms)),
+            game: Some(crate::view::Game {
+                skills: vec![crate::view::SkillState {
+                    name: "Bash".into(),
+                    ready,
+                    left_ms,
+                }],
+                ..Default::default()
+            }),
+            ..shown("player1", "")
+        };
+        let tick = |n: u32| at + TICK * n;
+        feed.see(
+            running(
+                vec![fighting(60_000, 2000, 0.5), shown("player2", "killing")],
+                vec![],
+            ),
+            tick(0),
+        );
+
+        let later = feed.see(
+            running(
+                vec![fighting(60_250, 1750, 0.56), shown("player2", "killing")],
+                vec![],
+            ),
+            tick(1),
+        );
+        assert_eq!(later, "", "uptime and a cooldown only counted on");
+
+        let used = feed.see(
+            running(
+                vec![fighting(60_500, 4000, 0.0), shown("player2", "killing")],
+                vec![],
+            ),
+            tick(2),
+        );
+        assert_eq!(events(&used), ["account"], "the skill was used again");
+
+        let ready = feed.see(
+            running(
+                vec![fighting(64_500, 0, 1.0), shown("player2", "killing")],
+                vec![],
+            ),
+            tick(18),
+        );
+        assert_eq!(events(&ready), ["account"], "the skill is ready");
+
+        feed.see(
+            running(
+                vec![fighting(64_750, 3000, 0.0), shown("player2", "killing")],
+                vec![],
+            ),
+            tick(19),
+        );
+        let held = feed.see(
+            running(
+                vec![fighting(65_000, 2750, 0.0), shown("player2", "killing")],
+                vec![],
+            ),
+            tick(20),
+        );
+        assert_eq!(
+            events(&held),
+            ["account"],
+            "a cooldown held at empty is sent each tick"
+        );
     }
 
     #[test]
@@ -405,25 +524,31 @@ mod tests {
     #[test]
     fn the_session_state_is_sent_when_it_changes() {
         let mut feed = Feed::resuming(None);
-        let idle = feed.see(Seen::Idle(vec![shown("player1", "")]));
+        let idle = feed.see(Seen::Idle(vec![shown("player1", "")]), Instant::now());
         assert_eq!(events(&idle), ["session", "accounts"]);
         assert!(idle.contains("\"kind\":\"none\""));
-        assert_eq!(feed.see(Seen::Idle(vec![shown("player1", "")])), "");
+        assert_eq!(
+            feed.see(Seen::Idle(vec![shown("player1", "")]), Instant::now()),
+            ""
+        );
         feed.session_is(Some(7));
-        let started = feed.see(running(vec![shown("player1", "")], vec![]));
+        let started = feed.see(running(vec![shown("player1", "")], vec![]), Instant::now());
         assert_eq!(events(&started), ["session"]);
         assert!(started.contains("\"startedMs\":7"));
         assert!(started.contains("\"configChanged\":false"));
-        let edited = feed.see(Seen::Running {
-            started_ms: 7,
-            other_build: false,
-            config_changed: true,
-            frame: Frame {
-                accounts: vec![shown("player1", "")],
-                log: vec![],
-                ending: false,
+        let edited = feed.see(
+            Seen::Running {
+                started_ms: 7,
+                other_build: false,
+                config_changed: true,
+                frame: Frame {
+                    accounts: vec![shown("player1", "")],
+                    log: vec![],
+                    ending: false,
+                },
             },
-        });
+            Instant::now(),
+        );
         assert_eq!(events(&edited), ["session"]);
         assert!(edited.contains("\"configChanged\":true"));
     }
