@@ -32,7 +32,7 @@ The eye button in the header shows your accounts as `account 1`, `account 2` and
 aqx web --tailscale
 ```
 
-It prints `https://<machine>.<tailnet>.ts.net:4970`, which opens on any device in your tailnet. It needs the `tailscale` command on your `PATH`. The route stays after `aqx web` stops, and every `aqx web` start prints each Tailscale Serve route to its port, flag or not, so you only pass `--tailscale` once. If that port on your tailnet already serves something else, `--tailscale` leaves it alone and asks for another `--port`. `tailscale serve --https=4970 --set-path=/ off` takes the route down. Anyone who can reach that address can drive your accounts, so keep it off [Funnel](https://tailscale.com/kb/1223/funnel).
+It prints `https://<machine>.<tailnet>.ts.net:4970`, which opens on any device in your tailnet. If a route to aqx web already exists, such as one on port 443, it prints that link instead and adds nothing. It needs the `tailscale` command on your `PATH`. The route stays after `aqx web` stops, and every `aqx web` start prints each Tailscale Serve route to its port, flag or not, so you only pass `--tailscale` once. If that port on your tailnet already serves something else, `--tailscale` leaves it alone and asks for another `--port`. `tailscale serve --https=4970 --set-path=/ off` takes the route down. Anyone who can reach that address can drive your accounts, so keep it off [Funnel](https://tailscale.com/kb/1223/funnel).
 
 ## Edit aqx.toml
 
