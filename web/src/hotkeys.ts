@@ -9,6 +9,7 @@ export const appHotkeys = defineAppHotkeys({
   "account.stop": { hotkey: "S", meta: { name: "Stop the script", group: account } },
   "account.pause": { hotkey: "P", meta: { name: "Pause or resume the script", group: account } },
   "account.restart": { hotkey: null, meta: { name: "Restart the script", group: account } },
+  "account.options": { hotkey: null, meta: { name: "Edit the script's options or args", group: account } },
   "account.server": { hotkey: null, meta: { name: "Switch server", group: account } },
   "account.logout": { hotkey: null, meta: { name: "Log out", group: account } },
   "account.next": { hotkey: "J", meta: { name: "Next account", group: account } },

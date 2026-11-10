@@ -16,7 +16,7 @@ import {
 import { type AppHotkeyId } from "@tanstack/hotkeys";
 import { createFormatForDisplay, useAppHotkeys } from "@tanstack/solid-hotkeys";
 import { pauseOrResume, tone } from "./App";
-import { logOut, openPicker, openServers } from "./Dialogs";
+import { logOut, openPicker, openServers, openScriptOptions } from "./Dialogs";
 import {
   VIEWS,
   type View,
@@ -297,6 +297,16 @@ function Actions(props: { account: Account; index: number }) {
           a().script?.endsWith(".cs") ? "Skua scripts can't pause" : !isRunning(a()) && "No script is running"
         }
       />
+      <Show when={a().script}>
+        {(script) => (
+          <Action
+            icon="options"
+            label={script().endsWith(".cs") ? "Options…" : "Args…"}
+            keys="account.options"
+            onClick={() => void openScriptOptions(on())}
+          />
+        )}
+      </Show>
       <Action icon="server" label="Server…" keys="account.server" onClick={() => openServers(on())} blocked={!isOnline(a()) && "Log in first"} />
     </div>
   );
