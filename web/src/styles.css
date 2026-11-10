@@ -1972,7 +1972,8 @@ table.keys {
 .accounts li button:focus-visible,
 .split-list button:focus-visible,
 .vlist .icon-button:focus-visible,
-.log:focus-visible {
+.log:focus-visible,
+main:focus-visible {
   outline-offset: -2px;
 }
 
