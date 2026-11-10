@@ -839,7 +839,7 @@ function Servers() {
   const [cooling, setCooling] = createSignal(false);
   createEffect(
     on(
-      () => listed.dataUpdatedAt,
+      () => Math.max(listed.dataUpdatedAt, listed.errorUpdatedAt),
       (at) => {
         const left = at + REFRESH_GAP_MS - Date.now();
         setCooling(left > 0);
@@ -856,6 +856,7 @@ function Servers() {
   const switchNow = async () => {
     const s = picked();
     if (!s || busy()) return;
+    const mine = dialog();
     setBusy(true);
     setError("");
     try {
@@ -863,7 +864,10 @@ function Servers() {
       const done = `switching to ${s.name}`;
       const failed = outcomes.filter((o) => o.error !== null);
       report(outcomes.filter((o) => o.error === null), done);
-      if (failed.length === 0) return close();
+      if (failed.length === 0) {
+        if (dialog() === mine) close();
+        return;
+      }
       setError(failed.map((o) => `${nameOf(o.account)}: ${o.error}`).join("; "));
     } catch (e) {
       setError(message(e));
@@ -897,7 +901,7 @@ function Servers() {
         </>
       }
     >
-      <Switch fallback={<p class="muted" aria-live="polite">Loading the servers…</p>}>
+      <Switch fallback={listed.error ? null : <p class="muted" aria-live="polite">Loading the servers…</p>}>
         <Match when={listed.data}>
           {(servers) => (
             <ul class="entries" ref={list} aria-label="Servers" onKeyDown={(e) => arrows(e, list)}>
@@ -936,14 +940,13 @@ function Servers() {
             </ul>
           )}
         </Match>
-        <Match when={listed.error}>
-          <p class="error">{message(listed.error)}</p>
-        </Match>
       </Switch>
-      <Show when={error()}>
-        <p class="error" role="alert">
-          {error()}
-        </p>
+      <Show when={error() || (listed.error && message(listed.error))}>
+        {(why) => (
+          <p class="error" role="alert">
+            {why()}
+          </p>
+        )}
       </Show>
     </Modal>
   );
