@@ -72,7 +72,7 @@ If a folder above the script has its own `CoreBots.cs`, aqx reads the includes f
 
 ## Update the library
 
-Press `u` on the Skua tab of the `o` list, or run `aqx skua update`. aqx downloads the library only when it changed upstream.
+In the web UI, press Run, switch to the Skua tab, and press Update. From a shell, run `aqx skua update`. aqx downloads the library only when it changed upstream.
 
 An update replaces the whole `~/aqx/skua/Scripts` folder, so aqx discards any edits you made inside it. If the download fails, aqx keeps the current library. Scripts that are running keep running, and the next start uses the new library.
 
