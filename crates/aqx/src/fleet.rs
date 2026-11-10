@@ -104,10 +104,6 @@ impl Log {
     pub fn lines(&self) -> impl DoubleEndedIterator<Item = &Line> {
         self.lines.iter()
     }
-
-    pub fn next_seq(&self) -> u64 {
-        self.next
-    }
 }
 
 pub enum Link {
@@ -1751,7 +1747,7 @@ mod tests {
         assert_eq!(script, 10, "a noisy channel doesn't push out a quiet one");
         assert_eq!(game.len(), LOG_LINES);
         assert_eq!(game[0].text, "game 500");
-        assert_eq!(log.since(log.next_seq() - 2).count(), 2);
+        assert_eq!(log.since(log.next - 2).count(), 2);
     }
 
     #[test]

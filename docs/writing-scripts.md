@@ -118,4 +118,4 @@ aqx run <script> --user <user> --pass <pass> --server <server> [--arg key=value]
 
 `aqx servers` lists the server names. Press Ctrl+C once to stop the script and log out, or twice to exit right away.
 
-In the TUI, `o` lists the folders and the `.ts`, `.js`, `.mjs` and `.cs` files in the `scripts` folder next to `aqx.toml`, `~/aqx/scripts` by default. It skips `.d.ts` files, `node_modules`, and names that start with a dot. `→` or `enter` opens a folder and `←` goes up one. Press `/` to search the folder you're in, or type or paste a path such as `~/bots/farm.ts` to go straight to it. `enter` runs the selected script. aqx then asks for each arg the script declares.
+In the web UI, the Files tab of Run lists the folders and the `.ts`, `.js`, `.mjs` and `.cs` files in the `scripts` folder next to `aqx.toml`, `~/aqx/scripts` by default. It skips `.d.ts` files, `node_modules`, and names that start with a dot. Type in the box to filter the folder you're in, or type or paste a path such as `~/bots/farm.ts` to go straight to it. Picking a script runs it, and aqx then asks for each arg the script declares.

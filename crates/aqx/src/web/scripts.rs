@@ -1,76 +1,17 @@
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
-use tui_input::Input as TextInput;
+use aqx_script::skua::library::Entry;
 
 use crate::config::Script;
 
 const SCRIPT_EXTENSIONS: [&str; 4] = [".ts", ".js", ".mjs", ".cs"];
-
-pub struct Prompt {
-    pub input: TextInput,
-    draft: TextInput,
-    pick: Option<usize>,
-    pub matches: Vec<String>,
-}
-
-impl Prompt {
-    pub fn new(home: &Path) -> Self {
-        let mut prompt = Prompt {
-            input: TextInput::default(),
-            draft: TextInput::default(),
-            pick: None,
-            matches: Vec::new(),
-        };
-        prompt.find_matches(home);
-        prompt
-    }
-
-    pub fn find_matches(&mut self, home: &Path) {
-        self.matches = scripts_matching(self.input.value(), home);
-    }
-
-    pub fn edited(&mut self) {
-        self.pick = None;
-    }
-
-    pub fn complete(&mut self) {
-        self.pick = None;
-        match self.matches.as_slice() {
-            [] => {}
-            [only] if !only.ends_with('/') => self.input = TextInput::new(format!("{only} ")),
-            many => self.input = TextInput::new(shared_prefix(many).to_owned()),
-        }
-    }
-
-    pub fn recall(&mut self, recent: &[String], older: bool) {
-        if recent.is_empty() {
-            return;
-        }
-        let pick = match (self.pick, older) {
-            (None, false) => return,
-            (None, true) => {
-                self.draft = std::mem::take(&mut self.input);
-                0
-            }
-            (Some(i), true) => (i + 1).min(recent.len() - 1),
-            (Some(0), false) => {
-                self.pick = None;
-                self.input = std::mem::take(&mut self.draft);
-                return;
-            }
-            (Some(i), false) => i - 1,
-        };
-        self.pick = Some(pick);
-        self.input = TextInput::new(recent[recent.len() - 1 - pick].clone());
-    }
-}
 
 const RECENT_KEPT: usize = 100;
 
 #[derive(Default)]
 pub struct Recent {
     runs: Vec<Script>,
-    offered: Vec<Script>,
 }
 
 impl Recent {
@@ -83,14 +24,6 @@ impl Recent {
 
     pub fn forget(&mut self, forgotten: impl Fn(&Path) -> bool) {
         self.runs.retain(|run| !forgotten(&run.path));
-        self.offered.retain(|offered| !forgotten(&offered.path));
-    }
-
-    pub fn offer(&mut self, script: Script) {
-        let known = self.offered.iter().any(|kept| kept.path == script.path);
-        if self.offered.len() < RECENT_KEPT && !known {
-            self.offered.push(script);
-        }
     }
 
     #[cfg(test)]
@@ -99,12 +32,7 @@ impl Recent {
     }
 
     pub fn typed(&self, home: &Path) -> Vec<String> {
-        let ran = |offered: &&Script| self.runs.iter().any(|run| run.path == offered.path);
-        let offered = self.offered.iter().filter(|offered| !ran(offered));
-        offered
-            .chain(&self.runs)
-            .map(|script| typed(home, script))
-            .collect()
+        self.runs.iter().map(|script| typed(home, script)).collect()
     }
 }
 
@@ -206,54 +134,44 @@ fn typed_args<'a>(words: impl Iterator<Item = &'a str>) -> Result<Vec<(String, S
     Ok(args)
 }
 
-fn scripts_matching(input: &str, home: &Path) -> Vec<String> {
-    let input = input.trim_start();
-    if input.contains(char::is_whitespace) {
-        return Vec::new();
-    }
-    let (dir, prefix) = input.split_at(input.rfind('/').map_or(0, |i| i + 1));
-    let Ok(entries) = std::fs::read_dir(home.join(expand_home(Path::new(dir)))) else {
-        return Vec::new();
-    };
-    let mut matches: Vec<String> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            let hidden = name.starts_with('.') && !prefix.starts_with('.');
-            if !name.starts_with(prefix) || hidden || name.contains(char::is_whitespace) {
-                return None;
-            }
-            let kind = entry.file_type().ok()?;
-            if kind.is_dir() || (kind.is_symlink() && entry.path().is_dir()) {
-                Some(format!("{dir}{name}/"))
-            } else if script_file(&name) {
-                Some(format!("{dir}{name}"))
-            } else {
-                None
-            }
-        })
-        .collect();
-    if prefix == "." || prefix == ".." {
-        matches.push(format!("{dir}../"));
-    }
-    matches.sort();
-    matches
-}
-
 pub fn script_file(name: &str) -> bool {
     SCRIPT_EXTENSIONS.iter().any(|ext| name.ends_with(ext)) && !name.ends_with(".d.ts")
 }
 
-pub fn shared_prefix(sorted: &[String]) -> &str {
-    let (Some(first), Some(last)) = (sorted.first(), sorted.last()) else {
-        return "";
+pub fn list(folder: &Path) -> Result<Vec<Entry>, String> {
+    let found = match fs::read_dir(folder) {
+        Ok(found) => found,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("couldn't list {}: {e}", folder.display())),
     };
-    let end = first
-        .char_indices()
-        .zip(last.chars())
-        .find(|((_, a), b)| a != b)
-        .map_or(first.len(), |((i, _), _)| i);
-    &first[..end]
+    let mut entries: Vec<Entry> = found
+        .flatten()
+        .filter_map(|found| {
+            let name = found.file_name().into_string().ok()?;
+            if name.starts_with('.') || name == "node_modules" {
+                return None;
+            }
+            let path = found.path();
+            let name = if path.is_dir() {
+                format!("{name}/")
+            } else if script_file(&name) && path.is_file() {
+                name
+            } else {
+                return None;
+            };
+            Some(Entry {
+                name: name.clone(),
+                description: String::new(),
+                tags: Vec::new(),
+                path: name,
+            })
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        let file = |e: &Entry| !e.path.ends_with('/');
+        (file(a), &a.path).cmp(&(file(b), &b.path))
+    });
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -272,13 +190,12 @@ mod tests {
         ] {
             std::fs::write(home.join(file), "").unwrap();
         }
-        assert_eq!(scripts_matching("fa", &home), ["farm/"]);
-        assert_eq!(
-            scripts_matching("farm/", &home),
-            ["farm/vault.cs", "farm/void.ts"]
-        );
-        assert_eq!(scripts_matching("farm/vo", &home), ["farm/void.ts"]);
-        assert!(scripts_matching("farm/void.ts n=1", &home).is_empty());
+        let listed: Vec<String> = list(&home.join("farm"))
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        assert_eq!(listed, ["vault.cs", "void.ts"]);
 
         let script = parse("farm/void.ts target=7500 label=two words", &home).unwrap();
         assert_eq!(script.path, home.join("farm/void.ts"));
@@ -322,10 +239,6 @@ mod tests {
         );
 
         let mut recent = Recent::default();
-        recent.offer(Script {
-            path: dir.join("farm/config.ts"),
-            args: vec![("token".into(), "x".into())],
-        });
         for typed in [
             "farm/void.ts target=7500",
             "farm/vault.ts",
@@ -336,11 +249,7 @@ mod tests {
         }
         assert_eq!(
             recent.typed(&dir),
-            [
-                "farm/config.ts token=x",
-                "farm/vault.ts",
-                "farm/void.ts target=100"
-            ]
+            ["farm/vault.ts", "farm/void.ts target=100"]
         );
         let text = std::fs::read_to_string(dir.join("state/history")).unwrap();
         let void = dir.join("farm/void.ts");
@@ -404,20 +313,5 @@ mod tests {
                 .all(|s| s.path != Path::new("/srv/50.ts")),
             "a forgotten script leaves the history"
         );
-    }
-
-    #[test]
-    fn up_walks_back_through_recent_runs_and_down_returns_to_the_draft() {
-        let recent = vec!["old.ts".to_owned(), "new.ts".to_owned()];
-        let mut prompt = Prompt::new(Path::new("/nonexistent"));
-        prompt.input = TextInput::new("dra".into());
-        prompt.recall(&recent, true);
-        assert_eq!(prompt.input.value(), "new.ts");
-        prompt.recall(&recent, true);
-        prompt.recall(&recent, true);
-        assert_eq!(prompt.input.value(), "old.ts");
-        prompt.recall(&recent, false);
-        prompt.recall(&recent, false);
-        assert_eq!(prompt.input.value(), "dra");
     }
 }

@@ -163,12 +163,6 @@ impl Session {
         self.compatible() && self.build == BUILD
     }
 
-    pub fn home(&self) -> PathBuf {
-        self.config
-            .parent()
-            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
-    }
-
     pub fn source(&self) -> &dyn Source {
         &self.remote
     }
@@ -180,17 +174,6 @@ impl Session {
             .map_err(anyhow::Error::msg)?
         {
             Reply::Resumable(accounts) => Ok(accounts),
-            other => bail!("the session answered {other:?}"),
-        }
-    }
-
-    pub fn last_lines(&self) -> anyhow::Result<Vec<LastLines>> {
-        match self
-            .remote
-            .request(&Request::LastLines)
-            .map_err(anyhow::Error::msg)?
-        {
-            Reply::LastLines(lines) => Ok(lines),
             other => bail!("the session answered {other:?}"),
         }
     }
@@ -715,7 +698,7 @@ mod tests {
 
         let session = connect(&socket).expect("the session answers the handshake");
         assert!(session.same_build() && session.started_ms > 0);
-        assert_eq!(session.home(), Path::new("/srv"));
+        assert_eq!(session.config, Path::new("/srv/aqx.toml"));
         let source = session.source();
         let want = Want {
             selected: 1,
@@ -778,9 +761,11 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(
-            watcher.last_lines().unwrap().len(),
-            2,
+        assert!(
+            matches!(
+                watcher.remote.request(&Request::LastLines),
+                Ok(Reply::LastLines(lines)) if lines.len() == 2
+            ),
             "a watcher can still read the last lines"
         );
         assert!(

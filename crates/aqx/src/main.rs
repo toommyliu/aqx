@@ -17,7 +17,6 @@ mod fleet;
 mod init;
 mod record;
 mod runner;
-mod tui;
 mod view;
 mod web;
 
@@ -27,17 +26,12 @@ use runner::{Job, Login, Note};
 #[command(
     name = "aqx",
     version,
-    about = "A headless AQW client. Without a command, opens the TUI",
-    args_conflicts_with_subcommands = true
+    about = "A headless AQW client",
+    arg_required_else_help = true
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
-    #[command(flatten)]
-    open: commands::Open,
-    /// Show accounts as "account 1", "account 2" and the home folder as ~, for screenshots.
-    #[arg(long)]
-    redact: bool,
+    command: Command,
 }
 
 #[derive(Subcommand)]
@@ -50,16 +44,8 @@ enum Command {
     },
     /// Set up a folder for scripts: aqx.d.ts, tsconfig.json, a sample script and aqx.toml.
     Init {
-        /// Where to write. Defaults to the folder of the config aqx tui would read, else $AQX_HOME or ~/aqx.
+        /// Where to write. Defaults to the folder of the config aqx up would read, else $AQX_HOME or ~/aqx.
         dir: Option<PathBuf>,
-    },
-    /// Open the TUI, the same as aqx without a command.
-    Tui {
-        #[command(flatten)]
-        open: commands::Open,
-        /// Show accounts as "account 1", "account 2" and the home folder as ~, for screenshots.
-        #[arg(long)]
-        redact: bool,
     },
     /// Run a session in this terminal and print its log. ctrl+c logs everyone out.
     Up {
@@ -163,13 +149,9 @@ pub(crate) fn parse_arg(text: &str) -> Result<(String, String), String> {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let Some(command) = cli.command else {
-        return finish(commands::open(&cli.open, cli.redact));
-    };
-    finish(match command {
+    finish(match cli.command {
         Command::Servers { json } => servers(json),
         Command::Init { dir } => commands::init(dir),
-        Command::Tui { open, redact } => commands::open(&open, redact),
         Command::Up {
             open, detach: true, ..
         } => commands::up_detached(&open),

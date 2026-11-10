@@ -1,6 +1,7 @@
 mod feed;
 mod form;
 mod http;
+mod scripts;
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
@@ -8,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 use anyhow::Context;
-use aqx_script::skua::library;
+use aqx_script::skua::library::{self, Updated};
 use aqx_script::skua::{self as skua_options, Kind, Settings};
 use aqx_script::{Arg, ArgKind, Scalar};
 use serde::{Deserialize, Serialize};
@@ -17,10 +18,9 @@ use serde_json::{Value, json};
 use crate::config::{self, Script};
 use crate::control::{Action, Want};
 use crate::daemon::{self, Session, Wanted};
-use crate::tui::library::{Update, list};
-use crate::tui::prompt::{self, History, Recent};
 use crate::view::{Shown, State};
 use http::{Failure, Reply, Request};
+use scripts::{History, Recent, list};
 
 pub const PORT: u16 = 4970;
 
@@ -281,7 +281,7 @@ impl Web {
             .collect();
         Ok(Reply::json(&json!({
             "path": path,
-            "shown": prompt::shown_path(&self.home, &path),
+            "shown": scripts::shown_path(&self.home, &path),
             "args": args,
         })))
     }
@@ -350,11 +350,11 @@ impl Web {
             .typed(Path::new("/"))
             .iter()
             .rev()
-            .filter_map(|typed| prompt::parse(typed, Path::new("/")).ok())
+            .filter_map(|typed| scripts::parse(typed, Path::new("/")).ok())
             .map(|script| {
                 let path = resolve(Path::new("/"), &script.path.to_string_lossy());
                 json!({
-                    "shown": prompt::shown_path(&self.home, &path),
+                    "shown": scripts::shown_path(&self.home, &path),
                     "path": path,
                     "args": script.args,
                 })
@@ -407,7 +407,7 @@ impl Web {
             .collect();
         Ok(Reply::json(&json!({
             "dir": dir,
-            "shown": match prompt::shown_path(&self.home, &dir) {
+            "shown": match scripts::shown_path(&self.home, &dir) {
                 shown if shown.is_empty() => dir.display().to_string(),
                 shown => shown,
             },
@@ -420,15 +420,16 @@ impl Web {
         let Ok(_updating) = self.updating.try_lock() else {
             return Err(Failure::conflict("the Skua scripts are already updating"));
         };
-        let mut update = Update::start();
-        loop {
-            if let Some(done) = update.poll() {
-                return done
-                    .map(|text| Reply::json(&json!({ "message": text })))
-                    .map_err(Failure::internal);
+        let home = config::skua_home().map_err(Failure::internal)?;
+        let updated = library::update(&home).map_err(Failure::internal)?;
+        aqx_script::skua::worker(&mut || {}).map_err(Failure::internal)?;
+        let message = match updated {
+            Updated::Current => "the Skua scripts are up to date".to_owned(),
+            Updated::To(commit) => {
+                format!("updated the Skua scripts to {}", library::short(&commit))
             }
-            thread::sleep(std::time::Duration::from_millis(200));
-        }
+        };
+        Ok(Reply::json(&json!({ "message": message })))
     }
 
     fn skua_options(&self, r: &Request) -> Result<Reply, Failure> {
@@ -841,7 +842,7 @@ fn resolve(home: &Path, typed: &str) -> PathBuf {
     let typed = typed.trim();
     let mut resolved = PathBuf::new();
     for part in home
-        .join(prompt::expand_home(Path::new(typed)))
+        .join(scripts::expand_home(Path::new(typed)))
         .components()
     {
         match part {
