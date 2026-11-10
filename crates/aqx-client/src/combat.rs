@@ -198,7 +198,7 @@ impl Combat {
 
     pub(crate) fn cooldown(&self, me: &Me, skill: &Skill) -> Option<Instant> {
         self.last_use(&skill.slot)
-            .map(|from| from + scaled(skill.old_cooldown_ms.unwrap_or(skill.cooldown_ms), me))
+            .map(|from| from + me.cooldown(skill))
     }
 
     pub(crate) fn global_cooldown(&self, me: &Me) -> Option<Instant> {
@@ -429,6 +429,12 @@ impl Combat {
             .chain(self.auto_due(now).filter(|_| auto))
             .chain(self.respawn_at)
             .min()
+    }
+}
+
+impl Me {
+    pub fn cooldown(&self, skill: &Skill) -> Duration {
+        scaled(skill.old_cooldown_ms.unwrap_or(skill.cooldown_ms), self)
     }
 }
 

@@ -308,21 +308,10 @@ fn summary(world: &World, me: &Me, now: Instant) -> Game {
             .iter()
             .filter(|s| s.slot.starts_with('a') && s.slot != "aa")
             .map(|s| {
-                let readiness = world.readiness.get(&s.slot);
-                let left = match readiness {
-                    Some(Readiness::At(at)) if s.cooldown_ms > 0 => {
-                        at.saturating_duration_since(now)
-                    }
-                    _ => Duration::ZERO,
-                };
+                let (ready, left) = cooling(world.readiness.get(&s.slot), me.cooldown(s), now);
                 SkillState {
                     name: s.name.clone(),
-                    ready: match readiness {
-                        Some(Readiness::Ready | Readiness::At(_)) | None => (1.0
-                            - left.as_secs_f32() * 1000.0 / s.cooldown_ms.max(1) as f32)
-                            .clamp(0.0, 1.0),
-                        Some(_) => 0.0,
-                    },
+                    ready,
                     left_ms: u32::try_from(left.as_millis()).unwrap_or(u32::MAX),
                 }
             })
@@ -350,6 +339,20 @@ fn summary(world: &World, me: &Me, now: Instant) -> Game {
         bank_used: me.bank_count,
         bank_slots: me.bank_slots,
         ..Game::default()
+    }
+}
+
+fn cooling(readiness: Option<&Readiness>, full: Duration, now: Instant) -> (f32, Duration) {
+    match readiness {
+        Some(Readiness::At(at)) if !full.is_zero() => {
+            let left = at.saturating_duration_since(now);
+            (
+                (1.0 - left.as_secs_f32() / full.as_secs_f32()).clamp(0.0, 1.0),
+                left,
+            )
+        }
+        Some(Readiness::Ready | Readiness::At(_)) | None => (1.0, Duration::ZERO),
+        Some(_) => (0.0, Duration::ZERO),
     }
 }
 
@@ -491,6 +494,27 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_cooling_skill_fills_over_its_whole_cooldown() {
+        let now = Instant::now();
+        let secs = Duration::from_secs;
+        assert_eq!(
+            cooling(Some(&Readiness::At(now + secs(6))), secs(8), now),
+            (0.25, secs(6)),
+            "a slowed skill fills from the start of its longer cooldown"
+        );
+        assert_eq!(
+            cooling(Some(&Readiness::At(now + secs(2))), secs(1), now),
+            (0.0, secs(2)),
+            "the global cooldown can outlast a short one"
+        );
+        assert_eq!(
+            cooling(Some(&Readiness::NoMana), secs(4), now),
+            (0.0, Duration::ZERO)
+        );
+        assert_eq!(cooling(None, secs(4), now), (1.0, Duration::ZERO));
+    }
 
     #[test]
     fn an_online_account_shows_where_it_is_and_what_it_holds() {
