@@ -74,6 +74,10 @@ function Header(props: { account: Account }) {
     if (typeof s === "object" && "Reconnecting" in s) return s.Reconnecting;
     return null;
   };
+  const upSince = createMemo(() => {
+    const up = a().up;
+    return up ? Date.now() - up.secs * 1000 : null;
+  });
   return (
     <div class="account-head">
       <div class="line">
@@ -92,10 +96,10 @@ function Header(props: { account: Account }) {
             </Show>
           </span>
         </Show>
-        <Show when={a().up}>
-          {(up) => (
+        <Show when={upSince()}>
+          {(at) => (
             <span class="muted">
-              <Since at={Date.now() - up().secs * 1000} prefix="up" />
+              <Since at={at()} prefix="up" />
             </span>
           )}
         </Show>
@@ -745,6 +749,7 @@ function Lists(props: { game: Game; view: View; index: number }) {
 const stillMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const DRIFT_MS = 150;
 const FILL_FRAME_MS = 100;
+const STILL_FRAME_MS = 250;
 
 function Skill(props: { n: number; skill: Game["skills"][number] }) {
   let fill!: HTMLSpanElement;
@@ -753,7 +758,8 @@ function Skill(props: { n: number; skill: Game["skills"][number] }) {
   createEffect(() => {
     const { ready, left_ms } = props.skill;
     const next = performance.now() + left_ms;
-    const animating = ready > 0 && ready < 1 && left_ms > 0 && !stillMotion.matches;
+    const animating = ready > 0 && ready < 1 && left_ms > 0;
+    const frame = stillMotion.matches ? STILL_FRAME_MS : FILL_FRAME_MS;
     if (animating && fill.getAnimations().length > 0 && Math.abs(next - end) < DRIFT_MS) return;
     end = next;
     const gap = (1 - ready) * 100;
@@ -764,7 +770,7 @@ function Skill(props: { n: number; skill: Game["skills"][number] }) {
       if (animating) {
         el.animate([{ transform: from }, { transform: "none" }], {
           duration: left_ms,
-          easing: `steps(${Math.max(1, Math.round(left_ms / FILL_FRAME_MS))})`,
+          easing: `steps(${Math.max(1, Math.round(left_ms / frame))})`,
         });
       }
     }
