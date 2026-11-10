@@ -61,19 +61,17 @@ enum Command {
         #[arg(long)]
         redact: bool,
     },
-    /// Start a session in the background without opening the TUI.
+    /// Run a session in this terminal and print its log. ctrl+c logs everyone out.
     Up {
         #[command(flatten)]
         open: commands::Open,
-    },
-    /// Run a session in the foreground, for systemd. aqx starts one in the background on its own.
-    Serve {
-        #[command(flatten)]
-        open: commands::Open,
+        /// Start the session in the background and return.
+        #[arg(short, long, conflicts_with_all = ["json", "quiet"])]
+        detach: bool,
         /// Print the log as JSON lines.
         #[arg(long)]
         json: bool,
-        /// Print nothing; read the log with aqx logs or the TUI.
+        /// Print nothing; read the log with aqx logs.
         #[arg(long, conflicts_with = "json")]
         quiet: bool,
     },
@@ -172,8 +170,12 @@ fn main() -> ExitCode {
         Command::Servers { json } => servers(json),
         Command::Init { dir } => commands::init(dir),
         Command::Tui { open, redact } => commands::open(&open, redact),
-        Command::Up { open } => commands::up(&open),
-        Command::Serve { open, json, quiet } => commands::serve(&open, json, quiet),
+        Command::Up {
+            open, detach: true, ..
+        } => commands::up_detached(&open),
+        Command::Up {
+            open, json, quiet, ..
+        } => commands::up(&open, json, quiet),
         Command::Web { config, port } => commands::web(config.as_deref(), port),
         Command::Down { config } => commands::down(config.as_deref()),
         Command::Ps { json } => commands::ps(json),

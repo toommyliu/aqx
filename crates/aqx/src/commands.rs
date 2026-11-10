@@ -222,7 +222,7 @@ fn act_on_named(session: &Session, wanted: &Wanted) -> anyhow::Result<()> {
 
 pub fn open(open: &Open, redact: bool) -> anyhow::Result<ExitCode> {
     if !std::io::stdout().is_terminal() {
-        bail!("aqx opens a TUI and needs a terminal; use aqx serve, aqx up or aqx run");
+        bail!("aqx opens a TUI and needs a terminal; use aqx up, aqx up -d or aqx run");
     }
     let path = config_path(open.config.as_deref())?;
     config::load(&path).map_err(anyhow::Error::msg)?;
@@ -252,7 +252,7 @@ pub fn open(open: &Open, redact: bool) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn up(open: &Open) -> anyhow::Result<ExitCode> {
+pub fn up_detached(open: &Open) -> anyhow::Result<ExitCode> {
     let path = config_path(open.config.as_deref())?;
     config::load(&path).map_err(anyhow::Error::msg)?;
     let (session, joined) = session_for(&path, &open.wanted()?)?;
@@ -274,7 +274,7 @@ pub fn up(open: &Open) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn serve(open: &Open, json: bool, quiet: bool) -> anyhow::Result<ExitCode> {
+pub fn up(open: &Open, json: bool, quiet: bool) -> anyhow::Result<ExitCode> {
     let path = config_path(open.config.as_deref())?;
     let print = match (json, quiet) {
         (true, _) => Print::Json,
