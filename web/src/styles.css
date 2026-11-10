@@ -1527,10 +1527,12 @@ textarea.code {
 }
 
 .arg.declared > input,
+.arg.declared > select,
 .arg.declared > .segments {
   grid-column: 2 / 4;
 }
 
+.arg > .muted,
 .arg > .error {
   grid-column: 1 / -1;
 }

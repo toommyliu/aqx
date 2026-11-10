@@ -146,6 +146,7 @@ impl Web {
             ("/api/skua/update", true) => self.update_skua(),
             ("/api/skua/options", false) => self.skua_options(r),
             ("/api/skua/options", true) => self.save_skua_options(r.body()?),
+            ("/api/skua/script-options", false) => self.skua_script_options(r),
             ("/api/config", false) => self.read_config(),
             ("/api/config", true) => self.write_config(r.body()?),
             ("/api/keys", false) => self.read_keys(),
@@ -483,6 +484,13 @@ impl Web {
             "corebots": pane(core),
             "script": pane(own),
         })))
+    }
+
+    fn skua_script_options(&self, r: &Request) -> Result<Reply, Failure> {
+        let script = self.script_path(&r.query("script").unwrap_or_default())?;
+        let home = config::skua_home().map_err(Failure::internal)?;
+        let own = skua_options::script_options(&script, &home, &[]).map_err(|e| e.to_string());
+        Ok(Reply::json(&pane(own)))
     }
 
     fn save_skua_options(&self, asked: OptionsRequest) -> Result<Reply, Failure> {
