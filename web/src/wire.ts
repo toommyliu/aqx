@@ -230,6 +230,7 @@ export const api = {
     call<{ corebots: SkuaPane; script: SkuaPane }>(
       `/api/skua/options?${q({ account: String(account), name, script })}`,
     ),
+  skuaScriptOptions: (script: string) => call<SkuaPane>(`/api/skua/script-options?${q({ script })}`),
   saveSkuaOptions: (body: {
     account: number;
     name: string;

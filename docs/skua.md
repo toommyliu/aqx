@@ -48,7 +48,7 @@ aqx run -a player1 ~/aqx/skua/Scripts/Evil/NSoD/VoidAuras/0SmartVoidAuras.cs
 
 In the web UI, press Run, and press the options button next to a Skua script on the Skua tab. For a Skua script outside the library, the Files tab has the same button next to each `.cs` file. The **CoreBots** tab edits the CoreBots options of that account. The **Script** tab edits the options of the script, and every account that runs the script shares them. You can change options only while the account is offline or idle.
 
-From a shell, pass options to `aqx run` as `--arg Name=value`. For an option outside the `Options` group, write `--arg Group:Name=value`.
+To give one account its own value, set it in that account's `args` in `aqx.toml`, or under Script options in the config editor. It applies on top of the shared options. From a shell, pass options to `aqx run` as `--arg Name=value`. For an option outside the `Options` group, write `--arg Group:Name=value`, and in `args` write `"Group:Name" = value`.
 
 ## Write your own Skua script
 

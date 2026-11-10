@@ -13,6 +13,7 @@ import {
   type Fields,
   type JsonValue,
   type SchemaProperty,
+  type SkuaOption,
   api,
 } from "./wire";
 
@@ -69,6 +70,7 @@ type AccountDraft = {
 };
 type Draft = { defaults: Record<string, string>; accounts: AccountDraft[] };
 type Problem = { id: string; account: string | null; message: string };
+type Known = Pick<DeclaredArg, "name" | "optional">;
 
 function kindOf(key: string, p: SchemaProperty): Kind {
   if (key === "server") return "server";
@@ -158,11 +160,15 @@ function accountOf(a: AccountDraft, kinds: Map<string, Kind>): EditedAccount {
 
 const isSkua = (script: string) => script.trim().toLowerCase().endsWith(".cs");
 
+const argName = (script: string, key: string) => (isSkua(script) ? key.trim().replace(/^Options:/, "") : key.trim());
+
+const optionKey = (o: SkuaOption) => (o.group === "Options" ? o.name : `${o.group}:${o.name}`);
+
 function problemsOf(
   draft: Draft,
   defaults: Setting[],
   account: Setting[],
-  declared: Record<string, DeclaredArg[]>,
+  declared: Record<string, Known[]>,
 ): Problem[] {
   const out: Problem[] = [];
   const check = (id: string, owner: string | null, raw: string, s: Setting, required: boolean) => {
@@ -181,22 +187,23 @@ function problemsOf(
     const at = `acct-${a.id}`;
     if (!a.user.trim()) out.push({ id: `${at}-user`, account: a.id, message: "Every account needs a username" });
     if (!a.password && !a.hasPassword) out.push({ id: `${at}-password`, account: a.id, message: "A new account needs a password" });
-    const known = isSkua(a.script) ? undefined : declared[a.script.trim()];
+    const known = declared[a.script.trim()];
+    const noun = isSkua(a.script) ? "option" : "arg";
     a.args.forEach((r, i) => {
-      const key = r.key.trim();
+      const key = argName(a.script, r.key);
       const arg = known?.find((d) => d.name === key);
       if (!key && r.value.trim()) out.push({ id: `${at}-arg${i}-key`, account: a.id, message: "Name this arg" });
       else if (known && key && !arg)
         out.push({
           id: `${at}-arg${i}-key`,
           account: a.id,
-          message: known.length > 0 ? `The script has no arg named ${key}` : "The script takes no args",
+          message: known.length > 0 ? `The script has no ${noun} named ${key}` : `The script has no ${noun}s`,
         });
       if (r.kind === "number" && !(r.value.trim() && Number.isFinite(Number(r.value))))
         out.push({ id: arg ? `${at}-argd-${key}` : `${at}-arg${i}-value`, account: a.id, message: "Use a number" });
     });
     for (const d of known ?? [])
-      if (!d.optional && !a.args.some((r) => r.key.trim() === d.name && r.value.trim()))
+      if (!d.optional && !a.args.some((r) => argName(a.script, r.key) === d.name && r.value.trim()))
         out.push({ id: `${at}-argd-${d.name}`, account: a.id, message: "The script needs this" });
     for (const s of account) {
       const raw = a.overrides[s.key];
@@ -342,7 +349,7 @@ function FormEditor(props: {
   const [status, setStatus] = createSignal("");
   const [error, setError] = createSignal("");
   const dirty = createMemo(() => canonical(draft) !== base());
-  const [declared, setDeclared] = createStore<Record<string, DeclaredArg[]>>({});
+  const [declared, setDeclared] = createStore<Record<string, Known[]>>({});
   const problems = createMemo(() => problemsOf(draft, defaultSettings(), accountSettings(), declared));
   const problemAt = createMemo(() => {
     const map = new Map<string, string>();
@@ -576,7 +583,7 @@ function AccountEditor(props: {
   problem: (id: string) => string | undefined;
   edit: (fn: (a: AccountDraft) => void) => void;
   onRemove: () => void;
-  onDeclared: (script: string, args: DeclaredArg[]) => void;
+  onDeclared: (script: string, args: Known[]) => void;
 }) {
   const at = () => `acct-${props.account.id}`;
   const heading = createUniqueId();
@@ -696,7 +703,7 @@ function AccountEditor(props: {
           }}
           />
           <span class="label" id={argsLabel}>
-            Script args
+            {isSkua(props.account.script) ? "Script options" : "Script args"}
           </span>
           <Args
             id={at()}
@@ -1008,6 +1015,8 @@ function TextInput(props: {
   );
 }
 
+const argKind = (d: DeclaredArg): ArgKind => (d.kind === "number" ? "number" : d.kind === "boolean" ? "bool" : "text");
+
 const hintOf = (d: DeclaredArg) =>
   [
     d.kind === "list" ? "a JSON list" : d.kind === "map" ? "a JSON object" : d.kind === "number" ? "a number" : "",
@@ -1023,36 +1032,55 @@ function Args(props: {
   args: Arg[];
   problem: (id: string) => string | undefined;
   edit: (fn: (a: AccountDraft) => void) => void;
-  onDeclared: (script: string, args: DeclaredArg[]) => void;
+  onDeclared: (script: string, args: Known[]) => void;
 }) {
   const [script] = createDebouncedValue(() => props.script.trim(), { wait: 300 });
+  const skua = () => script() !== "" && isSkua(script());
   const asked = createQuery(() => ({
     queryKey: ["declared", script()],
     queryFn: () => api.args(script(), []),
-    enabled: script() !== "" && !isSkua(script()),
+    enabled: script() !== "" && !skua(),
     retry: false,
     staleTime: 30_000,
   }));
-  const declared = () => (script() && !isSkua(script()) && asked.data ? asked.data.args : null);
+  const pane = createQuery(() => ({
+    queryKey: ["skuaScriptOptions", script()],
+    queryFn: () => api.skuaScriptOptions(script()),
+    enabled: skua(),
+    retry: false,
+    staleTime: 30_000,
+  }));
+  const declared = () => (script() && !skua() && asked.data ? asked.data.args : null);
+  const options = () => {
+    const p = skua() ? pane.data : undefined;
+    return p && "options" in p ? p.options.filter((o) => o.name.trim()) : null;
+  };
+  const known = (): Known[] | null =>
+    options()?.map((o) => ({ name: optionKey(o), optional: true })) ?? declared();
+  const failed = () => {
+    if (!script()) return undefined;
+    if (!skua()) return asked.error?.message;
+    const p = pane.data;
+    return pane.error?.message ?? (p && "error" in p ? p.error : undefined);
+  };
   createEffect(() => {
-    const known = declared();
-    if (known) props.onDeclared(script(), known);
+    const k = known();
+    if (k) props.onDeclared(script(), k);
   });
-  const names = () => new Set((declared() ?? []).map((d) => d.name));
-  const valueOf = (name: string) => props.args.find((r) => r.key.trim() === name)?.value ?? "";
-  const answer = (d: DeclaredArg, v: string) =>
+  const names = () => new Set((known() ?? []).map((d) => d.name));
+  const valueOf = (name: string) => props.args.find((r) => argName(script(), r.key) === name)?.value ?? "";
+  const answer = (name: string, kind: ArgKind, v: string) =>
     props.edit((a) => {
-      const at = a.args.findIndex((r) => r.key.trim() === d.name);
+      const at = a.args.findIndex((r) => argName(script(), r.key) === name);
       const row = a.args[at];
       if (v === "") {
         if (row) a.args.splice(at, 1);
         return;
       }
-      const kind: ArgKind = d.kind === "number" ? "number" : d.kind === "boolean" ? "bool" : "text";
       if (row) {
         row.value = v;
         row.kind = kind;
-      } else a.args.push({ key: d.name, value: v, kind });
+      } else a.args.push({ key: name, value: v, kind });
     });
   const set = (i: number, fn: (arg: Arg) => void) =>
     props.edit((a) => {
@@ -1088,7 +1116,7 @@ function Args(props: {
                     value={valueOf(d.name)}
                     aria-required={d.optional ? undefined : "true"}
                     aria-invalid={error() ? "true" : undefined}
-                    onInput={(e) => answer(d, e.currentTarget.value)}
+                    onInput={(e) => answer(d.name, argKind(d), e.currentTarget.value)}
                   />
                 }
               >
@@ -1102,8 +1130,67 @@ function Args(props: {
                   ]}
                   labelledBy={`${id}-label`}
                   invalid={!!error()}
-                  onChange={(v) => answer(d, v)}
+                  onChange={(v) => answer(d.name, argKind(d), v)}
                 />
+              </Show>
+              <Show when={error()}>{(message) => <p class="error small">{message()}</p>}</Show>
+            </div>
+          );
+        }}
+      </For>
+      <For each={options() ?? []}>
+        {(o) => {
+          const key = optionKey(o);
+          const id = `${props.id}-argd-${key}`;
+          const error = () => props.problem(id);
+          const kind: ArgKind = o.kind === "bool" ? "bool" : o.kind === "number" ? "number" : "text";
+          const current = o.kind === "bool" ? (o.value ?? o.default ?? "").toLowerCase() : (o.value ?? o.default ?? "");
+          const unset = current ? `Shared (${shown(current)})` : "Shared";
+          const value = () => (o.kind === "bool" ? valueOf(key).toLowerCase() : valueOf(key));
+          return (
+            <div class="arg declared">
+              <label id={`${id}-label`} for={id}>
+                {o.label || o.name}
+              </label>
+              <Switch>
+                <Match when={o.kind === "bool"}>
+                  <Segments
+                    id={id}
+                    value={value()}
+                    choices={[
+                      ["", unset],
+                      ["true", "Yes"],
+                      ["false", "No"],
+                    ]}
+                    labelledBy={`${id}-label`}
+                    invalid={!!error()}
+                    onChange={(v) => answer(key, kind, v)}
+                  />
+                </Match>
+                <Match when={o.kind === "choice"}>
+                  <select id={id} value={value()} onChange={(e) => answer(key, kind, e.currentTarget.value)}>
+                    <option value="">{unset}</option>
+                    <For each={o.choices}>{(c) => <option value={c}>{c}</option>}</For>
+                  </select>
+                </Match>
+                <Match when={o.kind === "number" || o.kind === "text"}>
+                  <input
+                    id={id}
+                    type="text"
+                    placeholder={unset}
+                    inputmode={o.kind === "number" ? "decimal" : "text"}
+                    spellcheck={false}
+                    autocapitalize="off"
+                    autocorrect="off"
+                    autocomplete="off"
+                    value={value()}
+                    aria-invalid={error() ? "true" : undefined}
+                    onInput={(e) => answer(key, kind, e.currentTarget.value)}
+                  />
+                </Match>
+              </Switch>
+              <Show when={o.description}>
+                <p class="muted small">{o.description}</p>
               </Show>
               <Show when={error()}>{(message) => <p class="error small">{message()}</p>}</Show>
             </div>
@@ -1112,7 +1199,7 @@ function Args(props: {
       </For>
       <Index each={props.args}>
         {(arg, i) => (
-          <Show when={!names().has(arg().key.trim())}>
+          <Show when={!names().has(argName(script(), arg().key))}>
             {(() => {
                 const id = `${props.id}-arg${i}`;
                 const keyError = () => props.problem(`${id}-key`);
@@ -1199,13 +1286,14 @@ function Args(props: {
           </Show>
         )}
       </Index>
-      <Show when={declared()?.length === 0 && props.args.length === 0}>
-        <p class="muted small">This script takes no args.</p>
+      <Show when={known()?.length === 0 && props.args.length === 0}>
+        <p class="muted small">{skua() ? "This script has no options." : "This script takes no args."}</p>
       </Show>
-      <Show when={script() && !isSkua(script()) ? asked.error : null}>
-        {(e) => <p class="muted small">{e().message}</p>}
+      <Show when={skua() && pane.isPending && !failed()}>
+        <p class="muted small" aria-live="polite">Loading the options…</p>
       </Show>
-      <Show when={declared() === null}>
+      <Show when={failed()}>{(e) => <p class="muted small">{e()}</p>}</Show>
+      <Show when={known() === null}>
         <button
           type="button"
           class="ghost add"
