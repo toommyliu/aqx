@@ -362,7 +362,7 @@ pub fn start(config: &Path, wanted: &Wanted) -> anyhow::Result<Session> {
     let log = std::fs::File::create(&paths.log).with_context(|| paths.log.display().to_string())?;
     let mut command = Command::new(std::env::current_exe()?);
     command
-        .args(["serve", "--quiet", "--config"])
+        .args(["up", "--quiet", "--config"])
         .arg(config)
         .args(wanted.args())
         .stdin(Stdio::null())
@@ -374,7 +374,7 @@ pub fn start(config: &Path, wanted: &Wanted) -> anyhow::Result<Session> {
             Ok(())
         });
     }
-    let mut child = command.spawn().context("couldn't start aqx serve")?;
+    let mut child = command.spawn().context("couldn't start the session")?;
     let until = Instant::now() + STARTUP;
     loop {
         if let Some(session) = connect(&paths.socket) {
@@ -384,7 +384,7 @@ pub fn start(config: &Path, wanted: &Wanted) -> anyhow::Result<Session> {
             let said = std::fs::read_to_string(&paths.log).unwrap_or_default();
             let said = said.trim().trim_start_matches("aqx: ");
             if said.is_empty() {
-                bail!("aqx serve exited ({status})");
+                bail!("the session exited ({status})");
             }
             bail!("{said}");
         }
