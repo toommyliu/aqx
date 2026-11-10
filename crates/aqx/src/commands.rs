@@ -249,10 +249,15 @@ pub fn up(open: &Open, json: bool, quiet: bool) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn web(config: Option<&Path>, port: u16, up: bool) -> anyhow::Result<ExitCode> {
+pub fn web(
+    config: Option<&Path>,
+    port: u16,
+    up: bool,
+    tailscale: bool,
+) -> anyhow::Result<ExitCode> {
     let path = config_path(config)?;
     config::load(&path).map_err(anyhow::Error::msg)?;
-    crate::web::serve(path, port, up)?;
+    crate::web::serve(path, port, up, tailscale)?;
     Ok(ExitCode::SUCCESS)
 }
 

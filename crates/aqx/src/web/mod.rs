@@ -2,6 +2,7 @@ mod feed;
 mod form;
 mod http;
 mod scripts;
+mod tailscale;
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
@@ -69,7 +70,7 @@ fn load_hidden() -> BTreeSet<PathBuf> {
         .unwrap_or_default()
 }
 
-pub fn serve(config: PathBuf, port: u16, up: bool) -> anyhow::Result<()> {
+pub fn serve(config: PathBuf, port: u16, up: bool, tailnet: bool) -> anyhow::Result<()> {
     let home = config
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
@@ -109,6 +110,7 @@ pub fn serve(config: PathBuf, port: u16, up: bool) -> anyhow::Result<()> {
         "aqx web is serving {} at http://{address}",
         web.config.display()
     );
+    thread::spawn(move || tailscale::announce(port, tailnet));
     for request in server.incoming_requests() {
         let web = Arc::clone(&web);
         thread::spawn(move || web.answer(request));

@@ -15,7 +15,7 @@ An aqx built without Node still runs, but `aqx web` answers every page with a no
 ## Start it
 
 ```sh
-aqx web [-c PATH] [--port N] [--up]
+aqx web [-c PATH] [--port N] [--up] [--tailscale]
 ```
 
 `-c` picks the config, the same way it does for `aqx up`. `aqx web` attaches to that config's session when one is running. When none is, the page lists the accounts as offline, and the first account you log in or run a script on starts the session. `--up` starts it right away instead, and logs in the accounts with `auto_start` on, as `aqx up -d` does. With a session already running, `--up` changes nothing. Stopping `aqx web` leaves the session running either way. The session still ends on its own once every account is offline, and `aqx web` keeps running so you can start it again. Each account's log keeps its last lines from the session that ended, and the overview shows each account's last line, until the next session starts. The Session menu restarts the session, which applies changes to `aqx.toml`, and logs everyone out.
@@ -26,13 +26,13 @@ The eye button in the header shows your accounts as `account 1`, `account 2` and
 
 ## Reach it from another device
 
-Use [Tailscale Serve](https://tailscale.com/kb/1312/serve) to put it on your tailnet:
+`--tailscale` puts it on your tailnet with [Tailscale Serve](https://tailscale.com/kb/1312/serve), over HTTPS on the same port:
 
 ```sh
-tailscale serve --bg 4970
+aqx web --tailscale
 ```
 
-Then open `https://<machine>.<tailnet>.ts.net` on any device in your tailnet. `tailscale serve reset` takes it down again. Anyone who can reach that address can drive your accounts, so keep it off [Funnel](https://tailscale.com/kb/1223/funnel).
+It prints `https://<machine>.<tailnet>.ts.net:4970`, which opens on any device in your tailnet. If a route to aqx web already exists, such as one on port 443, it prints that link instead and adds nothing. It needs the `tailscale` command on your `PATH`. The route stays after `aqx web` stops, and every `aqx web` start prints each Tailscale Serve route to its port, flag or not, so you only pass `--tailscale` once. If that port on your tailnet already serves something else, `--tailscale` leaves it alone and asks for another `--port`. `tailscale serve --https=4970 --set-path=/ off` takes the route down. Anyone who can reach that address can drive your accounts, so keep it off [Funnel](https://tailscale.com/kb/1223/funnel).
 
 ## Edit aqx.toml
 

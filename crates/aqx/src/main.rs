@@ -66,11 +66,15 @@ enum Command {
         /// The config to read instead of ./aqx.toml or ~/aqx/aqx.toml.
         #[arg(short, long, value_name = "PATH")]
         config: Option<PathBuf>,
+        /// The port to listen on.
         #[arg(long, default_value_t = web::PORT)]
         port: u16,
         /// Start the session first if it isn't running, logging in the accounts with auto_start on.
         #[arg(long)]
         up: bool,
+        /// Serve it on your tailnet over HTTPS at the same port, with tailscale serve.
+        #[arg(long)]
+        tailscale: bool,
     },
     /// Log out every account and end the session.
     Down {
@@ -159,7 +163,12 @@ fn main() -> ExitCode {
         Command::Up {
             open, json, quiet, ..
         } => commands::up(&open, json, quiet),
-        Command::Web { config, port, up } => commands::web(config.as_deref(), port, up),
+        Command::Web {
+            config,
+            port,
+            up,
+            tailscale,
+        } => commands::web(config.as_deref(), port, up, tailscale),
         Command::Down { config } => commands::down(config.as_deref()),
         Command::Ps { json } => commands::ps(json),
         Command::Logs {
