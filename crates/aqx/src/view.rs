@@ -101,6 +101,7 @@ pub struct Game {
 pub struct SkillState {
     pub name: String,
     pub ready: f32,
+    pub left_ms: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,16 +307,24 @@ fn summary(world: &World, me: &Me, now: Instant) -> Game {
             .skills
             .iter()
             .filter(|s| s.slot.starts_with('a') && s.slot != "aa")
-            .map(|s| SkillState {
-                name: s.name.clone(),
-                ready: match world.readiness.get(&s.slot) {
-                    Some(Readiness::At(at)) if *at > now && s.cooldown_ms > 0 => {
-                        let left = (*at - now).as_secs_f32() * 1000.0 / s.cooldown_ms as f32;
-                        (1.0 - left).clamp(0.0, 1.0)
+            .map(|s| {
+                let readiness = world.readiness.get(&s.slot);
+                let left = match readiness {
+                    Some(Readiness::At(at)) if s.cooldown_ms > 0 => {
+                        at.saturating_duration_since(now)
                     }
-                    Some(Readiness::Ready | Readiness::At(_)) | None => 1.0,
-                    Some(_) => 0.0,
-                },
+                    _ => Duration::ZERO,
+                };
+                SkillState {
+                    name: s.name.clone(),
+                    ready: match readiness {
+                        Some(Readiness::Ready | Readiness::At(_)) | None => (1.0
+                            - left.as_secs_f32() * 1000.0 / s.cooldown_ms.max(1) as f32)
+                            .clamp(0.0, 1.0),
+                        Some(_) => 0.0,
+                    },
+                    left_ms: u32::try_from(left.as_millis()).unwrap_or(u32::MAX),
+                }
             })
             .collect(),
         auras: me

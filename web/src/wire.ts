@@ -32,7 +32,7 @@ export type Game = {
   class_rank: number;
   level: number;
   gold: number;
-  skills: { name: string; ready: number }[];
+  skills: { name: string; ready: number; left_ms: number }[];
   auras: { name: string; stacks: number }[];
   target: { name: string; hp: number; max_hp: number } | null;
   players: { name: string; level: number | null }[];

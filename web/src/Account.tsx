@@ -198,22 +198,7 @@ function Vitals(props: { game: Game; account: Account }) {
       <div class="line small more">
         <span class="skills">
           <span class="muted">skills</span>
-          <For each={g().skills}>
-            {(s, i) => {
-              const used = createMemo((before: { ready: number; dropped: boolean }) => ({
-                ready: s.ready,
-                dropped: s.ready < before.ready,
-              }), { ready: s.ready, dropped: false });
-              return (
-                <span class="skill" classList={{ used: used().dropped }} style={{ "--fill": `${Math.round(s.ready * 100)}%` }}>
-                  {i() + 1} {s.name}
-                  <Show when={s.ready < 1}>
-                    <span class="visually-hidden"> (cooling down)</span>
-                  </Show>
-                </span>
-              );
-            }}
-          </For>
+          <For each={g().skills}>{(skill, i) => <Skill n={i() + 1} skill={skill} />}</For>
         </span>
       </div>
       <Show when={g().auras.length > 0}>
@@ -754,5 +739,47 @@ function Lists(props: { game: Game; view: View; index: number }) {
         </Table>
       </Match>
     </Switch>
+  );
+}
+
+const stillMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const DRIFT_MS = 150;
+const FILL_FRAME_MS = 100;
+
+function Skill(props: { n: number; skill: Game["skills"][number] }) {
+  let fill!: HTMLSpanElement;
+  let label!: HTMLSpanElement;
+  let end = 0;
+  createEffect(() => {
+    const { ready, left_ms } = props.skill;
+    const next = performance.now() + left_ms;
+    const animating = ready < 1 && left_ms > 0 && !stillMotion.matches;
+    if (animating && Math.abs(next - end) < DRIFT_MS) return;
+    end = next;
+    const gap = (1 - ready) * 100;
+    for (const [el, sign] of [[fill, -1], [label, 1]] as const) {
+      for (const running of el.getAnimations()) running.cancel();
+      const from = `translateX(${sign * gap}%)`;
+      el.style.transform = animating ? "" : from;
+      if (animating) {
+        el.animate([{ transform: from }, { transform: "none" }], {
+          duration: left_ms,
+          easing: `steps(${Math.max(1, Math.round(left_ms / FILL_FRAME_MS))})`,
+        });
+      }
+    }
+  });
+  return (
+    <span class="skill">
+      {props.n} {props.skill.name}
+      <span class="fill" ref={fill} aria-hidden="true">
+        <span ref={label}>
+          {props.n} {props.skill.name}
+        </span>
+      </span>
+      <Show when={props.skill.ready < 1}>
+        <span class="visually-hidden"> (cooling down)</span>
+      </Show>
+    </span>
   );
 }
