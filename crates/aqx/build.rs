@@ -53,6 +53,11 @@ fn embed_web(dist: &Path) {
         }
     }
     files.sort();
+    if files.is_empty() {
+        println!(
+            "cargo:warning=the web UI isn't built, so aqx web will only show a note. Run npm --prefix web ci && npm --prefix web run build, then build aqx again."
+        );
+    }
     let mut table = String::from("&[\n");
     for file in &files {
         println!("cargo:rerun-if-changed={}", file.display());

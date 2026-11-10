@@ -1,6 +1,6 @@
 # aqx
 
-aqx is a headless AQW client written in Rust. You run and script your accounts from a CLI, a TUI, or a web UI. Scripts are TypeScript files, and a compatibility layer runs most Skua scripts unchanged. Inspired by [aqw-python](https://github.com/Froztt13/aqw-python).
+aqx is a headless AQW client written in Rust. You run and script your accounts from a CLI or a web UI. Scripts are TypeScript files, and a compatibility layer runs most Skua scripts unchanged. Inspired by [aqw-python](https://github.com/Froztt13/aqw-python).
 
 ## Requirements
 
@@ -25,11 +25,15 @@ cargo install --path crates/aqx
 
 # Set up a scripts folder with aqx.toml, in ~/aqx by default.
 aqx init
+
+# Log in the accounts in aqx.toml, then open the web UI at http://127.0.0.1:4970.
+aqx up -d
+aqx web
 ```
 
 ## Docs
 
-- [Run accounts from the TUI](docs/tui.md)
+- [Set up aqx and run sessions](docs/config.md)
 - [Run accounts from the browser](docs/web.md)
 - [Write an aqx script](docs/writing-scripts.md)
 - [Run Skua scripts](docs/skua.md)
@@ -40,7 +44,6 @@ aqx init
 flowchart LR
     subgraph ui[You]
         cli[CLI]
-        tui[TUI]
         web[Web UI]
     end
     subgraph scripts[Scripts]

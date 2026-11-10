@@ -629,8 +629,8 @@ mod tests {
     }
 
     #[test]
-    fn the_tui_guide_example_loads() {
-        let page = include_str!("../../../docs/tui.md");
+    fn the_config_guide_example_loads() {
+        let page = include_str!("../../../docs/config.md");
         let example = page
             .split_once("```toml\n")
             .and_then(|(_, rest)| rest.split_once("```"))
@@ -661,7 +661,7 @@ mod tests {
             .collect();
         assert!(
             missing.is_empty(),
-            "docs/tui.md doesn't mention {missing:?}"
+            "docs/config.md doesn't mention {missing:?}"
         );
     }
 

@@ -12,9 +12,8 @@ use aqx_script::skua::{self, SkuaScript};
 use crate::config::{self, Script};
 use crate::control::{Action, Want};
 use crate::daemon::{self, Print, Session, Wanted};
-use crate::fleet::Channel;
+use crate::fleet::{Channel, LastLines};
 use crate::init;
-use crate::tui::{self, Leave};
 use crate::view::{Shown, State, time_of_day};
 
 const FOLLOW_EVERY: Duration = Duration::from_millis(250);
@@ -198,7 +197,7 @@ fn attached_note(session: &Session, path: &Path) -> String {
         .is_some_and(|t| t.as_millis() as u64 > session.started_ms);
     if changed {
         format!(
-            "attached to the session running since {since}; aqx.toml changed after it started, so run aqx down, then aqx, to apply it"
+            "attached to the session running since {since}; aqx.toml changed after it started, so run aqx down, then aqx up -d, to apply it"
         )
     } else {
         format!("attached to the session running since {since}")
@@ -220,47 +219,12 @@ fn act_on_named(session: &Session, wanted: &Wanted) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn open(open: &Open, redact: bool) -> anyhow::Result<ExitCode> {
-    if !std::io::stdout().is_terminal() {
-        bail!("aqx opens a TUI and needs a terminal; use aqx up, aqx up -d or aqx run");
-    }
-    let path = config_path(open.config.as_deref())?;
-    config::load(&path).map_err(anyhow::Error::msg)?;
-    let keymap = match tui::keymap_path() {
-        Some(keys) => tui::Keymap::load(keys).map_err(anyhow::Error::msg)?,
-        None => tui::Keymap::default(),
-    };
-    let (session, joined) = session_for(&path, &open.wanted()?)?;
-    let note = match joined {
-        Joined::Started => None,
-        Joined::Attached => Some(attached_note(&session, &path)),
-        Joined::Restarted => Some("restarted the session with this build".to_owned()),
-    };
-    match tui::run(session.source(), &session.home(), keymap, redact, note)? {
-        Leave::Detach => {
-            println!(
-                "detached; the accounts keep running. aqx attaches again, and aqx down ends the session"
-            );
-        }
-        Leave::Ended => {
-            println!("the aqx session ended");
-            if let Ok(lines) = session.last_lines() {
-                print_lines(&tui::last_words(&lines, redact));
-            }
-        }
-    }
-    Ok(ExitCode::SUCCESS)
-}
-
 pub fn up_detached(open: &Open) -> anyhow::Result<ExitCode> {
     let path = config_path(open.config.as_deref())?;
     config::load(&path).map_err(anyhow::Error::msg)?;
     let (session, joined) = session_for(&path, &open.wanted()?)?;
     match joined {
-        Joined::Started => println!(
-            "started an aqx session for {}; aqx attaches to it",
-            session.config.display()
-        ),
+        Joined::Started => println!("started an aqx session for {}", session.config.display()),
         Joined::Attached => println!(
             "aqx is already running for {}; {}",
             session.config.display(),
@@ -299,9 +263,36 @@ pub fn down(config: Option<&Path>) -> anyhow::Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     };
     println!("logging out every account in {}", path.display());
-    print_lines(&tui::last_words(&session.down()?, false));
+    print_lines(&last_words(&session.down()?));
     println!("the aqx session ended");
     Ok(ExitCode::SUCCESS)
+}
+
+fn last_words(accounts: &[LastLines]) -> Vec<String> {
+    let tail = if accounts.len() == 1 { 10 } else { 3 };
+    let width = accounts
+        .iter()
+        .map(|a| a.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = Vec::new();
+    for account in accounts {
+        let who = if accounts.len() == 1 {
+            String::new()
+        } else {
+            format!("{:<width$}  ", account.name)
+        };
+        let lines = &account.lines[account.lines.len().saturating_sub(tail)..];
+        for line in lines {
+            out.push(format!(
+                "{}  {who}{:<6}  {}",
+                time_of_day(line.at_ms),
+                line.channel.label(),
+                line.text
+            ));
+        }
+    }
+    out
 }
 
 fn names(session: &Session) -> anyhow::Result<Vec<Shown>> {
@@ -693,6 +684,52 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("the accounts are player1, healer")
+        );
+    }
+
+    #[test]
+    fn down_prints_the_last_lines_of_each_account() {
+        let accounts = ["player1", "player2"]
+            .map(|name| std::sync::Arc::new(crate::fleet::Account::detached(name)));
+        for (channel, text) in [
+            (Channel::Aqx, "logging in to Twilly"),
+            (Channel::Script, "farming"),
+            (Channel::Aqx, "the script stopped: done"),
+            (Channel::Game, "killed Frogzard, +10 gold, +5 xp"),
+            (Channel::Aqx, "disconnected: logged out"),
+        ] {
+            accounts[0].board().log.push(channel, text.into());
+        }
+        accounts[1]
+            .board()
+            .log
+            .push(Channel::Aqx, "couldn't log in: player2 is banned".into());
+        let fleet = crate::fleet::Fleet::of(accounts.to_vec());
+        let words = last_words(&fleet.last_lines());
+        let expected = [
+            "farming",
+            "the script stopped: done",
+            "disconnected: logged out",
+            "couldn't log in: player2 is banned",
+        ];
+        assert_eq!(
+            words.len(),
+            expected.len(),
+            "the last 3 lines of each, without game events: {words:?}"
+        );
+        assert!(
+            words
+                .iter()
+                .zip(expected)
+                .all(|(w, e)| w.ends_with(&format!("  {e}"))),
+            "{words:?}"
+        );
+        assert!(words[0].contains("  player1  script  farming"), "{words:?}");
+
+        let one = crate::fleet::Fleet::of(accounts[1..].to_vec());
+        assert!(
+            !last_words(&one.last_lines())[0].contains("player2  aqx"),
+            "one account needs no name column"
         );
     }
 }

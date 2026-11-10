@@ -1,6 +1,6 @@
 # Run accounts from the browser
 
-`aqx web` serves a web UI for the accounts in `aqx.toml` at `http://127.0.0.1:4970`. It does everything the TUI does: log accounts in and out, pick and run scripts, answer their args, switch servers, accept drops, edit Skua options, and read each account's log and lists. It also edits `aqx.toml` and lets you change its keys.
+`aqx web` serves a web UI for the accounts in `aqx.toml` at `http://127.0.0.1:4970`. It logs accounts in and out, picks and runs scripts, asks for their args, switches servers, accepts drops, edits Skua options, and shows each account's log and lists. It also edits `aqx.toml` and lets you change its keys.
 
 ## Build it
 
@@ -20,7 +20,7 @@ An aqx built without these steps still runs, but `aqx web` answers every page wi
 aqx web [-c PATH] [--port N]
 ```
 
-`-c` picks the config, the same way it does for `aqx`. `aqx web` attaches to that config's session when one is running. When none is, the page lists the accounts as offline, and the first account you log in or run a script on starts the session. The session still ends on its own once every account is offline, and `aqx web` keeps running so you can start it again. Each account's log keeps its last lines from the session that ended, and the overview shows each account's last line, until the next session starts. The Session menu restarts the session, which applies changes to `aqx.toml`, and logs everyone out.
+`-c` picks the config, the same way it does for `aqx up`. `aqx web` attaches to that config's session when one is running. When none is, the page lists the accounts as offline, and the first account you log in or run a script on starts the session. The session still ends on its own once every account is offline, and `aqx web` keeps running so you can start it again. Each account's log keeps its last lines from the session that ended, and the overview shows each account's last line, until the next session starts. The Session menu restarts the session, which applies changes to `aqx.toml`, and logs everyone out.
 
 `aqx web` listens on `127.0.0.1` only and has no login. It refuses requests whose `Host` isn't `localhost`, `127.0.0.1`, `[::1]` or a `*.ts.net` name.
 
@@ -44,7 +44,7 @@ aqx checks the file before saving it and refuses a change that wouldn't load. It
 
 ## Keys
 
-Press `?` to list the keys on a computer. Pick Change on a row, then press the new key. Keys you change show in blue, and aqx saves them in its data folder (`~/Library/Application Support/aqx/web-keys.json` on macOS), so every browser gets them. These keys are separate from the TUI's `keys.toml`.
+Press `?` to list the keys on a computer. Pick Change on a row, then press the new key. Keys you change show in blue, and aqx saves them in its data folder (`~/Library/Application Support/aqx/web-keys.json` on macOS), so every browser gets them.
 
 | Key | Does |
 | --- | --- |
