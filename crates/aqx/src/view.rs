@@ -208,6 +208,7 @@ impl Shown {
             .last
             .as_ref()
             .filter(|last| Some(&last.path) == path)
+            .filter(|_| !matches!(board.run, Run::Starting { .. }))
             .map(|last| last.args.clone());
         let status = match &board.run {
             Run::Starting { .. } => "starting".into(),
@@ -607,6 +608,15 @@ mod tests {
             "only the selected account builds its lists"
         );
         assert_eq!(summary.hp, 1000);
+
+        account.board().run = Run::Starting {
+            script: PathBuf::from("/srv/farm.ts"),
+        };
+        assert_eq!(
+            Shown::of(&account, false, Instant::now()).args,
+            None,
+            "a starting run may have new args, so the last run's aren't shown"
+        );
 
         harness.session.logout();
         harness.finish();
