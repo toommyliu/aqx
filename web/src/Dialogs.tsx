@@ -637,12 +637,21 @@ function RunArgs(props: { script: string; extra: [string, string][] }) {
     if (!d) return;
     const typed = typedRun(`x ${extra()}`);
     if (typeof typed === "string") return setError(typed);
+    const sent = new Map(typed.extra);
+    for (const [name] of perAccount() ? [] : props.extra) {
+      if (!d.args.some((arg) => arg.name === name)) continue;
+      const value = straight(answers()[key(null, name)] ?? "");
+      const reread = typedRun(`x ${name}=${value}`);
+      const keeps = typeof reread !== "string" && reread.extra.length === 1 && reread.extra[0]?.[1] === value;
+      if (value && keeps) sent.set(name, value);
+      else sent.delete(name);
+    }
     setError("");
     setBusy(true);
     try {
       const outcome = await api.run({
         script: props.script,
-        extra: typed.extra,
+        extra: [...sent],
         shared: !perAccount(),
         runs: targetsOf(on).map(({ account, name }) => ({
           account,
