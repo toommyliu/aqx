@@ -455,24 +455,27 @@ impl Web {
     }
 
     fn save_skua_options(&self, asked: OptionsRequest) -> Result<Reply, Failure> {
+        let _starting = self.starting.lock().unwrap_or_else(PoisonError::into_inner);
         let user = self.user_of(Some(asked.account), &asked.name)?;
-        if let Some(session) = self.session()?
-            && shown(&session)?
-                .get(asked.account)
-                .is_some_and(|a| !editable(&a.state))
-        {
-            return Err(Failure::conflict(
-                "Options can change while the account is offline or idle.",
-            ));
+        let script = match asked.tab.as_str() {
+            "corebots" => None,
+            "script" => Some(self.script_path(&asked.script)?),
+            _ => return Err(Failure::bad("tab is corebots or script")),
+        };
+        let accounts = match self.session()? {
+            Some(session) => shown(&session)?,
+            None => Vec::new(),
+        };
+        if options_busy(&accounts, asked.account, script.as_deref()) {
+            return Err(Failure::conflict(match script {
+                Some(_) => "Stop the accounts running this script before changing its options.",
+                None => "Options can change while the account is offline or idle.",
+            }));
         }
         let home = config::skua_home().map_err(Failure::internal)?;
-        let saved = match asked.tab.as_str() {
-            "corebots" => skua_options::core_bots_options(&user, &home, &asked.changes),
-            "script" => {
-                let script = self.script_path(&asked.script)?;
-                skua_options::script_options(&script, &home, &asked.changes)
-            }
-            _ => return Err(Failure::bad("tab is corebots or script")),
+        let saved = match &script {
+            Some(script) => skua_options::script_options(script, &home, &asked.changes),
+            None => skua_options::core_bots_options(&user, &home, &asked.changes),
         };
         saved
             .map(|settings| Reply::json(&pane(Ok(settings))))
@@ -706,8 +709,14 @@ fn shown(session: &Session) -> Result<Vec<Shown>, Failure> {
     Ok(frame.accounts)
 }
 
-fn editable(state: &State) -> bool {
-    matches!(state, State::Offline { .. } | State::Online)
+fn options_busy(accounts: &[Shown], account: usize, script: Option<&Path>) -> bool {
+    let busy = |a: &Shown| !matches!(a.state, State::Offline { .. } | State::Online);
+    match script {
+        Some(script) => accounts
+            .iter()
+            .any(|a| busy(a) && a.script.as_deref().map(Path::new) == Some(script)),
+        None => accounts.get(account).is_some_and(busy),
+    }
 }
 
 fn all_servers() -> Result<Reply, Failure> {
@@ -921,17 +930,35 @@ mod tests {
     }
 
     #[test]
-    fn skua_options_save_only_while_the_account_is_offline_or_idle() {
-        let states = [
-            State::Offline { why: None },
-            State::Online,
-            State::Busy(crate::view::Step::LoggingIn),
-            State::Reconnecting(String::new()),
-            State::Running,
-            State::Paused,
-            State::Stalled,
-        ];
-        let saves: Vec<bool> = states.iter().map(editable).collect();
-        assert_eq!(saves, [true, true, false, false, false, false, false]);
+    fn skua_options_save_only_while_no_running_script_can_rewrite_them() {
+        let account = |state: State, script: &str| Shown {
+            name: "player1".into(),
+            user: "player1".into(),
+            state,
+            server: "Twilly".into(),
+            script: Some(script.into()),
+            status: String::new(),
+            up: None,
+            stats: crate::fleet::Stats::default(),
+            gold_gained: None,
+            game: None,
+        };
+        let farm = Path::new("/srv/Farm.cs");
+        let idle = account(State::Online, "/srv/Farm.cs");
+        let offline = account(State::Offline { why: None }, "/srv/Farm.cs");
+        let farming = account(State::Running, "/srv/Farm.cs");
+        let paused = account(State::Paused, "/srv/Farm.cs");
+        let other = account(State::Running, "/srv/Other.cs");
+        let busy = |accounts: &[&Shown], script| {
+            let accounts: Vec<Shown> = accounts.iter().map(|a| (*a).clone()).collect();
+            options_busy(&accounts, 0, script)
+        };
+        assert!(!busy(&[&idle, &farming], None));
+        assert!(!busy(&[&offline], None));
+        assert!(busy(&[&paused], None));
+        assert!(busy(&[&other], None));
+        assert!(busy(&[&idle, &farming], Some(farm)));
+        assert!(busy(&[&idle, &paused], Some(farm)));
+        assert!(!busy(&[&other, &idle], Some(farm)));
     }
 }
