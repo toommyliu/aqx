@@ -1184,6 +1184,12 @@ legend {
   text-align: left;
 }
 
+.entry > .wrap {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .entry.two {
   display: grid;
   grid-template-columns: minmax(0, 14rem) minmax(0, 1fr);

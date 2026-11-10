@@ -378,7 +378,7 @@ function Files(props: Pick) {
             <li>
               <button type="button" data-nav data-name={entry.name} class="entry" onClick={() => open(entry.name, entry.dir)}>
                 <Icon name={entry.dir ? "folder" : "file"} />
-                <span>{entry.name}</span>
+                <span class="wrap">{entry.name}</span>
                 <Show when={entry.dir}>
                   <span class="visually-hidden"> folder</span>
                 </Show>
