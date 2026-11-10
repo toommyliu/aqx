@@ -69,7 +69,7 @@ fn load_hidden() -> BTreeSet<PathBuf> {
         .unwrap_or_default()
 }
 
-pub fn serve(config: PathBuf, port: u16) -> anyhow::Result<()> {
+pub fn serve(config: PathBuf, port: u16, up: bool) -> anyhow::Result<()> {
     let home = config
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
@@ -96,6 +96,14 @@ pub fn serve(config: PathBuf, port: u16) -> anyhow::Result<()> {
         eprintln!(
             "aqx: the web UI isn't built into this aqx; run npm --prefix web ci && npm --prefix web run build, then build aqx again"
         );
+    }
+    if up && daemon::session_for(&web.config)?.is_none() {
+        let fleet = Wanted {
+            accounts: Vec::new(),
+            script: None,
+        };
+        daemon::start(&web.config, &fleet)?;
+        println!("started an aqx session for {}", web.config.display());
     }
     println!(
         "aqx web is serving {} at http://{address}",

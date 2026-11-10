@@ -68,6 +68,9 @@ enum Command {
         config: Option<PathBuf>,
         #[arg(long, default_value_t = web::PORT)]
         port: u16,
+        /// Start the session first if it isn't running, logging in the accounts with auto_start on.
+        #[arg(long)]
+        up: bool,
     },
     /// Log out every account and end the session.
     Down {
@@ -158,7 +161,7 @@ fn main() -> ExitCode {
         Command::Up {
             open, json, quiet, ..
         } => commands::up(&open, json, quiet),
-        Command::Web { config, port } => commands::web(config.as_deref(), port),
+        Command::Web { config, port, up } => commands::web(config.as_deref(), port, up),
         Command::Down { config } => commands::down(config.as_deref()),
         Command::Ps { json } => commands::ps(json),
         Command::Logs {
