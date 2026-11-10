@@ -809,6 +809,7 @@ fn pane(loaded: Result<Settings, String>) -> Value {
                         },
                         "choices": o.choices,
                         "value": o.value,
+                        "default": o.default,
                     })
                 })
                 .collect();

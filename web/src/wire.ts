@@ -142,6 +142,7 @@ export type SkuaOption = {
   kind: "bool" | "number" | "text" | "choice";
   choices: string[];
   value: string | null;
+  default: string | null;
 };
 
 export type SkuaPane = { error: string } | { storage: string | null; options: SkuaOption[] };

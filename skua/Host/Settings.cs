@@ -9,7 +9,7 @@ namespace Aqx.Skua;
 
 public static class Settings
 {
-    sealed record Row(string Group, string Name, string Label, string Description, string Kind, string[] Choices, string? Value);
+    sealed record Row(string Group, string Name, string Label, string Description, string Kind, string[] Choices, string? Value, string? Default = null);
 
     public static int ScriptOptions(ScriptCompiler compiler, string path, IReadOnlyDictionary<string, string> changes)
     {
@@ -73,46 +73,46 @@ public static class Settings
     static readonly string[] Modes = Enum.GetNames<ClassUseMode>();
 
     static readonly Row[] CoreBotsRows = [
-        Bool("Options", "PrivateRooms", "Private rooms"),
-        Bool("Options", "PublicDifficult", "Public on difficult parts"),
-        Bool("Options", "BankMiscAC", "Bank misc. AC items on start-up"),
-        Bool("Options", "LoggerInChat", "Logger in chat"),
-        Bool("Options", "MessageBoxCheck", "Force off message boxes"),
-        Bool("Options", "RestCheck", "Should rest"),
-        Bool("Options", "DisableAutoEnhance", "Disable auto enhance"),
-        Bool("Options", "DisableBestGear", "Disable best gear"),
-        Bool("Options", "AntiLag", "Anti lag"),
-        Bool("Options", "IncognitoMode", "Incognito mode"),
-        Number("Options", "PrivateRoomNr", "Room number"),
-        Number("Options", "ActionDelayNr", "Action delay"),
-        Number("Options", "ExitCombatNr", "Exit combat delay"),
-        Number("Options", "HuntDelayNr", "Hunt delay"),
-        Number("Options", "QuestTriesNr", "Accept and complete tries"),
-        Number("Options", "QuestMaxNr", "Loaded quests max."),
-        Text("Options", "StopLocationSelect", "Map after stopping the bot"),
+        Bool("Options", "PrivateRooms", "Private rooms", true),
+        Bool("Options", "PublicDifficult", "Public on difficult parts", false),
+        Bool("Options", "BankMiscAC", "Bank misc. AC items on start-up", false),
+        Bool("Options", "LoggerInChat", "Logger in chat", true),
+        Bool("Options", "MessageBoxCheck", "Force off message boxes", false),
+        Bool("Options", "RestCheck", "Should rest", false),
+        Bool("Options", "DisableAutoEnhance", "Disable auto enhance", false),
+        Bool("Options", "DisableBestGear", "Disable best gear", false),
+        Bool("Options", "AntiLag", "Anti lag", true),
+        Bool("Options", "IncognitoMode", "Incognito mode", false),
+        Number("Options", "PrivateRoomNr", "Room number", 100000),
+        Number("Options", "ActionDelayNr", "Action delay", 700),
+        Number("Options", "ExitCombatNr", "Exit combat delay", 1600),
+        Number("Options", "HuntDelayNr", "Hunt delay", 1000),
+        Number("Options", "QuestTriesNr", "Accept and complete tries", 20),
+        Number("Options", "QuestMaxNr", "Loaded quests max.", 150),
+        Text("Options", "StopLocationSelect", "Map after stopping the bot", "whitemap"),
         .. new[] { "Solo", "Farm", "Dodge", "Boss" }.SelectMany(Loadout),
-        Bool("Boosters", "doGoldBoost", "Use gold boosts when farming gold"),
-        Bool("Boosters", "doClassBoost", "Use class boosts when ranking up a class"),
-        Bool("Boosters", "doRepBoost", "Use reputation boosts when farming rep"),
-        Bool("Boosters", "doExpBoost", "Use experience boosts when farming exp"),
-        Bool("Nation farms", "Nation_SellMemVoucher", "Sell Voucher of Nulgath if not needed"),
-        Bool("Nation farms", "Nation_ReturnPolicyDuringSupplies", "Do Swindles Return during supplies"),
-        Bool("Nation farms", "UltraAlteonForSupplies", "Ultra Alteon for supplies"),
-        Bool("Bludrut Brawl", "PvP_SoloPvPBoss", "Kill ads before boss"),
-        Bool("Bot creators", "BCO_Story_TestBot", "Story bot test mode"),
+        Bool("Boosters", "doGoldBoost", "Use gold boosts when farming gold", false),
+        Bool("Boosters", "doClassBoost", "Use class boosts when ranking up a class", false),
+        Bool("Boosters", "doRepBoost", "Use reputation boosts when farming rep", false),
+        Bool("Boosters", "doExpBoost", "Use experience boosts when farming exp", false),
+        Bool("Nation farms", "Nation_SellMemVoucher", "Sell Voucher of Nulgath if not needed", false),
+        Bool("Nation farms", "Nation_ReturnPolicyDuringSupplies", "Do Swindles Return during supplies", false),
+        Bool("Nation farms", "UltraAlteonForSupplies", "Ultra Alteon for supplies", false),
+        Bool("Bludrut Brawl", "PvP_SoloPvPBoss", "Kill ads before boss", false),
+        Bool("Bot creators", "BCO_Story_TestBot", "Story bot test mode", false),
     ];
 
     static IEnumerable<Row> Loadout(string role, int i) => [
         Text("Loadout", $"{role}ClassSelect", $"{role} class"),
-        Bool("Loadout", $"{role}EquipCheck", $"{role} equipment"),
-        new Row("Loadout", $"{role}ModeSelect", $"{role} class mode", "", "choice", Modes, null),
+        Bool("Loadout", $"{role}EquipCheck", $"{role} equipment", true),
+        new Row("Loadout", $"{role}ModeSelect", $"{role} class mode", "", "choice", Modes, null, nameof(ClassUseMode.Base)),
         .. new[] { "Helm", "Armor", "Cape", "Weapon", "Pet", "GroundItem" }.Select(slot =>
             Text("Loadout", $"{slot}{i + 1}Select", $"{role} {(slot == "GroundItem" ? "ground item" : slot.ToLowerInvariant())}")),
     ];
 
-    static Row Bool(string group, string key, string label) => new(group, key, label, "", "bool", [], null);
-    static Row Number(string group, string key, string label) => new(group, key, label, "", "number", [], null);
-    static Row Text(string group, string key, string label) => new(group, key, label, "", "text", [], null);
+    static Row Bool(string group, string key, string label, bool fallback) => new(group, key, label, "", "bool", [], null, fallback.ToString());
+    static Row Number(string group, string key, string label, int fallback) => new(group, key, label, "", "number", [], null, fallback.ToString());
+    static Row Text(string group, string key, string label, string? fallback = null) => new(group, key, label, "", "text", [], null, fallback);
 
     static string Kind(Type type) =>
         type == typeof(bool) ? "bool"
@@ -155,6 +155,8 @@ public static class Settings
             json.WriteEndArray();
             if (row.Value is null) json.WriteNull("value");
             else json.WriteString("value", row.Value);
+            if (row.Default is null) json.WriteNull("default");
+            else json.WriteString("default", row.Default);
             json.WriteEndObject();
         }
         json.WriteEndArray();
