@@ -112,8 +112,6 @@ enum Command {
         #[command(subcommand)]
         action: commands::Skua,
     },
-    /// Print the JSON Schema of aqx.toml, for editor completion and checks.
-    Schema,
     /// Log in, run a script until it ends, then log out.
     Run {
         /// The script, a .ts, .js or .cs file. With --account, defaults to the account's own script.
@@ -172,10 +170,6 @@ fn main() -> ExitCode {
         Command::Ctl { account, action } => commands::ctl(&account, action),
         Command::Check { scripts } => commands::check(&scripts),
         Command::Skua { action } => commands::skua(action),
-        Command::Schema => {
-            println!("{}", config::schema());
-            Ok(ExitCode::SUCCESS)
-        }
         Command::Run {
             script,
             account,
