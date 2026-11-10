@@ -379,7 +379,8 @@ const BRAILLE_DOTS = [
   [6.25, 7],
   [6.25, 11.25],
 ] as const;
-const BRAILLE_FRAMES = [
+type Dot = 0 | 1 | 2 | 3 | 4 | 5;
+const BRAILLE_FRAMES: Dot[][] = [
   [0, 1, 3],
   [0, 3, 4],
   [0, 3, 4, 5],
@@ -390,39 +391,48 @@ const BRAILLE_FRAMES = [
   [0, 1, 2, 5],
   [0, 1, 2],
   [0, 1, 2, 3],
+  [0, 1, 2, 3, 4, 5],
 ];
-const STILL_FRAME = [0, 1, 2, 3, 4, 5];
-const [frame, setFrame] = createSignal(0);
-const moving = !matchMedia("(prefers-reduced-motion: reduce)").matches;
-if (moving) setInterval(() => setFrame((f) => (f + 1) % BRAILLE_FRAMES.length), 80);
+const SPIN_STRIP = BRAILLE_FRAMES.flatMap((frame, i) =>
+  frame.map((dot) => ({ x: i * 14 + BRAILLE_DOTS[dot][0], y: BRAILLE_DOTS[dot][1] })),
+);
+const SPIN_MS = 800;
 
 function Mark(props: { tone: ReturnType<typeof tone> }) {
   return (
-    <svg class={`mark m-${props.tone}`} viewBox="0 0 14 14" aria-hidden="true">
-      <Switch>
-        <Match when={props.tone === "run" || props.tone === "busy"}>
-          <For each={moving ? (BRAILLE_FRAMES[frame()] ?? STILL_FRAME) : STILL_FRAME}>
-            {(dot) => <circle cx={BRAILLE_DOTS[dot]?.[0]} cy={BRAILLE_DOTS[dot]?.[1]} r="1.25" />}
-          </For>
-        </Match>
-        <Match when={props.tone === "on"}>
-          <circle cx="4.5" cy="7" r="4.5" />
-        </Match>
-        <Match when={props.tone === "off"}>
-          <circle class="line" cx="4.5" cy="7" r="3.75" />
-        </Match>
-        <Match when={props.tone === "bad"}>
-          <path class="line" d="M0.75 2.75 8.25 11.25M8.25 2.75 0.75 11.25" />
-        </Match>
-        <Match when={props.tone === "paused"}>
-          <path class="line" d="M0.75 2.5v9M5.75 2.5v9" />
-        </Match>
-        <Match when={props.tone === "warn"}>
-          <path class="line bold" d="M1 2.5v5.5" />
-          <circle cx="1" cy="11" r="1" />
-        </Match>
-      </Switch>
-    </svg>
+    <Show
+      when={props.tone === "run" || props.tone === "busy"}
+      fallback={
+        <svg class={`mark m-${props.tone}`} viewBox="0 0 14 14" aria-hidden="true">
+          <Switch>
+            <Match when={props.tone === "on"}>
+              <circle cx="4.5" cy="7" r="4.5" />
+            </Match>
+            <Match when={props.tone === "off"}>
+              <circle class="line" cx="4.5" cy="7" r="3.75" />
+            </Match>
+            <Match when={props.tone === "bad"}>
+              <path class="line" d="M0.75 2.75 8.25 11.25M8.25 2.75 0.75 11.25" />
+            </Match>
+            <Match when={props.tone === "paused"}>
+              <path class="line" d="M0.75 2.5v9M5.75 2.5v9" />
+            </Match>
+            <Match when={props.tone === "warn"}>
+              <path class="line bold" d="M1 2.5v5.5" />
+              <circle cx="1" cy="11" r="1" />
+            </Match>
+          </Switch>
+        </svg>
+      }
+    >
+      <span class={`mark spin m-${props.tone}`} aria-hidden="true">
+        <span style={{ "animation-delay": `${-(Number(document.timeline.currentTime ?? 0) % SPIN_MS)}ms` }}>
+          <svg viewBox={`0 0 ${BRAILLE_FRAMES.length * 14} 14`}>
+            <For each={SPIN_STRIP}>{(dot) => <circle cx={dot.x} cy={dot.y} r="1.25" />}</For>
+          </svg>
+        </span>
+      </span>
+    </Show>
   );
 }
 

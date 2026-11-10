@@ -485,8 +485,40 @@ kbd {
   height: 14px;
 }
 
-svg.mark {
+svg.mark,
+.mark.spin svg {
   fill: currentColor;
+}
+
+.mark.spin {
+  overflow: hidden;
+}
+
+.mark.spin > span {
+  display: block;
+  flex: none;
+  transform: translateX(-140px);
+}
+
+.mark.spin svg {
+  display: block;
+  width: 154px;
+  height: 14px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mark.spin > span {
+    animation: spin 800ms steps(10) infinite;
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-140px);
+  }
 }
 
 svg.mark .line {
@@ -647,29 +679,31 @@ meter.mp::-moz-meter-bar {
   gap: 0 8px;
 }
 
-@property --fill {
-  syntax: "<percentage>";
-  inherits: false;
-  initial-value: 100%;
-}
-
 .skill {
-  background: linear-gradient(to right, var(--text) var(--fill), var(--muted) var(--fill));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  position: relative;
+  color: var(--muted);
+  white-space: nowrap;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .skill:not(.used) {
-    transition: --fill 250ms linear;
-  }
+.skill .fill {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  color: var(--text);
+  user-select: none;
+}
+
+.skill .fill > span {
+  display: block;
 }
 
 @media (forced-colors: active) {
   .skill {
-    background: none;
     color: CanvasText;
+  }
+
+  .skill .fill {
+    display: none;
   }
 }
 

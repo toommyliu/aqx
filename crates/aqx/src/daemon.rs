@@ -143,7 +143,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -883,6 +883,7 @@ mod tests {
             skills: vec![crate::view::SkillState {
                 name: "Slash".into(),
                 ready: 1.0,
+                left_ms: 0,
             }],
             auras: vec![Aura {
                 name: "Haste".into(),
@@ -1090,7 +1091,7 @@ mod tests {
              Frame.accounts.game.quests.have Frame.accounts.game.quests.id \
              Frame.accounts.game.quests.name \
              Frame.accounts.game.quests.need Frame.accounts.game.skills \
-             Frame.accounts.game.skills.name Frame.accounts.game.skills.ready \
+             Frame.accounts.game.skills.left_ms Frame.accounts.game.skills.name Frame.accounts.game.skills.ready \
              Frame.accounts.game.target Frame.accounts.game.target.hp \
              Frame.accounts.game.target.max_hp Frame.accounts.game.target.name \
              Frame.accounts.game.temp Frame.accounts.game.temp.equipped \
@@ -1113,7 +1114,7 @@ mod tests {
              Servers.refusal";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (4, pinned),
+            (5, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }
