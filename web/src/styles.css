@@ -1066,8 +1066,13 @@ dialog {
   border-radius: 8px;
   background: var(--surface);
   color: var(--text);
-  overscroll-behavior: contain;
+  overflow: hidden;
   box-shadow: 0 8px 32px rgb(0 0 0 / 0.25);
+}
+
+dialog,
+dialog * {
+  overscroll-behavior: none;
 }
 
 dialog[open] {
@@ -1099,7 +1104,7 @@ dialog::backdrop {
 
 .dialog-body {
   padding: 10px 14px;
-  overflow-y: auto;
+  overflow: hidden auto;
   min-height: 0;
 }
 
@@ -1131,7 +1136,7 @@ dialog::backdrop {
   gap: 3px;
 }
 
-.field input,
+.field input:not([type="checkbox"]),
 .field select {
   width: 100%;
 }
@@ -1177,6 +1182,12 @@ legend {
   min-height: var(--row);
   padding: 0 6px;
   text-align: left;
+}
+
+.entry > .wrap {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .entry.two {
