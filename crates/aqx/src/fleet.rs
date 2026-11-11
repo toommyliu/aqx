@@ -151,6 +151,57 @@ pub enum Ended {
     Closed(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Queued {
+    pub id: u64,
+    pub script: Script,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ResumeWire")]
+pub struct Resume {
+    pub name: String,
+    pub online: bool,
+    pub script: Option<Script>,
+    pub queue: Vec<Script>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ResumeWire {
+    Before(String, Option<Script>),
+    Now {
+        name: String,
+        online: bool,
+        script: Option<Script>,
+        queue: Vec<Script>,
+    },
+}
+
+impl From<ResumeWire> for Resume {
+    fn from(wire: ResumeWire) -> Resume {
+        match wire {
+            ResumeWire::Before(name, script) => Resume {
+                name,
+                online: true,
+                script,
+                queue: Vec::new(),
+            },
+            ResumeWire::Now {
+                name,
+                online,
+                script,
+                queue,
+            } => Resume {
+                name,
+                online,
+                script,
+                queue,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stats {
     pub kills: u64,
@@ -169,6 +220,8 @@ pub struct Board {
     pub rep_from: HashMap<String, u32>,
     pub last: Option<Script>,
     pub recording: Option<Recorder>,
+    pub queue: VecDeque<Queued>,
+    queued_ids: u64,
     runs: u64,
     links: u64,
     queued_runs: usize,
@@ -190,6 +243,8 @@ impl Default for Board {
             rep_from: HashMap::new(),
             last: None,
             recording: None,
+            queue: VecDeque::new(),
+            queued_ids: 0,
             runs: 0,
             links: 0,
             queued_runs: 0,
@@ -425,7 +480,10 @@ impl Account {
 
     pub fn run(&self, script: Script) {
         self.commanded.store(true, Ordering::SeqCst);
-        let mut board = self.board();
+        self.start(&mut self.board(), script);
+    }
+
+    fn start(&self, board: &mut Board, script: Script) {
         board.runs += 1;
         if let Run::Running { cancel, .. } = &board.run {
             cancel.cancel();
@@ -435,6 +493,67 @@ impl Account {
             script,
             run: board.runs,
         });
+    }
+
+    pub fn enqueue(&self, script: Script) {
+        let mut board = self.board();
+        board.queued_ids += 1;
+        let id = board.queued_ids;
+        board.queue.push_back(Queued { id, script });
+    }
+
+    pub fn unqueue(&self, id: u64) -> Result<(), &'static str> {
+        let mut board = self.board();
+        let at = queued_at(&board, id)?;
+        board.queue.remove(at);
+        Ok(())
+    }
+
+    pub fn move_queued(&self, id: u64, to: usize) -> Result<(), &'static str> {
+        let mut board = self.board();
+        let at = queued_at(&board, id)?;
+        let item = board.queue.remove(at).expect("queued_at found it");
+        let to = to.min(board.queue.len());
+        board.queue.insert(to, item);
+        Ok(())
+    }
+
+    pub fn set_queued_args(
+        &self,
+        id: u64,
+        args: Vec<(String, String)>,
+    ) -> Result<(), &'static str> {
+        let mut board = self.board();
+        let at = queued_at(&board, id)?;
+        board.queue[at].script.args = args;
+        Ok(())
+    }
+
+    pub fn clear_queue(&self) -> Result<(), &'static str> {
+        let mut board = self.board();
+        if board.queue.is_empty() {
+            return Err("the queue is empty");
+        }
+        board.queue.clear();
+        Ok(())
+    }
+
+    pub fn next(&self) -> Result<(), &'static str> {
+        self.commanded.store(true, Ordering::SeqCst);
+        let mut board = self.board();
+        let next = board.queue.pop_front().ok_or("the queue is empty")?;
+        self.start(&mut board, next.script);
+        Ok(())
+    }
+
+    fn advance(&self, run: u64) {
+        let mut board = self.board();
+        if board.runs != run {
+            return;
+        }
+        if let Some(next) = board.queue.pop_front() {
+            self.start(&mut board, next.script);
+        }
     }
 
     pub fn restart(&self) -> Result<(), &'static str> {
@@ -574,6 +693,14 @@ impl Account {
         });
         Ok(())
     }
+}
+
+fn queued_at(board: &Board, id: u64) -> Result<usize, &'static str> {
+    board
+        .queue
+        .iter()
+        .position(|q| q.id == id)
+        .ok_or("that script already left the queue")
 }
 
 fn is_skua(script: &Path) -> bool {
@@ -850,21 +977,24 @@ impl Fleet {
         }
     }
 
-    pub fn resumable(&self) -> Vec<(String, Option<Script>)> {
+    pub fn resumable(&self) -> Vec<Resume> {
         self.accounts()
             .iter()
-            .filter(|a| !a.idle())
             .map(|a| {
+                let online = !a.idle();
                 let board = a.board();
                 let running = matches!(
                     board.run,
                     Run::Starting { .. } | Run::Running { .. } | Run::Restarting { .. }
                 );
-                (
-                    a.name.clone(),
-                    if running { board.last.clone() } else { None },
-                )
+                Resume {
+                    name: a.name.clone(),
+                    online,
+                    script: if running { board.last.clone() } else { None },
+                    queue: board.queue.iter().map(|q| q.script.clone()).collect(),
+                }
             })
+            .filter(|r| r.online || !r.queue.is_empty())
             .collect()
     }
 
@@ -927,6 +1057,12 @@ impl Backoff {
     }
 }
 
+enum After {
+    Next,
+    Retry,
+    Hold,
+}
+
 struct Linked {
     account: Arc<Account>,
     fleet: Accounts,
@@ -955,9 +1091,13 @@ impl Linked {
                         continue;
                     };
                     let started = Instant::now();
-                    let failed = self.run(script.clone(), run, session, server);
-                    if !(failed && self.account.restart_on_error) {
-                        continue;
+                    match self.run(script.clone(), run, session, server) {
+                        After::Next => {
+                            self.account.advance(run);
+                            continue;
+                        }
+                        After::Retry if self.account.restart_on_error => {}
+                        After::Retry | After::Hold => continue,
                     }
                     let delay = restarts.after(started.elapsed());
                     if !self.restarting(&script, run, delay) {
@@ -1168,7 +1308,7 @@ impl Linked {
         }
     }
 
-    fn run(self: &Arc<Self>, script: Script, run: u64, session: Handle, server: String) -> bool {
+    fn run(self: &Arc<Self>, script: Script, run: u64, session: Handle, server: String) -> After {
         let cancel = Cancel::default();
         let shown = script.path.display().to_string();
         {
@@ -1180,7 +1320,7 @@ impl Linked {
                         how: Ended::Stopped(None),
                     };
                 }
-                return false;
+                return After::Hold;
             }
             board.last = Some(script.clone());
             board.status.clear();
@@ -1203,9 +1343,10 @@ impl Linked {
                 let args = loaded.parse_args(&script.args).map_err(|e| (e, false))?;
                 Ok((loaded, args))
             });
-        let (how, restartable) =
+        let (how, after) =
             match loaded {
-                Err((why, restartable)) => (Ended::Failed(why), restartable),
+                Err((why, true)) => (Ended::Failed(why), After::Retry),
+                Err((why, false)) => (Ended::Failed(why), After::Hold),
                 Ok((loaded, args)) => {
                     let relogin: Arc<dyn aqx_script::Account> = Arc::clone(self) as _;
                     let ran =
@@ -1231,23 +1372,25 @@ impl Linked {
                     if matches!(ran.outcome, Outcome::LoggedOut) {
                         self.account.board().switched = None;
                     }
-                    let how = match ran.outcome {
-                        Outcome::Finished => Ended::Finished,
-                        Outcome::Stopped(reason) => Ended::Stopped(reason),
-                        Outcome::Cancelled => Ended::Stopped(None),
-                        Outcome::LoggedOut => Ended::Stopped(Some("the script logged out".into())),
-                        Outcome::Disconnected(why) => Ended::Closed(why),
-                        Outcome::Failed(why) => Ended::Failed(why),
+                    let (how, after) = match ran.outcome {
+                        Outcome::Finished => (Ended::Finished, After::Next),
+                        Outcome::Stopped(reason) => (Ended::Stopped(reason), After::Next),
+                        Outcome::Cancelled => (Ended::Stopped(None), After::Hold),
+                        Outcome::LoggedOut => (
+                            Ended::Stopped(Some("the script logged out".into())),
+                            After::Hold,
+                        ),
+                        Outcome::Disconnected(why) => (Ended::Closed(why), After::Hold),
+                        Outcome::Failed(why) => (Ended::Failed(why), After::Retry),
                         Outcome::Restart => unreachable!("handled by the runner"),
                     };
                     leave_combat(&ran.session);
-                    let restartable = matches!(how, Ended::Failed(_));
-                    (how, restartable)
+                    (how, after)
                 }
             };
-        let (how, restartable) = match how {
-            Ended::Failed(_) if cancel.is_cancelled() => (Ended::Stopped(None), false),
-            how => (how, restartable),
+        let (how, after) = match how {
+            Ended::Failed(_) if cancel.is_cancelled() => (Ended::Stopped(None), After::Hold),
+            how => (how, after),
         };
         match &how {
             Ended::Finished => self.account.say("the script finished"),
@@ -1266,7 +1409,7 @@ impl Linked {
             script: script.path,
             how,
         };
-        restartable
+        after
     }
 
     fn logout(&self) {
@@ -1488,6 +1631,198 @@ mod tests {
             "time spent reconnecting isn't a stall"
         );
         harness.session.logout();
+    }
+
+    #[test]
+    fn a_script_that_ends_itself_starts_the_next_in_the_queue_and_a_stop_holds_it() {
+        let (hang_up_in, hang_up) = mpsc::channel::<()>();
+        let harness = Harness::start(Options::default(), move |listener| {
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready();
+            let _ = hang_up.recv();
+        });
+        harness.session.ready().wait().unwrap();
+        let dir = std::env::temp_dir().join(format!("aqx-queue-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.join(format!("{name}.ts"));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"import {{ script, wait }} from "aqx";
+                    export default function* () {{ script.log("{name}"); {body} }}"#
+                ),
+            )
+            .unwrap();
+            Script {
+                path,
+                args: Vec::new(),
+            }
+        };
+        let finishes = script("finishes", "");
+        let stops = script("stops", r#"script.stop("done");"#);
+        let waits = script("waits", "yield* wait.ms(60_000);");
+        let (account, inbox) = Account::queueing("player1", None);
+        account.board().link = Link::Session {
+            session: harness.session.clone(),
+            server: "Test".into(),
+            since: Instant::now(),
+        };
+        let linked = linked(account);
+        let account = Arc::clone(&linked.account);
+        thread::spawn(move || linked.work(&inbox));
+        let until = |what: &str, done: &dyn Fn(&Board) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !done(&account.board()) {
+                assert!(Instant::now() < deadline, "never {what}");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let running = |script: &Script| {
+            let path = script.path.clone();
+            move |board: &Board| matches!(&board.run, Run::Running { script, .. } if *script == path)
+        };
+
+        account.enqueue(stops.clone());
+        account.enqueue(waits.clone());
+        account.run(finishes);
+        let ran = |board: &Board| -> Vec<String> {
+            board
+                .log
+                .lines()
+                .filter(|l| l.channel == Channel::Script)
+                .map(|l| l.text.clone())
+                .collect()
+        };
+        until("ran the queue", &|board| ran(board).len() == 3);
+        assert_eq!(ran(&account.board()), ["finishes", "stops", "waits"]);
+        assert!(running(&waits)(&account.board()));
+        assert!(account.board().queue.is_empty());
+
+        account.enqueue(stops);
+        assert_eq!(account.stop(), Ok(()));
+        until("stopped", &|board| matches!(board.run, Run::Ended { .. }));
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            matches!(account.board().run, Run::Ended { .. }),
+            "a stop doesn't start the next script"
+        );
+        assert_eq!(account.board().queue.len(), 1, "the queue keeps it");
+
+        assert_eq!(account.next(), Ok(()));
+        until("ran the next", &|board| {
+            board.queue.is_empty() && matches!(board.run, Run::Ended { .. })
+        });
+        hang_up_in.send(()).unwrap();
+        harness.session.logout();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_queue_reorders_and_edits_items_by_id() {
+        let account = Account::detached("player1");
+        let script = |name: &str| Script {
+            path: PathBuf::from(format!("/srv/{name}.ts")),
+            args: Vec::new(),
+        };
+        for name in ["a", "b", "c"] {
+            account.enqueue(script(name));
+        }
+        let order = || -> Vec<(u64, String)> {
+            account
+                .board()
+                .queue
+                .iter()
+                .map(|q| (q.id, q.script.path.display().to_string()))
+                .collect()
+        };
+        assert_eq!(account.move_queued(3, 0), Ok(()));
+        assert_eq!(
+            account.move_queued(1, 99),
+            Ok(()),
+            "past the end moves it last"
+        );
+        assert_eq!(account.unqueue(2), Ok(()));
+        assert_eq!(
+            order(),
+            [(3, "/srv/c.ts".to_owned()), (1, "/srv/a.ts".to_owned())]
+        );
+        assert_eq!(
+            account.unqueue(2),
+            Err("that script already left the queue")
+        );
+        let args = vec![("Options:Fast".to_owned(), "true".to_owned())];
+        assert_eq!(account.set_queued_args(1, args.clone()), Ok(()));
+        assert_eq!(account.board().queue[1].script.args, args);
+        account.enqueue(script("d"));
+        assert_eq!(
+            account.board().queue.back().map(|q| q.id),
+            Some(4),
+            "ids aren't reused"
+        );
+        assert_eq!(account.clear_queue(), Ok(()));
+        assert_eq!(account.clear_queue(), Err("the queue is empty"));
+        assert_eq!(account.next(), Err("the queue is empty"));
+    }
+
+    #[test]
+    fn a_restarted_session_gets_each_queue_back() {
+        let (account, _inbox) = Account::queueing("player1", None);
+        account.login().unwrap();
+        let daily = Script {
+            path: PathBuf::from("/srv/daily.ts"),
+            args: vec![("count".into(), "3".into())],
+        };
+        account.enqueue(daily.clone());
+        let offline = Account::detached("player2");
+        offline.enqueue(daily.clone());
+        let fleet = Fleet::of(vec![
+            Arc::new(account),
+            Arc::new(offline),
+            Arc::new(Account::detached("player3")),
+        ]);
+        assert_eq!(
+            fleet.resumable(),
+            [
+                Resume {
+                    name: "player1".into(),
+                    online: true,
+                    script: None,
+                    queue: vec![daily.clone()],
+                },
+                Resume {
+                    name: "player2".into(),
+                    online: false,
+                    script: None,
+                    queue: vec![daily],
+                }
+            ],
+            "an offline account comes back only for its queue"
+        );
+        let before: Vec<Resume> = serde_json::from_str(r#"[["player1", null]]"#).unwrap();
+        assert_eq!(
+            before,
+            [Resume {
+                name: "player1".into(),
+                online: true,
+                script: None,
+                queue: Vec::new(),
+            }],
+            "an older session's reply still reads"
+        );
+    }
+
+    #[test]
+    fn next_runs_the_head_of_the_queue() {
+        let (account, inbox) = Account::queueing("player1", Some(farm()));
+        account.enqueue(Script {
+            path: PathBuf::from("/srv/daily.ts"),
+            args: Vec::new(),
+        });
+        assert_eq!(account.next(), Ok(()));
+        let linked = linked(account);
+        assert_eq!(take(&linked, &inbox), Some(PathBuf::from("/srv/daily.ts")));
+        assert!(linked.account.board().queue.is_empty());
     }
 
     #[test]

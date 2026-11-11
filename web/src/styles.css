@@ -737,6 +737,39 @@ meter.mp::-moz-meter-bar {
   align-self: stretch;
 }
 
+.up-next {
+  padding: 0 12px 6px;
+}
+
+.up-next h3 {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.up-next ol {
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.up-next li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.queued-actions {
+  display: flex;
+  flex: none;
+  margin-inline-start: auto;
+}
+
+.queued-actions .icon-button {
+  min-height: 22px;
+}
+
 .login-split > .action:has(+ .expand) {
   border-start-end-radius: 0;
   border-end-end-radius: 0;

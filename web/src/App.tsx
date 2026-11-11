@@ -6,9 +6,9 @@ import {
   createHotkeys,
   useAppHotkeys,
 } from "@tanstack/solid-hotkeys";
-import { For, Match, Show, Switch, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
+import { For, type JSX, Match, Show, Switch, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 import { Toaster, useSonner } from "solid-sonner";
-import { AccountPanel, LoginMenu } from "./Account";
+import { AccountPanel, LoginMenu, RunMenu } from "./Account";
 import { Dialogs, logOut, openPicker, openServers, openScriptOptions } from "./Dialogs";
 import { inBrowserTab } from "./hotkeys";
 import {
@@ -896,7 +896,7 @@ type Bulk = {
   none: string;
   run: (on: number[]) => void;
   danger?: boolean;
-  loginMenu?: true;
+  menu?: (on: number[]) => JSX.Element;
 };
 
 function Selection() {
@@ -915,7 +915,7 @@ function Selection() {
       fits: isOffline,
       none: "None of them are offline",
       run: (on) => act("login", "logging in", on),
-      loginMenu: true,
+      menu: (on) => <LoginMenu on={on} />,
     },
     {
       icon: () => "play",
@@ -923,6 +923,7 @@ function Selection() {
       fits: () => true,
       none: "",
       run: (on) => openPicker(on),
+      menu: (on) => <RunMenu on={on} />,
     },
     {
       icon: () => "stop",
@@ -1000,13 +1001,12 @@ function Selection() {
               </span>
             </button>
           );
-          if (!b.loginMenu) return button;
+          const menu = b.menu;
+          if (!menu) return button;
           return (
             <div class="login-split">
               {button}
-              <Show when={!blocked()}>
-                <LoginMenu on={on()} />
-              </Show>
+              <Show when={!blocked()}>{menu(on())}</Show>
             </div>
           );
         }}

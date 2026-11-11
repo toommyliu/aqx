@@ -27,10 +27,11 @@ export const shows = (game: GameLines, channel: Channel) =>
 export type ConfigStart = { kind: "list" } | { kind: "account"; user: string } | { kind: "new" };
 
 export type Dialog =
-  | { kind: "picker" }
-  | { kind: "run"; script: string; extra: [string, string][] }
+  | { kind: "picker"; queue: boolean }
+  | { kind: "run"; script: string; extra: [string, string][]; queue: boolean }
   | { kind: "servers" }
   | { kind: "skua"; script: string }
+  | { kind: "queued"; account: number; id: number }
   | { kind: "config"; start: ConfigStart }
   | { kind: "keys" }
   | { kind: "end" }

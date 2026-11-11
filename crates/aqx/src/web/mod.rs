@@ -348,7 +348,12 @@ impl Web {
                 path: path.clone(),
                 args,
             };
-            actions.push((run.account, run.name.clone(), Action::Run(script)));
+            let action = if asked.queue {
+                Action::Enqueue(script)
+            } else {
+                Action::Run(script)
+            };
+            actions.push((run.account, run.name.clone(), action));
         }
         if !problems.is_empty() {
             return Ok(Reply::json(&json!({ "problems": problems })).status(422));
@@ -611,29 +616,33 @@ impl Web {
             .collect();
         let (resume, gone): (Vec<_>, Vec<_>) = resume
             .into_iter()
-            .partition(|(name, _)| configured.contains(name));
+            .partition(|r| configured.contains(&r.name));
         old.down().map_err(Failure::internal)?;
-        let mut resume = resume.into_iter();
-        let Some((first, script)) = resume.next() else {
+        let Some(first) = resume.iter().find(|r| r.online) else {
             return Ok(Reply::json(
                 &json!({ "restarted": false, "gone": gone.len() }),
             ));
         };
+        let started = first.name.clone();
         let fresh = daemon::start(
             &self.config,
             &Wanted {
-                accounts: vec![first],
-                start: script.map_or(Start::Login, Start::Run),
+                accounts: vec![started.clone()],
+                start: first.script.clone().map_or(Start::Login, Start::Run),
             },
         )
         .map_err(Failure::internal)?;
         let names = self.roster_of(Some(&fresh))?;
-        for (name, script) in resume {
-            if let Some(i) = names.iter().position(|(n, _)| *n == name) {
+        for again in resume {
+            let Some(i) = names.iter().position(|(n, _)| *n == again.name) else {
+                continue;
+            };
+            if again.online && again.name != started {
                 let _ = fresh
                     .source()
-                    .act(i, script.map_or(Action::Login, Action::Run));
+                    .act(i, again.script.clone().map_or(Action::Login, Action::Run));
             }
+            again.requeue(fresh.source(), i);
         }
         Ok(Reply::json(&json!({ "restarted": true })))
     }
@@ -654,6 +663,8 @@ struct RunRequest {
     runs: Vec<RunFor>,
     #[serde(default)]
     shared: bool,
+    #[serde(default)]
+    queue: bool,
 }
 
 #[derive(Deserialize)]

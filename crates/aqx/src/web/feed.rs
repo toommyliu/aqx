@@ -240,6 +240,7 @@ pub fn offline(account: &config::Account) -> Shown {
         gold_gained: None,
         game: None,
         recording: None,
+        queue: Vec::new(),
     }
 }
 

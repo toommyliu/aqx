@@ -39,7 +39,17 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export function openPicker(on: number[]) {
   if (on.length === 0) return;
   setActing(on);
-  setDialog({ kind: "picker" });
+  setDialog({ kind: "picker", queue: false });
+}
+
+export function openQueuePicker(on: number[]) {
+  if (on.length === 0) return;
+  setActing(on);
+  setDialog({ kind: "picker", queue: true });
+}
+
+export function openQueuedOptions(account: number, id: number) {
+  setDialog({ kind: "queued", account, id });
 }
 
 export function logOut(on: number[]) {
@@ -69,7 +79,7 @@ export async function openScriptOptions(on: number[]) {
     if (declared.args.length === 0) return say("This script takes no args");
     if (dialog() !== null) return;
     setActing([i]);
-    setDialog({ kind: "run", script, extra: [] });
+    setDialog({ kind: "run", script, extra: [], queue: false });
   } catch (e) {
     fail(message(e));
   }
@@ -96,14 +106,14 @@ function runEffect(on: number[]): { body: string; danger: boolean } {
 
 let starting = false;
 
-async function runNow(script: string, extra: [string, string][]) {
+async function runNow(script: string, extra: [string, string][], queue: boolean) {
   if (starting) return;
   starting = true;
   const on = acting();
   try {
     const declared = await api.args(script, on);
     if (declared.args.length > 0) {
-      setDialog({ kind: "run", script, extra });
+      setDialog({ kind: "run", script, extra, queue });
       return;
     }
     const start = async () => {
@@ -112,10 +122,11 @@ async function runNow(script: string, extra: [string, string][]) {
         extra,
         runs: targetsOf(on).map((t) => ({ ...t, args: [] })),
         shared: true,
+        queue,
       });
-      if (Array.isArray(outcome)) report(outcome, `running ${shownName(script)}`);
+      if (Array.isArray(outcome)) report(outcome, `${queue ? "queued" : "running"} ${shownName(script)}`);
     };
-    if (on.length > 1) {
+    if (on.length > 1 && !queue) {
       setDialog({
         kind: "confirm",
         title: `Run ${shownName(script)} on ${on.length} accounts?`,
@@ -159,17 +170,20 @@ export function Dialogs() {
   );
   return (
     <Switch>
-      <Match when={dialog()?.kind === "picker"}>
-        <Picker />
+      <Match when={(() => { const d = dialog(); return d?.kind === "picker" ? d : undefined; })()}>
+        {(d) => <Picker queue={d().queue} />}
       </Match>
       <Match when={(() => { const d = dialog(); return d?.kind === "run" ? d : undefined; })()}>
-        {(d) => <RunArgs script={d().script} extra={d().extra} />}
+        {(d) => <RunArgs script={d().script} extra={d().extra} queue={d().queue} />}
       </Match>
       <Match when={dialog()?.kind === "servers"}>
         <Servers />
       </Match>
       <Match when={(() => { const d = dialog(); return d?.kind === "skua" ? d : undefined; })()}>
         {(d) => <SkuaOptions script={d().script} />}
+      </Match>
+      <Match when={(() => { const d = dialog(); return d?.kind === "queued" ? d : undefined; })()}>
+        {(d) => <QueuedOptions account={d().account} id={d().id} />}
       </Match>
       <Match when={(() => { const d = dialog(); return d?.kind === "config" ? d : undefined; })()}>
         {(d) => <Config start={d().start} />}
@@ -202,23 +216,23 @@ const [lastDir, setLastDir] = createSignal("");
 
 type Pick = { onPick: (path: string, extra: [string, string][]) => void; options: boolean; focus?: boolean };
 
-export function Picker() {
+export function Picker(props: { queue: boolean }) {
   const who = () => {
     const on = acting();
     return on.length === 1 ? nameOf(on[0] ?? 0) : `${on.length} accounts`;
   };
   return (
-    <Modal title={`Run a script on ${who()}`} onClose={close} wide>
-      <ScriptPicker />
+    <Modal title={`${props.queue ? "Queue" : "Run"} a script on ${who()}`} onClose={close} wide>
+      <ScriptPicker queue={props.queue} />
     </Modal>
   );
 }
 
-export function ScriptPicker(props: { pick?: Pick }) {
+export function ScriptPicker(props: { pick?: Pick; queue?: boolean }) {
   const opened = pickerTab();
   const [switched, setSwitched] = createSignal(false);
   const pick = (): Pick => ({
-    ...(props.pick ?? { onPick: (path, extra) => void runNow(path, extra), options: true }),
+    ...(props.pick ?? { onPick: (path, extra) => void runNow(path, extra, props.queue ?? false), options: true }),
     focus: !switched() && pickerTab() === opened,
   });
   const tabs: { id: PickerTab; label: string }[] = [
@@ -620,7 +634,7 @@ function argHint(arg: DeclaredArg) {
   return parts.join(", ");
 }
 
-function RunArgs(props: { script: string; extra: [string, string][] }) {
+function RunArgs(props: { script: string; extra: [string, string][]; queue: boolean }) {
   const on = acting();
   const asked = createQuery(() => ({ queryKey: ["args", props.script, on], queryFn: () => api.args(props.script, on), staleTime: 0 }));
   const declared = () => asked.data;
@@ -675,6 +689,7 @@ function RunArgs(props: { script: string; extra: [string, string][] }) {
         script: props.script,
         extra: [...sent],
         shared: !perAccount(),
+        queue: props.queue,
         runs: targetsOf(on).map(({ account, name }) => ({
           account,
           name,
@@ -686,7 +701,7 @@ function RunArgs(props: { script: string; extra: [string, string][] }) {
       });
       if (Array.isArray(outcome)) {
         close();
-        report(outcome, `running ${d.shown}`);
+        report(outcome, `${props.queue ? "queued" : "running"} ${d.shown}`);
       } else {
         setProblems(outcome.problems);
         queueMicrotask(() => form.querySelector<HTMLElement>("[aria-invalid=true]")?.focus());
@@ -749,7 +764,7 @@ function RunArgs(props: { script: string; extra: [string, string][] }) {
   };
   return (
     <Modal
-      title={`Run ${hide(declared()?.shown ?? shownName(props.script))}`}
+      title={`${props.queue ? "Queue" : "Run"} ${hide(declared()?.shown ?? shownName(props.script))}`}
       onClose={close}
       lightDismiss={false}
       footer={
@@ -763,7 +778,11 @@ function RunArgs(props: { script: string; extra: [string, string][] }) {
             Cancel
           </button>
           <button type="submit" form="run-form" class="primary" disabled={busy() || !declared()}>
-            {busy() ? "Starting…" : on.length > 1 ? `Run on ${on.length} accounts` : "Run"}
+            {busy()
+              ? props.queue
+                ? "Queueing…"
+                : "Starting…"
+              : `${props.queue ? "Queue" : "Run"}${on.length > 1 ? ` on ${on.length} accounts` : ""}`}
           </button>
         </>
       }
@@ -1052,48 +1071,144 @@ function SkuaOptions(props: { script: string }) {
               <Show when={p().options.length === 0}>
                 <p class="muted">This script has no options.</p>
               </Show>
-              <For each={p().options}>
-                {(o) => {
-                  const id = `opt-${keyOf(o)}`;
-                  return (
-                    <div class="field">
-                      <Switch>
-                        <Match when={o.kind === "bool"}>
-                          <label class="check">
-                            <input
-                              id={id}
-                              type="checkbox"
-                              checked={effective(o).toLowerCase() === "true"}
-                              onChange={(e) => set(o, e.currentTarget.checked ? "True" : "False")}
-                            />
-                            {o.label}
-                          </label>
-                        </Match>
-                        <Match when={o.kind === "choice"}>
-                          <label for={id}>{o.label}</label>
-                          <select id={id} value={effective(o)} onChange={(e) => set(o, e.currentTarget.value)}>
-                            <For each={o.choices}>{(c) => <option value={c}>{c}</option>}</For>
-                          </select>
-                        </Match>
-                        <Match when={o.kind === "number" || o.kind === "text"}>
-                          <label for={id}>{o.label}</label>
-                          <input
-                            id={id}
-                            type="text"
-                            inputmode={o.kind === "number" ? "decimal" : undefined}
-                            value={value(o)}
-                            placeholder={o.default ?? undefined}
-                            onInput={(e) => set(o, e.currentTarget.value)}
-                          />
-                        </Match>
-                      </Switch>
-                      <Show when={o.description}>
-                        <p class="muted small">{o.description}</p>
-                      </Show>
-                    </div>
-                  );
-                }}
-              </For>
+              <OptionFields options={p().options} keyOf={keyOf} value={value} effective={effective} set={set} />
+            </form>
+          )}
+        </Match>
+      </Switch>
+    </Modal>
+  );
+}
+
+function OptionFields(props: {
+  options: SkuaOption[];
+  keyOf: (o: SkuaOption) => string;
+  value: (o: SkuaOption) => string;
+  effective: (o: SkuaOption) => string;
+  set: (o: SkuaOption, v: string) => void;
+}) {
+  return (
+    <For each={props.options}>
+      {(o) => {
+        const id = `opt-${props.keyOf(o)}`;
+        return (
+          <div class="field">
+            <Switch>
+              <Match when={o.kind === "bool"}>
+                <label class="check">
+                  <input
+                    id={id}
+                    type="checkbox"
+                    checked={props.effective(o).toLowerCase() === "true"}
+                    onChange={(e) => props.set(o, e.currentTarget.checked ? "True" : "False")}
+                  />
+                  {o.label}
+                </label>
+              </Match>
+              <Match when={o.kind === "choice"}>
+                <label for={id}>{o.label}</label>
+                <select id={id} value={props.effective(o)} onChange={(e) => props.set(o, e.currentTarget.value)}>
+                  <For each={o.choices}>{(c) => <option value={c}>{c}</option>}</For>
+                </select>
+              </Match>
+              <Match when={o.kind === "number" || o.kind === "text"}>
+                <label for={id}>{o.label}</label>
+                <input
+                  id={id}
+                  type="text"
+                  inputmode={o.kind === "number" ? "decimal" : undefined}
+                  value={props.value(o)}
+                  placeholder={o.default ?? undefined}
+                  onInput={(e) => props.set(o, e.currentTarget.value)}
+                />
+              </Match>
+            </Switch>
+            <Show when={o.description}>
+              <p class="muted small">{o.description}</p>
+            </Show>
+          </div>
+        );
+      }}
+    </For>
+  );
+}
+
+function QueuedOptions(props: { account: number; id: number }) {
+  const queued = () => accounts[props.account]?.queue.find((q) => q.id === props.id);
+  const script = queued()?.script.path ?? "";
+  const shared = createQuery(() => ({ queryKey: ["skuaScriptOptions", script], queryFn: () => api.skuaScriptOptions(script), staleTime: 0 }));
+  const given = (queued()?.script.args ?? []).map(([k, v]): [string, string] => [k.includes(":") ? k : `Options:${k}`, v]);
+  const [changes, setChanges] = createSignal<Record<string, string>>(Object.fromEntries(given));
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal("");
+  const keyOf = (o: SkuaOption) => `${o.group}:${o.name}`;
+  const base = (o: SkuaOption) => o.value ?? o.default ?? "";
+  const value = (o: SkuaOption) => changes()[keyOf(o)] ?? o.value ?? "";
+  const effective = (o: SkuaOption) => changes()[keyOf(o)] ?? base(o);
+  const set = (o: SkuaOption, v: string) => setChanges({ ...changes(), [keyOf(o)]: v });
+  const save = async (e: SubmitEvent, options: SkuaOption[]) => {
+    e.preventDefault();
+    const listed = new Map(options.map((o) => [keyOf(o), o]));
+    const kept = new Set(given.map(([k]) => k));
+    const args = Object.entries(changes()).filter(([key, v]) => {
+      const o = listed.get(key);
+      return o === undefined || kept.has(key) || v !== base(o);
+    });
+    setBusy(true);
+    setError("");
+    try {
+      const [outcome] = await api.act(targetsOf([props.account]), { set_queued_args: { id: props.id, args } });
+      if (outcome?.error) return setError(outcome.error);
+      close();
+      say("saved the options for this run");
+    } catch (err) {
+      setError(message(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      title={`Options for ${shownName(script)} · ${nameOf(props.account)}`}
+      onClose={close}
+      lightDismiss={false}
+      wide
+      footer={
+        <>
+          <Show when={error()}>
+            <p class="error" role="alert">
+              {error()}
+            </p>
+          </Show>
+          <button type="button" onClick={close}>
+            Close
+          </button>
+          <button type="submit" form="queued-form" class="primary" disabled={busy() || !shared.data}>
+            {busy() ? "Saving…" : "Save"}
+          </button>
+        </>
+      }
+    >
+      <p class="muted small">
+        These apply to this run only. Options you leave alone use the shared value when the script starts.
+      </p>
+      <Switch fallback={<p class="muted" aria-live="polite">Loading the options…</p>}>
+        <Match when={!queued()}>
+          <p class="error">This script already left the queue.</p>
+        </Match>
+        <Match when={shared.error}>
+          <p class="error">{message(shared.error)}</p>
+        </Match>
+        <Match when={(() => { const p = shared.data; return p && "error" in p ? p : undefined; })()}>
+          {(p) => <p class="error">{p().error}</p>}
+        </Match>
+        <Match when={(() => { const p = shared.data; return p && "options" in p ? p : undefined; })()}>
+          {(p) => (
+            <form id="queued-form" class="form options" onSubmit={(e) => void save(e, p().options)}>
+              <Show when={p().options.length === 0}>
+                <p class="muted">This script has no options.</p>
+              </Show>
+              <OptionFields options={p().options} keyOf={keyOf} value={value} effective={effective} set={set} />
             </form>
           )}
         </Match>

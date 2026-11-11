@@ -12,7 +12,7 @@ use aqx_script::skua::{self, SkuaScript};
 use crate::config::{self, Script};
 use crate::control::{Action, Want};
 use crate::daemon::{self, Print, Session, Start, Wanted};
-use crate::fleet::{Channel, LastLines};
+use crate::fleet::{Channel, LastLines, Resume};
 use crate::init;
 use crate::view::{Shown, State, time_of_day};
 
@@ -78,6 +78,20 @@ pub enum Ctl {
         #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = crate::parse_arg)]
         args: Vec<(String, String)>,
     },
+    /// Add a script to the end of the account's queue. When a script finishes or stops itself, the first one in the queue starts.
+    Queue {
+        /// The script, a .ts, .js or .cs file.
+        #[arg(required_unless_present = "clear")]
+        script: Option<PathBuf>,
+        /// A script argument. Repeatable.
+        #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = crate::parse_arg)]
+        args: Vec<(String, String)>,
+        /// Empty the queue instead.
+        #[arg(long, conflicts_with_all = ["script", "args"])]
+        clear: bool,
+    },
+    /// Stop the script and run the first one in the queue. Logs the account in if it's offline.
+    Next,
     /// Record the account's packets from now until --stop.
     ///
     /// Writes them as JSON lines, with the token and personal fields redacted, and keeps recording across logins.
@@ -169,36 +183,54 @@ fn session_for(path: &Path, wanted: &Wanted) -> anyhow::Result<(Session, Joined)
 }
 
 fn restart(old: Session, path: &Path, wanted: &Wanted) -> anyhow::Result<Session> {
-    let mut resume = old.resumable().unwrap_or_default();
-    match resume.len() {
+    let resume = old.resumable().unwrap_or_default();
+    match resume.iter().filter(|r| r.online).count() {
         0 => eprintln!("Ending the old session…"),
         1 => eprintln!("Logging out 1 account…"),
         n => eprintln!("Logging out {n} accounts…"),
     }
-    resume.retain(|(name, _)| !wanted.accounts.iter().any(|w| w.eq_ignore_ascii_case(name)));
     old.down()?;
     eprintln!("Starting the new session…");
-    let mut resume = resume.into_iter();
-    let Some((first, script)) = resume.next() else {
-        return daemon::start(path, wanted);
+    let named = |r: &Resume| {
+        wanted
+            .accounts
+            .iter()
+            .any(|w| w.eq_ignore_ascii_case(&r.name))
+    };
+    let back = |r: &&Resume| r.online && !named(r);
+    let Some(first) = resume.iter().find(back) else {
+        let fresh = daemon::start(path, wanted)?;
+        requeue(&fresh, resume)?;
+        return Ok(fresh);
     };
     let fresh = daemon::start(
         path,
         &Wanted {
-            accounts: vec![first],
-            start: script.map_or(Start::Login, Start::Run),
+            accounts: vec![first.name.clone()],
+            start: first.script.clone().map_or(Start::Login, Start::Run),
         },
     )?;
     let accounts = names(&fresh)?;
-    for (name, script) in resume {
-        if let Some(i) = accounts.iter().position(|a| a.name == name) {
+    for again in resume.iter().filter(back).skip(1) {
+        if let Some(i) = accounts.iter().position(|a| a.name == again.name) {
             let _ = fresh
                 .source()
-                .act(i, script.map_or(Action::Login, Action::Run));
+                .act(i, again.script.clone().map_or(Action::Login, Action::Run));
         }
     }
     act_on_named(&fresh, wanted)?;
+    requeue(&fresh, resume)?;
     Ok(fresh)
+}
+
+fn requeue(fresh: &Session, resume: Vec<Resume>) -> anyhow::Result<()> {
+    let accounts = names(fresh)?;
+    for again in resume {
+        if let Some(i) = accounts.iter().position(|a| a.name == again.name) {
+            again.requeue(fresh.source(), i);
+        }
+    }
+    Ok(())
 }
 
 fn attached_note(session: &Session, path: &Path) -> String {
@@ -411,11 +443,15 @@ fn ps_lines(rows: &[(String, Shown)]) -> Vec<String> {
     .map(str::to_owned);
     let mut table = vec![header];
     for (session, a) in rows {
-        let script = a
+        let name = a
             .script
             .as_deref()
-            .map(|s| s.rsplit('/').next().unwrap_or(s).to_owned())
-            .unwrap_or_default();
+            .map(|s| s.rsplit('/').next().unwrap_or(s));
+        let script = match (name, a.queue.len()) {
+            (name, 0) => name.unwrap_or_default().to_owned(),
+            (Some(name), queued) => format!("{name}, {queued} queued"),
+            (None, queued) => format!("{queued} queued"),
+        };
         let place = a
             .game
             .as_ref()
@@ -553,6 +589,16 @@ pub fn ctl(account: &str, ctl: Ctl) -> anyhow::Result<ExitCode> {
             let done = format!("running {}", path.display());
             (Action::Run(Script { path, args }), done)
         }
+        Ctl::Queue { clear: true, .. } => (Action::ClearQueue, "emptied the queue".to_owned()),
+        Ctl::Queue { script, args, .. } => {
+            let path = script_path(&script.expect("clap requires a script without --clear"))?;
+            let done = format!("queued {}", path.display());
+            (Action::Enqueue(Script { path, args }), done)
+        }
+        Ctl::Next => (
+            Action::Next,
+            "running the next script in the queue".to_owned(),
+        ),
         Ctl::Record { stop: true, .. } => (Action::StopRecording, "stopped recording".to_owned()),
         Ctl::Record { file, .. } => {
             let path = file.map(std::path::absolute).transpose()?;
@@ -654,6 +700,18 @@ mod tests {
     use super::*;
     use crate::view::Game;
 
+    fn queued(n: u64) -> Vec<crate::fleet::Queued> {
+        (1..=n)
+            .map(|id| crate::fleet::Queued {
+                id,
+                script: Script {
+                    path: "/srv/farm/daily.ts".into(),
+                    args: Vec::new(),
+                },
+            })
+            .collect()
+    }
+
     fn shown(name: &str, state: State) -> Shown {
         Shown {
             name: name.into(),
@@ -668,6 +726,7 @@ mod tests {
             gold_gained: None,
             game: None,
             recording: None,
+            queue: Vec::new(),
         }
     }
 
@@ -684,21 +743,25 @@ mod tests {
                 pad: "Spawn".into(),
                 ..Game::default()
             }),
+            queue: queued(2),
             ..shown("player1", State::Running)
         };
-        let banned = shown(
-            "healer",
-            State::Offline {
-                why: Some("login rejected: banned".into()),
-            },
-        );
+        let banned = Shown {
+            queue: queued(1),
+            ..shown(
+                "healer",
+                State::Offline {
+                    why: Some("login rejected: banned".into()),
+                },
+            )
+        };
         let lines = ps_lines(&[("farm".into(), farming), ("farm".into(), banned)]);
         assert_eq!(
             lines,
             [
-                "SESSION  ACCOUNT  STATE    SCRIPT        WHERE         UP    STATUS",
-                "farm     player1  running  void-aura.ts  farm-1 Enter  1h6m  Void Aura 12/7500",
-                "farm     healer   offline                                    login rejected: banned",
+                "SESSION  ACCOUNT  STATE    SCRIPT                  WHERE         UP    STATUS",
+                "farm     player1  running  void-aura.ts, 2 queued  farm-1 Enter  1h6m  Void Aura 12/7500",
+                "farm     healer   offline  1 queued                                    login rejected: banned",
             ]
         );
         let accounts = [

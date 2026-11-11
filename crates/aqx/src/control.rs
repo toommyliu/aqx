@@ -5,7 +5,7 @@ use aqx_client::ItemId;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Script;
-use crate::fleet::{Fleet, Line};
+use crate::fleet::{Fleet, Line, Resume};
 use crate::view::Shown;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,9 +36,29 @@ pub enum Action {
     Relogin,
     Switch(String),
     Run(Script),
+    Enqueue(Script),
+    Unqueue(u64),
+    MoveQueued {
+        id: u64,
+        to: usize,
+    },
+    SetQueuedArgs {
+        id: u64,
+        args: Vec<(String, String)>,
+    },
+    ClearQueue,
+    Next,
     PickUp(Vec<i64>),
     Record(Option<PathBuf>),
     StopRecording,
+}
+
+impl Resume {
+    pub fn requeue(self, source: &dyn Source, account: usize) {
+        for script in self.queue {
+            let _ = source.act(account, Action::Enqueue(script));
+        }
+    }
 }
 
 pub trait Source {
@@ -88,6 +108,15 @@ impl Source for Fleet {
                 account.run(script);
                 Ok(())
             }
+            Action::Enqueue(script) => {
+                account.enqueue(script);
+                Ok(())
+            }
+            Action::Unqueue(id) => account.unqueue(id),
+            Action::MoveQueued { id, to } => account.move_queued(id, to),
+            Action::SetQueuedArgs { id, args } => account.set_queued_args(id, args),
+            Action::ClearQueue => account.clear_queue(),
+            Action::Next => account.next(),
             Action::PickUp(ids) => account.pick_up(ids.into_iter().map(ItemId).collect()),
             Action::Record(path) => return account.record(path),
             Action::StopRecording => account.stop_recording(),
