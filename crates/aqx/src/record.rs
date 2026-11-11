@@ -29,14 +29,13 @@ enum Way {
     Out,
 }
 
-pub fn default_path(account: &str) -> std::io::Result<PathBuf> {
+pub fn recordings() -> std::io::Result<PathBuf> {
     let dir = dirs::data_dir()
         .ok_or_else(|| std::io::Error::other("no data folder to keep recordings in"))?
         .join("aqx")
         .join("recordings");
     std::fs::create_dir_all(&dir)?;
-    let account = account.replace(['/', '\\'], "_");
-    Ok(dir.join(format!("{account}-{}.jsonl", local_stamp())))
+    Ok(dir)
 }
 
 fn local_stamp() -> String {
@@ -58,12 +57,33 @@ fn local_stamp() -> String {
 
 impl Recorder {
     pub fn create(path: &Path) -> std::io::Result<Recorder> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
+        Recorder::open(path, true)
+    }
+
+    pub fn create_new_in(dir: &Path, account: &str) -> std::io::Result<Recorder> {
+        let stem = format!("{}-{}", account.replace(['/', '\\'], "_"), local_stamp());
+        let mut n = 1;
+        loop {
+            let name = match n {
+                1 => format!("{stem}.jsonl"),
+                n => format!("{stem}-{n}.jsonl"),
+            };
+            match Recorder::open(&dir.join(name), false) {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                opened => return opened,
+            }
+        }
+    }
+
+    fn open(path: &Path, replace: bool) -> std::io::Result<Recorder> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).mode(0o600);
+        if replace {
+            options.create(true).truncate(true);
+        } else {
+            options.create_new(true);
+        }
+        let file = options.open(path)?;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         Ok(Recorder {
             path: path.to_path_buf(),
@@ -144,6 +164,23 @@ mod tests {
         );
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_second_recording_in_the_same_second_gets_its_own_file() {
+        let dir = std::env::temp_dir().join(format!("aqx-record-names-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = Recorder::create_new_in(&dir, "player1").unwrap();
+        write(&first.file, Direction::In, "%xt%first%");
+        let second = Recorder::create_new_in(&dir, "player1").unwrap();
+        let kept = std::fs::read_to_string(first.path()).unwrap();
+        let paths = (first.path().to_path_buf(), second.path().to_path_buf());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_ne!(paths.0, paths.1);
+        assert!(
+            kept.contains("%xt%first%"),
+            "the first recording was overwritten"
+        );
     }
 
     #[test]

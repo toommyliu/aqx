@@ -523,15 +523,18 @@ impl Account {
         let Some(session) = board.session().filter(|s| !closed(s)).cloned() else {
             return Err("log in first".into());
         };
-        let path = match path {
-            Some(path) => path,
-            None => record::default_path(&self.name).map_err(|e| e.to_string())?,
+        let recorder = match path {
+            Some(path) => {
+                Recorder::create(&path).map_err(|e| format!("{}: {e}", path.display()))?
+            }
+            None => record::recordings()
+                .and_then(|dir| Recorder::create_new_in(&dir, &self.name))
+                .map_err(|e| e.to_string())?,
         };
-        let recorder = Recorder::create(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         self.show_packets(&recorder, &session);
         board.log.push(
             Channel::Aqx,
-            format!("recording packets to {}", path.display()),
+            format!("recording packets to {}", recorder.path().display()),
         );
         board.recording = Some(recorder);
         Ok(())
