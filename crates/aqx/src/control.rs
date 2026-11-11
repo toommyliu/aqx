@@ -49,6 +49,7 @@ pub enum Action {
     ClearQueue,
     Next,
     PickUp(Vec<i64>),
+    Registry(aqx_script::Edit),
     Record(Option<PathBuf>),
     StopRecording,
 }
@@ -118,6 +119,7 @@ impl Source for Fleet {
             Action::ClearQueue => account.clear_queue(),
             Action::Next => account.next(),
             Action::PickUp(ids) => account.pick_up(ids.into_iter().map(ItemId).collect()),
+            Action::Registry(edit) => account.edit(edit),
             Action::Record(path) => return account.record(path),
             Action::StopRecording => account.stop_recording(),
         }

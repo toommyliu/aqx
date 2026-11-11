@@ -17,6 +17,7 @@ use std::thread;
 
 use aqx_client::{Handle, Phase, Server, Settings, Update};
 use rquickjs::{Context, Runtime};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub use args::{Arg, ArgKind, Scalar};
@@ -37,6 +38,36 @@ pub enum Level {
 pub enum Output {
     Log { level: Level, text: String },
     Status(String),
+    Registered(Registered),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Item {
+    Id(i64),
+    Name(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredQuest {
+    pub id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward: Option<Item>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Registered {
+    pub drops: Vec<Item>,
+    pub quests: Vec<RegisteredQuest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Edit {
+    RegisterDrop(Item),
+    UnregisterDrop(Item),
+    RegisterQuest(RegisteredQuest),
+    UnregisterQuest(i64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,13 +129,17 @@ struct Signal {
     paused: AtomicBool,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
     resumed: Mutex<Option<Box<dyn Fn() + Send>>>,
+    edits: Mutex<Option<SendEdit>>,
 }
+
+type SendEdit = Box<dyn Fn(Edit) -> bool + Send>;
 
 enum Wake {
     Update(u64, Update),
     External(u64, External),
     Cancel,
     Resume,
+    Edit(Edit),
 }
 
 enum External {
@@ -175,6 +210,18 @@ impl Cancel {
         self.0.paused.load(Ordering::SeqCst)
     }
 
+    pub fn edit(&self, edit: Edit) -> Result<(), &'static str> {
+        let edits = self.0.edits.lock().unwrap_or_else(PoisonError::into_inner);
+        match &*edits {
+            Some(send) if send(edit) => Ok(()),
+            _ => Err("the script isn't running yet"),
+        }
+    }
+
+    fn on_edit(&self, send: impl Fn(Edit) -> bool + Send + 'static) {
+        *self.0.edits.lock().unwrap_or_else(PoisonError::into_inner) = Some(Box::new(send));
+    }
+
     fn listen(&self, wake: mpsc::Sender<Wake>) {
         let resumed = wake.clone();
         *self
@@ -184,6 +231,8 @@ impl Cancel {
             .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(move || {
             let _ = resumed.send(Wake::Resume);
         }));
+        let edits = wake.clone();
+        self.on_edit(move |edit| edits.send(Wake::Edit(edit)).is_ok());
         let cancelled = wake.clone();
         self.on_cancel(move || {
             let _ = cancelled.send(Wake::Cancel);

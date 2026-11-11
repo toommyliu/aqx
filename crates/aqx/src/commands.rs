@@ -721,6 +721,7 @@ mod tests {
             script: None,
             args: None,
             status: String::new(),
+            registered: None,
             up: None,
             stats: crate::fleet::Stats::default(),
             gold_gained: None,

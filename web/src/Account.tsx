@@ -43,7 +43,20 @@ import {
   hide,
 } from "./store";
 import { Found, Icon, type IconName, KeyCaps, ServerName, Since, amount, anchor, canHover, clock, number } from "./ui";
-import { type Account, type Channel, type Game, type Line, type Stack, api, isOffline, isOnline, isRunning, stateLabel } from "./wire";
+import {
+  type Account,
+  type Channel,
+  type Game,
+  type Item,
+  type Line,
+  type Registered,
+  type Stack,
+  api,
+  isOffline,
+  isOnline,
+  isRunning,
+  stateLabel,
+} from "./wire";
 
 const [details, setDetails] = createSignal(false);
 const [copied, setCopied] = createSignal<number | null>(null);
@@ -71,7 +84,9 @@ export function AccountPanel(props: { account: Account; index: number }) {
           <Match when={shown() === "packets"}>
             <Log user={a().user} packets />
           </Match>
-          <Match when={a().game}>{(g) => <Lists game={g()} view={shown()} index={props.index} />}</Match>
+          <Match when={a().game}>
+            {(g) => <Lists game={g()} view={shown()} index={props.index} registered={a().registered} />}
+          </Match>
         </Switch>
       </div>
     </section>
@@ -839,7 +854,7 @@ function Stacks(props: { label: string; stacks: Stack[]; note?: string }) {
   );
 }
 
-function Drops(props: { drops: Stack[]; index: number }) {
+function Drops(props: { drops: Stack[]; index: number; registered: Registered | null }) {
   const [chosen, setChosen] = createSignal<ReadonlySet<number>>(new Set());
   createEffect(on(() => props.index, () => setChosen(new Set<number>()), { defer: true }));
   createEffect(
@@ -870,6 +885,7 @@ function Drops(props: { drops: Stack[]; index: number }) {
   return (
     <>
       <div class="toolbar">
+        <DropSwitch pending={props.drops.length} registered={props.registered} />
         <Search label="Search drops" />
         <button type="button" disabled={chosen().size === 0} onClick={() => accept([...chosen()])}>
           Accept {chosen().size || ""}
@@ -912,7 +928,273 @@ function Drops(props: { drops: Stack[]; index: number }) {
   );
 }
 
-function Lists(props: { game: Game; view: View; index: number }) {
+function parseItem(text: string): Item | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  return /^\d+$/.test(trimmed) ? Number(trimmed) : trimmed;
+}
+
+function knownItem(game: Game, id: number): string | undefined {
+  return [...game.drops, ...game.inventory, ...game.temp].find((s) => s.id === id)?.name;
+}
+
+function itemName(game: Game, item: Item): string {
+  if (typeof item === "string") return item;
+  return knownItem(game, item) ?? `item ID ${item}`;
+}
+
+function knownQuest(game: Game, id: number): string | undefined {
+  return game.quests.find((q) => q.id === id)?.name;
+}
+
+function questName(game: Game, id: number): string {
+  return knownQuest(game, id) ?? `quest ID ${id}`;
+}
+
+const ITEM_UNKNOWN = "Registered by item ID. Its name shows once it's in the account's drops, inventory or temp items";
+const QUEST_UNKNOWN = "Its name shows while the account has the quest accepted";
+
+const [dropList, setDropList] = createSignal<"pending" | "registered">("pending");
+const [questList, setQuestList] = createSignal<"accepted" | "registered">("accepted");
+
+function ListSwitch<T extends string>(props: {
+  name: string;
+  label: string;
+  value: T;
+  choices: [T, string, number][];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div class="segments" role="radiogroup" aria-label={props.label}>
+      <For each={props.choices}>
+        {([value, label, count]) => (
+          <label class="segment">
+            <input
+              type="radio"
+              name={props.name}
+              value={value}
+              checked={props.value === value}
+              onChange={() => props.onChange(value)}
+            />
+            {label}
+            <span class="count">{count}</span>
+          </label>
+        )}
+      </For>
+    </div>
+  );
+}
+
+function DropSwitch(props: { pending: number; registered: Registered | null }) {
+  return (
+    <Show when={props.registered}>
+      {(registered) => (
+        <ListSwitch
+          name="drop-list"
+          label="Drops to show"
+          value={dropList()}
+          choices={[
+            ["pending", "Pending", props.pending],
+            ["registered", "Registered", registered().drops.length],
+          ]}
+          onChange={setDropList}
+        />
+      )}
+    </Show>
+  );
+}
+
+function QuestSwitch(props: { accepted: number; registered: Registered | null }) {
+  return (
+    <Show when={props.registered}>
+      {(registered) => (
+        <ListSwitch
+          name="quest-list"
+          label="Quests to show"
+          value={questList()}
+          choices={[
+            ["accepted", "Accepted", props.accepted],
+            ["registered", "Registered", registered().quests.length],
+          ]}
+          onChange={setQuestList}
+        />
+      )}
+    </Show>
+  );
+}
+
+function Unnamed(props: { tip: string }) {
+  return (
+    <span class="muted" data-tip={props.tip}>
+      Unknown name
+    </span>
+  );
+}
+
+function ItemLabel(props: { game: Game; item: Item }) {
+  const item = props.item;
+  if (typeof item === "string") return <>{item}</>;
+  return (
+    <Show when={knownItem(props.game, item)} fallback={<span data-tip={ITEM_UNKNOWN}><span class="muted">ID</span> {item}</span>}>
+      {(name) => (
+        <>
+          {name()} <span class="muted">#{item}</span>
+        </>
+      )}
+    </Show>
+  );
+}
+
+function Unregister(props: { name: string; onClick: () => void }) {
+  return (
+    <button type="button" class="icon-button" aria-label={`Unregister ${props.name}`} onClick={props.onClick}>
+      <Icon name="close" />
+    </button>
+  );
+}
+
+const removeHead = () => <span class="visually-hidden">Unregister</span>;
+
+function RegisteredDrops(props: { game: Game; registered: Registered; index: number }) {
+  const [text, setText] = createSignal("");
+  const find = createMemo(() => finder(search()));
+  const nameOf = (item: Item) => (typeof item === "string" ? item : knownItem(props.game, item));
+  const rows = createMemo(() => props.registered.drops.filter((item) => matches(find(), `${nameOf(item) ?? ""} ${item}`)));
+  const register = (e: SubmitEvent) => {
+    e.preventDefault();
+    const item = parseItem(text());
+    if (item === null) return;
+    void act({ registry: { register_drop: item } }, `registered ${itemName(props.game, item)}`, [props.index]);
+    setText("");
+  };
+  return (
+    <>
+      <div class="toolbar">
+        <DropSwitch pending={props.game.drops.length} registered={props.registered} />
+        <form class="register" onSubmit={register}>
+          <input
+            type="text"
+            aria-label="Drop to register, by name or item ID"
+            placeholder="Name or item ID"
+            value={text()}
+            onInput={(e) => setText(e.currentTarget.value)}
+          />
+          <button type="submit" disabled={parseItem(text()) === null}>
+            Register
+          </button>
+        </form>
+        <Search label="Search registered drops" />
+      </div>
+      <Table label="Registered drops" head={["Item", "ID", removeHead()]} empty={rows().length === 0}>
+        <For each={rows()}>
+          {(item) => (
+            <tr>
+              <td>
+                <Show when={nameOf(item)} fallback={<Unnamed tip={ITEM_UNKNOWN} />}>
+                  {(name) => <Found text={name()} find={find()} />}
+                </Show>
+              </td>
+              <td class="num">{typeof item === "number" ? <Found text={String(item)} find={find()} /> : ""}</td>
+              <td class="num">
+                <Unregister
+                  name={itemName(props.game, item)}
+                  onClick={() => act({ registry: { unregister_drop: item } }, `unregistered ${itemName(props.game, item)}`, [props.index])}
+                />
+              </td>
+            </tr>
+          )}
+        </For>
+      </Table>
+    </>
+  );
+}
+
+function RegisteredQuests(props: { game: Game; registered: Registered; index: number }) {
+  const [quest, setQuest] = createSignal("");
+  const [reward, setReward] = createSignal("");
+  const id = () => (/^\d+$/.test(quest().trim()) ? Number(quest().trim()) : null);
+  const rewardId = () => (/^\d+$/.test(reward().trim()) ? Number(reward().trim()) : null);
+  const rewardValid = () => !reward().trim() || rewardId() !== null;
+  const find = createMemo(() => finder(search()));
+  const rows = createMemo(() =>
+    props.registered.quests.map((q) => q.id).filter((questId) => matches(find(), `${knownQuest(props.game, questId) ?? ""} ${questId}`)),
+  );
+  const rewardOf = (questId: number) => props.registered.quests.find((q) => q.id === questId)?.reward;
+  const register = (e: SubmitEvent) => {
+    e.preventDefault();
+    const questId = id();
+    if (questId === null || !rewardValid()) return;
+    const chosen = rewardId();
+    const registration = chosen === null ? { id: questId } : { id: questId, reward: chosen };
+    void act({ registry: { register_quest: registration } }, `registered ${questName(props.game, questId)}`, [props.index]);
+    setQuest("");
+    setReward("");
+  };
+  return (
+    <>
+      <div class="toolbar">
+        <QuestSwitch accepted={props.game.quests.length} registered={props.registered} />
+        <form class="register" onSubmit={register}>
+          <input
+            type="text"
+            inputmode="numeric"
+            class="short"
+            aria-label="Quest ID to register"
+            placeholder="Quest ID"
+            aria-invalid={quest().trim() !== "" && id() === null}
+            value={quest()}
+            onInput={(e) => setQuest(e.currentTarget.value)}
+          />
+          <input
+            type="text"
+            inputmode="numeric"
+            class="short"
+            aria-label="Reward item ID, optional"
+            placeholder="Reward ID"
+            aria-invalid={!rewardValid()}
+            value={reward()}
+            onInput={(e) => setReward(e.currentTarget.value)}
+          />
+          <button type="submit" disabled={id() === null || !rewardValid()}>
+            Register
+          </button>
+        </form>
+        <Search label="Search registered quests" />
+      </div>
+      <Table label="Registered quests" head={["Quest", "ID", "Reward", removeHead()]} empty={rows().length === 0}>
+        <For each={rows()}>
+          {(questId) => (
+            <tr>
+              <td>
+                <Show when={knownQuest(props.game, questId)} fallback={<Unnamed tip={QUEST_UNKNOWN} />}>
+                  {(name) => <Found text={name()} find={find()} />}
+                </Show>
+              </td>
+              <td class="num">
+                <Found text={String(questId)} find={find()} />
+              </td>
+              <td class="num">
+                <Show when={rewardOf(questId)} keyed>
+                  {(reward) => <ItemLabel game={props.game} item={reward} />}
+                </Show>
+              </td>
+              <td class="num">
+                <Unregister
+                  name={questName(props.game, questId)}
+                  onClick={() =>
+                    act({ registry: { unregister_quest: questId } }, `unregistered ${questName(props.game, questId)}`, [props.index])
+                  }
+                />
+              </td>
+            </tr>
+          )}
+        </For>
+      </Table>
+    </>
+  );
+}
+
+function Lists(props: { game: Game; view: View; index: number; registered: Registered | null }) {
   const g = () => props.game;
   const find = createMemo(() => finder(search()));
   return (
@@ -934,11 +1216,18 @@ function Lists(props: { game: Game; view: View; index: number }) {
           </For>
         </Table>
       </Match>
+      <Match when={props.view === "drops" && dropList() === "registered" && props.registered}>
+        {(registered) => <RegisteredDrops game={g()} registered={registered()} index={props.index} />}
+      </Match>
       <Match when={props.view === "drops"}>
-        <Drops drops={g().drops} index={props.index} />
+        <Drops drops={g().drops} index={props.index} registered={props.registered} />
+      </Match>
+      <Match when={props.view === "quests" && questList() === "registered" && props.registered}>
+        {(registered) => <RegisteredQuests game={g()} registered={registered()} index={props.index} />}
       </Match>
       <Match when={props.view === "quests"}>
         <div class="toolbar">
+          <QuestSwitch accepted={g().quests.length} registered={props.registered} />
           <Search label="Search quests" />
         </div>
         <Table label="Quests" head={["Quest", "Progress"]} empty={!g().quests.some((q) => matches(find(), q.name))}>

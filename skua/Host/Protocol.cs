@@ -24,6 +24,7 @@ public sealed class Protocol : IDisposable
     public event Action<ClientEvent>? EventReceived;
     public Func<ClientEvent, ClientEvent>? Capture;
     public event Action<SectionUpdate>? StateReceived;
+    public event Action<JsonElement>? EditRequested;
 
     public Protocol(Stream output, TextReader input, State state)
     {
@@ -97,6 +98,7 @@ public sealed class Protocol : IDisposable
                 else if (root.TryGetProperty("disconnected", out var disconnected)) Disconnected?.Invoke(disconnected.GetBoolean());
                 else if (root.TryGetProperty("stop", out _)) Stop();
                 else if (root.TryGetProperty("reset", out _)) { Interlocked.Increment(ref generation); state.Reset(); }
+                else if (root.TryGetProperty("edit", out var edit)) { var change = edit.Clone(); events.Add(() => EditRequested?.Invoke(change)); }
                 else throw new JsonException("unknown worker message");
             }
         }
@@ -110,6 +112,31 @@ public sealed class Protocol : IDisposable
     }
     void Stop() { if (!stopped.IsCancellationRequested) { stopped.Cancel(); StopRequested?.Invoke(); } }
     void Write(string line) { lock (output) output.WriteLine(line); }
+    public void ReportRegistered(IEnumerable<string> dropNames, IEnumerable<int> dropIds, IReadOnlyDictionary<int, int> quests)
+    {
+        using MemoryStream buffer = new();
+        using (Utf8JsonWriter json = new(buffer))
+        {
+            json.WriteStartObject();
+            json.WriteStartObject("registered");
+            json.WriteStartArray("drops");
+            foreach (string name in dropNames) json.WriteStringValue(name);
+            foreach (int id in dropIds) json.WriteNumberValue(id);
+            json.WriteEndArray();
+            json.WriteStartArray("quests");
+            foreach (var (id, reward) in quests)
+            {
+                json.WriteStartObject();
+                json.WriteNumber("id", id);
+                if (reward > 0) json.WriteNumber("reward", reward);
+                json.WriteEndObject();
+            }
+            json.WriteEndArray();
+            json.WriteEndObject();
+            json.WriteEndObject();
+        }
+        Write(System.Text.Encoding.UTF8.GetString(buffer.ToArray()));
+    }
     public void Finish(EndOutcome outcome, string? detail) => Write(JsonSerializer.Serialize(new Completion(new(outcome, detail)), Json.Completion));
     public void Dispose() { events.CompleteAdding(); output.Dispose(); }
 }

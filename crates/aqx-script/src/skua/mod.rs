@@ -353,6 +353,9 @@ impl SkuaScript {
         self.cancel.on_cancel(move || {
             let _ = sender.send(Wake::Cancel);
         });
+        let sender = tx.clone();
+        self.cancel
+            .on_edit(move |edit| sender.send(Wake::Edit(edit)).is_ok());
         let mut generation = 0;
         let forwarding = Forwarding(Arc::new(AtomicU64::new(0)));
         forward(session, generation, tx.clone(), forwarding.0.clone())?;
@@ -418,6 +421,12 @@ impl SkuaScript {
                     stopping = Some(Instant::now());
                 }
                 Wake::Cancel => {}
+                Wake::Edit(edit) => {
+                    let _ = send(&mut stdin, &Message::Edit { edit });
+                }
+                Wake::Worker(Ok(Worker::Registered { registered })) => {
+                    (self.output)(Output::Registered(registered))
+                }
                 Wake::Log(text) => (self.output)(Output::Log {
                     level: Level::Log,
                     text,
@@ -864,6 +873,7 @@ enum Wake {
     Exited,
     Log(String),
     Cancel,
+    Edit(crate::Edit),
     Update(u64, Update),
     Ended(u64),
     Servers(RequestId, Result<Vec<aqx_client::Server>, String>),

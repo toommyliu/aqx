@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use aqx_client::{CombatState, Disconnect, Item, ItemId, Load, Me, Phase, Pool, Readiness, World};
 
+use aqx_script::Registered;
 use serde::{Deserialize, Serialize};
 
 use crate::fleet::{Account, Board, Ended, Link, Queued, Run, Stats};
@@ -16,6 +17,7 @@ pub struct Shown {
     pub script: Option<String>,
     pub args: Option<Vec<(String, String)>>,
     pub status: String,
+    pub registered: Option<Registered>,
     pub up: Option<Duration>,
     pub stats: Stats,
     pub gold_gained: Option<i64>,
@@ -254,6 +256,7 @@ impl Shown {
             script,
             args,
             status,
+            registered: matches!(board.run, Run::Running { .. }).then(|| board.registered.clone()),
             up,
             stats: board.stats,
             gold_gained,

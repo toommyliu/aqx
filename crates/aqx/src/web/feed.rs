@@ -235,6 +235,7 @@ pub fn offline(account: &config::Account) -> Shown {
         script: None,
         args: None,
         status: String::new(),
+        registered: None,
         up: None,
         stats: Stats::default(),
         gold_gained: None,

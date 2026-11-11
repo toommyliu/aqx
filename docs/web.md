@@ -1,6 +1,6 @@
 # Run accounts from the browser
 
-`aqx web` serves a web UI for the accounts in `aqx.toml` at `http://127.0.0.1:4970`. It logs accounts in and out, picks and runs scripts, asks for their args, switches servers, accepts drops, edits Skua options, and shows each account's log and lists. It also edits `aqx.toml` and lets you change its keys.
+`aqx web` serves a web UI for the accounts in `aqx.toml` at `http://127.0.0.1:4970`. It logs accounts in and out, picks and runs scripts, asks for their args, switches servers, accepts drops, registers drops and quests for the running script, edits Skua options, and shows each account's log and lists. It also edits `aqx.toml` and lets you change its keys.
 
 ## Build it
 
@@ -25,6 +25,8 @@ aqx web [-c PATH] [--port N] [--up] [--tailscale]
 To record an account's packets once it's online, press the record button in the top right corner of the account, or pick Record packets from the menu you get by right-clicking the account in the list or clicking its `⋯`. While it records, the button reads *rec*, a red dot shows beside the account in the list, and the account's log says which file aqx writes to. The account also gets a Packets tab that lists its last 1000 sent and 1000 received packets, each marked sent or received. Each packet takes one line, cut short when it's long, and the copy button beside a packet copies all of it. Press the button again to stop. `aqx ctl ACCOUNT record` does the same from a terminal; see [Run sessions](config.md#run-sessions).
 
 To queue a script, press the chevron next to Run and pick Add to queue, then pick a script the same way. It also works on ticked accounts, and it never asks first, since nothing stops. Once an account has queued scripts, an Up next list shows below its actions. `↑` and `↓` reorder it, `×` removes a script, Start runs the first one on an idle account, Skip to next stops the running script and runs the first one, and Clear empties the list. [Queue scripts](config.md#queue-scripts) says when the queue moves on.
+
+While a script runs, a switch at the left of the Drops tab's toolbar flips between pending drops and the drops the script registered, and the Quests tab's switch flips between accepted and registered quests. Registered means `drops.register` and `quests.register` in a TypeScript script, `Bot.Drops.Add` and `Bot.Quests.RegisterQuests` in a Skua script. On the registered list, type a drop's name or item ID and press Register to add one. For a quest, give its ID and, if you want a particular reward, the reward's item ID. `×` unregisters an entry. An entry registered by ID shows *Unknown name* until the account has that item or has the quest accepted. Your changes go to the running script, as if it had made the call itself, so they last until the script stops or restarts. A Skua script keeps its registered drops when aqx restarts it after a reconnect, as it does under Skua. A Skua script only picks up registered drops once its drop grabber is running, as in Skua.
 
 The eye button in the header shows your accounts as `account 1`, `account 2` and so on, your home folder as `~`, and room numbers as `•••••` (so `battleon-12345` reads `battleon-•••••`), so you can share a screenshot. The config editor still shows the real names, since you edit them there.
 

@@ -14,6 +14,7 @@ pub struct Internals<'js> {
     pub aqx_error: Constructor<'js>,
     pub dispatch_event: Function<'js>,
     pub dispatch_packet: Function<'js>,
+    pub edit: Function<'js>,
 }
 
 pub struct Host<'js> {
@@ -121,7 +122,7 @@ impl<'js> Host<'js> {
         self.version.set(self.version.get() + 1);
     }
 
-    fn emit(&self, output: Output) {
+    pub fn emit(&self, output: Output) {
         (self.output.borrow_mut())(output);
     }
 }
@@ -133,7 +134,7 @@ fn host<'a, 'js>(ctx: &'a Ctx<'js>) -> rquickjs::runtime::UserDataGuard<'a, Host
 
 pub struct Native;
 
-const NAMES: [&str; 26] = [
+const NAMES: [&str; 27] = [
     "aqxVersion",
     "versionCompare",
     "setCounterHold",
@@ -155,6 +156,7 @@ const NAMES: [&str; 26] = [
     "warn",
     "error",
     "status",
+    "registered",
     "stop",
     "version",
     "view",
@@ -203,12 +205,14 @@ impl ModuleDef for Native {
                  step: Symbol<'js>,
                  aqx_error: Constructor<'js>,
                  dispatch_event: Function<'js>,
-                 dispatch_packet: Function<'js>| {
+                 dispatch_packet: Function<'js>,
+                 edit: Function<'js>| {
                     host(&ctx).internals.replace(Some(Internals {
                         step,
                         aqx_error,
                         dispatch_event,
                         dispatch_packet,
+                        edit,
                     }));
                 },
             )?,
@@ -220,6 +224,15 @@ impl ModuleDef for Native {
             "status",
             Function::new(ctx.clone(), |ctx: Ctx<'js>, text: String| {
                 host(&ctx).emit(Output::Status(text))
+            })?,
+        )?;
+        exports.export(
+            "registered",
+            Function::new(ctx.clone(), |ctx: Ctx<'js>, json: String| -> Result<()> {
+                let registered = serde_json::from_str(&json)
+                    .map_err(|e| Exception::throw_type(&ctx, &e.to_string()))?;
+                host(&ctx).emit(Output::Registered(registered));
+                Ok(())
             })?,
         )?;
         exports.export(

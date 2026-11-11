@@ -11,7 +11,10 @@ use aqx_client::{ActionError, Aim, MapItemId, MonMapId, Options, Update};
 use aqx_client::{Handle, Server};
 use aqx_protocol::packet;
 use aqx_protocol::{AreaId, EntityId, ItemId, QuestId, ShopId};
-use aqx_script::{Account, Cancel, Level, LoadError, Outcome, Output, Script, Start};
+use aqx_script::{
+    Account, Cancel, Edit, Item, Level, LoadError, Outcome, Output, Registered, RegisteredQuest,
+    Script, Start,
+};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -173,7 +176,17 @@ fn logs(outputs: &[Output]) -> Vec<&str> {
         .iter()
         .filter_map(|output| match output {
             Output::Log { text, .. } => Some(text.as_str()),
-            Output::Status(_) => None,
+            Output::Status(_) | Output::Registered(_) => None,
+        })
+        .collect()
+}
+
+fn registered(outputs: &[Output]) -> Vec<&Registered> {
+    outputs
+        .iter()
+        .filter_map(|output| match output {
+            Output::Registered(registered) => Some(registered),
+            _ => None,
         })
         .collect()
 }
@@ -465,7 +478,7 @@ export default function* () {
         .into_iter()
         .filter_map(|output| match output {
             Output::Log { level, text } => Some((level, text)),
-            Output::Status(_) => None,
+            Output::Status(_) | Output::Registered(_) => None,
         })
         .collect();
     assert_eq!(
@@ -1238,7 +1251,7 @@ fn the_follower_example_equips_its_class_and_keeps_to_the_leaders_cell() {
         .iter()
         .filter_map(|o| match o {
             Output::Status(text) => Some(text.as_str()),
-            Output::Log { .. } => None,
+            Output::Log { .. } | Output::Registered(_) => None,
         })
         .collect();
     assert_eq!(statuses[0], "equipping Necromancer", "{statuses:?}");
@@ -1818,6 +1831,93 @@ fn registered_drops_are_picked_up() {
     );
     assert_eq!(outcome, Ok(Outcome::Finished));
     assert_eq!(logs(&outputs), [r#"["health potion"]"#, "picked 0"]);
+    assert_eq!(
+        registered(&outputs),
+        [
+            &Registered {
+                drops: vec![Item::Name("health potion".into())],
+                quests: vec![],
+            },
+            &Registered::default(),
+        ]
+    );
+}
+
+#[test]
+fn edits_from_outside_the_script_change_what_it_registered() {
+    let harness = serve(|peer| {
+        peer.send(&json_message(json!({"cmd": "dropItem", "items": {
+            "101": {"ItemID": 101, "sName": "Health Potion", "iQty": 2, "iStk": 10,
+                    "sType": "Item", "sES": "None"},
+        }})));
+        peer.expect(&packet::get_drop(AreaId(42), ItemId(101)));
+        peer.send(&json_message(json!({
+            "cmd": "getDrop", "bSuccess": 1, "ItemID": 101, "CharItemID": 5001,
+            "iQty": 2, "iQtyNow": 7, "bBank": 0,
+        })));
+        peer.expect(&packet::get_quests(AreaId(42), &[QuestId(30)]));
+    });
+    let dir = Dir::new();
+    let path = dir.file(
+        "main.ts",
+        r#"
+        import { drops, inventory, quests, script, wait } from "aqx";
+        export default function* () {
+          script.log("ready");
+          yield* wait.until(() => inventory.count(101) === 7);
+          script.log(JSON.stringify(drops.registered));
+          yield* wait.until(() => quests.registered.length > 0);
+          yield* wait.until(() => quests.registered.length === 0);
+        }
+        "#,
+    );
+    let cancel = Cancel::default();
+    let editor = cancel.clone();
+    let (outcome, outputs) = run_in(&harness, &path, &cancel, move |out| {
+        let edits = match out {
+            Output::Log { text, .. } if text == "ready" => vec![
+                Edit::RegisterDrop(Item::Id(-1)),
+                Edit::RegisterDrop(Item::Name("health potion".into())),
+            ],
+            Output::Log { text, .. } if text == r#"["health potion"]"# => vec![
+                Edit::RegisterQuest(RegisteredQuest {
+                    id: 30,
+                    reward: Some(Item::Id(7)),
+                }),
+                Edit::UnregisterQuest(30),
+            ],
+            _ => vec![],
+        };
+        for edit in edits {
+            editor.edit(edit).unwrap();
+        }
+    });
+    finish(harness);
+    assert_eq!(outcome, Ok(Outcome::Finished));
+    let warned = logs(&outputs);
+    assert_eq!(warned.len(), 3, "{warned:?}");
+    assert!(
+        warned[1].starts_with("couldn't change what the script registered: RangeError"),
+        "{warned:?}"
+    );
+    let picked = Registered {
+        drops: vec![Item::Name("health potion".into())],
+        quests: vec![],
+    };
+    assert_eq!(
+        registered(&outputs),
+        [
+            &picked,
+            &Registered {
+                quests: vec![RegisteredQuest {
+                    id: 30,
+                    reward: Some(Item::Id(7)),
+                }],
+                ..picked.clone()
+            },
+            &picked,
+        ]
+    );
 }
 
 #[test]
