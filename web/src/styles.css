@@ -804,6 +804,9 @@ meter.mp::-moz-meter-bar {
 
 .search input {
   width: 100%;
+}
+
+.search input:placeholder-shown {
   padding-right: 28px;
 }
 
