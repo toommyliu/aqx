@@ -79,6 +79,7 @@ export type Script = { path: string; args: [string, string][] };
 
 export type Action =
   | "login"
+  | "login_only"
   | "logout"
   | "stop"
   | "restart"

@@ -11,7 +11,7 @@ use aqx_script::skua::{self, SkuaScript};
 
 use crate::config::{self, Script};
 use crate::control::{Action, Want};
-use crate::daemon::{self, Print, Session, Wanted};
+use crate::daemon::{self, Print, Session, Start, Wanted};
 use crate::fleet::{Channel, LastLines};
 use crate::init;
 use crate::view::{Shown, State, time_of_day};
@@ -32,20 +32,24 @@ pub struct Open {
     /// A script argument. Repeatable.
     #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = crate::parse_arg, requires = "script")]
     pub args: Vec<(String, String)>,
+    /// Log the accounts in without running a script.
+    #[arg(long, conflicts_with = "script")]
+    pub no_script: bool,
 }
 
 impl Open {
     fn wanted(&self) -> anyhow::Result<Wanted> {
-        let script = match &self.script {
-            Some(path) => Some(Script {
+        let start = match &self.script {
+            Some(path) => Start::Run(Script {
                 path: script_path(path)?,
                 args: self.args.clone(),
             }),
-            None => None,
+            None if self.no_script => Start::LoginOnly,
+            None => Start::Login,
         };
         Ok(Wanted {
             accounts: self.accounts.clone(),
-            script,
+            start,
         })
     }
 }
@@ -147,7 +151,7 @@ fn session_for(path: &Path, wanted: &Wanted) -> anyhow::Result<(Session, Joined)
             return Ok((restart(session, path, wanted)?, Joined::Restarted));
         }
     }
-    if wanted.accounts.is_empty() && wanted.script.is_some() {
+    if wanted.accounts.is_empty() && matches!(wanted.start, Start::Run(_)) {
         bail!("aqx is already running for this config; name the accounts to run the script on");
     }
     act_on_named(&session, wanted)?;
@@ -172,7 +176,7 @@ fn restart(old: Session, path: &Path, wanted: &Wanted) -> anyhow::Result<Session
         path,
         &Wanted {
             accounts: vec![first],
-            script,
+            start: script.map_or(Start::Login, Start::Run),
         },
     )?;
     let accounts = names(&fresh)?;
@@ -208,11 +212,7 @@ fn act_on_named(session: &Session, wanted: &Wanted) -> anyhow::Result<()> {
     let accounts = names(session)?;
     for name in &wanted.accounts {
         let i = find(&accounts, name)?;
-        let action = match &wanted.script {
-            Some(script) => Action::Run(script.clone()),
-            None => Action::Login,
-        };
-        if let Err(why) = session.source().act(i, action) {
+        if let Err(why) = session.source().act(i, wanted.start.action()) {
             eprintln!("aqx: {}: {why}", accounts[i].name);
         }
     }

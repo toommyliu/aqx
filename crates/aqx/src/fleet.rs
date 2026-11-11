@@ -377,6 +377,14 @@ impl Account {
     }
 
     pub fn login(&self) -> Result<(), &'static str> {
+        self.log_in(self.script.clone())
+    }
+
+    pub fn login_only(&self) -> Result<(), &'static str> {
+        self.log_in(None)
+    }
+
+    fn log_in(&self, script: Option<Script>) -> Result<(), &'static str> {
         self.commanded.store(true, Ordering::SeqCst);
         let mut board = self.board();
         if board.queued_logins > 0 || matches!(board.link, Link::Connecting | Link::Waiting { .. })
@@ -388,7 +396,7 @@ impl Account {
         }
         board.queued_logins += 1;
         self.send(Command::Login { link: board.links });
-        if let Some(script) = self.script.clone() {
+        if let Some(script) = script {
             board.queued_runs += 1;
             self.send(Command::Run {
                 script,
@@ -1477,6 +1485,18 @@ mod tests {
         );
         assert_eq!(take(&linked, &inbox), None, "the configured script doesn't");
         assert_eq!(linked.account.stop(), Err("no script is running"));
+    }
+
+    #[test]
+    fn login_only_skips_the_configured_script() {
+        let (account, inbox) = Account::queueing("player1", Some(farm()));
+        assert_eq!(account.login_only(), Ok(()));
+        let linked = linked(account);
+        assert_eq!(take(&linked, &inbox), Some(PathBuf::from("login")));
+        assert!(
+            inbox.try_recv().is_err(),
+            "the configured script isn't queued"
+        );
     }
 
     #[test]

@@ -40,7 +40,7 @@ import {
   view,
   hide,
 } from "./store";
-import { Found, Icon, type IconName, KeyCaps, ServerName, Since, amount, canHover, clock, number } from "./ui";
+import { Found, Icon, type IconName, KeyCaps, ServerName, Since, amount, anchor, canHover, clock, number } from "./ui";
 import { type Account, type Game, type Stack, api, isOffline, isOnline, isRunning, stateLabel } from "./wire";
 
 const [details, setDetails] = createSignal(false);
@@ -264,17 +264,80 @@ function Action(props: {
   );
 }
 
+export function LoginMenu(props: { on: number[] }) {
+  let menu!: HTMLDivElement;
+  let button!: HTMLButtonElement;
+  let release: (() => void) | undefined;
+  onCleanup(() => release?.());
+  const id = createUniqueId();
+  const hotkeys = useAppHotkeys();
+  const format = createFormatForDisplay();
+  const key = () => {
+    const hotkey = hotkeys()["account.loginOnly"].hotkey;
+    return typeof hotkey === "string" ? hotkey : undefined;
+  };
+  return (
+    <>
+      <button
+        type="button"
+        class="action expand"
+        popovertarget={id}
+        aria-haspopup="true"
+        aria-label="More ways to log in"
+        data-tip="More ways to log in"
+        ref={button}
+      >
+        <Icon name="expand" />
+      </button>
+      <div
+        id={id}
+        class="menu"
+        popover
+        ref={menu}
+        on:beforetoggle={(e: ToggleEvent) => {
+          release?.();
+          release = e.newState === "open" ? anchor(button, menu, "bottom-start") : undefined;
+        }}
+        on:toggle={(e: ToggleEvent) => {
+          if (e.newState === "open") requestAnimationFrame(() => menu.querySelector("button")?.focus());
+        }}
+      >
+        <button
+          type="button"
+          aria-keyshortcuts={key()}
+          onClick={() => {
+            button.parentElement?.querySelector("button")?.focus();
+            menu.hidePopover();
+            void act("login_only", "logging in", props.on);
+          }}
+        >
+          Log in without the script
+          <span class="muted small">
+            Stays idle until you run a script
+            <Show when={key()}>{(k) => ` (${format(k())})`}</Show>
+          </span>
+        </button>
+      </div>
+    </>
+  );
+}
+
 function Actions(props: { account: Account; index: number }) {
   const a = () => props.account;
   const on = () => [props.index];
   return (
     <div class="actions" role="group" aria-label={`Actions for ${hide(a().name)}`}>
-      <Action
-        icon={isOffline(a()) ? "login" : "logout"}
-        label={isOffline(a()) ? "Log in" : "Log out"}
-        keys={isOffline(a()) ? "account.login" : "account.logout"}
-        onClick={() => (isOffline(a()) ? act("login", "logging in", on()) : logOut(on()))}
-      />
+      <div class="login-split">
+        <Action
+          icon={isOffline(a()) ? "login" : "logout"}
+          label={isOffline(a()) ? "Log in" : "Log out"}
+          keys={isOffline(a()) ? "account.login" : "account.logout"}
+          onClick={() => (isOffline(a()) ? act("login", "logging in", on()) : logOut(on()))}
+        />
+        <Show when={isOffline(a())}>
+          <LoginMenu on={on()} />
+        </Show>
+      </div>
       <Action icon="play" label="Run…" keys="account.run" onClick={() => openPicker(on())} />
       <Show when={isRunning(a())}>
         <Action

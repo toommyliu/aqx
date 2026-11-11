@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use crate::config::{self, Script};
 use crate::control::{Action, Want};
-use crate::daemon::{self, Session, Wanted};
+use crate::daemon::{self, Session, Start, Wanted};
 use crate::view::{Shown, State};
 use http::{Failure, Reply, Request};
 use scripts::{History, Recent, list};
@@ -101,7 +101,7 @@ pub fn serve(config: PathBuf, port: u16, up: bool, tailnet: bool) -> anyhow::Res
     if up && daemon::session_for(&web.config)?.is_none() {
         let fleet = Wanted {
             accounts: Vec::new(),
-            script: None,
+            start: Start::Login,
         };
         daemon::start(&web.config, &fleet)?;
         println!("started an aqx session for {}", web.config.display());
@@ -214,25 +214,29 @@ impl Web {
         let session = match session {
             Some(session) => session,
             None => {
-                let starts =
-                    |a: &Action| matches!(a, Action::Login | Action::Relogin | Action::Run(_));
-                let Some(at) = actions.iter().position(|(_, a)| starts(a)) else {
+                let start = |a: &Action| match a {
+                    Action::Login | Action::Relogin => Some(Start::Login),
+                    Action::LoginOnly => Some(Start::LoginOnly),
+                    Action::Run(script) => Some(Start::Run(script.clone())),
+                    _ => None,
+                };
+                let Some((at, start)) = actions
+                    .iter()
+                    .enumerate()
+                    .find_map(|(at, (_, a))| Some((at, start(a)?)))
+                else {
                     return Err(Failure::conflict(
                         "aqx isn't running; log an account in first",
                     ));
                 };
-                let (first, action) = actions.remove(at);
+                let (first, _) = actions.remove(at);
                 let name = roster
                     .get(first)
                     .map(|(name, _)| name.clone())
                     .ok_or_else(|| Failure::bad("no such account"))?;
-                let script = match action {
-                    Action::Run(script) => Some(script),
-                    _ => None,
-                };
                 let wanted = Wanted {
                     accounts: vec![name],
-                    script,
+                    start,
                 };
                 let session = daemon::start(&self.config, &wanted).map_err(Failure::internal)?;
                 outcomes.push(Outcome {
@@ -619,7 +623,7 @@ impl Web {
             &self.config,
             &Wanted {
                 accounts: vec![first],
-                script,
+                start: script.map_or(Start::Login, Start::Run),
             },
         )
         .map_err(Failure::internal)?;
