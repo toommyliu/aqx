@@ -5,7 +5,7 @@ use aqx_client::{CombatState, Disconnect, Item, ItemId, Load, Me, Phase, Pool, R
 
 use serde::{Deserialize, Serialize};
 
-use crate::fleet::{Account, Board, Ended, Link, Run, Stats};
+use crate::fleet::{Account, Board, Ended, Link, Queued, Run, Stats};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Shown {
@@ -21,6 +21,7 @@ pub struct Shown {
     pub gold_gained: Option<i64>,
     pub game: Option<Game>,
     pub recording: Option<String>,
+    pub queue: Vec<Queued>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +262,7 @@ impl Shown {
                 .recording
                 .as_ref()
                 .map(|r| r.path().display().to_string()),
+            queue: board.queue.iter().cloned().collect(),
         }
     }
 }

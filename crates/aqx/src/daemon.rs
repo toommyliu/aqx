@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{self, Script};
 use crate::control::{Action, Frame, Source, Want};
-use crate::fleet::{Fleet, LastLines, Line};
+use crate::fleet::{Fleet, LastLines, Line, Resume};
 
 const STARTUP: Duration = Duration::from_secs(10);
 const REPLY_WITHIN: Duration = Duration::from_secs(40);
@@ -50,7 +50,7 @@ enum Reply {
     Done,
     Refused(String),
     Configured(Vec<Script>),
-    Resumable(Vec<(String, Option<Script>)>),
+    Resumable(Vec<Resume>),
     LastLines(Vec<LastLines>),
 }
 
@@ -140,7 +140,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 9;
+pub const PROTOCOL: u32 = 10;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -164,7 +164,7 @@ impl Session {
         &self.remote
     }
 
-    pub fn resumable(&self) -> anyhow::Result<Vec<(String, Option<Script>)>> {
+    pub fn resumable(&self) -> anyhow::Result<Vec<Resume>> {
         match self
             .remote
             .request(&Request::Resumable)
@@ -490,7 +490,8 @@ impl Server {
                         | Action::Relogin
                         | Action::Switch(_)
                         | Action::Restart
-                        | Action::Run(_),
+                        | Action::Run(_)
+                        | Action::Next,
                     ..
                 }) if self.down.load(Ordering::SeqCst) => {
                     Reply::Refused("the session is ending".into())
@@ -712,6 +713,21 @@ mod tests {
         assert!(source.frame(&later).unwrap().log.is_empty());
         assert_eq!(source.act(0, Action::Logout), Err("already offline".into()));
         assert_eq!(source.act(7, Action::Stop), Err("no such account".into()));
+        let daily = Script {
+            path: "/srv/daily.ts".into(),
+            args: Vec::new(),
+        };
+        assert_eq!(source.act(1, Action::Enqueue(daily.clone())), Ok(()));
+        let queued = source.frame(&want).unwrap().accounts.swap_remove(1).queue;
+        assert_eq!(
+            queued.iter().map(|q| &q.script).collect::<Vec<_>>(),
+            [&daily]
+        );
+        assert_eq!(source.act(1, Action::Unqueue(queued[0].id)), Ok(()));
+        assert_eq!(
+            source.act(1, Action::Unqueue(queued[0].id)),
+            Err("that script already left the queue".into())
+        );
         assert!(
             session.resumable().unwrap().is_empty(),
             "nobody is online to resume"
@@ -816,6 +832,7 @@ mod tests {
             Action::Relogin,
             Action::Restart,
             Action::Run(script),
+            Action::Next,
         ] {
             assert_eq!(
                 session.source().act(0, action),
@@ -928,6 +945,10 @@ mod tests {
             gold_gained: Some(1),
             game: Some(game.clone()),
             recording: Some("/tmp/a.jsonl".into()),
+            queue: vec![crate::fleet::Queued {
+                id: 1,
+                script: script.clone(),
+            }],
         };
         let line = |channel: Channel| Line {
             seq: 0,
@@ -955,6 +976,13 @@ mod tests {
             Action::Relogin,
             Action::Switch("Twilly".into()),
             Action::Run(script.clone()),
+            Action::Enqueue(script.clone()),
+            Action::Unqueue(1),
+            Action::MoveQueued { id: 1, to: 0 },
+            Action::SetQueuedArgs {
+                id: 1,
+                args: vec![("a".into(), "1".into())],
+            },
             Action::PickUp(vec![1]),
             Action::Record(Some("/tmp/a.jsonl".into())),
             Action::StopRecording,
@@ -993,7 +1021,11 @@ mod tests {
             Reply::Done,
             Reply::Refused(String::new()),
             Reply::Configured(vec![script.clone()]),
-            Reply::Resumable(vec![("player1".into(), Some(script))]),
+            Reply::Resumable(vec![Resume {
+                name: "player1".into(),
+                script: Some(script.clone()),
+                queue: vec![script],
+            }]),
             Reply::LastLines(vec![LastLines {
                 name: "player1".into(),
                 user: "player1".into(),
@@ -1027,6 +1059,8 @@ mod tests {
                 Action::Pause,
                 Action::Resume,
                 Action::Relogin,
+                Action::ClearQueue,
+                Action::Next,
                 Action::StopRecording,
             ]
             .iter()
@@ -1042,22 +1076,23 @@ mod tests {
             shape(&value, "", &mut keys);
         }
         let shape = keys.into_iter().collect::<Vec<_>>().join(" ");
-        let pinned = "=Configured =Connecting =Done =Down =End =Hello =Joining =LastLines =Loading \
-             =LoggingIn =Online =Paused =Resumable =Running =Stalled =aqx =chat =game =login \
-             =login_only =logout =pause =received =relogin =restart =resume =script =sent =server =stop =stop_recording Act \
-             Act.account Act.action Act.action.pick_up Act.action.record Act.action.run Act.action.run.args \
-             Act.action.run.path Act.action.switch Busy Configured Configured.args \
-             Configured.path Frame \
-             Frame.accounts Frame.accounts.args Frame.accounts.game Frame.accounts.game.area \
+        let pinned = "=Configured =Connecting =Done =Down =End =Hello =Joining =LastLines =Loading =LoggingIn \
+             =Online =Paused =Resumable =Running =Stalled =aqx =chat =clear_queue =game =login \
+             =login_only =logout =next =pause =received =relogin =restart =resume =script =sent \
+             =server =stop =stop_recording Act Act.account Act.action Act.action.enqueue \
+             Act.action.enqueue.args Act.action.enqueue.path Act.action.move_queued \
+             Act.action.move_queued.id Act.action.move_queued.to Act.action.pick_up Act.action.record \
+             Act.action.run Act.action.run.args Act.action.run.path Act.action.set_queued_args \
+             Act.action.set_queued_args.args Act.action.set_queued_args.id Act.action.switch \
+             Act.action.unqueue Busy Configured Configured.args Configured.path Frame Frame.accounts \
+             Frame.accounts.args Frame.accounts.game Frame.accounts.game.area \
              Frame.accounts.game.auras Frame.accounts.game.auras.name \
-             Frame.accounts.game.auras.stacks Frame.accounts.game.away \
-             Frame.accounts.game.bag_slots Frame.accounts.game.bag_used \
-             Frame.accounts.game.bank Frame.accounts.game.bank.equipped \
-             Frame.accounts.game.bank.id Frame.accounts.game.bank.max \
-             Frame.accounts.game.bank.name Frame.accounts.game.bank.qty \
-             Frame.accounts.game.bank.rank Frame.accounts.game.bank_slots \
-             Frame.accounts.game.bank_used Frame.accounts.game.cell Frame.accounts.game.class \
-             Frame.accounts.game.class_rank Frame.accounts.game.dead \
+             Frame.accounts.game.auras.stacks Frame.accounts.game.away Frame.accounts.game.bag_slots \
+             Frame.accounts.game.bag_used Frame.accounts.game.bank Frame.accounts.game.bank.equipped \
+             Frame.accounts.game.bank.id Frame.accounts.game.bank.max Frame.accounts.game.bank.name \
+             Frame.accounts.game.bank.qty Frame.accounts.game.bank.rank \
+             Frame.accounts.game.bank_slots Frame.accounts.game.bank_used Frame.accounts.game.cell \
+             Frame.accounts.game.class Frame.accounts.game.class_rank Frame.accounts.game.dead \
              Frame.accounts.game.drops Frame.accounts.game.drops.equipped \
              Frame.accounts.game.drops.id Frame.accounts.game.drops.max \
              Frame.accounts.game.drops.name Frame.accounts.game.drops.qty \
@@ -1068,36 +1103,37 @@ mod tests {
              Frame.accounts.game.inventory Frame.accounts.game.inventory.equipped \
              Frame.accounts.game.inventory.id Frame.accounts.game.inventory.max \
              Frame.accounts.game.inventory.name Frame.accounts.game.inventory.qty \
-             Frame.accounts.game.inventory.rank Frame.accounts.game.level \
-             Frame.accounts.game.max_hp Frame.accounts.game.max_mp \
-             Frame.accounts.game.member Frame.accounts.game.misc_used Frame.accounts.game.mp Frame.accounts.game.pad \
-             Frame.accounts.game.players Frame.accounts.game.players.level \
-             Frame.accounts.game.players.name Frame.accounts.game.quests \
-             Frame.accounts.game.quests.have Frame.accounts.game.quests.id \
-             Frame.accounts.game.quests.name \
-             Frame.accounts.game.quests.need Frame.accounts.game.skills \
-             Frame.accounts.game.skills.left_ms Frame.accounts.game.skills.name Frame.accounts.game.skills.ready \
+             Frame.accounts.game.inventory.rank Frame.accounts.game.level Frame.accounts.game.max_hp \
+             Frame.accounts.game.max_mp Frame.accounts.game.member Frame.accounts.game.misc_used \
+             Frame.accounts.game.mp Frame.accounts.game.pad Frame.accounts.game.players \
+             Frame.accounts.game.players.level Frame.accounts.game.players.name \
+             Frame.accounts.game.quests Frame.accounts.game.quests.have Frame.accounts.game.quests.id \
+             Frame.accounts.game.quests.name Frame.accounts.game.quests.need \
+             Frame.accounts.game.skills Frame.accounts.game.skills.left_ms \
+             Frame.accounts.game.skills.name Frame.accounts.game.skills.ready \
              Frame.accounts.game.target Frame.accounts.game.target.hp \
              Frame.accounts.game.target.max_hp Frame.accounts.game.target.name \
-             Frame.accounts.game.temp Frame.accounts.game.temp.equipped \
-             Frame.accounts.game.temp.id Frame.accounts.game.temp.max \
-             Frame.accounts.game.temp.name Frame.accounts.game.temp.qty \
-             Frame.accounts.game.temp.rank Frame.accounts.gold_gained Frame.accounts.name Frame.accounts.recording \
-             Frame.accounts.script Frame.accounts.server Frame.accounts.state \
-             Frame.accounts.state.Busy Frame.accounts.state.Offline \
-             Frame.accounts.state.Offline.why Frame.accounts.state.Reconnecting \
-             Frame.accounts.stats Frame.accounts.stats.deaths Frame.accounts.stats.drops \
-             Frame.accounts.stats.gold_from Frame.accounts.stats.kills Frame.accounts.status \
-             Frame.accounts.up Frame.accounts.up.nanos Frame.accounts.up.secs \
-             Frame.accounts.user Frame.ending Frame.full Frame.log Frame.log.at_ms \
-             Frame.log.channel Frame.log.seq Frame.log.text Frame.selected Frame.since Hello \
-             Hello.build Hello.config Hello.protocol Hello.started_ms LastLines \
-             LastLines.lines LastLines.lines.at_ms LastLines.lines.channel \
+             Frame.accounts.game.temp Frame.accounts.game.temp.equipped Frame.accounts.game.temp.id \
+             Frame.accounts.game.temp.max Frame.accounts.game.temp.name Frame.accounts.game.temp.qty \
+             Frame.accounts.game.temp.rank Frame.accounts.gold_gained Frame.accounts.name \
+             Frame.accounts.queue Frame.accounts.queue.id Frame.accounts.queue.script \
+             Frame.accounts.queue.script.args Frame.accounts.queue.script.path \
+             Frame.accounts.recording Frame.accounts.script Frame.accounts.server \
+             Frame.accounts.state Frame.accounts.state.Busy Frame.accounts.state.Offline \
+             Frame.accounts.state.Offline.why Frame.accounts.state.Reconnecting Frame.accounts.stats \
+             Frame.accounts.stats.deaths Frame.accounts.stats.drops Frame.accounts.stats.gold_from \
+             Frame.accounts.stats.kills Frame.accounts.status Frame.accounts.up \
+             Frame.accounts.up.nanos Frame.accounts.up.secs Frame.accounts.user Frame.ending \
+             Frame.full Frame.log Frame.log.at_ms Frame.log.channel Frame.log.seq Frame.log.text \
+             Frame.selected Frame.since Hello Hello.build Hello.config Hello.protocol \
+             Hello.started_ms LastLines LastLines.lines LastLines.lines.at_ms LastLines.lines.channel \
              LastLines.lines.seq LastLines.lines.text LastLines.name LastLines.user Offline \
-             Offline.why Reconnecting Refused Resumable Resumable.args Resumable.path";
+             Offline.why Reconnecting Refused Resumable Resumable.name Resumable.queue \
+             Resumable.queue.args Resumable.queue.path Resumable.script Resumable.script.args \
+             Resumable.script.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (9, pinned),
+            (10, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }
