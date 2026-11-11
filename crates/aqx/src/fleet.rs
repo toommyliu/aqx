@@ -158,10 +158,48 @@ pub struct Queued {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ResumeWire")]
 pub struct Resume {
     pub name: String,
+    pub online: bool,
     pub script: Option<Script>,
     pub queue: Vec<Script>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ResumeWire {
+    Before(String, Option<Script>),
+    Now {
+        name: String,
+        online: bool,
+        script: Option<Script>,
+        queue: Vec<Script>,
+    },
+}
+
+impl From<ResumeWire> for Resume {
+    fn from(wire: ResumeWire) -> Resume {
+        match wire {
+            ResumeWire::Before(name, script) => Resume {
+                name,
+                online: true,
+                script,
+                queue: Vec::new(),
+            },
+            ResumeWire::Now {
+                name,
+                online,
+                script,
+                queue,
+            } => Resume {
+                name,
+                online,
+                script,
+                queue,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -942,8 +980,8 @@ impl Fleet {
     pub fn resumable(&self) -> Vec<Resume> {
         self.accounts()
             .iter()
-            .filter(|a| !a.idle())
             .map(|a| {
+                let online = !a.idle();
                 let board = a.board();
                 let running = matches!(
                     board.run,
@@ -951,10 +989,12 @@ impl Fleet {
                 );
                 Resume {
                     name: a.name.clone(),
+                    online,
                     script: if running { board.last.clone() } else { None },
                     queue: board.queue.iter().map(|q| q.script.clone()).collect(),
                 }
             })
+            .filter(|r| r.online || !r.queue.is_empty())
             .collect()
     }
 
@@ -1734,14 +1774,41 @@ mod tests {
             args: vec![("count".into(), "3".into())],
         };
         account.enqueue(daily.clone());
-        let fleet = Fleet::of(vec![Arc::new(account)]);
+        let offline = Account::detached("player2");
+        offline.enqueue(daily.clone());
+        let fleet = Fleet::of(vec![
+            Arc::new(account),
+            Arc::new(offline),
+            Arc::new(Account::detached("player3")),
+        ]);
         assert_eq!(
             fleet.resumable(),
+            [
+                Resume {
+                    name: "player1".into(),
+                    online: true,
+                    script: None,
+                    queue: vec![daily.clone()],
+                },
+                Resume {
+                    name: "player2".into(),
+                    online: false,
+                    script: None,
+                    queue: vec![daily],
+                }
+            ],
+            "an offline account comes back only for its queue"
+        );
+        let before: Vec<Resume> = serde_json::from_str(r#"[["player1", null]]"#).unwrap();
+        assert_eq!(
+            before,
             [Resume {
                 name: "player1".into(),
+                online: true,
                 script: None,
-                queue: vec![daily],
-            }]
+                queue: Vec::new(),
+            }],
+            "an older session's reply still reads"
         );
     }
 

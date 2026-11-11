@@ -1137,7 +1137,8 @@ function QueuedOptions(props: { account: number; id: number }) {
   const queued = () => accounts[props.account]?.queue.find((q) => q.id === props.id);
   const script = queued()?.script.path ?? "";
   const shared = createQuery(() => ({ queryKey: ["skuaScriptOptions", script], queryFn: () => api.skuaScriptOptions(script), staleTime: 0 }));
-  const [changes, setChanges] = createSignal<Record<string, string>>(Object.fromEntries(queued()?.script.args ?? []));
+  const given = (queued()?.script.args ?? []).map(([k, v]): [string, string] => [k.includes(":") ? k : `Options:${k}`, v]);
+  const [changes, setChanges] = createSignal<Record<string, string>>(Object.fromEntries(given));
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const keyOf = (o: SkuaOption) => `${o.group}:${o.name}`;
@@ -1148,9 +1149,10 @@ function QueuedOptions(props: { account: number; id: number }) {
   const save = async (e: SubmitEvent, options: SkuaOption[]) => {
     e.preventDefault();
     const listed = new Map(options.map((o) => [keyOf(o), o]));
+    const kept = new Set(given.map(([k]) => k));
     const args = Object.entries(changes()).filter(([key, v]) => {
       const o = listed.get(key);
-      return o === undefined || v !== base(o);
+      return o === undefined || kept.has(key) || v !== base(o);
     });
     setBusy(true);
     setError("");

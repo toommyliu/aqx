@@ -184,7 +184,7 @@ fn session_for(path: &Path, wanted: &Wanted) -> anyhow::Result<(Session, Joined)
 
 fn restart(old: Session, path: &Path, wanted: &Wanted) -> anyhow::Result<Session> {
     let resume = old.resumable().unwrap_or_default();
-    match resume.len() {
+    match resume.iter().filter(|r| r.online).count() {
         0 => eprintln!("Ending the old session…"),
         1 => eprintln!("Logging out 1 account…"),
         n => eprintln!("Logging out {n} accounts…"),
@@ -197,7 +197,8 @@ fn restart(old: Session, path: &Path, wanted: &Wanted) -> anyhow::Result<Session
             .iter()
             .any(|w| w.eq_ignore_ascii_case(&r.name))
     };
-    let Some(first) = resume.iter().find(|r| !named(r)) else {
+    let back = |r: &&Resume| r.online && !named(r);
+    let Some(first) = resume.iter().find(back) else {
         let fresh = daemon::start(path, wanted)?;
         requeue(&fresh, resume)?;
         return Ok(fresh);
@@ -210,7 +211,7 @@ fn restart(old: Session, path: &Path, wanted: &Wanted) -> anyhow::Result<Session
         },
     )?;
     let accounts = names(&fresh)?;
-    for again in resume.iter().filter(|r| !named(r)).skip(1) {
+    for again in resume.iter().filter(back).skip(1) {
         if let Some(i) = accounts.iter().position(|a| a.name == again.name) {
             let _ = fresh
                 .source()

@@ -618,25 +618,26 @@ impl Web {
             .into_iter()
             .partition(|r| configured.contains(&r.name));
         old.down().map_err(Failure::internal)?;
-        let Some(first) = resume.first() else {
+        let Some(first) = resume.iter().find(|r| r.online) else {
             return Ok(Reply::json(
                 &json!({ "restarted": false, "gone": gone.len() }),
             ));
         };
+        let started = first.name.clone();
         let fresh = daemon::start(
             &self.config,
             &Wanted {
-                accounts: vec![first.name.clone()],
+                accounts: vec![started.clone()],
                 start: first.script.clone().map_or(Start::Login, Start::Run),
             },
         )
         .map_err(Failure::internal)?;
         let names = self.roster_of(Some(&fresh))?;
-        for (at, again) in resume.into_iter().enumerate() {
+        for again in resume {
             let Some(i) = names.iter().position(|(n, _)| *n == again.name) else {
                 continue;
             };
-            if at > 0 {
+            if again.online && again.name != started {
                 let _ = fresh
                     .source()
                     .act(i, again.script.clone().map_or(Action::Login, Action::Run));

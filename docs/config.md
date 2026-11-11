@@ -74,7 +74,7 @@ Each account has a queue of scripts to run next. When a script finishes, or stop
 
 A stop, an error or a logout holds the queue where it is. With `restart_on_error` on, an error runs the same script again, and the queue moves on once it finishes. A relogin, a server switch, a stall restart and a reconnect start the current script again, not the next one. Running a script by hand leaves the queue alone, so it carries on after that script finishes.
 
-The queue lives in the session. Restarting the session from the web UI, or when `aqx up -d` swaps builds, keeps it. `aqx down` empties it, and so does a session that ends because every account went offline.
+The queue lives in the session. Restarting the session from the web UI, or when `aqx up -d` swaps builds, keeps every account's queue, offline ones included, as long as one account is online to start the new session. `aqx down` empties it, and so does a session that ends because every account went offline.
 
 ## Other tools
 

@@ -1023,6 +1023,7 @@ mod tests {
             Reply::Configured(vec![script.clone()]),
             Reply::Resumable(vec![Resume {
                 name: "player1".into(),
+                online: true,
                 script: Some(script.clone()),
                 queue: vec![script],
             }]),
@@ -1128,7 +1129,7 @@ mod tests {
              Frame.selected Frame.since Hello Hello.build Hello.config Hello.protocol \
              Hello.started_ms LastLines LastLines.lines LastLines.lines.at_ms LastLines.lines.channel \
              LastLines.lines.seq LastLines.lines.text LastLines.name LastLines.user Offline \
-             Offline.why Reconnecting Refused Resumable Resumable.name Resumable.queue \
+             Offline.why Reconnecting Refused Resumable Resumable.name Resumable.online Resumable.queue \
              Resumable.queue.args Resumable.queue.path Resumable.script Resumable.script.args \
              Resumable.script.path";
         assert_eq!(
