@@ -140,7 +140,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 8;
+pub const PROTOCOL: u32 = 9;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -927,6 +927,7 @@ mod tests {
             stats: crate::fleet::Stats::default(),
             gold_gained: Some(1),
             game: Some(game.clone()),
+            recording: Some("/tmp/a.jsonl".into()),
         };
         let line = |channel: Channel| Line {
             seq: 0,
@@ -940,6 +941,8 @@ mod tests {
             Channel::Server,
             Channel::Chat,
             Channel::Game,
+            Channel::Sent,
+            Channel::Received,
         ];
         let actions = [
             Action::Login,
@@ -953,6 +956,8 @@ mod tests {
             Action::Switch("Twilly".into()),
             Action::Run(script.clone()),
             Action::PickUp(vec![1]),
+            Action::Record(Some("/tmp/a.jsonl".into())),
+            Action::StopRecording,
         ];
         let want = Want {
             selected: 0,
@@ -1022,6 +1027,7 @@ mod tests {
                 Action::Pause,
                 Action::Resume,
                 Action::Relogin,
+                Action::StopRecording,
             ]
             .iter()
             .map(|v| serde_json::to_value(v).unwrap()),
@@ -1038,8 +1044,8 @@ mod tests {
         let shape = keys.into_iter().collect::<Vec<_>>().join(" ");
         let pinned = "=Configured =Connecting =Done =Down =End =Hello =Joining =LastLines =Loading \
              =LoggingIn =Online =Paused =Resumable =Running =Stalled =aqx =chat =game =login \
-             =login_only =logout =pause =relogin =restart =resume =script =server =stop Act \
-             Act.account Act.action Act.action.pick_up Act.action.run Act.action.run.args \
+             =login_only =logout =pause =received =relogin =restart =resume =script =sent =server =stop =stop_recording Act \
+             Act.account Act.action Act.action.pick_up Act.action.record Act.action.run Act.action.run.args \
              Act.action.run.path Act.action.switch Busy Configured Configured.args \
              Configured.path Frame \
              Frame.accounts Frame.accounts.args Frame.accounts.game Frame.accounts.game.area \
@@ -1076,7 +1082,7 @@ mod tests {
              Frame.accounts.game.temp Frame.accounts.game.temp.equipped \
              Frame.accounts.game.temp.id Frame.accounts.game.temp.max \
              Frame.accounts.game.temp.name Frame.accounts.game.temp.qty \
-             Frame.accounts.game.temp.rank Frame.accounts.gold_gained Frame.accounts.name \
+             Frame.accounts.game.temp.rank Frame.accounts.gold_gained Frame.accounts.name Frame.accounts.recording \
              Frame.accounts.script Frame.accounts.server Frame.accounts.state \
              Frame.accounts.state.Busy Frame.accounts.state.Offline \
              Frame.accounts.state.Offline.why Frame.accounts.state.Reconnecting \
@@ -1091,7 +1097,7 @@ mod tests {
              Offline.why Reconnecting Refused Resumable Resumable.args Resumable.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (8, pinned),
+            (9, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

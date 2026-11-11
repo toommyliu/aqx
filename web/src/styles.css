@@ -616,6 +616,15 @@ main {
   min-width: 0;
 }
 
+.recorder {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.recorder[aria-pressed="true"] {
+  color: var(--bad);
+}
+
 .account-head h2 {
   font-size: 15px;
   font-weight: 600;
@@ -882,6 +891,48 @@ meter.mp::-moz-meter-bar {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   min-width: 0;
+}
+
+.ch-sent .c,
+.ch-received .c {
+  width: 8ch;
+}
+
+.ch-sent .c {
+  color: var(--accent);
+}
+
+.ch-sent .x,
+.ch-received .x {
+  flex: 1;
+  overflow: clip;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.ln .copy {
+  flex: none;
+  width: 20px;
+  min-height: 18px;
+  height: 18px;
+  margin-left: auto;
+  opacity: 0;
+}
+
+.ln:hover .copy,
+.ln .copy:focus-visible,
+.ln .copy.copied {
+  opacity: 1;
+}
+
+.ln .copy.copied {
+  color: var(--run);
+}
+
+@media (hover: none) {
+  .ln .copy {
+    opacity: 1;
+  }
 }
 
 .ch-chat .x {
@@ -2275,6 +2326,14 @@ dialog.tall .dialog-foot.sticky {
   color: var(--muted);
 }
 
+.rec {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--bad);
+}
+
 .accounts .jump {
   flex: none;
   min-width: 18px;
@@ -2405,6 +2464,11 @@ mark {
 
   .ln {
     display: block;
+  }
+
+  .ln.ch-sent,
+  .ln.ch-received {
+    display: flex;
   }
 
   .ln .t,

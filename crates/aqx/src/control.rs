@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Instant;
 
 use aqx_client::ItemId;
@@ -36,6 +37,8 @@ pub enum Action {
     Switch(String),
     Run(Script),
     PickUp(Vec<i64>),
+    Record(Option<PathBuf>),
+    StopRecording,
 }
 
 pub trait Source {
@@ -86,6 +89,8 @@ impl Source for Fleet {
                 Ok(())
             }
             Action::PickUp(ids) => account.pick_up(ids.into_iter().map(ItemId).collect()),
+            Action::Record(path) => return account.record(path),
+            Action::StopRecording => account.stop_recording(),
         }
         .map_err(str::to_owned)
     }

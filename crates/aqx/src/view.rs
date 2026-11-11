@@ -20,6 +20,7 @@ pub struct Shown {
     pub stats: Stats,
     pub gold_gained: Option<i64>,
     pub game: Option<Game>,
+    pub recording: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +257,10 @@ impl Shown {
             stats: board.stats,
             gold_gained,
             game,
+            recording: board
+                .recording
+                .as_ref()
+                .map(|r| r.path().display().to_string()),
         }
     }
 }

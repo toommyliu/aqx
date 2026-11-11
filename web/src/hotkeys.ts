@@ -13,6 +13,7 @@ export const appHotkeys = defineAppHotkeys({
   "account.options": { hotkey: null, meta: { name: "Edit the script's options or args", group: account } },
   "account.server": { hotkey: null, meta: { name: "Switch server", group: account } },
   "account.logout": { hotkey: null, meta: { name: "Log out", group: account } },
+  "account.record": { hotkey: null, meta: { name: "Start or stop recording packets", group: account } },
   "account.next": { hotkey: "J", meta: { name: "Next account", group: account } },
   "account.previous": { hotkey: "K", meta: { name: "Previous account", group: account } },
   "account.overview": { hotkey: "V", meta: { name: "Switch between the overview and the last account", group: account } },
