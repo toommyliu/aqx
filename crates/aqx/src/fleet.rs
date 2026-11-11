@@ -796,7 +796,10 @@ impl Fleet {
                 let mut board = account.board();
                 let due = matches!(&board.run, Run::Running { cancel, .. } if !cancel.is_paused())
                     && !board.stalled
-                    && now.saturating_duration_since(board.last_progress) >= account.stall_after;
+                    && now.saturating_duration_since(board.last_progress) >= account.stall_after
+                    && board
+                        .session()
+                        .is_some_and(|s| matches!(s.snapshot().phase, Phase::Ready));
                 if due {
                     board.stalled = true;
                     let quiet = account.stall_after.as_secs();
@@ -1267,7 +1270,8 @@ impl Account {
 
 #[cfg(test)]
 mod tests {
-    use aqx_client::{MonMapId, NoticeKind};
+    use aqx_client::testing::{Harness, Peer};
+    use aqx_client::{MonMapId, NoticeKind, Options, Reconnect};
 
     use super::*;
 
@@ -1332,6 +1336,17 @@ mod tests {
 
     #[test]
     fn a_running_script_without_progress_stalls_once_until_it_progresses() {
+        let (hang_up_in, hang_up) = mpsc::channel::<()>();
+        let options = Options {
+            reconnect: Some(Reconnect::new("x".into(), Duration::from_secs(60))),
+            ..Options::default()
+        };
+        let harness = Harness::start(options, move |listener| {
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready();
+            let _ = hang_up.recv();
+        });
+        harness.session.ready().wait().unwrap();
         let (account, inbox) = Account::queueing("player1", Some(farm()));
         let account = Arc::new(Account {
             on_stall: OnStall::Restart,
@@ -1341,6 +1356,11 @@ mod tests {
         let now = Instant::now();
         {
             let mut board = account.board();
+            board.link = Link::Session {
+                session: harness.session.clone(),
+                server: "Test".into(),
+                since: now,
+            };
             board.run = Run::Running {
                 script: PathBuf::from("/srv/farm.ts"),
                 cancel: Cancel::default(),
@@ -1374,6 +1394,19 @@ mod tests {
             exp: 0,
         });
         assert!(!account.board().stalled(), "progress clears the stall");
+
+        hang_up_in.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(harness.session.snapshot().phase, Phase::Reconnecting { .. }) {
+            assert!(Instant::now() < deadline, "never started reconnecting");
+            thread::sleep(Duration::from_millis(5));
+        }
+        fleet.supervise(Instant::now() + Duration::from_secs(3600));
+        assert!(
+            !account.board().stalled() && inbox.try_recv().is_err(),
+            "time spent reconnecting isn't a stall"
+        );
+        harness.session.logout();
     }
 
     #[test]
