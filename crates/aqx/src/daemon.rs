@@ -140,7 +140,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 7;
+pub const PROTOCOL: u32 = 8;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -297,18 +297,38 @@ impl Source for Remote {
 
 pub struct Wanted {
     pub accounts: Vec<String>,
-    pub script: Option<Script>,
+    pub start: Start,
+}
+
+pub enum Start {
+    Login,
+    LoginOnly,
+    Run(Script),
+}
+
+impl Start {
+    pub fn action(&self) -> Action {
+        match self {
+            Start::Login => Action::Login,
+            Start::LoginOnly => Action::LoginOnly,
+            Start::Run(script) => Action::Run(script.clone()),
+        }
+    }
 }
 
 impl Wanted {
     fn args(&self) -> Vec<String> {
         let mut args = self.accounts.clone();
-        if let Some(script) = &self.script {
-            args.push("--script".into());
-            args.push(script.path.display().to_string());
-            for (key, value) in &script.args {
-                args.push("--arg".into());
-                args.push(format!("{key}={value}"));
+        match &self.start {
+            Start::Login => {}
+            Start::LoginOnly => args.push("--no-script".into()),
+            Start::Run(script) => {
+                args.push("--script".into());
+                args.push(script.path.display().to_string());
+                for (key, value) in &script.args {
+                    args.push("--arg".into());
+                    args.push(format!("{key}={value}"));
+                }
             }
         }
         args
@@ -466,6 +486,7 @@ impl Server {
                 Ok(Request::Act {
                     action:
                         Action::Login
+                        | Action::LoginOnly
                         | Action::Relogin
                         | Action::Switch(_)
                         | Action::Restart
@@ -592,14 +613,10 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
     let fleet = Arc::new(Fleet::new(aqx_client::DeviceId::load()?));
     fleet.add_new(accounts);
     for (i, account) in fleet.accounts().iter().enumerate() {
-        if first.contains(&account.name) {
-            let action = match &wanted.script {
-                Some(script) => Action::Run(script.clone()),
-                None => Action::Login,
-            };
-            if let Err(why) = fleet.act(i, action) {
-                account.say(format!("couldn't start: {why}"));
-            }
+        if first.contains(&account.name)
+            && let Err(why) = fleet.act(i, wanted.start.action())
+        {
+            account.say(format!("couldn't start: {why}"));
         }
     }
     fleet.watch(config.clone());
@@ -795,6 +812,7 @@ mod tests {
         assert!(server.done(), "with everyone offline, the session is done");
         for action in [
             Action::Login,
+            Action::LoginOnly,
             Action::Relogin,
             Action::Restart,
             Action::Run(script),
@@ -925,6 +943,7 @@ mod tests {
         ];
         let actions = [
             Action::Login,
+            Action::LoginOnly,
             Action::Logout,
             Action::Stop,
             Action::Restart,
@@ -996,6 +1015,7 @@ mod tests {
         values.extend(
             [
                 Action::Login,
+                Action::LoginOnly,
                 Action::Logout,
                 Action::Stop,
                 Action::Restart,
@@ -1018,7 +1038,7 @@ mod tests {
         let shape = keys.into_iter().collect::<Vec<_>>().join(" ");
         let pinned = "=Configured =Connecting =Done =Down =End =Hello =Joining =LastLines =Loading \
              =LoggingIn =Online =Paused =Resumable =Running =Stalled =aqx =chat =game =login \
-             =logout =pause =relogin =restart =resume =script =server =stop Act \
+             =login_only =logout =pause =relogin =restart =resume =script =server =stop Act \
              Act.account Act.action Act.action.pick_up Act.action.run Act.action.run.args \
              Act.action.run.path Act.action.switch Busy Configured Configured.args \
              Configured.path Frame \
@@ -1071,7 +1091,7 @@ mod tests {
              Offline.why Reconnecting Refused Resumable Resumable.args Resumable.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (7, pinned),
+            (8, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

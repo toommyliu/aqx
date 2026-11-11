@@ -5,6 +5,7 @@ const app = "App";
 
 export const appHotkeys = defineAppHotkeys({
   "account.login": { hotkey: "I", meta: { name: "Log in, then run the script", group: account } },
+  "account.loginOnly": { hotkey: null, meta: { name: "Log in without running the script", group: account } },
   "account.run": { hotkey: "O", meta: { name: "Pick a script and run it", group: account } },
   "account.stop": { hotkey: "S", meta: { name: "Stop the script", group: account } },
   "account.pause": { hotkey: "P", meta: { name: "Pause or resume the script", group: account } },

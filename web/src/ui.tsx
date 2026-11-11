@@ -2,6 +2,7 @@ import { autoUpdate, computePosition, flip, offset, shift } from "@floating-ui/d
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import ArrowDown from "lucide-solid/icons/arrow-down";
 import ArrowUp from "lucide-solid/icons/arrow-up";
+import ChevronDown from "lucide-solid/icons/chevron-down";
 import ChevronLeft from "lucide-solid/icons/chevron-left";
 import Ellipsis from "lucide-solid/icons/ellipsis";
 import Eye from "lucide-solid/icons/eye";
@@ -45,6 +46,7 @@ const ICONS = {
   config: FileCog,
   close: X,
   back: ChevronLeft,
+  expand: ChevronDown,
   up: ArrowUp,
   folder: Folder,
   file: File,
@@ -245,7 +247,7 @@ export function VirtualList<T>(props: {
   );
 }
 
-export function anchor(reference: Element, floating: HTMLElement, placement: "bottom-end" | "top" = "bottom-end") {
+export function anchor(reference: Element, floating: HTMLElement, placement: "bottom-start" | "bottom-end" | "top" = "bottom-end") {
   floating.style.visibility = "hidden";
   return autoUpdate(reference, floating, () => {
     void computePosition(reference, floating, {

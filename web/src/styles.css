@@ -723,6 +723,23 @@ meter.mp::-moz-meter-bar {
   flex-wrap: wrap;
 }
 
+.login-split {
+  display: flex;
+  align-self: stretch;
+}
+
+.login-split > .action:has(+ .expand) {
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+}
+
+.login-split > .expand {
+  margin-inline-start: -1px;
+  padding: 0 4px;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+}
+
 .tabs {
   display: flex;
   gap: 2px;
@@ -1327,6 +1344,16 @@ textarea.code {
     line-height: 1.1;
     white-space: normal;
     text-align: center;
+  }
+
+  .login-split {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .login-split > .expand {
+    flex: none;
+    width: 24px;
   }
 
   .top .label {

@@ -26,6 +26,7 @@ pub struct Frame {
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     Login,
+    LoginOnly,
     Logout,
     Stop,
     Restart,
@@ -69,6 +70,7 @@ impl Source for Fleet {
         let account = accounts.get(account).ok_or("no such account")?;
         match action {
             Action::Login => account.login(),
+            Action::LoginOnly => account.login_only(),
             Action::Logout => account.logout(),
             Action::Stop => account.stop(),
             Action::Restart => account.restart(),

@@ -77,6 +77,7 @@ function Shortcuts(props: { onOpen: (i: number | null) => void }) {
     select(order[to] ?? null);
   };
   bind("account.login", () => act("login", "logging in", here()));
+  bind("account.loginOnly", () => act("login_only", "logging in", here()));
   bind("account.run", () => openPicker(here()));
   bind("account.stop", () => act("stop", "stopping", here()));
   bind("account.restart", () => act("restart", "restarting", here()));

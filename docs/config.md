@@ -55,6 +55,7 @@ Each config gets its own session, so accounts from different `aqx.toml` files ca
 | --- | --- |
 | `aqx up [ACCOUNT...] [-c PATH] [--json \| --quiet]` | Run the session in this terminal and print its log. `ctrl+c` logs everyone out; a second one exits at once. Fails when the session is already running. |
 | `aqx up -d [ACCOUNT...] [-c PATH]` | Start the session in the background and return. When it's already running, log in the named accounts. |
+| `aqx up [-d] [ACCOUNT...] --no-script` | Log the accounts in without running their scripts |
 | `aqx ps [--json]` | List every running session's accounts: state, script, where, uptime and status |
 | `aqx logs [ACCOUNT] [-f] [--all]` | Print an account's recent log, or every account's when only one session runs. `-f` keeps printing, and `--all` adds game lines. |
 | `aqx ctl ACCOUNT login\|logout\|stop\|restart\|pause\|resume\|relogin` | Drive an account in whichever session has it |
