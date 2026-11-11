@@ -80,6 +80,10 @@ body {
   height: 100%;
 }
 
+* {
+  overscroll-behavior: none;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -1068,11 +1072,6 @@ dialog {
   color: var(--text);
   overflow: hidden;
   box-shadow: 0 8px 32px rgb(0 0 0 / 0.25);
-}
-
-dialog,
-dialog * {
-  overscroll-behavior: none;
 }
 
 dialog[open] {
