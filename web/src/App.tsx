@@ -57,7 +57,7 @@ const REVEAL_MS = 300;
 const interactive = (target: EventTarget | null) =>
   target instanceof HTMLElement && target.closest("button, a, [role=tab], select, summary") !== null;
 
-function Shortcuts() {
+function Shortcuts(props: { onOpen: (i: number | null) => void }) {
   const keys = useAppHotkeys();
   const bind = (
     id: AppHotkeyId,
@@ -90,6 +90,16 @@ function Shortcuts() {
   );
   bind("account.next", () => step(1));
   bind("account.previous", () => step(-1));
+  let last: string | undefined;
+  createEffect(() => {
+    const user = current()?.user;
+    if (user !== undefined) last = user;
+  });
+  bind("account.overview", () => {
+    if (selected() !== null) return props.onOpen(null);
+    const back = accounts.findIndex((a) => a.user === last);
+    props.onOpen(back === -1 ? (ordered()[0] ?? null) : back);
+  });
   bind(
     "account.mark",
     (e) => {
@@ -183,7 +193,7 @@ export function App() {
       </div>
       <Toasts />
       <Dialogs />
-      <Shortcuts />
+      <Shortcuts onOpen={open} />
       <Tooltips />
     </>
   );

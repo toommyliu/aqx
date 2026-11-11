@@ -14,6 +14,7 @@ export const appHotkeys = defineAppHotkeys({
   "account.logout": { hotkey: null, meta: { name: "Log out", group: account } },
   "account.next": { hotkey: "J", meta: { name: "Next account", group: account } },
   "account.previous": { hotkey: "K", meta: { name: "Previous account", group: account } },
+  "account.overview": { hotkey: "V", meta: { name: "Switch between the overview and the last account", group: account } },
   "account.mark": { hotkey: "X", meta: { name: "Tick or untick the account", group: account } },
   "account.markAll": { hotkey: "Mod+A", meta: { name: "Select every account, or none", group: account } },
   "search.focus": { hotkey: "/", meta: { name: "Search the log or list", group: app } },
