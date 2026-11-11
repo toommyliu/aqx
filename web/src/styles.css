@@ -162,7 +162,7 @@ textarea {
 
 .ellipsis {
   min-width: 0;
-  overflow: hidden;
+  overflow: clip;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -394,7 +394,7 @@ kbd {
   min-width: 0;
   padding: 3px;
   margin: -3px;
-  overflow: hidden;
+  overflow: clip;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
@@ -572,7 +572,7 @@ svg.mark .bold {
 .accounts .name {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
+  overflow: clip;
   text-overflow: ellipsis;
   text-align: left;
 }
@@ -1227,7 +1227,7 @@ legend {
 }
 
 .entry.two > span:first-child {
-  overflow: hidden;
+  overflow: clip;
   text-overflow: ellipsis;
 }
 
@@ -1570,7 +1570,7 @@ textarea.code {
 }
 
 .arg.declared > label code {
-  overflow: hidden;
+  overflow: clip;
   text-overflow: ellipsis;
   font: 12px/1.4 var(--mono);
 }
