@@ -264,7 +264,7 @@ function Action(props: {
   );
 }
 
-function LoginMenu(props: { on: number[] }) {
+export function LoginMenu(props: { on: number[] }) {
   let menu!: HTMLDivElement;
   let button!: HTMLButtonElement;
   let release: (() => void) | undefined;

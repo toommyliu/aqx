@@ -8,7 +8,7 @@ import {
 } from "@tanstack/solid-hotkeys";
 import { For, Match, Show, Switch, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 import { Toaster, useSonner } from "solid-sonner";
-import { AccountPanel } from "./Account";
+import { AccountPanel, LoginMenu } from "./Account";
 import { Dialogs, logOut, openPicker, openServers, openScriptOptions } from "./Dialogs";
 import { inBrowserTab } from "./hotkeys";
 import {
@@ -870,6 +870,7 @@ type Bulk = {
   none: string;
   run: (on: number[]) => void;
   danger?: boolean;
+  loginMenu?: true;
 };
 
 function Selection() {
@@ -888,6 +889,7 @@ function Selection() {
       fits: isOffline,
       none: "None of them are offline",
       run: (on) => act("login", "logging in", on),
+      loginMenu: true,
     },
     {
       icon: () => "play",
@@ -951,7 +953,7 @@ function Selection() {
           const on = () => fitting(b.fits);
           const blocked = () => (chosen().length === 0 ? "Select some accounts first" : on().length === 0 ? b.none : "");
           const partial = () => on().length > 0 && on().length < chosen().length;
-          return (
+          const button = (
             <button
               type="button"
               class="action"
@@ -971,6 +973,15 @@ function Selection() {
                 </Show>
               </span>
             </button>
+          );
+          if (!b.loginMenu) return button;
+          return (
+            <div class="login-split">
+              {button}
+              <Show when={!blocked()}>
+                <LoginMenu on={on()} />
+              </Show>
+            </div>
           );
         }}
       </For>

@@ -1048,6 +1048,10 @@ table.list .num {
     white-space: normal;
     text-align: center;
   }
+
+  .selection .login-split {
+    flex: 1.5 1 0;
+  }
 }
 
 :root [data-sonner-toaster][data-sonner-theme] {
