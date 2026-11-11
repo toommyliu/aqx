@@ -2,8 +2,11 @@ import { autoUpdate, computePosition, flip, offset, shift } from "@floating-ui/d
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import ArrowDown from "lucide-solid/icons/arrow-down";
 import ArrowUp from "lucide-solid/icons/arrow-up";
+import Check from "lucide-solid/icons/check";
 import ChevronDown from "lucide-solid/icons/chevron-down";
 import ChevronLeft from "lucide-solid/icons/chevron-left";
+import CircleDot from "lucide-solid/icons/circle-dot";
+import Copy from "lucide-solid/icons/copy";
 import Ellipsis from "lucide-solid/icons/ellipsis";
 import Eye from "lucide-solid/icons/eye";
 import EyeOff from "lucide-solid/icons/eye-off";
@@ -42,6 +45,9 @@ const ICONS = {
   pause: Pause,
   restart: RotateCcw,
   server: Server,
+  record: CircleDot,
+  copy: Copy,
+  check: Check,
   users: Users,
   config: FileCog,
   close: X,

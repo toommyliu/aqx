@@ -57,9 +57,10 @@ Each config gets its own session, so accounts from different `aqx.toml` files ca
 | `aqx up -d [ACCOUNT...] [-c PATH]` | Start the session in the background and return. When it's already running, log in the named accounts. |
 | `aqx up [-d] [ACCOUNT...] --no-script` | Log the accounts in without running their scripts |
 | `aqx ps [--json]` | List every running session's accounts: state, script, where, uptime and status |
-| `aqx logs [ACCOUNT] [-f] [--all]` | Print an account's recent log, or every account's when only one session runs. `-f` keeps printing, and `--all` adds game lines. |
+| `aqx logs [ACCOUNT] [-f] [--all]` | Print an account's recent log, or every account's when only one session runs. `-f` keeps printing, and `--all` adds game lines and the packets of a recording account. |
 | `aqx ctl ACCOUNT login\|logout\|stop\|restart\|pause\|resume\|relogin` | Drive an account in whichever session has it |
 | `aqx ctl ACCOUNT run SCRIPT [--arg KEY=VALUE]...` | Run a script, stopping the one running. Logs the account in if it's offline. |
+| `aqx ctl ACCOUNT record [FILE]` | Write the account's packets to `FILE` as JSON lines from now until `aqx ctl ACCOUNT record --stop`, with the token and personal fields redacted. The account has to be logged in to start, and the recording carries on through relogins and server switches. Without `FILE`, aqx writes to `recordings` in its data folder (`~/Library/Application Support/aqx/recordings` on macOS). |
 | `aqx down [-c PATH]` | Log out every account and end the session |
 
 `ACCOUNT` is a name or a username. Sessions keep their sockets, locks and logs in aqx's data folder (`~/Library/Application Support/aqx/sessions` on macOS), which only you can open. Set `AQX_SESSIONS` to use another folder. When `aqx up -d` attaches to a session that was already running, it says when that session started, and warns if `aqx.toml` changed after it. When the running session is from another build of aqx, `aqx up -d` asks whether to restart it with this one, and restarts it without asking when the two builds can't talk to each other. A restart logs the online accounts out and back in, and their scripts start again.

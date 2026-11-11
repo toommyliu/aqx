@@ -239,6 +239,7 @@ pub fn offline(account: &config::Account) -> Shown {
         stats: Stats::default(),
         gold_gained: None,
         game: None,
+        recording: None,
     }
 }
 

@@ -51,6 +51,13 @@ export function pauseOrResume(on: number[]) {
   return paused ? act("resume", "resumed", on) : act("pause", "pausing", on);
 }
 
+export const recordable = (a: Account | undefined) => a !== undefined && (a.recording !== null || isOnline(a));
+
+export function recordOrStop(on: number[]) {
+  const recording = on.length > 0 && on.every((i) => typeof accounts[i]?.recording === "string");
+  return recording ? act("stop_recording", "stopped recording", on) : act({ record: null }, "recording packets", on);
+}
+
 const JUMPS = ["Mod+1", "Mod+2", "Mod+3", "Mod+4", "Mod+5", "Mod+6", "Mod+7", "Mod+8", "Mod+9"] as const;
 const REVEAL_MS = 300;
 
@@ -85,6 +92,7 @@ function Shortcuts(props: { onOpen: (i: number | null) => void }) {
   bind("account.options", () => void openScriptOptions(here()));
   bind("account.server", () => openServers(here()));
   bind("account.logout", () => logOut(here()));
+  bind("account.record", () => recordOrStop(here()));
   createHotkeys(
     () => JUMPS.slice(0, accounts.length).map((hotkey, i) => ({ hotkey, callback: () => select(i) })),
     () => ({ enabled: !inBrowserTab && dialog() === null }),
@@ -710,6 +718,11 @@ function AccountList(props: { onOpen: (i: number | null) => void }) {
                     </kbd>
                   )}
                 </Show>
+                <Show when={a().recording}>
+                  <span class="rec" title="Recording packets">
+                    <span class="visually-hidden">recording</span>
+                  </span>
+                </Show>
                 <span class={`state s-${tone(a())}`} title={hide(reason(a()) ?? "") || undefined}>
                   {stateLabel(a())}
                 </span>
@@ -785,6 +798,19 @@ function AccountList(props: { onOpen: (i: number | null) => void }) {
           }}
         >
           Edit config…
+        </button>
+        <button
+          type="button"
+          aria-disabled={recordable(menuFor()) ? undefined : "true"}
+          onClick={() => {
+            const a = menuFor();
+            if (a === undefined || !recordable(a)) return;
+            row?.focus();
+            closeMenu();
+            void recordOrStop([accounts.findIndex((x) => x.user === a.user)]);
+          }}
+        >
+          {menuFor()?.recording ? "Stop recording" : "Record packets"}
         </button>
       </div>
     </nav>

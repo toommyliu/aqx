@@ -22,6 +22,8 @@ aqx web [-c PATH] [--port N] [--up] [--tailscale]
 
 `aqx web` listens on `127.0.0.1` only and has no login. It refuses requests whose `Host` isn't `localhost`, `127.0.0.1`, `[::1]` or a `*.ts.net` name.
 
+To record an account's packets once it's online, press the record button in the top right corner of the account, or pick Record packets from the menu you get by right-clicking the account in the list or clicking its `⋯`. While it records, the button reads *rec*, a red dot shows beside the account in the list, and the account's log says which file aqx writes to. The account also gets a Packets tab that lists its last 1000 sent and 1000 received packets, each marked sent or received. Each packet takes one line, cut short when it's long, and the copy button beside a packet copies all of it. Press the button again to stop. `aqx ctl ACCOUNT record` does the same from a terminal; see [Run sessions](config.md#run-sessions).
+
 The eye button in the header shows your accounts as `account 1`, `account 2` and so on, your home folder as `~`, and room numbers as `•••••` (so `battleon-12345` reads `battleon-•••••`), so you can share a screenshot. The config editor still shows the real names, since you edit them there.
 
 ## Reach it from another device

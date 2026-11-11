@@ -12,13 +12,17 @@ export const VIEWS = [
   { id: "bank", label: "Bank" },
   { id: "factions", label: "Factions" },
   { id: "players", label: "Players" },
+  { id: "packets", label: "Packets" },
 ] as const;
 
 export type View = (typeof VIEWS)[number]["id"];
 
 export type GameLines = "shown" | "hidden";
 
-export const shows = (game: GameLines, channel: Channel) => game === "shown" || channel !== "game";
+export const isPacket = (channel: Channel) => channel === "sent" || channel === "received";
+
+export const shows = (game: GameLines, channel: Channel) =>
+  !isPacket(channel) && (game === "shown" || channel !== "game");
 
 export type ConfigStart = { kind: "list" } | { kind: "account"; user: string } | { kind: "new" };
 
@@ -34,7 +38,20 @@ export type Dialog =
   | { kind: "confirm"; title: string; body: string; label: string; danger: boolean; run: () => void };
 
 
-const LOG_KEPT = 5000;
+const KEPT_PER_CHANNEL = 1000;
+
+function keepNewest(lines: Line[]): Line[] {
+  const counted = new Map<Channel, number>();
+  const kept: Line[] = [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line === undefined) continue;
+    const n = (counted.get(line.channel) ?? 0) + 1;
+    counted.set(line.channel, n);
+    if (n <= KEPT_PER_CHANNEL) kept.push(line);
+  }
+  return kept.length === lines.length ? lines : kept.reverse();
+}
 
 export function persisted<T extends string>(key: string, allowed: readonly T[], fallback: T): [Accessor<T>, (next: T) => void] {
   let saved: string | null = null;
@@ -322,10 +339,7 @@ export function startFeed() {
         },
         account: (at, account) => setAccounts(at, reconcile(account)),
         log: (lines) =>
-          setLog((kept) => {
-            const all = kept.concat(lines);
-            return all.length > LOG_KEPT ? all.slice(all.length - LOG_KEPT) : all;
-          }),
+          setLog((kept) => keepNewest(kept.concat(lines))),
         ended: setEnded,
         connected: setConnected,
       });

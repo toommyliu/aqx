@@ -8,13 +8,15 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aqx_client::{
-    ActionError, CombatState, DeviceId, Event, Handle, ItemId, NoticeKind, Phase, Server, Spot, api,
+    ActionError, CombatState, DeviceId, Direction, Event, Handle, ItemId, NoticeKind, Phase,
+    Server, Spot, api,
 };
 use aqx_script::{Cancel, Level, Outcome, Output};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{self, OnStall, Script};
 use crate::describe::describe;
+use crate::record::{self, Recorder};
 use crate::runner::{self, Job, Login, Note};
 
 pub const LOG_LINES: usize = 1000;
@@ -27,6 +29,8 @@ pub enum Channel {
     Server,
     Chat,
     Game,
+    Sent,
+    Received,
 }
 
 impl Channel {
@@ -37,15 +41,26 @@ impl Channel {
             Channel::Server => "server",
             Channel::Chat => "chat",
             Channel::Game => "game",
+            Channel::Sent => "sent",
+            Channel::Received => "received",
         }
+    }
+
+    fn packet(direction: Direction) -> Channel {
+        match direction {
+            Direction::Out => Channel::Sent,
+            Direction::In => Channel::Received,
+        }
+    }
+
+    pub fn is_packet(self) -> bool {
+        matches!(self, Channel::Sent | Channel::Received)
     }
 
     fn of(event: &Event) -> Channel {
         match event {
-            Event::Phase(_)
-            | Event::Ready { .. }
-            | Event::Unreadable { .. }
-            | Event::Packet { .. } => Channel::Aqx,
+            Event::Phase(_) | Event::Ready { .. } | Event::Unreadable { .. } => Channel::Aqx,
+            Event::Packet { direction, .. } => Channel::packet(*direction),
             Event::Notice { .. } => Channel::Server,
             Event::Chat { .. } | Event::Whisper { .. } => Channel::Chat,
             _ => Channel::Game,
@@ -153,6 +168,7 @@ pub struct Board {
     pub touched: HashMap<ItemId, Instant>,
     pub rep_from: HashMap<String, u32>,
     pub last: Option<Script>,
+    pub recording: Option<Recorder>,
     runs: u64,
     links: u64,
     queued_runs: usize,
@@ -173,6 +189,7 @@ impl Default for Board {
             touched: HashMap::new(),
             rep_from: HashMap::new(),
             last: None,
+            recording: None,
             runs: 0,
             links: 0,
             queued_runs: 0,
@@ -495,6 +512,56 @@ impl Account {
         Ok(())
     }
 
+    pub fn record(self: &Arc<Self>, path: Option<PathBuf>) -> Result<(), String> {
+        let mut board = self.board();
+        if let Some(recorder) = &board.recording {
+            return Err(format!(
+                "already recording to {}",
+                recorder.path().display()
+            ));
+        }
+        let Some(session) = board.session().filter(|s| !closed(s)).cloned() else {
+            return Err("log in first".into());
+        };
+        let recorder = match path {
+            Some(path) => {
+                Recorder::create(&path).map_err(|e| format!("{}: {e}", path.display()))?
+            }
+            None => record::recordings()
+                .and_then(|dir| Recorder::create_new_in(&dir, &self.name))
+                .map_err(|e| e.to_string())?,
+        };
+        self.show_packets(&recorder, &session);
+        board.log.push(
+            Channel::Aqx,
+            format!("recording packets to {}", recorder.path().display()),
+        );
+        board.recording = Some(recorder);
+        Ok(())
+    }
+
+    fn show_packets(self: &Arc<Self>, recorder: &Recorder, session: &Handle) {
+        let account = Arc::downgrade(self);
+        recorder.watch(session, move |direction, text| {
+            if let Some(account) = account.upgrade() {
+                account
+                    .board()
+                    .log
+                    .push(Channel::packet(direction), text.to_owned());
+            }
+        });
+    }
+
+    pub fn stop_recording(&self) -> Result<(), &'static str> {
+        let mut board = self.board();
+        let recorder = board.recording.take().ok_or("not recording")?;
+        board.log.push(
+            Channel::Aqx,
+            format!("stopped recording to {}", recorder.path().display()),
+        );
+        Ok(())
+    }
+
     pub fn pick_up(self: &Arc<Self>, items: Vec<ItemId>) -> Result<(), &'static str> {
         let session = self.board().session().cloned().ok_or("offline")?;
         let account = Arc::clone(self);
@@ -753,7 +820,10 @@ impl Fleet {
                     .log
                     .lines()
                     .rev()
-                    .filter(|l| !matches!(l.channel, Channel::Chat | Channel::Game))
+                    .filter(|l| {
+                        !matches!(l.channel, Channel::Chat | Channel::Game)
+                            && !l.channel.is_packet()
+                    })
                     .take(LAST_LINES);
                 let mut lines: Vec<Line> = kept.cloned().collect();
                 lines.reverse();
@@ -1093,6 +1163,9 @@ impl Linked {
             server: server.to_owned(),
             since: Instant::now(),
         };
+        if let Some(recorder) = &board.recording {
+            self.account.show_packets(recorder, session);
+        }
     }
 
     fn run(self: &Arc<Self>, script: Script, run: u64, session: Handle, server: String) -> bool {
@@ -1757,6 +1830,94 @@ mod tests {
         assert_eq!(game.len(), LOG_LINES);
         assert_eq!(game[0].text, "game 500");
         assert_eq!(log.since(log.next - 2).count(), 2);
+    }
+
+    #[test]
+    fn a_recording_started_mid_session_follows_the_account_to_its_next_session_until_stopped() {
+        let serve = || {
+            let (say, says) = mpsc::channel::<String>();
+            let harness = Harness::start(Options::default(), move |listener| {
+                let mut peer = Peer::accept(&listener);
+                peer.serve_to_ready();
+                for text in says {
+                    peer.send(&text);
+                }
+            });
+            harness.session.ready().wait().unwrap();
+            (harness, say)
+        };
+        let recorded = |path: &Path, text: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if std::fs::read_to_string(path).is_ok_and(|lines| lines.contains(text)) {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "{text} never reached {}",
+                    path.display()
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let dir = std::env::temp_dir().join(format!("aqx-fleet-record-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (first, second) = (dir.join("first.jsonl"), dir.join("second.jsonl"));
+        let linked = linked(Account::detached("player1"));
+        let account = &linked.account;
+        assert_eq!(
+            account.record(Some(first.clone())),
+            Err("log in first".into())
+        );
+        assert!(!first.exists(), "refusing to record makes no file");
+
+        let (old, say_old) = serve();
+        linked.attach(&old.session, "Test");
+        account.record(Some(first.clone())).unwrap();
+        assert_eq!(
+            account.record(Some(second.clone())),
+            Err(format!("already recording to {}", first.display()))
+        );
+        say_old
+            .send("%xt%server%-1%before the relogin%".into())
+            .unwrap();
+        recorded(&first, "before the relogin");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !account.board().log.lines().any(|l| {
+            l.channel == Channel::Received && l.text == "%xt%server%-1%before the relogin%"
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "the packet never reached the log"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let (new, say_new) = serve();
+        linked.attach(&new.session, "Test");
+        say_new
+            .send("%xt%server%-1%after the relogin%".into())
+            .unwrap();
+        recorded(&first, "after the relogin");
+
+        account.stop_recording().unwrap();
+        assert_eq!(account.stop_recording(), Err("not recording"));
+        account.record(Some(second.clone())).unwrap();
+        say_new
+            .send("%xt%server%-1%after stopping%".into())
+            .unwrap();
+        recorded(&second, "after stopping");
+
+        let lines = std::fs::read_to_string(&first).unwrap();
+        assert!(
+            !lines.contains("after stopping"),
+            "stopping ends the recording"
+        );
+        assert!(
+            !lines.contains("You joined"),
+            "the recording starts when asked, not at login"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

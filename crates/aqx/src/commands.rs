@@ -78,6 +78,16 @@ pub enum Ctl {
         #[arg(long = "arg", value_name = "KEY=VALUE", value_parser = crate::parse_arg)]
         args: Vec<(String, String)>,
     },
+    /// Record the account's packets from now until --stop.
+    ///
+    /// Writes them as JSON lines, with the token and personal fields redacted, and keeps recording across logins.
+    Record {
+        /// Where to write. Defaults to a new file in the recordings folder in aqx's data folder.
+        file: Option<PathBuf>,
+        /// Stop recording.
+        #[arg(long, conflicts_with = "file")]
+        stop: bool,
+    },
 }
 
 pub fn init(dir: Option<PathBuf>) -> anyhow::Result<ExitCode> {
@@ -505,7 +515,7 @@ pub fn logs(account: Option<&str>, follow: bool, all: bool) -> anyhow::Result<Ex
             let frame = session.source().frame(&want).map_err(anyhow::Error::msg)?;
             for line in frame.log {
                 since[i] = line.seq + 1;
-                if !all && line.channel == Channel::Game {
+                if !all && (line.channel == Channel::Game || line.channel.is_packet()) {
                     continue;
                 }
                 println!(
@@ -543,9 +553,19 @@ pub fn ctl(account: &str, ctl: Ctl) -> anyhow::Result<ExitCode> {
             let done = format!("running {}", path.display());
             (Action::Run(Script { path, args }), done)
         }
+        Ctl::Record { stop: true, .. } => (Action::StopRecording, "stopped recording".to_owned()),
+        Ctl::Record { file, .. } => {
+            let path = file.map(std::path::absolute).transpose()?;
+            (Action::Record(path), "recording packets".to_owned())
+        }
     };
+    let recording = matches!(action, Action::Record(_));
     match session.source().act(i, action) {
         Ok(()) => {
+            let done = match names(&session)?.swap_remove(i).recording {
+                Some(path) if recording => format!("recording packets to {path}"),
+                _ => done,
+            };
             println!("{name}: {done}");
             Ok(ExitCode::SUCCESS)
         }
@@ -647,6 +667,7 @@ mod tests {
             stats: crate::fleet::Stats::default(),
             gold_gained: None,
             game: None,
+            recording: None,
         }
     }
 

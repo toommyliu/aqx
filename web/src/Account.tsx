@@ -15,7 +15,7 @@ import {
 } from "solid-js";
 import { type AppHotkeyId } from "@tanstack/hotkeys";
 import { createFormatForDisplay, useAppHotkeys } from "@tanstack/solid-hotkeys";
-import { pauseOrResume, tone } from "./App";
+import { pauseOrResume, recordOrStop, recordable, tone } from "./App";
 import { logOut, openPicker, openServers, openScriptOptions } from "./Dialogs";
 import {
   VIEWS,
@@ -24,11 +24,13 @@ import {
   ended,
   finder,
   gameLines,
+  isPacket,
   lastLines,
   lineText,
   session,
   log,
   logLoading,
+  fail,
   report,
   say,
   search,
@@ -41,23 +43,30 @@ import {
   hide,
 } from "./store";
 import { Found, Icon, type IconName, KeyCaps, ServerName, Since, amount, anchor, canHover, clock, number } from "./ui";
-import { type Account, type Game, type Stack, api, isOffline, isOnline, isRunning, stateLabel } from "./wire";
+import { type Account, type Channel, type Game, type Line, type Stack, api, isOffline, isOnline, isRunning, stateLabel } from "./wire";
 
 const [details, setDetails] = createSignal(false);
+const [copied, setCopied] = createSignal<number | null>(null);
+let uncopy: ReturnType<typeof setTimeout> | undefined;
 
 export function AccountPanel(props: { account: Account; index: number }) {
   const a = () => props.account;
-  const views = createMemo(() => VIEWS.filter((v) => v.id === "log" || a().game !== null));
+  const views = createMemo(() =>
+    VIEWS.filter((v) => v.id === "log" || (v.id === "packets" ? a().recording !== null : a().game !== null)),
+  );
   const shown = () => (views().some((v) => v.id === view()) ? view() : "log");
   return (
     <section class="account" classList={{ details: details() }} aria-labelledby="account-name">
-      <Header account={a()} />
+      <Header account={a()} index={props.index} />
       <Actions account={a()} index={props.index} />
       <Tabs views={views()} game={a().game} shown={shown()} />
       <div class="panel" id={`panel-${shown()}`} role="tabpanel" aria-labelledby={`tab-${shown()}`}>
         <Switch>
           <Match when={shown() === "log"}>
             <Log user={a().user} />
+          </Match>
+          <Match when={shown() === "packets"}>
+            <Log user={a().user} packets />
           </Match>
           <Match when={a().game}>{(g) => <Lists game={g()} view={shown()} index={props.index} />}</Match>
         </Switch>
@@ -66,7 +75,7 @@ export function AccountPanel(props: { account: Account; index: number }) {
   );
 }
 
-function Header(props: { account: Account }) {
+function Header(props: { account: Account; index: number }) {
   const a = () => props.account;
   const why = () => {
     const s = a().state;
@@ -74,6 +83,7 @@ function Header(props: { account: Account }) {
     if (typeof s === "object" && "Reconnecting" in s) return s.Reconnecting;
     return null;
   };
+  const recordBlocked = () => !recordable(a()) && "Log in first";
   const upSince = createMemo(() => {
     const up = a().up;
     return up ? Date.now() - up.secs * 1000 : null;
@@ -104,6 +114,24 @@ function Header(props: { account: Account }) {
           )}
         </Show>
         <Show when={why()}>{(w) => <span class="bad">{hide(w())}</span>}</Show>
+        <button
+          type="button"
+          class="ghost small recorder"
+          aria-pressed={a().recording !== null}
+          aria-label="Record packets"
+          aria-disabled={recordBlocked() ? "true" : undefined}
+          data-tip={a().recording ? "Stop recording" : "Record packets"}
+          onClick={() => {
+            const blocked = recordBlocked();
+            if (!blocked) void recordOrStop([props.index]);
+            else if (!canHover()) say(blocked);
+          }}
+        >
+          <Show when={a().recording} fallback={<Icon name="record" />}>
+            <span class="rec" aria-hidden="true" />
+            rec
+          </Show>
+        </button>
       </div>
       <Show when={a().game}>{(g) => <Vitals game={g()} account={a()} />}</Show>
       <div class="line small">
@@ -386,6 +414,7 @@ function count(game: Game | null, id: View): number | undefined {
     inventory: game.inventory.length,
     bank: game.bank?.length,
     factions: game.factions.length,
+    packets: undefined,
   };
   return counts[id];
 }
@@ -489,15 +518,28 @@ function Search(props: { label: string }) {
   );
 }
 
-function Log(props: { user: string }) {
+async function copyPacket(line: Line) {
+  try {
+    await navigator.clipboard.writeText(line.text);
+    setCopied(line.seq);
+    clearTimeout(uncopy);
+    uncopy = setTimeout(() => setCopied(null), 1500);
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e));
+  }
+}
+
+function Log(props: { user: string; packets?: boolean }) {
   let ref!: HTMLDivElement;
   const [stuck, setStuck] = createSignal(true);
+  let lastTop = 0;
   const past = () => (session()?.kind === "none" ? ended() : null);
   const find = createMemo(() => finder(search()));
   const lines = createMemo(() => {
     const query = find();
     const source = past() ? lastLines(props.user) : log();
-    return source.filter((l) => shows(gameLines(), l.channel) && (!query || query.test(lineText(l))));
+    const wanted = (channel: Channel) => (props.packets ? isPacket(channel) : shows(gameLines(), channel));
+    return source.filter((l) => wanted(l.channel) && (!query || query.test(lineText(l))));
   });
   const virtual = createVirtualizer({
     get count() {
@@ -515,21 +557,27 @@ function Log(props: { user: string }) {
       if (stuck()) requestAnimationFrame(newest);
     }),
   );
+
   return (
     <>
       <div class="toolbar">
         <Show when={past()}>
           {(e) => <span class="muted small">The session ended at {clock(e().endedMs)}. These are its last lines.</span>}
         </Show>
-        <Search label="Search the log" />
-        <button
-          type="button"
-          class="toggle"
-          aria-pressed={gameLines() === "shown"}
-          onClick={() => setGameLines(gameLines() === "shown" ? "hidden" : "shown")}
-        >
-          Verbose
-        </button>
+        <Search label={props.packets ? "Search the packets" : "Search the log"} />
+        <span class="visually-hidden" role="status">
+          {props.packets && copied() !== null ? "Copied the packet" : ""}
+        </span>
+        <Show when={!props.packets}>
+          <button
+            type="button"
+            class="toggle"
+            aria-pressed={gameLines() === "shown"}
+            onClick={() => setGameLines(gameLines() === "shown" ? "hidden" : "shown")}
+          >
+            Verbose
+          </button>
+        </Show>
       </div>
       <div
         class="log"
@@ -538,13 +586,17 @@ function Log(props: { user: string }) {
         role="log"
         aria-live="off"
         aria-label="Log"
-        onScroll={() => setStuck(ref.scrollHeight - ref.scrollTop - ref.clientHeight < 24)}
+        onScroll={() => {
+          if (ref.scrollHeight - ref.scrollTop - ref.clientHeight <= 1) setStuck(true);
+          else if (ref.scrollTop < lastTop) setStuck(false);
+          lastTop = ref.scrollTop;
+        }}
       >
         <Show
           when={lines().length > 0}
           fallback={
             <Show when={past() || !logLoading()}>
-              <p class="muted empty">{search() ? "No matching lines" : "Nothing logged yet"}</p>
+              <p class="muted empty">{search() ? "No matching lines" : props.packets ? "No packets yet" : "Nothing logged yet"}</p>
             </Show>
           }
         >
@@ -564,6 +616,18 @@ function Log(props: { user: string }) {
                         <span class="x">
                           <Found text={lineText(line())} find={find()} />
                         </span>
+                        <Show when={props.packets}>
+                          <button
+                            type="button"
+                            class="ghost icon-button copy"
+                            classList={{ copied: copied() === line().seq }}
+                            aria-label="Copy the packet"
+                            data-tip="Copy"
+                            onClick={() => void copyPacket(line())}
+                          >
+                            <Icon name={copied() === line().seq ? "check" : "copy"} />
+                          </button>
+                        </Show>
                       </div>
                     )}
                   </Show>

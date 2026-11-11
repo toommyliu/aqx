@@ -61,9 +61,10 @@ export type Account = {
   stats: { kills: number; deaths: number; drops: number; gold_from: number | null };
   gold_gained: number | null;
   game: Game | null;
+  recording: string | null;
 };
 
-export type Channel = "aqx" | "script" | "server" | "chat" | "game";
+export type Channel = "aqx" | "script" | "server" | "chat" | "game" | "sent" | "received";
 
 export type Line = { seq: number; at_ms: number; channel: Channel; text: string };
 
@@ -88,7 +89,9 @@ export type Action =
   | "relogin"
   | { switch: string }
   | { run: Script }
-  | { pick_up: number[] };
+  | { pick_up: number[] }
+  | { record: null }
+  | "stop_recording";
 
 export type Outcome = { account: number; error: string | null };
 
