@@ -11,7 +11,7 @@ use aqx_client::{
     ActionError, CombatState, DeviceId, Direction, Event, Handle, ItemId, NoticeKind, Phase,
     Server, Spot, api,
 };
-use aqx_script::{Cancel, Level, Outcome, Output};
+use aqx_script::{Cancel, Edit, Level, Outcome, Output, Registered};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{self, OnStall, Script};
@@ -214,6 +214,7 @@ pub struct Board {
     pub link: Link,
     pub run: Run,
     pub status: String,
+    pub registered: Registered,
     pub log: Log,
     pub stats: Stats,
     pub touched: HashMap<ItemId, Instant>,
@@ -237,6 +238,7 @@ impl Default for Board {
             link: Link::Offline { why: None },
             run: Run::Idle,
             status: String::new(),
+            registered: Registered::default(),
             log: Log::default(),
             stats: Stats::default(),
             touched: HashMap::new(),
@@ -310,6 +312,7 @@ impl Board {
                 self.log.push(Channel::Script, format!("status: {text}"));
                 self.status = text;
             }
+            Output::Registered(registered) => self.registered = registered,
         }
     }
 
@@ -593,6 +596,13 @@ impl Account {
                 cancel.pause();
                 Ok(())
             }
+            _ => Err("no script is running"),
+        }
+    }
+
+    pub fn edit(&self, edit: Edit) -> Result<(), &'static str> {
+        match &self.board().run {
+            Run::Running { cancel, .. } => cancel.edit(edit),
             _ => Err("no script is running"),
         }
     }
@@ -1324,6 +1334,7 @@ impl Linked {
             }
             board.last = Some(script.clone());
             board.status.clear();
+            board.registered = Registered::default();
             board.progressed(Instant::now());
             board.run = Run::Running {
                 script: script.path.clone(),
@@ -1362,7 +1373,10 @@ impl Linked {
                                     };
                                     self.attach(session, &server);
                                 }
-                                Note::Restarting => self.account.say("restarting the script"),
+                                Note::Restarting => {
+                                    self.account.board().registered = Registered::default();
+                                    self.account.say("restarting the script")
+                                }
                                 Note::Reconnecting(_) => self
                                     .account
                                     .say("the script starts again once the account is back"),

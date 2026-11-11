@@ -279,10 +279,15 @@ impl Fake {
             &path,
             &data(),
             move |out| {
-                if let Output::Log { text, .. } = out {
-                    observe(&text);
-                    sink.lock().unwrap().push(text);
-                }
+                let text = match out {
+                    Output::Log { text, .. } => text,
+                    Output::Registered(registered) => {
+                        format!("registered {}", serde_json::to_string(&registered).unwrap())
+                    }
+                    Output::Status(_) => return,
+                };
+                observe(&text);
+                sink.lock().unwrap().push(text);
             },
             cancel,
         )

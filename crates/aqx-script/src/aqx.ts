@@ -354,11 +354,13 @@ interface Native {
     error: typeof AqxError,
     dispatchEvent: (name: string, payload: unknown) => Spawned[],
     dispatchPacket: (kind: string, cmd: string, packet: unknown) => Spawned[],
+    edit: (json: string) => void,
   ): void;
   log(text: string): void;
   warn(text: string): void;
   error(text: string): void;
   status(text: string): void;
+  registered(json: string): void;
   stop(reason: string | undefined): void;
   restart(): void;
   version(): number;
@@ -430,11 +432,26 @@ function started(entries: readonly { tag: number; handler: Listener }[], payload
   return actions;
 }
 
+type Edit =
+  | { readonly register_drop: ItemRef }
+  | { readonly unregister_drop: ItemRef }
+  | { readonly register_quest: QuestRegistration }
+  | { readonly unregister_quest: number };
+
+function edit(json: string): void {
+  const change = JSON.parse(json) as Edit;
+  if ("register_drop" in change) drops.register(change.register_drop);
+  else if ("unregister_drop" in change) drops.unregister(change.unregister_drop);
+  else if ("register_quest" in change) quests.register(change.register_quest);
+  else quests.unregister(change.unregister_quest);
+}
+
 native.init(
   STEP,
   AqxError,
   (name, payload) => started(eventHandlers.get(name) ?? [], payload),
   (kind, cmd, packet) => started(packetHandlers.get(`${kind}:${cmd}`) ?? [], packet),
+  edit,
 );
 
 function listen(table: Map<string, { tag: number; handler: Listener }[]>, key: string, handler: Listener): number {
@@ -797,6 +814,12 @@ export const bank = view(
 const wantedDrops: ItemRef[] = [];
 let dropsWatched = false;
 
+function reportRegistered(): void {
+  native.registered(
+    JSON.stringify({ drops: wantedDrops, quests: [...questLoops.values()].map((loop) => loop.registration) }),
+  );
+}
+
 function wanted(offer: Drop): boolean {
   return wantedDrops.some((item) =>
     typeof item === "number" ? offer.id === item : offer.name.toLowerCase() === item.toLowerCase(),
@@ -827,6 +850,7 @@ export const drops = view(
     register(...items: ItemRef[]): void {
       const refs = items.map((item) => itemRef(item, "drops.register's item"));
       for (const item of refs) if (!wantedDrops.includes(item)) wantedDrops.push(item);
+      reportRegistered();
       if (!dropsWatched) {
         dropsWatched = true;
         listen(eventHandlers, "dropOffered", (offer: Drop) => (wanted(offer) ? pickupLogged(offer) : undefined));
@@ -838,6 +862,7 @@ export const drops = view(
         const at = wantedDrops.indexOf(itemRef(item, "drops.unregister's item"));
         if (at >= 0) wantedDrops.splice(at, 1);
       }
+      reportRegistered();
     },
   },
 );
@@ -861,6 +886,7 @@ function* questLoop(registration: QuestRegistration): Script {
   } catch (e) {
     script.warn(`quest ${questId} failed: ${e instanceof Error ? e.message : e}`);
     questLoops.delete(questId);
+    reportRegistered();
   }
 }
 
@@ -901,6 +927,7 @@ export const quests = Object.freeze({
       if (running) native.halt(running.tag);
       questLoops.set(registered.id, { registration: registered, tag: spawn(questLoop(registered)) });
     }
+    reportRegistered();
   },
   unregister(...ids: number[]): void {
     for (const questId of ids.map((value) => checkId(value, "quests.unregister's id"))) {
@@ -909,6 +936,7 @@ export const quests = Object.freeze({
       questLoops.delete(questId);
       native.halt(running.tag);
     }
+    reportRegistered();
   },
 });
 

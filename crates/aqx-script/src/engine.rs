@@ -16,8 +16,8 @@ use rquickjs::{
 use crate::act::{self, Act, Answer, Reply, Started};
 use crate::native::{Host, Internals};
 use crate::{
-    Account, Cancel, External, LoadError, Outcome, Relogged, Start, Wake, events, forward, restore,
-    source, views,
+    Account, Cancel, Edit, External, Level, LoadError, Outcome, Output, Relogged, Start, Wake,
+    events, forward, restore, source, views,
 };
 
 const MAIN: TaskId = TaskId(0);
@@ -301,6 +301,7 @@ impl<'js> Engine<'js> {
             match wake {
                 Ok(Wake::Cancel) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
                 Ok(Wake::Resume) => continue,
+                Ok(Wake::Edit(edit)) => self.on_edit(&edit)?,
                 Ok(Wake::Update(generation, _)) if generation != self.generation => continue,
                 Ok(Wake::Update(
                     _,
@@ -431,6 +432,24 @@ impl<'js> Engine<'js> {
             .collect();
         for (id, filter) in waiting {
             self.offer(id, filter, payload.clone().into_value())?;
+        }
+        self.settle_js()
+    }
+
+    fn on_edit(&mut self, edit: &Edit) -> rquickjs::Result<()> {
+        let json = serde_json::to_string(edit).expect("an edit serializes to JSON");
+        match self.internals.edit.call::<_, ()>((json,)) {
+            Ok(()) => {}
+            Err(Error::Exception) => {
+                let why = describe(&self.ctx, self.ctx.catch());
+                if let Some(host) = self.ctx.userdata::<Host>() {
+                    host.emit(Output::Log {
+                        level: Level::Warn,
+                        text: format!("couldn't change what the script registered: {why}"),
+                    });
+                }
+            }
+            Err(e) => return Err(e),
         }
         self.settle_js()
     }

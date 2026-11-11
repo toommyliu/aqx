@@ -1,6 +1,6 @@
 mod support;
 
-use aqx_script::Outcome;
+use aqx_script::{Cancel, Edit, Item, Outcome, RegisteredQuest};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -858,4 +858,70 @@ public class QuestRepair {
     assert_eq!(result, Outcome::Finished, "{logs:?}");
     assert!(logs.contains(&"repaired 1 cached 1".into()), "{logs:?}");
     assert!(logs.contains(&"notices 2 bounded True".into()), "{logs:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn edits_from_outside_change_what_a_skua_script_registered() {
+    let cancel = Cancel::default();
+    let editor = cancel.clone();
+    let (result, logs, _) = Fake::start(|_, _| {}).run_with(
+        r#"
+using Skua.Core.Interfaces;
+public class Edits {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Drops.Add("Bone Dust");
+        bot.Log("ready");
+        for (int i = 0; i < 100 && !(bot.Drops.ToPickupIDs.Contains(7) && !bot.Drops.ToPickup.Any()); i++) bot.Sleep(20);
+        bot.Log($"drops {string.Join(",", bot.Drops.ToPickupIDs)}");
+        for (int i = 0; i < 100 && !bot.Quests.Registered.Contains(404); i++) bot.Sleep(20);
+        bot.Log($"quest reward {bot.Quests.RegisteredRewards[404]}");
+        for (int i = 0; i < 100 && bot.Quests.Registered.Any(); i++) bot.Sleep(20);
+        bot.Log($"quests {bot.Quests.Registered.Count()}");
+    }
+}
+"#,
+        &cancel,
+        Default::default(),
+        move |text| {
+            let edits = match text {
+                "ready" => vec![
+                    Edit::RegisterDrop(Item::Id(7)),
+                    Edit::UnregisterDrop(Item::Name("Bone Dust".into())),
+                ],
+                "drops 7" => vec![Edit::RegisterQuest(RegisteredQuest {
+                    id: 404,
+                    reward: Some(Item::Id(9)),
+                })],
+                "quest reward 9" => vec![
+                    Edit::RegisterQuest(RegisteredQuest {
+                        id: 405,
+                        reward: Some(Item::Name("Bone Dust".into())),
+                    }),
+                    Edit::UnregisterQuest(404),
+                ],
+                _ => vec![],
+            };
+            for edit in edits {
+                editor.edit(edit).unwrap();
+            }
+        },
+    );
+    assert_eq!(result, Outcome::Finished, "{logs:?}");
+    for expected in [
+        "drops 7",
+        "quest reward 9",
+        "quests 0",
+        "Skua scripts take a quest reward by its item ID",
+        r#"registered {"drops":["Bone Dust"],"quests":[]}"#,
+        r#"registered {"drops":["Bone Dust",7],"quests":[]}"#,
+        r#"registered {"drops":[7],"quests":[]}"#,
+        r#"registered {"drops":[7,9],"quests":[{"id":404,"reward":9}]}"#,
+        r#"registered {"drops":[7,9],"quests":[]}"#,
+    ] {
+        assert!(
+            logs.contains(&expected.into()),
+            "{expected} missing from {logs:?}"
+        );
+    }
 }

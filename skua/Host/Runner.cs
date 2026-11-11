@@ -28,6 +28,9 @@ public static class Runner
             bot.Options.AutoRelogin = bot.AccountAutoRelogin;
             ((AqxOption)bot.Options).HomeServer = state.Session.Server;
             typeof(IScriptInterface).GetProperty(nameof(IScriptInterface.Instance))!.SetValue(null, bot);
+            bot.Drops.PropertyChanged += (_, e) => { if (e.PropertyName is nameof(IScriptDrop.ToPickup) or nameof(IScriptDrop.ToPickupIDs)) bot.ReportRegistered(); };
+            bot.Quests.PropertyChanged += (_, e) => { if (e.PropertyName is nameof(IScriptQuest.Registered)) bot.ReportRegistered(); };
+            protocol.EditRequested += bot.Edit;
             Ioc.Default.ConfigureServices(new Services(bot));
             string bundledSkills = new[] { Path.Combine(compiler.Root, "Skills", "AdvancedSkills.json"), Path.Combine(AppContext.BaseDirectory, "AdvancedSkills.json") }.FirstOrDefault(File.Exists) ?? "";
             string skills = ClientFileSources.SkuaAdvancedSkillsFile;

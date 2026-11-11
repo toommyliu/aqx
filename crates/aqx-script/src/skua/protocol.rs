@@ -207,6 +207,7 @@ pub enum CounterHold {
 pub enum Worker {
     Request(Request),
     Done { done: Done },
+    Registered { registered: crate::Registered },
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Done {
@@ -232,6 +233,7 @@ pub enum Message {
     Stop { stop: Empty },
     Disconnected { disconnected: bool },
     Reset { reset: Empty },
+    Edit { edit: crate::Edit },
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Empty {}

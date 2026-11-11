@@ -428,6 +428,7 @@ fn show(started: Instant, output: &Output) {
             text,
         } => println!("{stamp}error: {text}"),
         Output::Status(text) => println!("{stamp}status: {text}"),
+        Output::Registered(_) => {}
     }
 }
 

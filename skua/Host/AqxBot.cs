@@ -89,5 +89,26 @@ public sealed class AqxBot(Protocol protocol, State state, string path) : IScrip
     public CancellationTokenSource ScriptCts => stop;
     public void RequestStop() { Combat.StopAttacking = false; stop.Cancel(); }
     public void ThrowIfStopped() { if (!cleanup.Value) stop.Token.ThrowIfCancellationRequested(); }
+    public void ReportRegistered() => protocol.ReportRegistered(Drops.ToPickup.ToArray(), Drops.ToPickupIDs.ToArray(), ((AqxQuest)Quests).RegisteredRewards);
+    public void Edit(System.Text.Json.JsonElement change)
+    {
+        var field = change.EnumerateObject().Single();
+        var value = field.Value;
+        bool byId = value.ValueKind == System.Text.Json.JsonValueKind.Number;
+        switch (field.Name)
+        {
+            case "register_drop": if (byId) Drops.Add(value.GetInt32()); else Drops.Add(value.GetString()!); break;
+            case "unregister_drop": if (byId) Drops.Remove(value.GetInt32()); else Drops.Remove(value.GetString()!); break;
+            case "register_quest": Quests.RegisterQuests((value.GetProperty("id").GetInt32(), RewardId(value))); break;
+            case "unregister_quest": Quests.UnregisterQuests(value.GetInt32()); break;
+            default: throw new System.Text.Json.JsonException($"unknown edit {field.Name}");
+        }
+    }
+    static int RewardId(System.Text.Json.JsonElement quest)
+    {
+        if (!quest.TryGetProperty("reward", out var reward)) return -1;
+        if (reward.ValueKind != System.Text.Json.JsonValueKind.Number) throw new InvalidOperationException("Skua scripts take a quest reward by its item ID");
+        return reward.GetInt32();
+    }
     public Task RaiseStopping(Exception? error) => stoppingHandlers ? Task.Run(() => { cleanup.Value = true; ((AqxEvent)Events).RaiseStopping(error); }) : Task.CompletedTask;
 }

@@ -140,7 +140,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 10;
+pub const PROTOCOL: u32 = 11;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -940,6 +940,16 @@ mod tests {
             script: Some("/srv/farm.ts".into()),
             args: None,
             status: String::new(),
+            registered: Some(aqx_script::Registered {
+                drops: vec![
+                    aqx_script::Item::Id(1),
+                    aqx_script::Item::Name("Bone Dust".into()),
+                ],
+                quests: vec![aqx_script::RegisteredQuest {
+                    id: 1,
+                    reward: Some(aqx_script::Item::Id(2)),
+                }],
+            }),
             up: Some(Duration::from_secs(1)),
             stats: crate::fleet::Stats::default(),
             gold_gained: Some(1),
@@ -984,6 +994,17 @@ mod tests {
                 args: vec![("a".into(), "1".into())],
             },
             Action::PickUp(vec![1]),
+            Action::Registry(aqx_script::Edit::RegisterDrop(aqx_script::Item::Id(1))),
+            Action::Registry(aqx_script::Edit::UnregisterDrop(aqx_script::Item::Name(
+                "Bone Dust".into(),
+            ))),
+            Action::Registry(aqx_script::Edit::RegisterQuest(
+                aqx_script::RegisteredQuest {
+                    id: 1,
+                    reward: Some(aqx_script::Item::Id(2)),
+                },
+            )),
+            Action::Registry(aqx_script::Edit::UnregisterQuest(1)),
             Action::Record(Some("/tmp/a.jsonl".into())),
             Action::StopRecording,
         ];
@@ -1083,6 +1104,9 @@ mod tests {
              =server =stop =stop_recording Act Act.account Act.action Act.action.enqueue \
              Act.action.enqueue.args Act.action.enqueue.path Act.action.move_queued \
              Act.action.move_queued.id Act.action.move_queued.to Act.action.pick_up Act.action.record \
+             Act.action.registry Act.action.registry.register_drop Act.action.registry.register_quest \
+             Act.action.registry.register_quest.id Act.action.registry.register_quest.reward \
+             Act.action.registry.unregister_drop Act.action.registry.unregister_quest \
              Act.action.run Act.action.run.args Act.action.run.path Act.action.set_queued_args \
              Act.action.set_queued_args.args Act.action.set_queued_args.id Act.action.switch \
              Act.action.unqueue Busy Configured Configured.args Configured.path Frame Frame.accounts \
@@ -1119,7 +1143,9 @@ mod tests {
              Frame.accounts.game.temp.rank Frame.accounts.gold_gained Frame.accounts.name \
              Frame.accounts.queue Frame.accounts.queue.id Frame.accounts.queue.script \
              Frame.accounts.queue.script.args Frame.accounts.queue.script.path \
-             Frame.accounts.recording Frame.accounts.script Frame.accounts.server \
+             Frame.accounts.recording Frame.accounts.registered Frame.accounts.registered.drops \
+             Frame.accounts.registered.quests Frame.accounts.registered.quests.id \
+             Frame.accounts.registered.quests.reward Frame.accounts.script Frame.accounts.server \
              Frame.accounts.state Frame.accounts.state.Busy Frame.accounts.state.Offline \
              Frame.accounts.state.Offline.why Frame.accounts.state.Reconnecting Frame.accounts.stats \
              Frame.accounts.stats.deaths Frame.accounts.stats.drops Frame.accounts.stats.gold_from \
@@ -1134,7 +1160,7 @@ mod tests {
              Resumable.script.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (10, pinned),
+            (11, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

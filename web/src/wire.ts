@@ -50,6 +50,18 @@ export type Game = {
   bank_slots: number;
 };
 
+export type Item = number | string;
+
+export type RegisteredQuest = { id: number; reward?: Item };
+
+export type Registered = { drops: Item[]; quests: RegisteredQuest[] };
+
+export type Edit =
+  | { register_drop: Item }
+  | { unregister_drop: Item }
+  | { register_quest: RegisteredQuest }
+  | { unregister_quest: number };
+
 export type Account = {
   name: string;
   user: string;
@@ -57,6 +69,7 @@ export type Account = {
   server: string;
   script: string | null;
   status: string;
+  registered: Registered | null;
   up: { secs: number; nanos: number } | null;
   stats: { kills: number; deaths: number; drops: number; gold_from: number | null };
   gold_gained: number | null;
@@ -99,6 +112,7 @@ export type Action =
   | "clear_queue"
   | "next"
   | { pick_up: number[] }
+  | { registry: Edit }
   | { record: null }
   | "stop_recording";
 
