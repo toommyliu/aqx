@@ -1387,7 +1387,8 @@ textarea.code {
 .vlist {
   max-height: 55dvh;
   overflow-y: auto;
-  margin: 6px -6px 0;
+  margin: 6px -14px 0 -6px;
+  padding-right: 14px;
 }
 
 .vlist ul {
@@ -1607,6 +1608,7 @@ dialog.tall .editor.script-chooser {
   min-height: 0;
   max-height: none;
   margin: 6px 0 0;
+  padding-right: 14px;
   overflow-y: auto;
 }
 
