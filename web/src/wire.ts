@@ -62,6 +62,7 @@ export type Account = {
   gold_gained: number | null;
   game: Game | null;
   recording: string | null;
+  queue: Queued[];
 };
 
 export type Channel = "aqx" | "script" | "server" | "chat" | "game" | "sent" | "received";
@@ -78,6 +79,8 @@ export type Ended = { endedMs: number; accounts: { name: string; user: string; l
 
 export type Script = { path: string; args: [string, string][] };
 
+export type Queued = { id: number; script: Script };
+
 export type Action =
   | "login"
   | "login_only"
@@ -89,6 +92,12 @@ export type Action =
   | "relogin"
   | { switch: string }
   | { run: Script }
+  | { enqueue: Script }
+  | { unqueue: number }
+  | { move_queued: { id: number; to: number } }
+  | { set_queued_args: { id: number; args: [string, string][] } }
+  | "clear_queue"
+  | "next"
   | { pick_up: number[] }
   | { record: null }
   | "stop_recording";
@@ -219,6 +228,7 @@ export const api = {
     extra: [string, string][];
     runs: { account: number; name: string; args: [string, string][] }[];
     shared: boolean;
+    queue: boolean;
   }) => call<Outcome[] | { problems: Problem[] }>("/api/run", body),
   args: (script: string, accounts: number[]) =>
     call<Declared>(`/api/args?${q({ script, accounts: accounts.join(",") })}`),

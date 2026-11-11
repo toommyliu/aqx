@@ -50,6 +50,8 @@ In the web UI, press Run, and press the options button next to a Skua script on 
 
 To give one account its own value, set it in that account's `args` in `aqx.toml`, or under Script options in the config editor. It applies on top of the shared options. From a shell, pass options to `aqx run` as `--arg Name=value`. For an option outside the `Options` group, write `--arg Group:Name=value`, and in `args` write `"Group:Name" = value`.
 
+A queued Skua script reads the shared options when it starts, not when you queue it. To give one run its own values, press the options button beside it in the account's Up next list. Those values apply to that run only, and you can change them while another script runs, because they don't touch the shared options.
+
 ## Write your own Skua script
 
 Keep your scripts in any folder outside `~/aqx/skua/Scripts`. Their `//cs_include Scripts/...` lines read files from the library:

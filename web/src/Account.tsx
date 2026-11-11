@@ -16,7 +16,7 @@ import {
 import { type AppHotkeyId } from "@tanstack/hotkeys";
 import { createFormatForDisplay, useAppHotkeys } from "@tanstack/solid-hotkeys";
 import { pauseOrResume, recordOrStop, recordable, tone } from "./App";
-import { logOut, openPicker, openServers, openScriptOptions } from "./Dialogs";
+import { logOut, openPicker, openQueuePicker, openQueuedOptions, openServers, openScriptOptions } from "./Dialogs";
 import {
   VIEWS,
   type View,
@@ -59,6 +59,9 @@ export function AccountPanel(props: { account: Account; index: number }) {
     <section class="account" classList={{ details: details() }} aria-labelledby="account-name">
       <Header account={a()} index={props.index} />
       <Actions account={a()} index={props.index} />
+      <Show when={a().queue.length > 0}>
+        <UpNext account={a()} index={props.index} />
+      </Show>
       <Tabs views={views()} game={a().game} shown={shown()} />
       <div class="panel" id={`panel-${shown()}`} role="tabpanel" aria-labelledby={`tab-${shown()}`}>
         <Switch>
@@ -292,7 +295,9 @@ function Action(props: {
   );
 }
 
-export function LoginMenu(props: { on: number[] }) {
+type MenuItem = { title: string; note: string; keys?: AppHotkeyId; run: () => void };
+
+function SplitMenu(props: { label: string; item: MenuItem }) {
   let menu!: HTMLDivElement;
   let button!: HTMLButtonElement;
   let release: (() => void) | undefined;
@@ -301,7 +306,8 @@ export function LoginMenu(props: { on: number[] }) {
   const hotkeys = useAppHotkeys();
   const format = createFormatForDisplay();
   const key = () => {
-    const hotkey = hotkeys()["account.loginOnly"].hotkey;
+    const keys = props.item.keys;
+    const hotkey = keys === undefined ? undefined : hotkeys()[keys].hotkey;
     return typeof hotkey === "string" ? hotkey : undefined;
   };
   return (
@@ -311,8 +317,8 @@ export function LoginMenu(props: { on: number[] }) {
         class="action expand"
         popovertarget={id}
         aria-haspopup="true"
-        aria-label="More ways to log in"
-        data-tip="More ways to log in"
+        aria-label={props.label}
+        data-tip={props.label}
         ref={button}
       >
         <Icon name="expand" />
@@ -336,17 +342,44 @@ export function LoginMenu(props: { on: number[] }) {
           onClick={() => {
             button.parentElement?.querySelector("button")?.focus();
             menu.hidePopover();
-            void act("login_only", "logging in", props.on);
+            props.item.run();
           }}
         >
-          Log in without the script
+          {props.item.title}
           <span class="muted small">
-            Stays idle until you run a script
+            {props.item.note}
             <Show when={key()}>{(k) => ` (${format(k())})`}</Show>
           </span>
         </button>
       </div>
     </>
+  );
+}
+
+export function LoginMenu(props: { on: number[] }) {
+  return (
+    <SplitMenu
+      label="More ways to log in"
+      item={{
+        title: "Log in without the script",
+        note: "Stays idle until you run a script",
+        keys: "account.loginOnly",
+        run: () => void act("login_only", "logging in", props.on),
+      }}
+    />
+  );
+}
+
+export function RunMenu(props: { on: number[] }) {
+  return (
+    <SplitMenu
+      label="More ways to run"
+      item={{
+        title: "Add to queue…",
+        note: "Runs after the current script finishes",
+        run: () => openQueuePicker(props.on),
+      }}
+    />
   );
 }
 
@@ -366,7 +399,10 @@ function Actions(props: { account: Account; index: number }) {
           <LoginMenu on={on()} />
         </Show>
       </div>
-      <Action icon="play" label="Run…" keys="account.run" onClick={() => openPicker(on())} />
+      <div class="login-split">
+        <Action icon="play" label="Run…" keys="account.run" onClick={() => openPicker(on())} />
+        <RunMenu on={on()} />
+      </div>
       <Show when={isRunning(a())}>
         <Action
           icon="stop"
@@ -400,6 +436,88 @@ function Actions(props: { account: Account; index: number }) {
       </Show>
       <Action icon="server" label="Server…" keys="account.server" onClick={() => openServers(on())} blocked={!isOnline(a()) && "Log in first"} />
     </div>
+  );
+}
+
+function shownArgs(args: [string, string][]): string {
+  return args.map(([k, v]) => `${k.replace(/^Options:/, "")}=${v}`).join(", ");
+}
+
+function UpNext(props: { account: Account; index: number }) {
+  const a = () => props.account;
+  const on = () => [props.index];
+  const last = () => a().queue.length - 1;
+  const move = (id: number, to: number) => void act({ move_queued: { id, to } }, "moved it", on());
+  return (
+    <section class="up-next" aria-labelledby="up-next-title">
+      <div class="line small">
+        <h3 id="up-next-title" class="muted">
+          Up next
+        </h3>
+        <button type="button" class="ghost small" onClick={() => act("next", "running the next script", on())}>
+          {isRunning(a()) ? "Skip to next" : "Start"}
+        </button>
+        <button type="button" class="ghost small" onClick={() => act("clear_queue", "emptied the queue", on())}>
+          Clear
+        </button>
+      </div>
+      <ol>
+        <For each={a().queue}>
+          {(q, i) => {
+            const name = () => q.script.path.split("/").pop() ?? q.script.path;
+            return (
+              <li>
+                <span class="ellipsis" data-tip={hide(q.script.path)}>
+                  {name()}
+                </span>
+                <Show when={q.script.args.length > 0}>
+                  <span class="muted ellipsis">{hide(shownArgs(q.script.args))}</span>
+                </Show>
+                <span class="queued-actions">
+                  <Show when={q.script.path.endsWith(".cs")}>
+                    <button
+                      type="button"
+                      class="icon-button"
+                      aria-label={`Options for ${name()}`}
+                      data-tip="Options for this run"
+                      onClick={() => openQueuedOptions(props.index, q.id)}
+                    >
+                      <Icon name="options" />
+                    </button>
+                  </Show>
+                  <button
+                    type="button"
+                    class="icon-button"
+                    aria-label={`Move ${name()} up`}
+                    disabled={i() === 0}
+                    onClick={() => move(q.id, i() - 1)}
+                  >
+                    <Icon name="up" />
+                  </button>
+                  <button
+                    type="button"
+                    class="icon-button"
+                    aria-label={`Move ${name()} down`}
+                    disabled={i() === last()}
+                    onClick={() => move(q.id, i() + 1)}
+                  >
+                    <Icon name="down" />
+                  </button>
+                  <button
+                    type="button"
+                    class="icon-button"
+                    aria-label={`Remove ${name()} from the queue`}
+                    onClick={() => act({ unqueue: q.id }, "removed it from the queue", on())}
+                  >
+                    <Icon name="close" />
+                  </button>
+                </span>
+              </li>
+            );
+          }}
+        </For>
+      </ol>
+    </section>
   );
 }
 
