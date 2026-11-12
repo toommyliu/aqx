@@ -1,10 +1,8 @@
-# Set up aqx and run sessions
+# Configuration
 
-`aqx.toml` lists your accounts and what each one runs. Every config gets a session that keeps its accounts logged in. You start and stop sessions from the shell, and drive them from the shell or from the [web UI](web.md).
+`aqx.toml` lists your accounts and what each one runs. Each config has its own session. See the [CLI reference](cli.md) and [web UI](web.md) for session controls.
 
-## Write aqx.toml
-
-`aqx init` sets up `~/aqx`, or the folder you name. It writes `aqx.d.ts`, a `tsconfig.json` that points at it, a sample script, `aqx.schema.json` for editor completion, and a `.gitignore` that keeps `aqx.toml` out of git. In a terminal it also asks for one account and writes an `aqx.toml` that runs the sample. Running it again updates `aqx.d.ts` and the schema and leaves your other files alone.
+## aqx.toml
 
 ```toml
 [defaults]
@@ -24,7 +22,7 @@ server = "Yorumi"
 auto_start = false
 ```
 
-aqx looks for `./aqx.toml`, then `~/aqx/aqx.toml`. Set `AQX_HOME` to use another folder in place of `~/aqx`, or pass `-c PATH` to read a specific file. The file holds passwords, so run `chmod 600` on it. aqx warns when other users can read it.
+aqx looks for `./aqx.toml`, then `~/aqx/aqx.toml`. Set `AQX_HOME` to replace `~/aqx`, or pass `-c PATH` to select a file. The file holds passwords. aqx warns when other users can read it.
 
 `[defaults]` takes every key below except `user`, `password`, `name`, `script` and `args`, and applies it to each account. An `[[account]]` can override any of them except `client_version`, which only `[defaults]` sets.
 
@@ -45,42 +43,4 @@ aqx looks for `./aqx.toml`, then `~/aqx/aqx.toml`. Set `AQX_HOME` to use another
 | `stall_after` | How long a running script can go without progress before the account counts as stalled, like `"90s"`, `"5m"` or `"1h"`. Progress is a kill, an item change, a quest turn-in or a map join. Defaults to `"5m"`. |
 | `on_stall` | What a stall does: `warn` logs a warning, `restart` restarts the script, and `relogin` logs out, back in, and starts the script again. Defaults to `warn`. |
 
-Script paths you type in the web UI also resolve relative to `aqx.toml`. The session checks the file every 2 seconds and adds any `[[account]]` with a new name, offline. Edits to accounts that are already in the session, `auto_start` included, take effect when it restarts, and each changed account's log says so. Run `aqx down`, then `aqx up -d`, to apply them, or restart the session from the web UI's Session menu.
-
-## Run sessions
-
-Each config gets its own session, so accounts from different `aqx.toml` files can run at the same time.
-
-| Command | Does |
-| --- | --- |
-| `aqx up [ACCOUNT...] [-c PATH] [--json \| --quiet]` | Run the session in this terminal and print its log. `ctrl+c` logs everyone out; a second one exits at once. Fails when the session is already running. |
-| `aqx up -d [ACCOUNT...] [-c PATH]` | Start the session in the background and return. When it's already running, log in the named accounts. |
-| `aqx up [-d] [ACCOUNT...] --no-script` | Log the accounts in without running their scripts |
-| `aqx ps [--json]` | List every running session's accounts: state, script and how many are queued, where, uptime and status |
-| `aqx logs [ACCOUNT] [-f] [--all]` | Print an account's recent log, or every account's when only one session runs. `-f` keeps printing, and `--all` adds game lines and the packets of a recording account. |
-| `aqx ctl ACCOUNT login\|logout\|stop\|restart\|pause\|resume\|relogin` | Drive an account in whichever session has it |
-| `aqx ctl ACCOUNT run SCRIPT [--arg KEY=VALUE]...` | Run a script, stopping the one running. Logs the account in if it's offline. |
-| `aqx ctl ACCOUNT queue SCRIPT [--arg KEY=VALUE]...` | Add a script to the end of the account's queue. See [Queue scripts](#queue-scripts). |
-| `aqx ctl ACCOUNT queue --clear` | Empty the account's queue |
-| `aqx ctl ACCOUNT next` | Stop the script and run the first one in the queue. Logs the account in if it's offline. |
-| `aqx ctl ACCOUNT record [FILE]` | Write the account's packets to `FILE` as JSON lines from now until `aqx ctl ACCOUNT record --stop`, with the token and personal fields redacted. The account has to be logged in to start, and the recording carries on through relogins and server switches. Without `FILE`, aqx writes to `recordings` in its data folder (`~/Library/Application Support/aqx/recordings` on macOS). |
-| `aqx down [-c PATH]` | Log out every account and end the session |
-
-`ACCOUNT` is a name or a username. Sessions keep their sockets, locks and logs in aqx's data folder (`~/Library/Application Support/aqx/sessions` on macOS), which only you can open. Set `AQX_SESSIONS` to use another folder. When `aqx up -d` attaches to a session that was already running, it says when that session started, and warns if `aqx.toml` changed after it. When the running session is from another build of aqx, `aqx up -d` asks whether to restart it with this one, and restarts it without asking when the two builds can't talk to each other. A restart logs the online accounts out and back in, and their scripts start again.
-
-## Queue scripts
-
-Each account has a queue of scripts to run next. When a script finishes, or stops itself, the first script in the queue starts. Adding a script doesn't start it, so an idle account waits until you run something or press Start. `aqx ctl ACCOUNT next` starts it from a shell.
-
-A stop, an error or a logout holds the queue where it is. With `restart_on_error` on, an error runs the same script again, and the queue moves on once it finishes. A relogin, a server switch, a stall restart and a reconnect start the current script again, not the next one. Running a script by hand leaves the queue alone, so it carries on after that script finishes.
-
-The queue lives in the session. Restarting the session from the web UI, or when `aqx up -d` swaps builds, keeps every account's queue, offline ones included, as long as one account is online to start the new session. `aqx down` empties it, and so does a session that ends because every account went offline.
-
-## Other tools
-
-| Command | Does |
-| --- | --- |
-| `aqx check SCRIPT...` | Compile scripts and the files they import, without logging in or running them |
-| `aqx skua update\|list [QUERY]\|path` | Download or update the Skua script library, search it, or print its folder. See [Run Skua scripts](skua.md). |
-| `aqx run -a ACCOUNT [SCRIPT] [--arg KEY=VALUE]...` | Log one account from `aqx.toml` in, run its script or the one named, and log out when it ends |
-| `aqx run ... --record FILE` | Also write every packet to `FILE` as JSON lines, with the token and personal fields redacted |
+Script paths in the web UI also resolve relative to `aqx.toml`. New accounts appear offline within 2 seconds. Changes to existing accounts take effect after a session restart.

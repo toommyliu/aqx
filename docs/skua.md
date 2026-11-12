@@ -1,6 +1,6 @@
 # Run Skua scripts
 
-aqx runs most [Skua](https://github.com/auqw/Skua) scripts unchanged. A worker built with .NET compiles and runs them. aqx keeps the Skua script library and its settings in one folder, `~/aqx/skua`.
+aqx runs most [Skua](https://github.com/auqw/Skua) scripts unchanged using a .NET worker. The script library and its settings live in `~/aqx/skua`.
 
 <img width="2930" height="1820" alt="skua" src="https://github.com/user-attachments/assets/3a4928bd-2762-4ae1-afe0-23152d2abfe0" />
 
@@ -18,7 +18,7 @@ aqx runs most [Skua](https://github.com/auqw/Skua) scripts unchanged. A worker b
 	```
 
 	The installed `aqx` builds the Skua worker from this clone. If you move or delete the clone, Skua scripts stop working until you install aqx again from a clone.
-3. Download the script library. In the web UI, press Run, switch to the Skua tab, then press Update. From a shell, run `aqx skua update`.
+3. Download the script library. In the web UI, press Run, switch to the Skua tab, then press Update. In a terminal, run `aqx skua update`.
 
 	`aqx skua update` downloads the `Skua` branch of [auqw/Scripts](https://github.com/auqw/Scripts), about 3 MB, into `~/aqx/skua/Scripts`. Then it builds the worker. The first build takes about a minute, because .NET downloads the worker's packages.
 
@@ -26,7 +26,7 @@ aqx contacts GitHub only when you press Update or run `aqx skua update`. Scripts
 
 ## Run a script from the library
 
-In the web UI, press Run on an account, or on the accounts you ticked, and switch to the Skua tab. The list shows the scripts in the library, each with its description and tags. The list leaves out files and folders whose names start with `Core`, such as `CoreBots.cs`, because they hold shared code and aren't meant to run. `aqx skua list` leaves them out too. The search box searches names, folders, descriptions, and tags. A script matches when it contains every word you type. A word that starts with `#` searches only tags. If a tag has exactly that name, the word matches only that tag, so `#rep` skips scripts tagged `reputation`. Otherwise the word matches every tag that starts with it, so `#mer` already finds the scripts tagged `merge`. `#merge legion` finds the scripts tagged `merge` that mention Legion. Pick a script to run it on those accounts.
+The web UI and `aqx skua list` search script names, folders, descriptions, and tags. Prefix a word with `#` to search tags. Files and folders whose names start with `Core` are excluded because they contain shared code.
 
 To run a library script each time an account logs in, set the account's `script` in `aqx.toml`. Paths in `aqx.toml` are relative to the file, so with the file in `~/aqx` the path starts with `skua/Scripts`:
 
@@ -37,7 +37,7 @@ password = "change-me"
 script = "skua/Scripts/Evil/NSoD/VoidAuras/0SmartVoidAuras.cs"
 ```
 
-From a shell, `aqx skua list` prints the full path and the name of each script that matches the words you give it, including `#tag` words. Pass that path to `aqx run`:
+In a terminal, `aqx skua list` prints the full path and the name of each script that matches the words you give it, including `#tag` words. Pass that path to `aqx run`:
 
 ```sh
 aqx skua list smart void
@@ -46,9 +46,9 @@ aqx run -a player1 ~/aqx/skua/Scripts/Evil/NSoD/VoidAuras/0SmartVoidAuras.cs
 
 ## Change script options
 
-In the web UI, press Run, and press the options button next to a Skua script on the Skua tab. For a Skua script outside the library, the Files tab has the same button next to each `.cs` file. The **CoreBots** tab edits the CoreBots options of that account. The **Script** tab edits the options of the script, and every account that runs the script shares them. You can change options only while the account is offline or idle.
+CoreBots options belong to an account. Script options are shared by every account that runs the script. You can change them only while the account is offline or idle.
 
-To give one account its own value, set it in that account's `args` in `aqx.toml`, or under Script options in the config editor. It applies on top of the shared options. From a shell, pass options to `aqx run` as `--arg Name=value`. For an option outside the `Options` group, write `--arg Group:Name=value`, and in `args` write `"Group:Name" = value`.
+To give one account its own value, set it in that account's `args` in `aqx.toml`, or under Script options in the config editor. It applies on top of the shared options. In a terminal, pass options to `aqx run` as `--arg Name=value`. For an option outside the `Options` group, write `--arg Group:Name=value`, and in `args` write `"Group:Name" = value`.
 
 A queued Skua script reads the shared options when it starts, not when you queue it. To give one run its own values, press the options button beside it in the account's Up next list. Those values apply to that run only, and you can change them while another script runs, because they don't touch the shared options.
 
@@ -77,7 +77,7 @@ If a folder above the script has its own `CoreBots.cs`, aqx reads the includes f
 
 ## Update the library
 
-In the web UI, press Run, switch to the Skua tab, and press Update. From a shell, run `aqx skua update`. aqx downloads the library only when it changed upstream.
+In the web UI, press Run, switch to the Skua tab, and press Update. In a terminal, run `aqx skua update`. aqx downloads the library only when it changed upstream.
 
 An update replaces the whole `~/aqx/skua/Scripts` folder, so aqx discards any edits you made inside it. If the download fails, aqx keeps the current library. Scripts that are running keep running, and the next start uses the new library.
 

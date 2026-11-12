@@ -29,8 +29,9 @@ aqx web --up
 
 ## Docs
 
-- [Set up aqx and run sessions](docs/config.md)
-- [Run accounts from the browser](docs/web.md)
+- [Configuration](docs/config.md)
+- [CLI reference](docs/cli.md)
+- [Web UI](docs/web.md)
 - [Write an aqx script](docs/writing-scripts.md)
 - [Run Skua scripts](docs/skua.md)
 
