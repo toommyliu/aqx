@@ -144,6 +144,12 @@ pub struct Stack {
 pub struct QuestProgress {
     pub id: i64,
     pub name: String,
+    pub items: Vec<TurnIn>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnIn {
+    pub name: String,
     pub have: u32,
     pub need: u32,
 }
@@ -431,8 +437,15 @@ fn lists(world: &World, me: &Me, board: &Board, game: &mut Game) {
         .map(|q| QuestProgress {
             id: q.id.0,
             name: q.name.clone(),
-            have: q.turn_in.iter().map(|n| held(n.id).min(n.qty)).sum(),
-            need: q.turn_in.iter().map(|n| n.qty).sum(),
+            items: q
+                .turn_in
+                .iter()
+                .map(|n| TurnIn {
+                    name: n.name.clone(),
+                    have: held(n.id),
+                    need: n.qty,
+                })
+                .collect(),
         })
         .collect();
     game.factions = world
@@ -552,6 +565,17 @@ mod tests {
             peer.send(&json_message(json!({
                 "cmd": "addGoldExp", "intGold": 0, "intExp": 0, "iRep": 2600, "FactionID": 46, "typ": "q",
             })));
+            peer.send(&json_message(json!({"cmd": "getQuests", "quests": {"30": {
+                "QuestID": 30, "sName": "Potion Run",
+                "turnin": [{"ItemID": 101, "iQty": 3}, {"ItemID": 900, "iQty": 10}],
+                "oItems": {
+                    "101": {"ItemID": 101, "sName": "Health Potion"},
+                    "900": {"ItemID": 900, "sName": "Frog Leg"},
+                },
+            }}})));
+            peer.send(&json_message(
+                json!({"cmd": "acceptQuest", "QuestID": 30, "bSuccess": 1}),
+            ));
             peer.join_farm();
             peer.expect(&packet::logout());
         });
@@ -610,6 +634,16 @@ mod tests {
             names(&game.inventory),
             ["Default Sword", "Health Potion"],
             "equipped items lead"
+        );
+        let turn_in: Vec<_> = game.quests[0]
+            .items
+            .iter()
+            .map(|i| (i.name.as_str(), i.have, i.need))
+            .collect();
+        assert_eq!(
+            turn_in,
+            [("Health Potion", 5, 3), ("Frog Leg", 0, 10)],
+            "each turn-in item shows what is held against what the quest asks for"
         );
         let good = &game.factions[0];
         assert_eq!((good.name.as_str(), good.gained), ("Good", true));
