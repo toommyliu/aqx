@@ -95,7 +95,10 @@ const shownName = (path: string) => path.split("/").pop() ?? path;
 
 function runEffect(on: number[]): { body: string; danger: boolean } {
   const offline = on.filter((i) => accounts[i] !== undefined && isOffline(accounts[i])).length;
-  const running = on.filter((i) => accounts[i] !== undefined && isRunning(accounts[i])).length;
+  const running = on.filter((i) => {
+    const a = accounts[i];
+    return a !== undefined && (isRunning(a) || (a.script !== null && typeof a.state === "object" && "Reconnecting" in a.state));
+  }).length;
   if (on.length === 1) {
     const name = nameOf(on[0] ?? 0);
     const body = running
