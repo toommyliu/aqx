@@ -279,10 +279,19 @@ export function Tooltips() {
   const show = (target: EventTarget | null) => {
     const el = target instanceof Element ? target.closest<HTMLElement>("[data-tip]") : null;
     if (!el) return hide();
-    tip.textContent = el.dataset.tip ?? "";
-    if (!tip.matches(":popover-open")) tip.showPopover();
     stop?.();
-    stop = anchor(el, tip, "top");
+    const update = () => {
+      tip.textContent = el.dataset.tip ?? "";
+    };
+    update();
+    if (!tip.matches(":popover-open")) tip.showPopover();
+    const unanchor = anchor(el, tip, "top");
+    const observer = new MutationObserver(update);
+    observer.observe(el, { attributes: true, attributeFilter: ["data-tip"] });
+    stop = () => {
+      observer.disconnect();
+      unanchor();
+    };
   };
   onMount(() => {
     const over = (e: Event) => (matchMedia("(hover: hover)").matches ? show(e.target) : undefined);
@@ -306,7 +315,7 @@ export function Since(props: { at: number; prefix: string }) {
   const at = () => Math.round(props.at / 1000) * 1000;
   return (
     <time
-      class="since"
+      class="detail-tip"
       datetime={new Date(at()).toISOString()}
       tabindex="0"
       data-tip={exact.format(at())}

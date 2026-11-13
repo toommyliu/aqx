@@ -140,7 +140,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 12;
+pub const PROTOCOL: u32 = 13;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -1124,7 +1124,8 @@ mod tests {
              Frame.accounts.game.drops Frame.accounts.game.drops.equipped \
              Frame.accounts.game.drops.id Frame.accounts.game.drops.max \
              Frame.accounts.game.drops.name Frame.accounts.game.drops.qty \
-             Frame.accounts.game.drops.rank Frame.accounts.game.factions \
+             Frame.accounts.game.drops.rank Frame.accounts.game.exp Frame.accounts.game.exp_to_level \
+             Frame.accounts.game.factions \
              Frame.accounts.game.factions.gained Frame.accounts.game.factions.name \
              Frame.accounts.game.factions.next Frame.accounts.game.factions.rank \
              Frame.accounts.game.factions.rep Frame.accounts.game.gold Frame.accounts.game.hp \
@@ -1164,7 +1165,7 @@ mod tests {
              Resumable.script.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (12, pinned),
+            (13, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }
