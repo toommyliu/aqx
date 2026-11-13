@@ -96,6 +96,15 @@ const shownName = (path: string) => path.split("/").pop() ?? path;
 function runEffect(on: number[]): { body: string; danger: boolean } {
   const offline = on.filter((i) => accounts[i] !== undefined && isOffline(accounts[i])).length;
   const running = on.filter((i) => accounts[i] !== undefined && isRunning(accounts[i])).length;
+  if (on.length === 1) {
+    const name = nameOf(on[0] ?? 0);
+    const body = running
+      ? `${name} stops the script it's running, then starts this one.`
+      : offline
+        ? `${name} logs in, then starts this script.`
+        : `${name} starts this script.`;
+    return { body, danger: running > 0 };
+  }
   const first: string[] = [];
   if (offline > 0) first.push(offline === 1 ? "1 offline account logs in first." : `${offline} offline accounts log in first.`);
   if (running > 0)
@@ -645,6 +654,9 @@ function RunArgs(props: { script: string; extra: [string, string][]; queue: bool
   const [error, setError] = createSignal("");
   const [extra, setExtra] = createSignal(props.extra.map(([k, v]) => `${k}=${v}`).join(" "));
   let form!: HTMLFormElement;
+  let restart!: HTMLButtonElement;
+  const effect = () => runEffect(on);
+  const interrupts = () => !props.queue && effect().danger;
   const key = (account: number | null, arg: string) => `${account ?? "all"}:${arg}`;
   createEffect(() => {
     const d = declared();
@@ -671,6 +683,7 @@ function RunArgs(props: { script: string; extra: [string, string][]; queue: bool
     e.preventDefault();
     const d = declared();
     if (!d) return;
+    const queue = props.queue || (e.submitter instanceof HTMLButtonElement && e.submitter.value === "queue");
     const typed = typedRun(`x ${extra()}`);
     if (typeof typed === "string") return setError(typed);
     const sent = new Map(typed.extra);
@@ -689,7 +702,7 @@ function RunArgs(props: { script: string; extra: [string, string][]; queue: bool
         script: props.script,
         extra: [...sent],
         shared: !perAccount(),
-        queue: props.queue,
+        queue,
         runs: targetsOf(on).map(({ account, name }) => ({
           account,
           name,
@@ -701,7 +714,7 @@ function RunArgs(props: { script: string; extra: [string, string][]; queue: bool
       });
       if (Array.isArray(outcome)) {
         close();
-        report(outcome, `${props.queue ? "queued" : "running"} ${d.shown}`);
+        report(outcome, `${queue ? "queued" : "running"} ${d.shown}`);
       } else {
         setProblems(outcome.problems);
         queueMicrotask(() => form.querySelector<HTMLElement>("[aria-invalid=true]")?.focus());
@@ -777,17 +790,42 @@ function RunArgs(props: { script: string; extra: [string, string][]; queue: bool
           <button type="button" onClick={close}>
             Cancel
           </button>
-          <button type="submit" form="run-form" class="primary" disabled={busy() || !declared()}>
-            {busy()
-              ? props.queue
-                ? "Queueing…"
-                : "Starting…"
-              : `${props.queue ? "Queue" : "Run"}${on.length > 1 ? ` on ${on.length} accounts` : ""}`}
-          </button>
+          <Show
+            when={interrupts()}
+            fallback={
+              <button type="submit" form="run-form" class="primary" disabled={busy() || !declared()}>
+                {busy()
+                  ? props.queue
+                    ? "Queueing…"
+                    : "Starting…"
+                  : `${props.queue ? "Queue" : "Run"}${on.length > 1 ? ` on ${on.length} accounts` : ""}`}
+              </button>
+            }
+          >
+            <button type="submit" form="run-form" value="queue" disabled={busy() || !declared()}>
+              Add to queue
+            </button>
+            <button type="submit" form="run-form" ref={restart} class="primary danger" disabled={busy() || !declared()}>
+              Restart
+            </button>
+          </Show>
         </>
       }
     >
-      <form id="run-form" ref={form} onSubmit={submit} class="form">
+      <form
+        id="run-form"
+        ref={form}
+        onSubmit={submit}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" || !interrupts() || !(e.target instanceof HTMLInputElement)) return;
+          e.preventDefault();
+          restart.focus();
+        }}
+        class="form"
+      >
+        <Show when={interrupts()}>
+          <p>{effect().body}</p>
+        </Show>
         <Show when={asked.error}>
           <p class="error">{message(asked.error)}</p>
         </Show>
