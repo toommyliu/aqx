@@ -140,7 +140,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 14;
+pub const PROTOCOL: u32 = 15;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -866,7 +866,8 @@ mod tests {
 
     fn samples() -> Vec<serde_json::Value> {
         use crate::view::{
-            Aura, Game, Player, QuestProgress, Shown, Stack, Standing, State, Step, Target, TurnIn,
+            Aura, AuraTimer, Game, Player, QuestProgress, Shown, Stack, Standing, State, Step,
+            Target, TurnIn,
         };
         let script = Script {
             path: PathBuf::from("/srv/farm.ts"),
@@ -890,8 +891,23 @@ mod tests {
             auras: vec![Aura {
                 name: "Haste".into(),
                 stacks: 1,
+                description: "Increases haste".into(),
+                timer: Some(AuraTimer {
+                    duration_ms: 2000,
+                    left_ms: 1000,
+                }),
             }],
             target: Some(Target {
+                id: 1,
+                auras: vec![Aura {
+                    name: "Mark".into(),
+                    stacks: 2,
+                    description: String::new(),
+                    timer: Some(AuraTimer {
+                        duration_ms: 4000,
+                        left_ms: 3000,
+                    }),
+                }],
                 name: "Frogzard".into(),
                 hp: 1,
                 max_hp: 2,
@@ -1115,8 +1131,9 @@ mod tests {
              Act.action.set_queued_args.args Act.action.set_queued_args.id Act.action.switch \
              Act.action.unqueue Busy Configured Configured.args Configured.path Frame Frame.accounts \
              Frame.accounts.args Frame.accounts.game Frame.accounts.game.area \
-             Frame.accounts.game.auras Frame.accounts.game.auras.name \
-             Frame.accounts.game.auras.stacks Frame.accounts.game.away Frame.accounts.game.bag_slots \
+             Frame.accounts.game.auras Frame.accounts.game.auras.description Frame.accounts.game.auras.name \
+             Frame.accounts.game.auras.stacks Frame.accounts.game.auras.timer \
+             Frame.accounts.game.auras.timer.duration_ms Frame.accounts.game.auras.timer.left_ms Frame.accounts.game.away Frame.accounts.game.bag_slots \
              Frame.accounts.game.bag_used Frame.accounts.game.bank Frame.accounts.game.bank.category Frame.accounts.game.bank.equipped \
              Frame.accounts.game.bank.id Frame.accounts.game.bank.max Frame.accounts.game.bank.name \
              Frame.accounts.game.bank.qty Frame.accounts.game.bank.rank \
@@ -1142,7 +1159,11 @@ mod tests {
              Frame.accounts.game.quests.items.need Frame.accounts.game.quests.name \
              Frame.accounts.game.skills Frame.accounts.game.skills.left_ms \
              Frame.accounts.game.skills.name Frame.accounts.game.skills.ready \
-             Frame.accounts.game.target Frame.accounts.game.target.hp \
+             Frame.accounts.game.target Frame.accounts.game.target.auras \
+             Frame.accounts.game.target.auras.description Frame.accounts.game.target.auras.name \
+             Frame.accounts.game.target.auras.stacks Frame.accounts.game.target.auras.timer \
+             Frame.accounts.game.target.auras.timer.duration_ms Frame.accounts.game.target.auras.timer.left_ms \
+             Frame.accounts.game.target.hp Frame.accounts.game.target.id \
              Frame.accounts.game.target.max_hp Frame.accounts.game.target.name \
              Frame.accounts.game.temp Frame.accounts.game.temp.category Frame.accounts.game.temp.equipped Frame.accounts.game.temp.id \
              Frame.accounts.game.temp.max Frame.accounts.game.temp.name Frame.accounts.game.temp.qty \
@@ -1166,7 +1187,7 @@ mod tests {
              Resumable.script.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (14, pinned),
+            (15, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

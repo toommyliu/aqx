@@ -112,17 +112,27 @@ pub struct SkillState {
     pub left_ms: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Aura {
     pub name: String,
     pub stacks: u32,
+    pub description: String,
+    pub timer: Option<AuraTimer>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AuraTimer {
+    pub duration_ms: u32,
+    pub left_ms: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Target {
+    pub id: i64,
     pub name: String,
     pub hp: u32,
     pub max_hp: u32,
+    pub auras: Vec<Aura>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,21 +399,15 @@ fn summary(world: &World, me: &Me, now: Instant) -> Game {
                 }
             })
             .collect(),
-        auras: me
-            .auras
-            .active
-            .iter()
-            .map(|a| Aura {
-                name: a.name.clone(),
-                stacks: a.stacks,
-            })
-            .collect(),
+        auras: auras(&me.auras, now),
         target: world.target.and_then(|id| {
             let m = room?.monsters.iter().find(|m| m.id == id)?;
             Some(Target {
+                id: m.id.0,
                 name: m.name.clone(),
                 hp: m.hp,
                 max_hp: m.max_hp,
+                auras: auras(&m.auras, now),
             })
         }),
         bag_used: used(Pool::Bag),
@@ -413,6 +417,36 @@ fn summary(world: &World, me: &Me, now: Instant) -> Game {
         bank_slots: me.bank_slots,
         ..Game::default()
     }
+}
+
+fn auras(auras: &aqx_client::Auras, now: Instant) -> Vec<Aura> {
+    auras
+        .hud
+        .iter()
+        .filter(|a| {
+            a.expires.is_none_or(|expires| {
+                now.saturating_duration_since(expires) <= Duration::from_secs(10)
+            })
+        })
+        .map(|a| Aura {
+            name: a.name.clone(),
+            stacks: a.stacks,
+            description: a.description.clone(),
+            timer: a.expires.and_then(|expires| {
+                let duration = Duration::try_from_secs_f64(a.duration).ok()?;
+                if duration.is_zero() {
+                    return None;
+                }
+                let left = expires.saturating_duration_since(now);
+                Some(AuraTimer {
+                    duration_ms: u32::try_from(duration.as_millis())
+                        .unwrap_or(u32::MAX)
+                        .max(1),
+                    left_ms: u32::try_from(left.as_millis()).unwrap_or(u32::MAX),
+                })
+            }),
+        })
+        .collect()
 }
 
 fn cooling(readiness: Option<&Readiness>, full: Duration, now: Instant) -> (f32, Duration) {
@@ -632,6 +666,127 @@ mod tests {
             (0.0, Duration::ZERO)
         );
         assert_eq!(cooling(None, secs(4), now), (1.0, Duration::ZERO));
+    }
+
+    #[test]
+    fn combat_details_follow_hud_timers_stacks_and_target_switches() {
+        let (send, receive) = std::sync::mpsc::channel::<Vec<serde_json::Value>>();
+        let harness = Harness::start(Options::default(), move |listener| {
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready();
+            peer.join_farm();
+            for (step, messages) in receive.iter().enumerate() {
+                for message in messages {
+                    peer.send(&json_message(message));
+                }
+                peer.send(&json_message(json!({
+                    "cmd": "acceptQuest", "QuestID": step + 1, "bSuccess": 1,
+                })));
+            }
+            peer.expect_logout();
+        });
+        let snapshot = |messages| {
+            send.send(messages).unwrap();
+            loop {
+                if matches!(harness.events.recv().unwrap(), Event::QuestAccepted { .. }) {
+                    return (*harness.session.snapshot()).clone();
+                }
+            }
+        };
+        let mut world = snapshot(vec![json!({
+            "cmd": "ct", "a": [
+                {"cmd": "aura+", "cInf": "p:7", "tInf": "p:7", "auras": [
+                    {"nam": "Timed", "desc": "An active effect", "dur": 20, "t": "s", "isNew": true},
+                    {"nam": "Untimed", "dur": 20, "t": "x", "isNew": true},
+                ]},
+                {"cmd": "aura+", "cInf": "p:8", "tInf": "p:7", "auras": [
+                    {"nam": "Timed", "dur": 20, "t": "s", "stk": 2, "isNew": true},
+                ]},
+                {"cmd": "aura+", "tInf": "m:1", "auras": [
+                    {"nam": "Mark", "dur": 8, "t": "s", "isNew": true},
+                ]},
+                {"cmd": "aura++", "tInf": "m:2", "auras": [
+                    {"nam": "Ward", "isNew": true},
+                ]},
+            ],
+        })]);
+        let board = Board::default();
+        let end = world.me.as_ref().unwrap().auras.hud[0].expires.unwrap();
+        world.target = Some(aqx_client::MonMapId(1));
+        let first = summary(
+            &world,
+            world.me.as_ref().unwrap(),
+            end - Duration::from_secs(5),
+        );
+        assert_eq!(first.auras.len(), 2);
+        assert_eq!(first.auras[0].stacks, 2);
+        assert_eq!(first.auras[0].description, "An active effect");
+        assert_eq!(
+            first.auras[0].timer,
+            Some(AuraTimer {
+                duration_ms: 20000,
+                left_ms: 5000
+            })
+        );
+        assert_eq!(first.auras[1].timer, None);
+        assert_eq!(first.target.as_ref().unwrap().auras[0].name, "Mark");
+        let elapsed = game(&world, &board, false, end + Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            elapsed.auras[0].timer,
+            Some(AuraTimer {
+                duration_ms: 20000,
+                left_ms: 0
+            })
+        );
+        let stale = game(&world, &board, false, end + Duration::from_secs(11)).unwrap();
+        assert_eq!(stale.auras.len(), 1);
+        assert_eq!(stale.auras[0].name, "Untimed");
+
+        world = snapshot(vec![json!({
+            "cmd": "ct", "a": [
+                {"cmd": "aura+", "cInf": "p:7", "tInf": "p:7", "auras": [
+                    {"nam": "Timed", "dur": 10, "t": "s", "stk": 5},
+                ]},
+                {"cmd": "aura=", "tInf": "p:7", "auras": [{"nam": "Untimed", "stk": 7}]},
+                {"cmd": "aura-", "tInf": "m:1", "aura": {"nam": "Mark", "stk": 3, "dur": 4}},
+            ],
+        })]);
+        let me = world.me.as_ref().unwrap();
+        let end = me.auras.hud[0].expires.unwrap();
+        let now = end - Duration::from_secs(10);
+        world.target = Some(aqx_client::MonMapId(1));
+        let refreshed = game(&world, &board, true, now).unwrap();
+        assert_eq!(refreshed.auras[0].stacks, 5);
+        assert_eq!(
+            refreshed.auras[0].timer,
+            Some(AuraTimer {
+                duration_ms: 20000,
+                left_ms: 10000
+            })
+        );
+        assert_eq!(refreshed.auras[1].stacks, 7);
+        assert_eq!(refreshed.target.as_ref().unwrap().auras[0].stacks, 3);
+        world.target = Some(aqx_client::MonMapId(2));
+        let switched = game(&world, &board, false, now).unwrap().target.unwrap();
+        assert_eq!(switched.id, 2);
+        assert_eq!(switched.name, refreshed.target.unwrap().name);
+        assert_eq!(switched.auras[0].name, "Ward");
+        assert_eq!(switched.auras[0].timer, None);
+        world.target = None;
+        assert_eq!(game(&world, &board, false, now).unwrap().target, None);
+
+        world = snapshot(vec![
+            json!({"cmd": "aura-", "tInf": "p:7", "aura": {"nam": "Timed"}}),
+            json!({"cmd": "clearAuras"}),
+            json!({"cmd": "ct", "m": {"1": {"intHP": 0, "intState": 0}}}),
+        ]);
+        world.target = Some(aqx_client::MonMapId(1));
+        let cleared = game(&world, &board, false, Instant::now()).unwrap();
+        assert!(cleared.auras.is_empty());
+        assert!(cleared.target.unwrap().auras.is_empty());
+        drop(send);
+        harness.session.logout();
+        harness.finish();
     }
 
     #[test]
