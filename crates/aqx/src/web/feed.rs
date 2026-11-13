@@ -55,6 +55,7 @@ struct Steady {
     rest: Shown,
     up_since: Option<Instant>,
     ready_at: Vec<Option<Instant>>,
+    aura_ends: Vec<Option<Instant>>,
 }
 
 impl Steady {
@@ -70,10 +71,27 @@ impl Steady {
                 })
             })
             .collect();
+        let aura_ends = rest
+            .game
+            .iter_mut()
+            .flat_map(|game| {
+                game.auras
+                    .iter_mut()
+                    .chain(game.target.iter_mut().flat_map(|target| &mut target.auras))
+            })
+            .map(|aura| {
+                aura.timer.as_mut().and_then(|timer| {
+                    (timer.left_ms > 0).then(|| {
+                        at + Duration::from_millis(std::mem::take(&mut timer.left_ms).into())
+                    })
+                })
+            })
+            .collect();
         Steady {
             rest,
             up_since,
             ready_at,
+            aura_ends,
         }
     }
 
@@ -89,6 +107,11 @@ impl Steady {
                 .ready_at
                 .iter()
                 .zip(&now.ready_at)
+                .all(|(a, b)| near(a, b))
+            && self
+                .aura_ends
+                .iter()
+                .zip(&now.aura_ends)
                 .all(|(a, b)| near(a, b))
     }
 }
@@ -508,6 +531,96 @@ mod tests {
             events(&held),
             ["account"],
             "a cooldown held at empty is sent each tick"
+        );
+    }
+
+    #[test]
+    fn aura_countdowns_only_send_lifecycle_changes() {
+        use crate::view::{Aura, AuraTimer, Game, Target};
+        let at = Instant::now();
+        let timed = |left_ms: u32| {
+            let aura = Aura {
+                name: "Effect".into(),
+                stacks: 2,
+                description: String::new(),
+                timer: Some(AuraTimer {
+                    duration_ms: 120_000,
+                    left_ms,
+                }),
+            };
+            Shown {
+                game: Some(Game {
+                    auras: vec![aura.clone()],
+                    target: Some(Target {
+                        id: 1,
+                        name: "Monster".into(),
+                        hp: 100,
+                        max_hp: 100,
+                        auras: vec![aura],
+                    }),
+                    ..Default::default()
+                }),
+                ..shown("player1", "")
+            }
+        };
+        let mut feed = Feed::resuming(None);
+        feed.see(running(vec![timed(90_000)], vec![]), at);
+        let mut sent = 0;
+        for tick in 1..=24 {
+            let output = feed.see(
+                running(vec![timed(90_000 - tick * 250)], vec![]),
+                at + TICK * tick,
+            );
+            sent += events(&output).len();
+        }
+        assert_eq!(sent, 0, "six seconds of countdowns need no account updates");
+        let later = at + Duration::from_secs(6);
+        let refreshed = feed.see(running(vec![timed(90_000)], vec![]), later);
+        assert_eq!(events(&refreshed), ["account"]);
+        let mut resized = timed(90_000);
+        resized.game.as_mut().unwrap().auras[0]
+            .timer
+            .as_mut()
+            .unwrap()
+            .duration_ms = 180_000;
+        assert_eq!(
+            events(&feed.see(running(vec![resized], vec![]), later)),
+            ["account"]
+        );
+        let mut stacked = timed(90_000);
+        stacked
+            .game
+            .as_mut()
+            .unwrap()
+            .target
+            .as_mut()
+            .unwrap()
+            .auras[0]
+            .stacks = 3;
+        assert_eq!(
+            events(&feed.see(running(vec![stacked], vec![]), later)),
+            ["account"]
+        );
+        let elapsed = feed.see(
+            running(vec![timed(0)], vec![]),
+            later + Duration::from_secs(90),
+        );
+        assert_eq!(events(&elapsed), ["account"]);
+        assert!(
+            feed.see(
+                running(vec![timed(0)], vec![]),
+                later + Duration::from_secs(91)
+            )
+            .is_empty()
+        );
+        let mut untimed = timed(0);
+        untimed.game.as_mut().unwrap().auras[0].timer = None;
+        assert_eq!(
+            events(&feed.see(
+                running(vec![untimed], vec![]),
+                later + Duration::from_secs(91)
+            )),
+            ["account"]
         );
     }
 
