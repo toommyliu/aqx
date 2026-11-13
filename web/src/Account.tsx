@@ -48,6 +48,7 @@ import {
   type Channel,
   type Game,
   type Item,
+  type ItemCategory,
   type Line,
   type Registered,
   type Stack,
@@ -818,12 +819,67 @@ function Table(props: { label: string; head: JSX.Element[]; children: JSX.Elemen
   );
 }
 
-function Stacks(props: { label: string; stacks: Stack[]; note?: string }) {
+const ITEM_CATEGORIES: readonly [ItemCategory, string][] = [
+  ["classes", "Classes"],
+  ["weapons", "Weapons"],
+  ["armor", "Armor"],
+  ["helms", "Helms"],
+  ["capes", "Capes"],
+  ["pets", "Pets"],
+  ["accessories", "Accessories"],
+  ["items", "Items"],
+  ["consumables", "Potions & elixirs"],
+  ["enhancements", "Enhancements"],
+  ["other", "Other"],
+];
+
+type ItemFilter = "all" | "equipped" | ItemCategory;
+const ITEM_FILTERS: readonly [ItemFilter, string][] = [["all", "All"], ["equipped", "Equipped"], ...ITEM_CATEGORIES];
+
+function Stacks(props: { label: string; stacks: Stack[]; note?: string; categories?: boolean; account?: number }) {
+  const [selected, setSelected] = createSignal<ItemFilter>("all");
+  createEffect(on(() => props.account, () => setSelected("all"), { defer: true }));
   const find = createMemo(() => finder(search()));
-  const rows = createMemo(() => props.stacks.filter((s) => matches(find(), s.name)));
+  const counts = createMemo(() => {
+    const counts = new Map<ItemFilter, number>();
+    let equipped = 0;
+    for (const item of props.stacks) {
+      counts.set(item.category, (counts.get(item.category) ?? 0) + 1);
+      if (item.equipped) equipped++;
+    }
+    counts.set("all", props.stacks.length);
+    counts.set("equipped", equipped);
+    return counts;
+  });
+  const filters = createMemo(() => ITEM_FILTERS.filter(([id]) => id === "all" || (counts().get(id) ?? 0) > 0));
+  createEffect(() => {
+    if (props.categories && !filters().some(([id]) => id === selected())) setSelected("all");
+  });
+  const filter = () => props.categories && filters().some(([id]) => id === selected()) ? selected() : "all";
+  const rows = createMemo(() => {
+    const category = filter();
+    return props.stacks.filter((s) =>
+      (category === "all" || (category === "equipped" ? s.equipped : s.category === category)) && matches(find(), s.name),
+    );
+  });
   return (
     <>
       <div class="toolbar">
+        <Show when={props.categories}>
+          <select
+            class="item-category"
+            aria-label="Inventory category"
+            value={filter()}
+            onChange={(e) => {
+              const choice = ITEM_FILTERS.find(([id]) => id === e.currentTarget.value);
+              if (choice) setSelected(choice[0]);
+            }}
+          >
+            <For each={filters()}>
+              {([id, label]) => <option value={id}>{label} · {counts().get(id) ?? 0}</option>}
+            </For>
+          </select>
+        </Show>
         <Search label={`Search ${props.label.toLowerCase()}`} />
         <Show when={props.note}>
           <span class="muted small">{props.note}</span>
@@ -1273,6 +1329,8 @@ function Lists(props: { game: Game; view: View; index: number; registered: Regis
       <Match when={props.view === "inventory"}>
         <Stacks
           label="Inventory"
+          categories
+          account={props.index}
           stacks={g().inventory}
           note={`bag ${g().bag_used}/${g().bag_slots} · misc ${g().misc_used}`}
         />

@@ -140,6 +140,48 @@ pub struct Stack {
     pub max: u32,
     pub equipped: bool,
     pub rank: Option<u32>,
+    pub category: ItemCategory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemCategory {
+    Classes,
+    Weapons,
+    Armor,
+    Helms,
+    Capes,
+    Pets,
+    Accessories,
+    Items,
+    Consumables,
+    Enhancements,
+    Other,
+}
+
+impl ItemCategory {
+    fn of(kind: &str, link: &str) -> Self {
+        match kind {
+            "Class" => Self::Classes,
+            "Sword" | "Axe" | "Gauntlet" | "Dagger" | "HandGun" | "Rifle" | "Gun" | "Whip"
+            | "Bow" | "Mace" | "Polearm" | "Staff" | "Wand" => Self::Weapons,
+            "Armor" => Self::Armor,
+            "Helm" => Self::Helms,
+            "Cape" => Self::Capes,
+            "Pet" => Self::Pets,
+            "Misc" | "Earring" | "Amulet" | "Necklace" | "Belt" | "Ring" => Self::Accessories,
+            "Item"
+                if ["potion", "elixir", "tonic", "scroll"]
+                    .iter()
+                    .any(|name| link.eq_ignore_ascii_case(name)) =>
+            {
+                Self::Consumables
+            }
+            "Note" | "Resource" | "Item" | "Quest Item" | "ServerUse" => Self::Items,
+            "Enhancement" => Self::Enhancements,
+            _ => Self::Other,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,6 +450,7 @@ fn lists(world: &World, me: &Me, board: &Board, game: &mut Game) {
         max: i.max_stack,
         equipped: i.equipped,
         rank: i.class_rank(),
+        category: ItemCategory::of(&i.kind, &i.link),
     };
     if let Some(room) = &world.room {
         game.players = room
@@ -431,6 +474,7 @@ fn lists(world: &World, me: &Me, board: &Board, game: &mut Game) {
                 max: d.max_stack,
                 equipped: false,
                 rank: None,
+                category: ItemCategory::of(&d.kind, &d.link),
             })
             .collect(),
     );
@@ -479,6 +523,7 @@ fn lists(world: &World, me: &Me, board: &Board, game: &mut Game) {
                 max: t.max_stack,
                 equipped: false,
                 rank: None,
+                category: ItemCategory::Items,
             })
             .collect(),
     );
@@ -534,6 +579,39 @@ mod tests {
 
     use super::*;
     use crate::config::Script;
+
+    #[test]
+    fn inventory_categories_group_equipment_and_separate_consumables() {
+        for kind in [
+            "Sword", "Axe", "Gauntlet", "Dagger", "HandGun", "Rifle", "Gun", "Whip", "Bow", "Mace",
+            "Polearm", "Staff", "Wand",
+        ] {
+            assert_eq!(ItemCategory::of(kind, ""), ItemCategory::Weapons);
+        }
+        for kind in ["Misc", "Earring", "Amulet", "Necklace", "Belt", "Ring"] {
+            assert_eq!(ItemCategory::of(kind, ""), ItemCategory::Accessories);
+        }
+        for link in ["potion", "Elixir", "TONIC", "scroll"] {
+            assert_eq!(ItemCategory::of("Item", link), ItemCategory::Consumables);
+        }
+        for (kind, category) in [
+            ("Class", ItemCategory::Classes),
+            ("Armor", ItemCategory::Armor),
+            ("Helm", ItemCategory::Helms),
+            ("Cape", ItemCategory::Capes),
+            ("Pet", ItemCategory::Pets),
+            ("Note", ItemCategory::Items),
+            ("Resource", ItemCategory::Items),
+            ("Item", ItemCategory::Items),
+            ("Quest Item", ItemCategory::Items),
+            ("ServerUse", ItemCategory::Items),
+            ("Enhancement", ItemCategory::Enhancements),
+            ("Unknown", ItemCategory::Other),
+        ] {
+            assert_eq!(ItemCategory::of(kind, ""), category);
+        }
+        assert_eq!(ItemCategory::of("Sword", "potion"), ItemCategory::Weapons);
+    }
 
     #[test]
     fn a_cooling_skill_fills_over_its_whole_cooldown() {
@@ -639,6 +717,13 @@ mod tests {
             names(&game.inventory),
             ["Default Sword", "Health Potion"],
             "equipped items lead"
+        );
+        assert_eq!(
+            game.inventory
+                .iter()
+                .map(|item| item.category)
+                .collect::<Vec<_>>(),
+            [ItemCategory::Weapons, ItemCategory::Items]
         );
         let turn_in: Vec<_> = game.quests[0]
             .items

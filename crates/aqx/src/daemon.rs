@@ -140,7 +140,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 13;
+pub const PROTOCOL: u32 = 14;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -879,6 +879,7 @@ mod tests {
             max: 10,
             equipped: false,
             rank: Some(1),
+            category: crate::view::ItemCategory::Items,
         };
         let game = Game {
             skills: vec![crate::view::SkillState {
@@ -1116,12 +1117,12 @@ mod tests {
              Frame.accounts.args Frame.accounts.game Frame.accounts.game.area \
              Frame.accounts.game.auras Frame.accounts.game.auras.name \
              Frame.accounts.game.auras.stacks Frame.accounts.game.away Frame.accounts.game.bag_slots \
-             Frame.accounts.game.bag_used Frame.accounts.game.bank Frame.accounts.game.bank.equipped \
+             Frame.accounts.game.bag_used Frame.accounts.game.bank Frame.accounts.game.bank.category Frame.accounts.game.bank.equipped \
              Frame.accounts.game.bank.id Frame.accounts.game.bank.max Frame.accounts.game.bank.name \
              Frame.accounts.game.bank.qty Frame.accounts.game.bank.rank \
              Frame.accounts.game.bank_slots Frame.accounts.game.bank_used Frame.accounts.game.cell \
              Frame.accounts.game.class Frame.accounts.game.class_rank Frame.accounts.game.dead \
-             Frame.accounts.game.drops Frame.accounts.game.drops.equipped \
+             Frame.accounts.game.drops Frame.accounts.game.drops.category Frame.accounts.game.drops.equipped \
              Frame.accounts.game.drops.id Frame.accounts.game.drops.max \
              Frame.accounts.game.drops.name Frame.accounts.game.drops.qty \
              Frame.accounts.game.drops.rank Frame.accounts.game.exp Frame.accounts.game.exp_to_level \
@@ -1129,7 +1130,7 @@ mod tests {
              Frame.accounts.game.factions.gained Frame.accounts.game.factions.name \
              Frame.accounts.game.factions.next Frame.accounts.game.factions.rank \
              Frame.accounts.game.factions.rep Frame.accounts.game.gold Frame.accounts.game.hp \
-             Frame.accounts.game.inventory Frame.accounts.game.inventory.equipped \
+             Frame.accounts.game.inventory Frame.accounts.game.inventory.category Frame.accounts.game.inventory.equipped \
              Frame.accounts.game.inventory.id Frame.accounts.game.inventory.max \
              Frame.accounts.game.inventory.name Frame.accounts.game.inventory.qty \
              Frame.accounts.game.inventory.rank Frame.accounts.game.level Frame.accounts.game.max_hp \
@@ -1143,7 +1144,7 @@ mod tests {
              Frame.accounts.game.skills.name Frame.accounts.game.skills.ready \
              Frame.accounts.game.target Frame.accounts.game.target.hp \
              Frame.accounts.game.target.max_hp Frame.accounts.game.target.name \
-             Frame.accounts.game.temp Frame.accounts.game.temp.equipped Frame.accounts.game.temp.id \
+             Frame.accounts.game.temp Frame.accounts.game.temp.category Frame.accounts.game.temp.equipped Frame.accounts.game.temp.id \
              Frame.accounts.game.temp.max Frame.accounts.game.temp.name Frame.accounts.game.temp.qty \
              Frame.accounts.game.temp.rank Frame.accounts.gold_gained Frame.accounts.name \
              Frame.accounts.queue Frame.accounts.queue.id Frame.accounts.queue.script \
@@ -1165,7 +1166,7 @@ mod tests {
              Resumable.script.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (13, pinned),
+            (14, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }
