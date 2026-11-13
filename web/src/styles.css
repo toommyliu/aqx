@@ -869,6 +869,11 @@ table.list td .icon-button {
   flex-wrap: wrap;
 }
 
+.item-category {
+  max-width: 100%;
+  font-size: 12px;
+}
+
 .toggle {
   color: var(--muted);
 }

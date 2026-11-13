@@ -9,6 +9,8 @@ export type State =
   | "Paused"
   | "Stalled";
 
+export type ItemCategory = "classes" | "weapons" | "armor" | "helms" | "capes" | "pets" | "accessories" | "items" | "consumables" | "enhancements" | "other";
+
 export type Stack = {
   id: number;
   name: string;
@@ -16,6 +18,7 @@ export type Stack = {
   max: number;
   equipped: boolean;
   rank: number | null;
+  category: ItemCategory;
 };
 
 export type Game = {
