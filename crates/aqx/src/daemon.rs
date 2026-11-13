@@ -140,7 +140,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 11;
+pub const PROTOCOL: u32 = 12;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -866,7 +866,7 @@ mod tests {
 
     fn samples() -> Vec<serde_json::Value> {
         use crate::view::{
-            Aura, Game, Player, QuestProgress, Shown, Stack, Standing, State, Step, Target,
+            Aura, Game, Player, QuestProgress, Shown, Stack, Standing, State, Step, Target, TurnIn,
         };
         let script = Script {
             path: PathBuf::from("/srv/farm.ts"),
@@ -903,8 +903,11 @@ mod tests {
             quests: vec![QuestProgress {
                 id: 1,
                 name: "Quest".into(),
-                have: 1,
-                need: 2,
+                items: vec![TurnIn {
+                    name: "Bone Dust".into(),
+                    have: 1,
+                    need: 2,
+                }],
             }],
             factions: vec![Standing {
                 name: "Good".into(),
@@ -1132,8 +1135,9 @@ mod tests {
              Frame.accounts.game.max_mp Frame.accounts.game.member Frame.accounts.game.misc_used \
              Frame.accounts.game.mp Frame.accounts.game.pad Frame.accounts.game.players \
              Frame.accounts.game.players.level Frame.accounts.game.players.name \
-             Frame.accounts.game.quests Frame.accounts.game.quests.have Frame.accounts.game.quests.id \
-             Frame.accounts.game.quests.name Frame.accounts.game.quests.need \
+             Frame.accounts.game.quests Frame.accounts.game.quests.id Frame.accounts.game.quests.items \
+             Frame.accounts.game.quests.items.have Frame.accounts.game.quests.items.name \
+             Frame.accounts.game.quests.items.need Frame.accounts.game.quests.name \
              Frame.accounts.game.skills Frame.accounts.game.skills.left_ms \
              Frame.accounts.game.skills.name Frame.accounts.game.skills.ready \
              Frame.accounts.game.target Frame.accounts.game.target.hp \
@@ -1160,7 +1164,7 @@ mod tests {
              Resumable.script.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (11, pinned),
+            (12, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

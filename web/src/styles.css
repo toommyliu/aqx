@@ -1037,6 +1037,18 @@ table.list .num {
   width: 1%;
 }
 
+table.list tr:has(+ .turn-in) td {
+  border-bottom: none;
+}
+
+table.list .turn-in td {
+  padding-top: 0;
+}
+
+table.list .turn-in td:first-child {
+  padding-left: 28px;
+}
+
 .check {
   display: inline-flex;
   align-items: center;

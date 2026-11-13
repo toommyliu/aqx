@@ -38,7 +38,7 @@ export type Game = {
   target: { name: string; hp: number; max_hp: number } | null;
   players: { name: string; level: number | null }[];
   drops: Stack[];
-  quests: { id: number; name: string; have: number; need: number }[];
+  quests: { id: number; name: string; items: { name: string; have: number; need: number }[] }[];
   factions: { name: string; rank: number; rep: number; next: number | null; gained: boolean }[];
   temp: Stack[];
   inventory: Stack[];

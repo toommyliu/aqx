@@ -1233,14 +1233,24 @@ function Lists(props: { game: Game; view: View; index: number; registered: Regis
         <Table label="Quests" head={["Quest", "Progress"]} empty={!g().quests.some((q) => matches(find(), q.name))}>
           <For each={g().quests.filter((q) => matches(find(), q.name))}>
             {(q) => (
-              <tr>
-                <td>
-                  <Found text={q.name} find={find()} /> <span class="muted">#{q.id}</span>
-                </td>
-                <td class="num">
-                  {q.have}/{q.need}
-                </td>
-              </tr>
+              <>
+                <tr>
+                  <td>
+                    <Found text={q.name} find={find()} /> <span class="muted">#{q.id}</span>
+                  </td>
+                  <td />
+                </tr>
+                <For each={q.items}>
+                  {(item) => (
+                    <tr class="turn-in">
+                      <td>{item.name}</td>
+                      <td class="num">
+                        {number.format(item.have)}/{number.format(item.need)}
+                      </td>
+                    </tr>
+                  )}
+                </For>
+              </>
             )}
           </For>
         </Table>
