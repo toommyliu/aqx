@@ -15,6 +15,7 @@ import {
 } from "solid-js";
 import { type AppHotkeyId } from "@tanstack/hotkeys";
 import { createFormatForDisplay, useAppHotkeys } from "@tanstack/solid-hotkeys";
+import { createCountdown } from "./timing";
 import { pauseOrResume, recordOrStop, recordable, tone } from "./App";
 import { logOut, openPicker, openQueuePicker, openQueuedOptions, openServers, openScriptOptions } from "./Dialogs";
 import {
@@ -45,6 +46,7 @@ import {
 import { Found, Icon, type IconName, KeyCaps, ServerName, Since, amount, anchor, canHover, clock, number } from "./ui";
 import {
   type Account,
+  type Aura,
   type Channel,
   type Game,
   type Item,
@@ -240,6 +242,13 @@ function Vitals(props: { game: Game; account: Account }) {
         <span>{amount(props.account.stats.drops, "drop")}</span>
       </div>
       <div class="line small more">
+        <span class="skills">
+          <span class="muted">skills</span>
+          <For each={g().skills}>{(skill, i) => <Skill n={i() + 1} skill={skill} sampledAt={props.account.sampledAt} />}</For>
+        </span>
+      </div>
+      <Auras label="player auras" auras={g().auras} sampledAt={props.account.sampledAt} />
+      <div class="line small more">
         <Show
           when={g().target}
           fallback={
@@ -258,22 +267,7 @@ function Vitals(props: { game: Game; account: Account }) {
           )}
         </Show>
       </div>
-      <div class="line small more">
-        <span class="skills">
-          <span class="muted">skills</span>
-          <For each={g().skills}>{(skill, i) => <Skill n={i() + 1} skill={skill} />}</For>
-        </span>
-      </div>
-      <Show when={g().auras.length > 0}>
-        <div class="line small more">
-          <span class="auras">
-            <span class="muted">auras</span>{" "}
-            {g()
-              .auras.map((a) => (a.stacks > 1 ? `${a.name} ×${a.stacks}` : a.name))
-              .join(", ")}
-          </span>
-        </div>
-      </Show>
+      <Auras label="target auras" auras={g().target?.auras ?? []} sampledAt={props.account.sampledAt} />
     </>
   );
 }
@@ -1370,46 +1364,70 @@ function Lists(props: { game: Game; view: View; index: number; registered: Regis
   );
 }
 
-const stillMotion = matchMedia("(prefers-reduced-motion: reduce)");
-const DRIFT_MS = 150;
-const FILL_FRAME_MS = 100;
-const STILL_FRAME_MS = 250;
-
-function Skill(props: { n: number; skill: Game["skills"][number] }) {
-  let fill!: HTMLSpanElement;
-  let label!: HTMLSpanElement;
-  let end = 0;
-  createEffect(() => {
-    const { ready, left_ms } = props.skill;
-    const next = performance.now() + left_ms;
-    const animating = ready > 0 && ready < 1 && left_ms > 0;
-    const frame = stillMotion.matches ? STILL_FRAME_MS : FILL_FRAME_MS;
-    if (animating && fill.getAnimations().length > 0 && Math.abs(next - end) < DRIFT_MS) return;
-    end = next;
-    const gap = (1 - ready) * 100;
-    for (const [el, sign] of [[fill, -1], [label, 1]] as const) {
-      for (const running of el.getAnimations()) running.cancel();
-      const from = `translateX(${sign * gap}%)`;
-      el.style.transform = animating ? "" : from;
-      if (animating) {
-        el.animate([{ transform: from }, { transform: "none" }], {
-          duration: left_ms,
-          easing: `steps(${Math.max(1, Math.round(left_ms / frame))})`,
-        });
-      }
-    }
-  });
+function Skill(props: { n: number; skill: Game["skills"][number]; sampledAt: number }) {
+  const timer = createCountdown(() => ({
+    progress: props.skill.ready,
+    leftMs: props.skill.left_ms,
+    running: props.skill.ready > 0 && props.skill.ready < 1 && props.skill.left_ms > 0,
+    sampledAt: props.sampledAt,
+  }));
   return (
     <span class="skill">
-      {props.n} {props.skill.name}
-      <span class="fill" ref={fill} aria-hidden="true">
-        <span ref={label}>
-          {props.n} {props.skill.name}
-        </span>
-      </span>
+      <TimedFill timer={timer} text={`${props.n} ${props.skill.name}`} />
       <Show when={props.skill.ready < 1}>
         <span class="visually-hidden"> (cooling down)</span>
       </Show>
+    </span>
+  );
+}
+
+function Auras(props: { label: string; auras: Aura[]; sampledAt: number }) {
+  return (
+    <div class="line small more">
+      <span class="auras">
+        <span class="muted">{props.label}</span>
+        <Show when={props.auras.length > 0} fallback={<span class="muted">none</span>}>
+          <For each={props.auras}>{(aura) => <AuraLabel aura={aura} sampledAt={props.sampledAt} />}</For>
+        </Show>
+      </span>
+    </div>
+  );
+}
+
+function AuraLabel(props: { aura: Aura; sampledAt: number }) {
+  const timer = createCountdown(() => {
+    const timing = props.aura.timer;
+    return {
+      progress: timing ? Math.max(0, 1 - timing.left_ms / timing.duration_ms) : 1,
+      leftMs: timing?.left_ms ?? 0,
+      running: timing !== null && timing.left_ms > 0,
+      sampledAt: props.sampledAt,
+    };
+  });
+  return (
+    <span class="aura">
+      <TimedFill
+        timer={timer}
+        text={`${hide(props.aura.name)}${props.aura.stacks > 1 ? ` ×${props.aura.stacks}` : ""}`}
+      />
+      <span class="muted">
+        {" · "}
+        <Show when={props.aura.timer} fallback="duration unknown">
+          <span>{timer.seconds() > 0 ? `${timer.seconds()}s` : "timer elapsed"}</span>
+        </Show>
+      </span>
+      <Show when={props.aura.description}>
+        <span class="aura-description muted">{hide(props.aura.description)}</span>
+      </Show>
+    </span>
+  );
+}
+
+function TimedFill(props: { timer: ReturnType<typeof createCountdown>; text: string }) {
+  return (
+    <span class="timed-fill" ref={props.timer.observe} style={{ "--fill": `${props.timer.percent()}%` }}>
+      {props.text}
+      <span class="timed-fill-progress" aria-hidden="true">{props.text}</span>
     </span>
   );
 }

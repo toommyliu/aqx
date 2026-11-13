@@ -21,6 +21,13 @@ export type Stack = {
   category: ItemCategory;
 };
 
+export type Aura = {
+  name: string;
+  stacks: number;
+  description: string;
+  timer: { duration_ms: number; left_ms: number } | null;
+};
+
 export type Game = {
   area: string;
   cell: string;
@@ -39,8 +46,8 @@ export type Game = {
   exp_to_level: number;
   gold: number;
   skills: { name: string; ready: number; left_ms: number }[];
-  auras: { name: string; stacks: number }[];
-  target: { name: string; hp: number; max_hp: number } | null;
+  auras: Aura[];
+  target: { id: number; name: string; hp: number; max_hp: number; auras: Aura[] } | null;
   players: { name: string; level: number | null }[];
   drops: Stack[];
   quests: { id: number; name: string; items: { name: string; have: number; need: number }[] }[];
@@ -67,7 +74,7 @@ export type Edit =
   | { register_quest: RegisteredQuest }
   | { unregister_quest: number };
 
-export type Account = {
+type AccountData = {
   name: string;
   user: string;
   state: State;
@@ -82,6 +89,8 @@ export type Account = {
   recording: string | null;
   queue: Queued[];
 };
+
+export type Account = AccountData & { sampledAt: number };
 
 export type Channel = "aqx" | "script" | "server" | "chat" | "game" | "sent" | "received";
 
@@ -290,6 +299,8 @@ export type Feed = {
   connected: (up: boolean) => void;
 };
 
+const receivedAccount = (account: AccountData): Account => ({ ...account, sampledAt: performance.now() });
+
 export function follow(selected: number | null, feed: Feed): () => void {
   let resume = "";
   const url = () => {
@@ -319,10 +330,10 @@ export function follow(selected: number | null, feed: Feed): () => void {
       }
     });
     next.addEventListener("session", (e) => feed.session(decode<Session>(e.data)));
-    next.addEventListener("accounts", (e) => feed.accounts(decode<Account[]>(e.data)));
+    next.addEventListener("accounts", (e) => feed.accounts(decode<AccountData[]>(e.data).map(receivedAccount)));
     next.addEventListener("account", (e) => {
-      const { i, account } = decode<{ i: number; account: Account }>(e.data);
-      feed.account(i, account);
+      const { i, account } = decode<{ i: number; account: AccountData }>(e.data);
+      feed.account(i, receivedAccount(account));
     });
     next.addEventListener("ended", (e) => feed.ended(decode<Ended>(e.data)));
     next.addEventListener("log", (e) => {

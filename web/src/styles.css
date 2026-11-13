@@ -692,36 +692,52 @@ meter.mp::-moz-meter-bar {
   gap: 0 8px;
 }
 
-.skill {
+.timed-fill {
   position: relative;
+  display: inline-block;
   color: var(--muted);
   white-space: nowrap;
 }
 
-.skill .fill {
+.timed-fill-progress {
   position: absolute;
   inset: 0;
-  overflow: hidden;
   color: var(--text);
+  clip-path: inset(0 calc(100% - var(--fill)) 0 0);
   user-select: none;
 }
 
-.skill .fill > span {
-  display: block;
-}
-
 @media (forced-colors: active) {
-  .skill {
+  .timed-fill {
     color: CanvasText;
   }
 
-  .skill .fill {
+  .timed-fill-progress {
     display: none;
   }
 }
 
 .auras {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  min-width: 0;
   font-size: 12px;
+}
+
+.aura {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.aura .timed-fill {
+  max-width: 100%;
+  white-space: normal;
+}
+
+.aura-description {
+  display: block;
 }
 
 .actions {
