@@ -316,6 +316,8 @@ export function follow(selected: number | null, feed: Feed): () => void {
   const open = () => {
     clearTimeout(retry);
     source?.close();
+    source = null;
+    if (document.visibilityState !== "visible" || stopped) return;
     const next = new EventSource(url());
     source = next;
     next.addEventListener("open", () => {
@@ -323,6 +325,7 @@ export function follow(selected: number | null, feed: Feed): () => void {
       feed.connected(true);
     });
     next.addEventListener("error", () => {
+      if (source !== next || document.visibilityState !== "visible" || stopped) return;
       feed.connected(false);
       if (next.readyState === EventSource.CLOSED && !stopped) {
         retry = window.setTimeout(open, wait);
@@ -342,7 +345,11 @@ export function follow(selected: number | null, feed: Feed): () => void {
     });
   };
   const back = () => {
-    if (document.visibilityState === "visible" && source?.readyState === EventSource.CLOSED) {
+    if (document.visibilityState !== "visible") {
+      clearTimeout(retry);
+      source?.close();
+      source = null;
+    } else if (!source || source.readyState === EventSource.CLOSED) {
       wait = 1000;
       open();
     }

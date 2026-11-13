@@ -489,40 +489,8 @@ kbd {
   height: 14px;
 }
 
-svg.mark,
-.mark.spin svg {
+svg.mark {
   fill: currentColor;
-}
-
-.mark.spin {
-  overflow: hidden;
-}
-
-.mark.spin > span {
-  display: block;
-  flex: none;
-  transform: translateX(-140px);
-}
-
-.mark.spin svg {
-  display: block;
-  width: 154px;
-  height: 14px;
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .mark.spin > span {
-    animation: spin 800ms steps(10) infinite;
-  }
-}
-
-@keyframes spin {
-  from {
-    transform: translateX(0);
-  }
-  to {
-    transform: translateX(-140px);
-  }
 }
 
 svg.mark .line {

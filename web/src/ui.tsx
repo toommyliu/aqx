@@ -36,6 +36,7 @@ import { createQuery } from "@tanstack/solid-query";
 import { For, Index, type JSX, Show, createSignal, createUniqueId, onMount } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { api } from "./wire";
+import { observeTime } from "./timing";
 
 const ICONS = {
   login: LogIn,
@@ -307,14 +308,17 @@ export function Tooltips() {
   return <div class="tooltip" popover="manual" ref={tip} aria-hidden="true" />;
 }
 
-const [now, setNow] = createSignal(Date.now());
-setInterval(() => setNow(Date.now()), 15_000);
 const exact = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" });
 
 export function Since(props: { at: number; prefix: string }) {
+  const [now, setNow] = createSignal(Date.now());
   const at = () => Math.round(props.at / 1000) * 1000;
   return (
     <time
+      ref={(element) => observeTime(element, (now) => {
+        setNow(Date.now());
+        return now + 15_000;
+      })}
       class="detail-tip"
       datetime={new Date(at()).toISOString()}
       tabindex="0"
