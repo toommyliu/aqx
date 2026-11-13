@@ -2444,10 +2444,18 @@ dialog.tall .dialog-foot.sticky {
   color: var(--paused);
 }
 
-.since {
+.detail-tip {
   cursor: default;
   text-decoration: underline dotted color-mix(in srgb, currentColor 40%, transparent);
   text-underline-offset: 3px;
+}
+
+button.detail-tip,
+button.detail-tip:hover {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
 }
 
 .head-state {

@@ -200,13 +200,25 @@ function Meter(props: { label: string; value: number; max: number; kind: "hp" | 
 
 function Vitals(props: { game: Game; account: Account }) {
   const g = () => props.game;
+  const xp = () => `${number.format(g().exp)} / ${number.format(g().exp_to_level)} xp`;
   return (
     <>
       <div class="line small">
         <Meter label="hp" value={g().hp} max={g().max_hp} kind="hp" />
         <Meter label="mp" value={g().mp} max={g().max_mp} kind="mp" />
         <span>
-          lv {g().level} {g().class} <span class="muted">r{g().class_rank}</span>
+          <button
+            type="button"
+            class="detail-tip"
+            data-tip={xp()}
+            aria-label={`lv ${g().level}, ${xp()}`}
+            onClick={() => {
+              if (!canHover()) say(xp());
+            }}
+          >
+            lv {g().level}
+          </button>{" "}
+          {g().class} <span class="muted">r{g().class_rank}</span>
         </span>
         <Show when={g().dead}>
           <span class="badge bad">dead</span>

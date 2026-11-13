@@ -85,6 +85,8 @@ pub struct Game {
     pub class: String,
     pub class_rank: u32,
     pub level: u32,
+    pub exp: u64,
+    pub exp_to_level: u64,
     pub gold: u64,
     pub skills: Vec<SkillState>,
     pub auras: Vec<Aura>,
@@ -329,6 +331,8 @@ fn summary(world: &World, me: &Me, now: Instant) -> Game {
         class: me.class_name.clone(),
         class_rank: me.class_rank(),
         level: me.level,
+        exp: me.exp,
+        exp_to_level: me.exp_to_level,
         gold: me.gold,
         skills: me
             .skills
@@ -616,6 +620,7 @@ mod tests {
         );
         assert_eq!((shown.stats.drops, shown.gold_gained), (2, Some(0)));
         let game = shown.game.expect("an online account has a game");
+        assert_eq!((game.exp, game.exp_to_level), (400, 2000));
         assert_eq!(
             (game.area.as_str(), game.cell.as_str(), game.pad.as_str()),
             ("farm-1", "Enter", "Spawn")
@@ -654,6 +659,7 @@ mod tests {
             "only the selected account builds its lists"
         );
         assert_eq!(summary.hp, 1000);
+        assert_eq!((summary.exp, summary.exp_to_level), (400, 2000));
 
         account.board().run = Run::Starting {
             script: PathBuf::from("/srv/farm.ts"),

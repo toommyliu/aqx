@@ -306,7 +306,7 @@ export function Since(props: { at: number; prefix: string }) {
   const at = () => Math.round(props.at / 1000) * 1000;
   return (
     <time
-      class="since"
+      class="detail-tip"
       datetime={new Date(at()).toISOString()}
       tabindex="0"
       data-tip={exact.format(at())}
