@@ -19,6 +19,8 @@ Each config gets its own session, so accounts from different `aqx.toml` files ca
 | `aqx ctl ACCOUNT record [FILE]` | Write the account's packets to `FILE` as JSON lines from now until `aqx ctl ACCOUNT record --stop`, with the token and personal fields redacted. The account has to be logged in to start, and the recording carries on through relogins and server switches. Without `FILE`, aqx writes to `recordings` in its data folder (`~/Library/Application Support/aqx/recordings` on macOS). |
 | `aqx down [-c PATH]` | Log out every account and end the session |
 
+A session ends when every account it logged in goes offline, unless `aqx.toml` has an enabled [schedule](config.md#schedules). Then it stays up, waiting for the next one, until `aqx down`.
+
 `ACCOUNT` is a name or a username. Sessions store sockets, locks, and logs in aqx's data folder (`~/Library/Application Support/aqx/sessions` on macOS). Set `AQX_SESSIONS` to use another folder.
 
 When `aqx up -d` attaches to a session from another build, it asks whether to restart the session. If the builds cannot communicate, it restarts the session without asking. A restart logs online accounts out and back in and restarts their scripts.

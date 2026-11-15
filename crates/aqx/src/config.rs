@@ -2,8 +2,12 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use jiff::civil::{Time, Weekday};
+use jiff::tz::TimeZone;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
+
+use crate::schedule::{Days, Length, Schedule};
 
 pub const FILE_NAME: &str = "aqx.toml";
 const SERVER: &str = "Server to join, as aqx servers lists it. Required here or on each account.";
@@ -36,6 +40,11 @@ pub struct Config {
     #[serde(default, rename = "account")]
     #[schemars(description = "One account to log in.")]
     pub accounts: Vec<AccountConfig>,
+    #[serde(default, rename = "schedule")]
+    #[schemars(
+        description = "Scripts to run on an account at a time of day, while the session runs."
+    )]
+    pub schedules: Vec<ScheduleConfig>,
 }
 
 #[derive(Deserialize, JsonSchema, Debug, Default, Clone, PartialEq, Eq)]
@@ -75,6 +84,105 @@ pub enum OnStall {
     Restart,
     #[schemars(description = "Log out, log back in and start the script again.")]
     Relogin,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WhenBusy {
+    #[default]
+    #[schemars(description = "Leave the running script alone and skip this run.")]
+    Skip,
+    #[schemars(description = "Stop the running script and drop it.")]
+    Stop,
+    #[schemars(
+        description = "Stop the running script and put it first in the queue. It starts again from the beginning."
+    )]
+    Interrupt,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AfterRun {
+    #[default]
+    #[schemars(description = "Stay logged in. The queue goes on only if the last script finished.")]
+    Stay,
+    #[schemars(description = "Go on with the queue, however the run ended.")]
+    Resume,
+    #[schemars(description = "Log the account out.")]
+    Logout,
+}
+
+#[derive(Deserialize, JsonSchema, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleConfig {
+    #[schemars(
+        description = "What logs call the schedule. Defaults to the first script's name and the start time, like \"farm at 09:30\"."
+    )]
+    name: Option<String>,
+    #[schemars(description = "Account to run on, by name or user.")]
+    account: String,
+    #[schemars(description = "Script to run, relative to this file.")]
+    script: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Arguments for script. Values are strings, numbers or booleans.",
+        schema_with = "args_schema"
+    )]
+    args: toml::Table,
+    #[serde(default)]
+    #[schemars(
+        description = "Several scripts to run one after another, instead of script and args."
+    )]
+    scripts: Vec<ScheduledScript>,
+    #[serde(deserialize_with = "clock")]
+    #[schemars(
+        description = "Start time, 24-hour \"HH:MM\".",
+        schema_with = "clock_schema"
+    )]
+    at: Time,
+    #[schemars(
+        description = "Days to run: \"mon\" to \"sun\", \"weekdays\" or \"weekends\". Defaults to every day."
+    )]
+    days: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "maybe_clock")]
+    #[schemars(
+        description = "Stop time, \"HH:MM\". Earlier than at means the next day.",
+        schema_with = "clock_schema"
+    )]
+    until: Option<Time>,
+    #[serde(default, rename = "for", deserialize_with = "duration")]
+    #[schemars(
+        description = "How long to run, like \"2h\", instead of until.",
+        schema_with = "duration_schema"
+    )]
+    run_for: Option<Duration>,
+    #[schemars(
+        description = "IANA time zone for at, until and days, like \"America/New_York\". Defaults to the machine's."
+    )]
+    timezone: Option<String>,
+    #[schemars(description = "What happens when a script is already running. Defaults to skip.")]
+    when_busy: Option<WhenBusy>,
+    #[schemars(description = "What happens when the run ends. Defaults to stay.")]
+    after: Option<AfterRun>,
+    #[schemars(
+        description = "Start late when the session starts inside the window. Needs until or for. Defaults to false."
+    )]
+    catch_up: Option<bool>,
+    #[schemars(description = "Whether the schedule runs. Defaults to true.")]
+    enabled: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledScript {
+    #[schemars(description = "Script to run, relative to this file.")]
+    script: PathBuf,
+    #[serde(default)]
+    #[schemars(
+        description = "Arguments for the script. Values are strings, numbers or booleans.",
+        schema_with = "args_schema"
+    )]
+    args: toml::Table,
 }
 
 impl Settings {
@@ -206,21 +314,27 @@ fn home(aqx_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     }
 }
 
-pub fn load(path: &Path) -> Result<Vec<Account>, String> {
-    let accounts = load_quietly(path)?;
-    warn_if_others_can_read(path);
-    Ok(accounts)
+#[derive(Debug)]
+pub struct Loaded {
+    pub accounts: Vec<Account>,
+    pub schedules: Vec<Schedule>,
 }
 
-pub fn load_quietly(path: &Path) -> Result<Vec<Account>, String> {
+pub fn load(path: &Path) -> Result<Loaded, String> {
+    let loaded = load_quietly(path)?;
+    warn_if_others_can_read(path);
+    Ok(loaded)
+}
+
+pub fn load_quietly(path: &Path) -> Result<Loaded, String> {
     let at = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
     let path = std::path::absolute(path).map_err(|e| at(&e))?;
     let text = std::fs::read_to_string(&path).map_err(|e| at(&e))?;
     read(&text, path.parent().unwrap_or(Path::new("."))).map_err(|e| at(&e))
 }
 
-pub fn read(text: &str, dir: &Path) -> Result<Vec<Account>, String> {
-    parse(text)?.accounts(dir)
+pub fn read(text: &str, dir: &Path) -> Result<Loaded, String> {
+    parse(text)?.resolve(dir)
 }
 
 fn password<'de, D: serde::Deserializer<'de>>(given: D) -> Result<String, D::Error> {
@@ -241,7 +355,28 @@ fn parse(text: &str) -> Result<Config, String> {
 }
 
 impl Config {
-    pub fn accounts(&self, dir: &Path) -> Result<Vec<Account>, String> {
+    fn resolve(&self, dir: &Path) -> Result<Loaded, String> {
+        let accounts = self.accounts(dir)?;
+        let schedules: Vec<Schedule> = self
+            .schedules
+            .iter()
+            .map(|s| s.resolve(&accounts, dir))
+            .collect::<Result<_, _>>()?;
+        let mut names: Vec<String> = schedules.iter().map(|s| s.name.to_lowercase()).collect();
+        names.sort_unstable();
+        if let Some(twice) = names.windows(2).find(|w| w[0] == w[1]) {
+            return Err(format!(
+                "two schedules are named {}; give one a `name`",
+                twice[0]
+            ));
+        }
+        Ok(Loaded {
+            accounts,
+            schedules,
+        })
+    }
+
+    fn accounts(&self, dir: &Path) -> Result<Vec<Account>, String> {
         if self.accounts.is_empty() {
             return Err("there is no [[account]]".into());
         }
@@ -310,7 +445,7 @@ impl AccountConfig {
         let script = match &self.script {
             Some(path) => Some(Script {
                 path: dir.join(path),
-                args: self.script_args()?,
+                args: args_of(&format!("account {name}"), &self.args)?,
             }),
             None if self.args.is_empty() => None,
             None => return Err(format!("account {name} has args but no script")),
@@ -330,28 +465,140 @@ impl AccountConfig {
             name,
         })
     }
+}
 
-    fn script_args(&self) -> Result<Vec<(String, String)>, String> {
-        self.args
+impl ScheduleConfig {
+    fn resolve(&self, accounts: &[Account], dir: &Path) -> Result<Schedule, String> {
+        let first = self
+            .script
+            .as_ref()
+            .or_else(|| self.scripts.first().map(|s| &s.script));
+        let name = match (&self.name, first) {
+            (Some(name), _) => name.clone(),
+            (None, Some(first)) => format!(
+                "{} at {}",
+                first.file_stem().unwrap_or_default().to_string_lossy(),
+                crate::schedule::clock(self.at)
+            ),
+            (None, None) => return Err(format!("a schedule for {} has no script", self.account)),
+        };
+        let who = format!("schedule {name}");
+        let scripts = match (&self.script, &self.scripts[..]) {
+            (Some(_), [_, ..]) => return Err(format!("{who} sets both script and scripts")),
+            (None, []) => return Err(format!("{who} has no script")),
+            (Some(path), []) => vec![Script {
+                path: dir.join(path),
+                args: args_of(&who, &self.args)?,
+            }],
+            (None, _) if !self.args.is_empty() => {
+                return Err(format!(
+                    "{who} has args but no script; give each of scripts its own args"
+                ));
+            }
+            (None, scripts) => scripts
+                .iter()
+                .map(|s| {
+                    Ok(Script {
+                        path: dir.join(&s.script),
+                        args: args_of(&who, &s.args)?,
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        };
+        let account = accounts
             .iter()
-            .map(|(key, value)| {
-                let text = match value {
-                    toml::Value::String(s) => s.clone(),
-                    toml::Value::Integer(n) => n.to_string(),
-                    toml::Value::Float(f) => f.to_string(),
-                    toml::Value::Boolean(b) => b.to_string(),
-                    other => {
+            .find(|a| {
+                a.name.eq_ignore_ascii_case(&self.account)
+                    || a.user.eq_ignore_ascii_case(&self.account)
+            })
+            .ok_or_else(|| format!("{who} names no account {}", self.account))?
+            .name
+            .clone();
+        let days = match &self.days {
+            None => Days::EVERY,
+            Some(days) if days.is_empty() => return Err(format!("{who} has no days")),
+            Some(days) => days.iter().try_fold(Days::NONE, |set, day| {
+                let add: &[Weekday] = match day.to_lowercase().as_str() {
+                    "mon" => &[Weekday::Monday],
+                    "tue" => &[Weekday::Tuesday],
+                    "wed" => &[Weekday::Wednesday],
+                    "thu" => &[Weekday::Thursday],
+                    "fri" => &[Weekday::Friday],
+                    "sat" => &[Weekday::Saturday],
+                    "sun" => &[Weekday::Sunday],
+                    "weekdays" => &[
+                        Weekday::Monday,
+                        Weekday::Tuesday,
+                        Weekday::Wednesday,
+                        Weekday::Thursday,
+                        Weekday::Friday,
+                    ],
+                    "weekends" => &[Weekday::Saturday, Weekday::Sunday],
+                    _ => {
                         return Err(format!(
-                            "account {}: args.{key} is a {}; use a string, number or boolean",
-                            self.name(),
-                            other.type_str()
+                            "{who}: {day:?} isn't a day; use \"mon\" to \"sun\", \"weekdays\" or \"weekends\""
                         ));
                     }
                 };
-                Ok((key.clone(), text))
-            })
-            .collect()
+                Ok(add.iter().fold(set, |set, day| set.with(*day)))
+            })?,
+        };
+        let length = match (self.until, self.run_for) {
+            (Some(_), Some(_)) => return Err(format!("{who} sets both until and for")),
+            (Some(until), None) if until == self.at => {
+                return Err(format!("{who} has until at the same time as at"));
+            }
+            (Some(until), None) => Some(Length::Until(until)),
+            (None, Some(length)) if length.is_zero() => {
+                return Err(format!("{who} has a for of zero"));
+            }
+            (None, Some(length)) => Some(Length::For(length)),
+            (None, None) => None,
+        };
+        let catch_up = self.catch_up.unwrap_or(false);
+        if catch_up && length.is_none() {
+            return Err(format!("{who} sets catch_up without until or for"));
+        }
+        let zone = match &self.timezone {
+            Some(zone) => Some(
+                TimeZone::get(zone).map_err(|_| format!("{who}: no time zone named {zone:?}"))?,
+            ),
+            None => None,
+        };
+        Ok(Schedule {
+            name,
+            account,
+            scripts,
+            days,
+            at: self.at,
+            length,
+            zone,
+            when_busy: self.when_busy.unwrap_or_default(),
+            after: self.after.unwrap_or_default(),
+            catch_up,
+            enabled: self.enabled.unwrap_or(true),
+        })
     }
+}
+
+fn args_of(who: &str, args: &toml::Table) -> Result<Vec<(String, String)>, String> {
+    args.iter()
+        .map(|(key, value)| {
+            let text = match value {
+                toml::Value::String(s) => s.clone(),
+                toml::Value::Integer(n) => n.to_string(),
+                toml::Value::Float(f) => f.to_string(),
+                toml::Value::Boolean(b) => b.to_string(),
+                other => {
+                    return Err(format!(
+                        "{who}: args.{key} is a {}; use a string, number or boolean",
+                        other.type_str()
+                    ));
+                }
+            };
+            Ok((key.clone(), text))
+        })
+        .collect()
 }
 
 pub fn schema() -> String {
@@ -360,6 +607,27 @@ pub fn schema() -> String {
 
 fn duration_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "string", "pattern": r"^\s*\d+\s*(ms|s|m|h)?\s*$" })
+}
+
+fn clock_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "string", "pattern": r"^\d{2}:\d{2}$" })
+}
+
+fn clock<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Time, D::Error> {
+    let text = String::deserialize(d)?;
+    let parsed = text.split_once(':').and_then(|(h, m)| {
+        let two = |s: &str| {
+            (s.len() == 2 && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<i8>().ok())?
+        };
+        Time::new(two(h)?, two(m)?, 0, 0).ok()
+    });
+    parsed.ok_or_else(|| {
+        serde::de::Error::custom(format!("{text:?} isn't a 24-hour time like \"09:30\""))
+    })
+}
+
+fn maybe_clock<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Time>, D::Error> {
+    clock(d).map(Some)
 }
 
 fn args_schema(_: &mut SchemaGenerator) -> Schema {
@@ -631,17 +899,35 @@ mod tests {
     #[test]
     fn the_config_guide_example_loads() {
         let page = include_str!("../../../docs/config.md");
-        let example = page
-            .split_once("```toml\n")
-            .and_then(|(_, rest)| rest.split_once("```"))
-            .expect("a toml example")
-            .0;
-        let names: Vec<String> = accounts(example)
+        let examples: Vec<&str> = page
+            .split("```toml\n")
+            .skip(1)
+            .filter_map(|rest| rest.split_once("```"))
+            .map(|(example, _)| example)
+            .collect();
+        let names: Vec<String> = accounts(examples[0])
             .unwrap()
             .into_iter()
             .map(|a| a.name)
             .collect();
         assert_eq!(names, ["player1", "healer"]);
+        let both = format!("{}\n{}", examples[0], examples[1]);
+        let schedules = parse(&both)
+            .unwrap()
+            .resolve(Path::new("/srv/aqx"))
+            .unwrap()
+            .schedules;
+        let named: Vec<(&str, &str, usize)> = schedules
+            .iter()
+            .map(|s| (s.name.as_str(), s.account.as_str(), s.scripts.len()))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("morning farm", "player1", 1),
+                ("quests at 21:00", "healer", 2)
+            ]
+        );
         let schema: serde_json::Value = serde_json::from_str(&schema()).unwrap();
         let defs = schema["$defs"].as_object().unwrap().values();
         let keys = defs.flat_map(|def| {
@@ -674,12 +960,199 @@ mod tests {
         let account = schema["$defs"]["AccountConfig"]["properties"]
             .as_object()
             .unwrap();
-        for (key, field) in settings.iter().chain(account.iter()) {
+        let schedule = schema["$defs"]["ScheduleConfig"]["properties"]
+            .as_object()
+            .unwrap();
+        let scripts = schema["$defs"]["ScheduledScript"]["properties"]
+            .as_object()
+            .unwrap();
+        for (key, field) in settings
+            .iter()
+            .chain(account.iter())
+            .chain(schedule.iter())
+            .chain(scripts.iter())
+        {
             assert!(
                 field.get("description").is_some(),
                 "{key} has no description"
             );
         }
         assert!(account.contains_key("password") && settings.contains_key("on_stall"));
+        assert!(schedule.contains_key("for") && schedule.contains_key("when_busy"));
+    }
+
+    fn schedules(extra: &str) -> Result<Vec<Schedule>, String> {
+        let text = format!(
+            "[defaults]\nserver = \"Twilly\"\n[[account]]\nuser = \"player1\"\npassword = \"x\"\n[[account]]\nname = \"healer\"\nuser = \"player2\"\npassword = \"y\"\n{extra}"
+        );
+        Ok(parse(&text)?.resolve(Path::new("/srv/aqx"))?.schedules)
+    }
+
+    #[test]
+    fn a_schedule_takes_one_script_or_several_and_does_less_unless_told() {
+        let [one, several] = schedules(
+            r#"
+            [[schedule]]
+            account = "PLAYER2"
+            script = "farm.ts"
+            args = { target = 7500 }
+            at = "09:30"
+
+            [[schedule]]
+            name = "nightly"
+            account = "player1"
+            scripts = [{ script = "a.ts" }, { script = "b.ts", args = { fast = true } }]
+            at = "23:00"
+            until = "01:00"
+            days = ["weekends", "Mon"]
+            timezone = "America/New_York"
+            when_busy = "interrupt"
+            after = "logout"
+            catch_up = true
+            enabled = false
+            "#,
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        assert_eq!(
+            (one.name.as_str(), one.account.as_str()),
+            ("farm at 09:30", "healer"),
+            "an account is found by user, and a schedule is named after its script"
+        );
+        assert_eq!(
+            one.scripts,
+            [Script {
+                path: PathBuf::from("/srv/aqx/farm.ts"),
+                args: vec![("target".into(), "7500".into())],
+            }]
+        );
+        assert_eq!(
+            (one.days, one.length, &one.zone),
+            (Days::EVERY, None, &None)
+        );
+        assert_eq!(
+            (one.when_busy, one.after, one.catch_up, one.enabled),
+            (WhenBusy::Skip, AfterRun::Stay, false, true)
+        );
+
+        let paths: Vec<&Path> = several.scripts.iter().map(|s| s.path.as_path()).collect();
+        assert_eq!(
+            paths,
+            [Path::new("/srv/aqx/a.ts"), Path::new("/srv/aqx/b.ts")]
+        );
+        assert_eq!(several.scripts[1].args, [("fast".into(), "true".into())]);
+        assert_eq!(
+            several.days,
+            Days::NONE
+                .with(Weekday::Saturday)
+                .with(Weekday::Sunday)
+                .with(Weekday::Monday)
+        );
+        assert_eq!(
+            several.length,
+            Some(Length::Until(Time::constant(1, 0, 0, 0)))
+        );
+        assert_eq!(
+            several.zone.as_ref().and_then(TimeZone::iana_name),
+            Some("America/New_York")
+        );
+        assert_eq!(
+            (
+                several.when_busy,
+                several.after,
+                several.catch_up,
+                several.enabled
+            ),
+            (WhenBusy::Interrupt, AfterRun::Logout, true, false)
+        );
+        let [timed] = schedules(
+            "[[schedule]]\naccount = \"player1\"\nscript = \"a.ts\"\nat = \"06:00\"\nfor = \"90m\"",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        assert_eq!(timed.length, Some(Length::For(Duration::from_secs(5400))));
+    }
+
+    #[test]
+    fn a_schedule_that_cannot_fire_as_written_is_refused() {
+        let one = |extra: &str| {
+            schedules(&format!(
+                "[[schedule]]\naccount = \"player1\"\nat = \"09:30\"\n{extra}"
+            ))
+        };
+        for (extra, said) in [
+            (
+                "script = \"a.ts\"\naccont = \"x\"",
+                "unknown field `accont`",
+            ),
+            ("script = \"a.ts\"\nat = \"9:30\"", "duplicate key"),
+            ("", "has no script"),
+            (
+                "script = \"a.ts\"\nscripts = [{ script = \"b.ts\" }]",
+                "both script and scripts",
+            ),
+            (
+                "scripts = [{ script = \"b.ts\" }]\nargs = { n = 1 }",
+                "args but no script",
+            ),
+            ("script = \"a.ts\"\nargs = { n = [1] }", "args.n is a array"),
+            ("script = \"a.ts\"\ndays = [\"mo\"]", "\"mo\" isn't a day"),
+            ("script = \"a.ts\"\ndays = []", "has no days"),
+            (
+                "script = \"a.ts\"\nuntil = \"10:00\"\nfor = \"1h\"",
+                "both until and for",
+            ),
+            ("script = \"a.ts\"\nuntil = \"09:30\"", "same time as at"),
+            ("script = \"a.ts\"\nfor = \"0s\"", "a for of zero"),
+            (
+                "script = \"a.ts\"\ncatch_up = true",
+                "catch_up without until or for",
+            ),
+            (
+                "script = \"a.ts\"\nuntil = \"24:00\"",
+                "isn't a 24-hour time",
+            ),
+            (
+                "script = \"a.ts\"\ntimezone = \"Mars/Olympus\"",
+                "no time zone named",
+            ),
+            (
+                "script = \"a.ts\"\nwhen_busy = \"queue\"",
+                "unknown variant",
+            ),
+            ("script = \"a.ts\"\nafter = \"quit\"", "unknown variant"),
+        ] {
+            let error = one(extra).unwrap_err();
+            assert!(error.contains(said), "{extra}: {error}");
+        }
+        for at in ["9:30", "09:60", "0930", "+9:30", "09:30:00"] {
+            let error = schedules(&format!(
+                "[[schedule]]\naccount = \"player1\"\nscript = \"a.ts\"\nat = \"{at}\""
+            ))
+            .unwrap_err();
+            assert!(error.contains("isn't a 24-hour time"), "{at}: {error}");
+        }
+        assert!(
+            one("script = \"a.ts\"\naccount = \"player9\"")
+                .unwrap_err()
+                .contains("duplicate key")
+        );
+        let nobody =
+            schedules("[[schedule]]\naccount = \"player9\"\nscript = \"a.ts\"\nat = \"09:30\"")
+                .unwrap_err();
+        assert!(
+            nobody.contains("schedule a at 09:30 names no account player9"),
+            "{nobody}"
+        );
+        let twins = schedules(
+            "[[schedule]]\naccount = \"player1\"\nscript = \"farm.ts\"\nat = \"09:30\"\n[[schedule]]\naccount = \"healer\"\nscript = \"other/Farm.ts\"\nat = \"09:30\"",
+        )
+        .unwrap_err();
+        assert!(
+            twins.contains("two schedules are named farm at 09:30; give one a `name`"),
+            "{twins}"
+        );
     }
 }

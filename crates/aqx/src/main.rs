@@ -17,6 +17,7 @@ mod fleet;
 mod init;
 mod record;
 mod runner;
+mod schedule;
 mod view;
 mod web;
 
@@ -256,7 +257,7 @@ fn run_from(with: RunWith) -> anyhow::Result<ExitCode> {
         );
     };
     let path = config::find(with.config.as_deref()).map_err(anyhow::Error::msg)?;
-    let accounts = config::load(&path).map_err(anyhow::Error::msg)?;
+    let accounts = config::load(&path).map_err(anyhow::Error::msg)?.accounts;
     let account = accounts
         .into_iter()
         .find(|a| a.name.eq_ignore_ascii_case(&name) || a.user.eq_ignore_ascii_case(&name))

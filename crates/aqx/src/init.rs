@@ -166,7 +166,11 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        let [account] = crate::config::load(&path).unwrap().try_into().unwrap();
+        let [account] = crate::config::load(&path)
+            .unwrap()
+            .accounts
+            .try_into()
+            .unwrap();
         assert_eq!(
             (account.user.as_str(), account.password.as_str()),
             ("player1", r#"p"a\ss"#)

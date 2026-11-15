@@ -12,6 +12,7 @@ clap.workspace = true
 ctrlc.workspace = true
 dirs.workspace = true
 flate2.workspace = true
+jiff.workspace = true
 libc.workspace = true
 schemars.workspace = true
 serde.workspace = true

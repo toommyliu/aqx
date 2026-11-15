@@ -18,7 +18,7 @@ An aqx built without Node still runs, but `aqx web` answers every page with a no
 aqx web [-c PATH] [--port N] [--up] [--tailscale]
 ```
 
-`-c` selects the config. `aqx web` attaches to its session if one is running. Otherwise, logging in or running a script starts a session. `--up` starts the session immediately and logs in accounts with `auto_start` enabled. Stopping `aqx web` leaves the session running. The session ends when every account goes offline, but `aqx web` stays open so you can start it again. The Session menu can restart the session or log everyone out.
+`-c` selects the config. `aqx web` attaches to its session if one is running. Otherwise, logging in or running a script starts a session. `--up` starts the session immediately and logs in accounts with `auto_start` enabled. Stopping `aqx web` leaves the session running. The session ends when every account goes offline, but `aqx web` stays open so you can start it again. A session whose `aqx.toml` has an enabled [schedule](config.md#schedules) stays up with every account offline, waiting for the next one, until you log everyone out. The Session menu can restart the session or log everyone out.
 
 `aqx web` listens on `127.0.0.1` only and has no login. It refuses requests whose `Host` isn't `localhost`, `127.0.0.1`, `[::1]` or a `*.ts.net` name.
 

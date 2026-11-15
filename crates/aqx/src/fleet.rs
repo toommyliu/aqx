@@ -12,12 +12,14 @@ use aqx_client::{
     Server, Spot, api,
 };
 use aqx_script::{Cancel, Edit, Level, Outcome, Output, Registered};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{self, OnStall, Script};
+use crate::config::{self, AfterRun, OnStall, Script, WhenBusy};
 use crate::describe::describe;
 use crate::record::{self, Recorder};
 use crate::runner::{self, Job, Login, Note};
+use crate::schedule::{self, Deadline, Due, Fresh, Schedule, Schedules};
 
 pub const LOG_LINES: usize = 1000;
 
@@ -222,6 +224,8 @@ pub struct Board {
     pub last: Option<Script>,
     pub recording: Option<Recorder>,
     pub queue: VecDeque<Queued>,
+    sent: Option<Script>,
+    scheduled: Option<Scheduled>,
     queued_ids: u64,
     runs: u64,
     links: u64,
@@ -246,6 +250,8 @@ impl Default for Board {
             last: None,
             recording: None,
             queue: VecDeque::new(),
+            sent: None,
+            scheduled: None,
             queued_ids: 0,
             runs: 0,
             links: 0,
@@ -256,6 +262,37 @@ impl Default for Board {
             switched: None,
         }
     }
+}
+
+struct Scheduled {
+    name: String,
+    run: u64,
+    rest: Vec<u64>,
+    deadline: Option<Deadline>,
+    after: AfterRun,
+    ran: bool,
+}
+
+enum Busy {
+    Running(Option<Script>),
+    LoggingIn,
+}
+
+impl Busy {
+    fn said(&self) -> String {
+        match self {
+            Busy::Running(Some(script)) => format!("{} is running", named(script)),
+            Busy::Running(None) => "a script is starting".into(),
+            Busy::LoggingIn => "the account is logging in".into(),
+        }
+    }
+}
+
+fn named(script: &Script) -> String {
+    script.path.file_name().map_or_else(
+        || script.path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 impl Board {
@@ -295,6 +332,66 @@ impl Board {
 
     pub fn paused(&self) -> bool {
         matches!(&self.run, Run::Running { cancel, .. } if cancel.is_paused())
+    }
+
+    fn online(&self) -> bool {
+        self.session().is_some_and(|s| !closed(s))
+    }
+
+    fn busy(&self) -> Option<Busy> {
+        let running = match &self.run {
+            Run::Running { cancel, .. } => !cancel.is_cancelled(),
+            Run::Starting { .. } | Run::Restarting { .. } => true,
+            Run::Idle | Run::Ended { .. } => false,
+        };
+        if running || self.queued_runs > 0 {
+            return Some(Busy::Running(self.sent.clone()));
+        }
+        let logging_in =
+            self.queued_logins > 0 || matches!(self.link, Link::Connecting | Link::Waiting { .. });
+        logging_in.then_some(Busy::LoggingIn)
+    }
+
+    fn owned(&self) -> bool {
+        self.scheduled.as_ref().is_some_and(|s| s.run == self.runs)
+    }
+
+    fn follow(&mut self) {
+        if let Some(scheduled) = &mut self.scheduled {
+            scheduled.run = self.runs;
+        }
+    }
+
+    fn drop_rest(&mut self, scheduled: &Scheduled) {
+        self.queue.retain(|q| !scheduled.rest.contains(&q.id));
+    }
+
+    fn push_front(&mut self, script: Script) -> u64 {
+        self.queued_ids += 1;
+        let id = self.queued_ids;
+        self.queue.push_front(Queued { id, script });
+        id
+    }
+
+    fn halt(&mut self) -> Result<(), &'static str> {
+        self.runs += 1;
+        let pending = self.queued_runs > 0;
+        match &self.run {
+            Run::Running { cancel, .. } => {
+                cancel.cancel();
+                Ok(())
+            }
+            Run::Starting { .. } => Ok(()),
+            Run::Restarting { script, .. } => {
+                self.run = Run::Ended {
+                    script: script.clone(),
+                    how: Ended::Stopped(None),
+                };
+                Ok(())
+            }
+            _ if pending => Ok(()),
+            _ => Err("no script is running"),
+        }
     }
 
     fn script_output(&mut self, out: Output) {
@@ -430,8 +527,13 @@ impl Account {
             board.run,
             Run::Starting { .. } | Run::Running { .. } | Run::Restarting { .. }
         );
-        let script =
-            if running { board.last.clone() } else { None }.or_else(|| self.script.clone());
+        let owned = board.owned();
+        let script = match (owned, running) {
+            (true, _) => board.sent.clone(),
+            (false, true) => board.last.clone(),
+            (false, false) => None,
+        }
+        .or_else(|| self.script.clone());
         board.runs += 1;
         if let Run::Running { cancel, .. } = &board.run {
             cancel.cancel();
@@ -444,10 +546,14 @@ impl Account {
         self.send(Command::Login { link: board.links });
         if let Some(script) = script {
             board.queued_runs += 1;
+            board.sent = Some(script.clone());
             self.send(Command::Run {
                 script,
                 run: board.runs,
             });
+            if owned {
+                board.follow();
+            }
         }
     }
 
@@ -473,6 +579,7 @@ impl Account {
         self.send(Command::Login { link: board.links });
         if let Some(script) = script {
             board.queued_runs += 1;
+            board.sent = Some(script.clone());
             self.send(Command::Run {
                 script,
                 run: board.runs,
@@ -483,7 +590,9 @@ impl Account {
 
     pub fn run(&self, script: Script) {
         self.commanded.store(true, Ordering::SeqCst);
-        self.start(&mut self.board(), script);
+        let mut board = self.board();
+        board.scheduled = None;
+        self.start(&mut board, script);
     }
 
     fn start(&self, board: &mut Board, script: Script) {
@@ -492,10 +601,132 @@ impl Account {
             cancel.cancel();
         }
         board.queued_runs += 1;
+        board.sent = Some(script.clone());
         self.send(Command::Run {
             script,
             run: board.runs,
         });
+    }
+
+    pub fn run_scheduled(&self, schedule: &Schedule, deadline: Option<Deadline>) {
+        let name = &schedule.name;
+        let Some((first, rest)) = schedule.scripts.split_first() else {
+            return;
+        };
+        let mut board = self.board();
+        match (board.busy(), schedule.when_busy) {
+            (None, _) => {}
+            (Some(busy), WhenBusy::Skip) => {
+                board.log.push(
+                    Channel::Aqx,
+                    format!("schedule {name} skipped: {}", busy.said()),
+                );
+                return;
+            }
+            (Some(Busy::Running(Some(current))), WhenBusy::Stop) => board.log.push(
+                Channel::Aqx,
+                format!(
+                    "schedule {name}: stopped {} to run {}",
+                    named(&current),
+                    named(first)
+                ),
+            ),
+            (Some(Busy::Running(Some(current))), WhenBusy::Interrupt) => {
+                let said = format!(
+                    "schedule {name}: interrupted {}; it restarts from the queue",
+                    named(&current)
+                );
+                board.push_front(current);
+                board.log.push(Channel::Aqx, said);
+            }
+            (Some(_), WhenBusy::Stop | WhenBusy::Interrupt) => {}
+        }
+        let mut rest: Vec<u64> = rest
+            .iter()
+            .rev()
+            .map(|script| board.push_front(script.clone()))
+            .collect();
+        rest.reverse();
+        self.commanded.store(true, Ordering::SeqCst);
+        self.start(&mut board, first.clone());
+        let scripts: Vec<String> = schedule.scripts.iter().map(named).collect();
+        let until = deadline
+            .as_ref()
+            .map(|d| format!(" until {}", d.label()))
+            .unwrap_or_default();
+        board.log.push(
+            Channel::Aqx,
+            format!(
+                "schedule {name}: running {}{until}",
+                scripts.join(", then ")
+            ),
+        );
+        board.scheduled = Some(Scheduled {
+            name: name.clone(),
+            run: board.runs,
+            rest,
+            deadline,
+            after: schedule.after,
+            ran: false,
+        });
+    }
+
+    fn check_deadline(&self, now: Timestamp) {
+        let mut board = self.board();
+        let Some(scheduled) = board
+            .scheduled
+            .take_if(|s| s.deadline.as_ref().is_some_and(|d| d.reached(now)))
+        else {
+            return;
+        };
+        let script = board
+            .sent
+            .as_ref()
+            .map_or_else(|| "the script".into(), named);
+        let at = scheduled.deadline.as_ref().map(Deadline::label);
+        board.log.push(
+            Channel::Aqx,
+            format!(
+                "schedule {}: stopping {script} at {}",
+                scheduled.name,
+                at.unwrap_or_default()
+            ),
+        );
+        board.drop_rest(&scheduled);
+        let _ = board.halt();
+        self.after(&mut board, &scheduled);
+    }
+
+    fn held(&self, run: u64) {
+        let mut board = self.board();
+        let Some(scheduled) = board.scheduled.take_if(|s| s.run == run) else {
+            return;
+        };
+        board.drop_rest(&scheduled);
+        self.after(&mut board, &scheduled);
+    }
+
+    fn after(&self, board: &mut Board, scheduled: &Scheduled) {
+        let name = &scheduled.name;
+        match scheduled.after {
+            AfterRun::Stay => {}
+            AfterRun::Resume if !board.online() => {}
+            AfterRun::Resume => {
+                if let Some(next) = board.queue.pop_front() {
+                    board
+                        .log
+                        .push(Channel::Aqx, format!("schedule {name}: resuming the queue"));
+                    self.start(board, next.script);
+                }
+            }
+            AfterRun::Logout => {
+                if self.log_out(board).is_ok() {
+                    board
+                        .log
+                        .push(Channel::Aqx, format!("schedule {name}: logging out"));
+                }
+            }
+        }
     }
 
     pub fn enqueue(&self, script: Script) {
@@ -545,6 +776,7 @@ impl Account {
         self.commanded.store(true, Ordering::SeqCst);
         let mut board = self.board();
         let next = board.queue.pop_front().ok_or("the queue is empty")?;
+        board.scheduled = None;
         self.start(&mut board, next.script);
         Ok(())
     }
@@ -554,38 +786,49 @@ impl Account {
         if board.runs != run {
             return;
         }
+        if let Some(mut scheduled) = board.scheduled.take_if(|s| s.run == run) {
+            while !scheduled.rest.is_empty() {
+                let id = scheduled.rest.remove(0);
+                if let Ok(at) = queued_at(&board, id) {
+                    let next = board.queue.remove(at).expect("queued_at found it");
+                    self.start(&mut board, next.script);
+                    scheduled.run = board.runs;
+                    board.scheduled = Some(scheduled);
+                    return;
+                }
+            }
+            if scheduled.after != AfterRun::Stay {
+                self.after(&mut board, &scheduled);
+                return;
+            }
+        }
         if let Some(next) = board.queue.pop_front() {
             self.start(&mut board, next.script);
         }
     }
 
     pub fn restart(&self) -> Result<(), &'static str> {
-        let script = self.board().last.clone().or_else(|| self.script.clone());
-        let script = script.ok_or("no script to restart")?;
-        self.run(script);
+        let mut board = self.board();
+        let owned = board.owned();
+        let script = match owned {
+            true => board.sent.clone(),
+            false => board.last.clone(),
+        };
+        let script = script
+            .or_else(|| self.script.clone())
+            .ok_or("no script to restart")?;
+        self.commanded.store(true, Ordering::SeqCst);
+        self.start(&mut board, script);
+        if owned {
+            board.follow();
+        }
         Ok(())
     }
 
     pub fn stop(&self) -> Result<(), &'static str> {
         let mut board = self.board();
-        board.runs += 1;
-        let pending = board.queued_runs > 0;
-        match &board.run {
-            Run::Running { cancel, .. } => {
-                cancel.cancel();
-                Ok(())
-            }
-            Run::Starting { .. } => Ok(()),
-            Run::Restarting { script, .. } => {
-                board.run = Run::Ended {
-                    script: script.clone(),
-                    how: Ended::Stopped(None),
-                };
-                Ok(())
-            }
-            _ if pending => Ok(()),
-            _ => Err("no script is running"),
-        }
+        board.scheduled = None;
+        board.halt()
     }
 
     pub fn pause(&self) -> Result<(), &'static str> {
@@ -619,6 +862,11 @@ impl Account {
 
     pub fn logout(&self) -> Result<(), &'static str> {
         let mut board = self.board();
+        board.scheduled = None;
+        self.log_out(&mut board)
+    }
+
+    fn log_out(&self, board: &mut Board) -> Result<(), &'static str> {
         board.switched = None;
         board.runs += 1;
         board.links += 1;
@@ -823,6 +1071,7 @@ pub struct Fleet {
     device: DeviceId,
     accounts: Accounts,
     logins: Arc<Spacing>,
+    schedules: Mutex<Schedules>,
 }
 
 impl Fleet {
@@ -831,6 +1080,45 @@ impl Fleet {
             device,
             accounts: Accounts::default(),
             logins: Arc::new(Spacing::new(LOGIN_GAP, LOGIN_JITTER)),
+            schedules: Mutex::default(),
+        }
+    }
+
+    fn schedules(&self) -> MutexGuard<'_, Schedules> {
+        self.schedules
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn set_schedules(&self, schedules: Vec<Schedule>, fresh: Fresh) {
+        self.schedules().set(schedules, fresh);
+    }
+
+    pub fn waits_for_schedules(&self) -> bool {
+        self.schedules().waiting()
+    }
+
+    pub fn schedule(&self, now: Timestamp) {
+        let accounts = self.accounts();
+        for account in &accounts {
+            account.check_deadline(now);
+        }
+        let due = self.schedules().due(now);
+        for (schedule, due) in due {
+            let Some(account) = accounts
+                .iter()
+                .find(|a| a.name.eq_ignore_ascii_case(&schedule.account))
+            else {
+                continue;
+            };
+            match due {
+                Due::Fire(deadline) => account.run_scheduled(&schedule, deadline),
+                Due::Missed => account.say(format!(
+                    "schedule {} missed at {} (aqx wasn't running)",
+                    schedule.name,
+                    schedule::clock(schedule.at)
+                )),
+            }
         }
     }
 
@@ -913,8 +1201,9 @@ impl Fleet {
                     continue;
                 }
                 seen = now;
-                if let Ok(accounts) = config::load_quietly(&path) {
-                    fleet.refresh(accounts, &path);
+                if let Ok(loaded) = config::load_quietly(&path) {
+                    fleet.refresh(loaded.accounts, &path);
+                    fleet.set_schedules(loaded.schedules, Fresh::Reload);
                 }
             }
         });
@@ -1107,7 +1396,10 @@ impl Linked {
                             continue;
                         }
                         After::Retry if self.account.restart_on_error => {}
-                        After::Retry | After::Hold => continue,
+                        After::Retry | After::Hold => {
+                            self.account.held(run);
+                            continue;
+                        }
                     }
                     let delay = restarts.after(started.elapsed());
                     if !self.restarting(&script, run, delay) {
@@ -1268,11 +1560,21 @@ impl Linked {
         board.link = Link::Offline {
             why: (!cancelled).then(|| why.clone()),
         };
+        let runs = board.runs;
+        let scheduled = board.scheduled.take_if(|s| s.run == runs);
         board.runs += 1;
         if !cancelled {
             board
                 .log
                 .push(Channel::Aqx, format!("couldn't log in: {why}"));
+        }
+        if let Some(scheduled) = scheduled {
+            board.drop_rest(&scheduled);
+            let how = if scheduled.ran { "ended" } else { "missed" };
+            board.log.push(
+                Channel::Aqx,
+                format!("schedule {} {how}: couldn't log in", scheduled.name),
+            );
         }
         None
     }
@@ -1331,6 +1633,9 @@ impl Linked {
                     };
                 }
                 return After::Hold;
+            }
+            if let Some(scheduled) = board.scheduled.as_mut().filter(|s| s.run == run) {
+                scheduled.ran = true;
             }
             board.last = Some(script.clone());
             board.status.clear();
@@ -1472,6 +1777,7 @@ impl Fleet {
             device: aqx_client::testing::device_id(),
             accounts: Arc::new(RwLock::new(accounts)),
             logins: Arc::new(Spacing::new(Duration::ZERO, Duration::ZERO)),
+            schedules: Mutex::default(),
         }
     }
 }
@@ -1544,8 +1850,12 @@ mod tests {
     }
 
     fn linked(account: Account) -> Arc<Linked> {
+        linked_to(Arc::new(account))
+    }
+
+    fn linked_to(account: Arc<Account>) -> Arc<Linked> {
         Arc::new(Linked {
-            account: Arc::new(account),
+            account,
             fleet: Accounts::default(),
             logins: Arc::new(Spacing::new(Duration::ZERO, Duration::ZERO)),
             login: Login {
@@ -1730,6 +2040,384 @@ mod tests {
         hang_up_in.send(()).unwrap();
         harness.session.logout();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn script(name: &str) -> Script {
+        Script {
+            path: PathBuf::from(format!("/srv/{name}.ts")),
+            args: Vec::new(),
+        }
+    }
+
+    fn utc(h: i8, m: i8) -> Timestamp {
+        jiff::civil::date(2026, 11, 16)
+            .at(h, m, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .unwrap()
+            .timestamp()
+    }
+
+    fn timed(scripts: &[&str], when_busy: WhenBusy, after: AfterRun) -> Schedule {
+        Schedule {
+            scripts: scripts.iter().map(|name| script(name)).collect(),
+            length: Some(schedule::Length::For(Duration::from_secs(3600))),
+            when_busy,
+            after,
+            ..Schedule::for_tests("player1", jiff::civil::time(9, 30, 0, 0))
+        }
+    }
+
+    struct Scheduling {
+        fleet: Fleet,
+        linked: Arc<Linked>,
+        inbox: Receiver<Command>,
+    }
+
+    impl Scheduling {
+        fn new(schedule: Schedule, online: Option<&Handle>) -> Scheduling {
+            let (account, inbox) = Account::queueing("player1", None);
+            if let Some(session) = online {
+                account.board().link = Link::Session {
+                    session: session.clone(),
+                    server: "Test".into(),
+                    since: Instant::now(),
+                };
+            }
+            let linked = linked_to(Arc::new(account));
+            let fleet = Fleet::of(vec![Arc::clone(&linked.account)]);
+            fleet.set_schedules(vec![schedule], Fresh::Start);
+            fleet.schedule(utc(9, 0));
+            Scheduling {
+                fleet,
+                linked,
+                inbox,
+            }
+        }
+
+        fn account(&self) -> &Account {
+            &self.linked.account
+        }
+
+        fn next_command(&self) -> Option<Option<PathBuf>> {
+            match self.inbox.try_recv().ok()? {
+                Command::Login { .. } => Some(Some("login".into())),
+                Command::Logout => Some(Some("logout".into())),
+                Command::Run { script, run } => {
+                    Some(self.linked.take_run(&script, run).map(|_| script.path))
+                }
+            }
+        }
+
+        fn commands(&self) -> Vec<Option<PathBuf>> {
+            std::iter::from_fn(|| self.next_command()).collect()
+        }
+
+        fn running(&self) -> (u64, Cancel) {
+            let cancel = Cancel::default();
+            let mut board = self.account().board();
+            let script = board.sent.clone().unwrap().path;
+            board.run = Run::Running {
+                script,
+                cancel: cancel.clone(),
+            };
+            (board.runs, cancel)
+        }
+
+        fn said(&self) -> Vec<String> {
+            self.account()
+                .board()
+                .log
+                .lines()
+                .filter(|l| l.channel == Channel::Aqx && l.text.starts_with("schedule "))
+                .map(|l| l.text.clone())
+                .collect()
+        }
+
+        fn queue(&self) -> Vec<PathBuf> {
+            self.account()
+                .board()
+                .queue
+                .iter()
+                .map(|q| q.script.path.clone())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn a_schedule_logs_an_offline_account_in_and_stops_its_run_at_the_deadline() {
+        let at = Scheduling::new(timed(&["farm"], WhenBusy::Skip, AfterRun::Stay), None);
+        at.fleet.schedule(utc(9, 30));
+        assert!(at.account().commanded());
+        assert_eq!(
+            at.commands(),
+            [Some(PathBuf::from("/srv/farm.ts"))],
+            "the run logs the account in first, as aqx ctl run does"
+        );
+        let (_, cancel) = at.running();
+        at.fleet.schedule(utc(10, 29));
+        assert!(!cancel.is_cancelled());
+        at.fleet.schedule(utc(10, 30));
+        assert!(cancel.is_cancelled(), "the deadline stops it");
+        assert_eq!(
+            at.said(),
+            [
+                "schedule morning farm: running farm.ts until 10:30",
+                "schedule morning farm: stopping farm.ts at 10:30"
+            ]
+        );
+        assert!(at.commands().is_empty(), "stay doesn't log out");
+        assert!(at.account().board().scheduled.is_none());
+    }
+
+    #[test]
+    fn a_manual_action_takes_a_run_from_its_schedule_and_a_relogin_or_restart_does_not() {
+        type Act = fn(&Account);
+        let takes: [(&str, Act); 4] = [
+            ("run", |a| a.run(script("other"))),
+            ("stop", |a| {
+                let _ = a.stop();
+            }),
+            ("logout", |a| {
+                let _ = a.logout();
+            }),
+            ("next", |a| {
+                let _ = a.next();
+            }),
+        ];
+        for (what, act) in takes {
+            let at = Scheduling::new(timed(&["farm"], WhenBusy::Skip, AfterRun::Logout), None);
+            at.account().enqueue(script("queued"));
+            at.fleet.schedule(utc(9, 30));
+            let (_, cancel) = at.running();
+            act(at.account());
+            let was = cancel.is_cancelled();
+            at.fleet.schedule(utc(10, 30));
+            assert_eq!(at.said().len(), 1, "{what}: {:?}", at.said());
+            assert!(
+                at.account().board().scheduled.is_none(),
+                "{what} ends the schedule's hold"
+            );
+            assert_eq!(cancel.is_cancelled(), was, "{what}: the deadline leaves it");
+        }
+        type Keep = fn(&Account);
+        let keeps: [(&str, Keep); 2] = [
+            ("relogin", |a| a.relogin()),
+            ("restart", |a| {
+                let _ = a.restart();
+            }),
+        ];
+        for (what, act) in keeps {
+            let at = Scheduling::new(timed(&["farm"], WhenBusy::Skip, AfterRun::Logout), None);
+            at.fleet.schedule(utc(9, 30));
+            at.running();
+            act(at.account());
+            let rerun: Vec<Option<PathBuf>> = at
+                .commands()
+                .into_iter()
+                .filter(|c| c.as_deref() != Some(Path::new("login")))
+                .filter(|c| c.as_deref() != Some(Path::new("logout")))
+                .collect();
+            assert_eq!(
+                rerun.last(),
+                Some(&Some(PathBuf::from("/srv/farm.ts"))),
+                "{what} reruns the scheduled script"
+            );
+            let (_, cancel) = at.running();
+            at.fleet.schedule(utc(10, 30));
+            assert!(cancel.is_cancelled(), "{what}: the deadline still applies");
+            assert_eq!(at.commands(), [Some(PathBuf::from("logout"))], "{what}");
+        }
+    }
+
+    #[test]
+    fn when_busy_skips_stops_or_interrupts_the_running_script() {
+        let farming = Script {
+            args: vec![("target".into(), "7500".into())],
+            ..script("farm")
+        };
+        let busy = |when_busy| {
+            let at = Scheduling::new(timed(&["daily"], when_busy, AfterRun::Stay), None);
+            at.account().enqueue(script("queued"));
+            at.account().run(farming.clone());
+            at.fleet.schedule(utc(9, 30));
+            at
+        };
+        let skip = busy(WhenBusy::Skip);
+        assert_eq!(
+            skip.said(),
+            ["schedule morning farm skipped: farm.ts is running"]
+        );
+        assert_eq!(skip.commands(), [Some(PathBuf::from("/srv/farm.ts"))]);
+        assert!(skip.account().board().scheduled.is_none());
+
+        let stop = busy(WhenBusy::Stop);
+        assert_eq!(
+            stop.said()[0],
+            "schedule morning farm: stopped farm.ts to run daily.ts"
+        );
+        assert_eq!(
+            stop.commands(),
+            [None, Some(PathBuf::from("/srv/daily.ts"))]
+        );
+        assert_eq!(
+            stop.queue(),
+            [PathBuf::from("/srv/queued.ts")],
+            "stop drops it"
+        );
+
+        let interrupt = busy(WhenBusy::Interrupt);
+        assert_eq!(
+            interrupt.said()[0],
+            "schedule morning farm: interrupted farm.ts; it restarts from the queue"
+        );
+        assert_eq!(
+            interrupt.commands(),
+            [None, Some(PathBuf::from("/srv/daily.ts"))]
+        );
+        assert_eq!(
+            interrupt.account().board().queue[0].script,
+            farming,
+            "the interrupted script waits first in the queue with its args"
+        );
+    }
+
+    #[test]
+    fn several_scripts_run_in_order_then_resume_goes_on_with_the_queue() {
+        let (hang_up_in, hang_up) = mpsc::channel::<()>();
+        let harness = Harness::start(Options::default(), move |listener| {
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready();
+            let _ = hang_up.recv();
+        });
+        harness.session.ready().wait().unwrap();
+        let three = || timed(&["a", "b", "c"], WhenBusy::Interrupt, AfterRun::Resume);
+        let paths = |names: &[&str]| -> Vec<PathBuf> {
+            names
+                .iter()
+                .map(|n| PathBuf::from(format!("/srv/{n}.ts")))
+                .collect()
+        };
+
+        let at = Scheduling::new(three(), Some(&harness.session));
+        at.account().enqueue(script("queued"));
+        at.account().run(script("farm"));
+        at.fleet.schedule(utc(9, 30));
+        assert_eq!(at.queue(), paths(&["b", "c", "farm", "queued"]));
+        assert_eq!(
+            at.said().last().unwrap(),
+            "schedule morning farm: running a.ts, then b.ts, then c.ts until 10:30"
+        );
+        assert_eq!(at.commands(), [None, Some(paths(&["a"])[0].clone())]);
+        for (next, left) in [
+            ("b", &["c", "farm", "queued"][..]),
+            ("c", &["farm", "queued"]),
+        ] {
+            let (run, _) = at.running();
+            at.account().advance(run);
+            assert_eq!(at.commands(), [Some(paths(&[next])[0].clone())]);
+            assert_eq!(at.queue(), paths(left));
+        }
+        let (run, _) = at.running();
+        at.account().advance(run);
+        assert_eq!(
+            at.commands(),
+            [Some(PathBuf::from("/srv/farm.ts"))],
+            "resume restarts the interrupted script"
+        );
+        assert_eq!(at.queue(), paths(&["queued"]));
+        assert_eq!(
+            at.said().last().unwrap(),
+            "schedule morning farm: resuming the queue"
+        );
+        assert!(at.account().board().scheduled.is_none());
+
+        let at = Scheduling::new(three(), Some(&harness.session));
+        at.account().run(script("farm"));
+        at.fleet.schedule(utc(9, 30));
+        at.commands();
+        let (run, _) = at.running();
+        at.account().advance(run);
+        at.commands();
+        let (_, cancel) = at.running();
+        at.fleet.schedule(utc(10, 30));
+        assert!(cancel.is_cancelled());
+        assert_eq!(
+            at.commands(),
+            [Some(PathBuf::from("/srv/farm.ts"))],
+            "after a deadline stop, resume skips what the schedule hadn't started"
+        );
+        assert!(at.queue().is_empty());
+        hang_up_in.send(()).unwrap();
+        harness.session.logout();
+    }
+
+    #[test]
+    fn a_run_that_ends_early_holds_the_queue_or_logs_out_as_after_says() {
+        let (hang_up_in, hang_up) = mpsc::channel::<()>();
+        let harness = Harness::start(Options::default(), move |listener| {
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready();
+            let _ = hang_up.recv();
+        });
+        harness.session.ready().wait().unwrap();
+        let online = Some(&harness.session);
+        for (after, on, then) in [
+            (AfterRun::Stay, online, Vec::new()),
+            (AfterRun::Resume, None, Vec::new()),
+            (
+                AfterRun::Resume,
+                online,
+                vec![Some(PathBuf::from("/srv/queued.ts"))],
+            ),
+            (
+                AfterRun::Logout,
+                online,
+                vec![Some(PathBuf::from("logout"))],
+            ),
+        ] {
+            let at = Scheduling::new(timed(&["a", "b"], WhenBusy::Skip, after), on);
+            at.account().enqueue(script("queued"));
+            at.fleet.schedule(utc(9, 30));
+            at.commands();
+            let (run, _) = at.running();
+            at.account().board().run = Run::Ended {
+                script: PathBuf::from("/srv/a.ts"),
+                how: Ended::Failed("boom".into()),
+            };
+            at.account().held(run);
+            let resumed = !then.is_empty() && after == AfterRun::Resume;
+            assert_eq!(
+                at.queue().len(),
+                usize::from(!resumed),
+                "{after:?}: the schedule's unstarted script leaves the queue"
+            );
+            assert_eq!(
+                at.commands(),
+                then,
+                "{after:?}, online {}: an offline account doesn't resume",
+                on.is_some()
+            );
+            assert!(at.account().board().scheduled.is_none());
+        }
+        hang_up_in.send(()).unwrap();
+    }
+
+    #[test]
+    fn a_login_that_gives_up_misses_the_schedule() {
+        let at = Scheduling::new(timed(&["a", "b"], WhenBusy::Skip, AfterRun::Resume), None);
+        at.fleet.schedule(utc(9, 30));
+        at.commands();
+        let link = at.account().board().links;
+        assert!(
+            at.linked
+                .failed(link, "the server refused".into())
+                .is_none()
+        );
+        assert_eq!(
+            at.said().last().unwrap(),
+            "schedule morning farm missed: couldn't log in"
+        );
+        assert!(at.queue().is_empty() && at.account().board().scheduled.is_none());
     }
 
     #[test]

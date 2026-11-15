@@ -443,7 +443,9 @@ impl Server {
     }
 
     fn done(&self) -> bool {
-        self.fleet.idle() && (self.fleet.commanded() || self.down.load(Ordering::SeqCst))
+        let ended = self.down.load(Ordering::SeqCst)
+            || (self.fleet.commanded() && !self.fleet.waits_for_schedules());
+        self.fleet.idle() && ended
     }
 
     pub fn listen(self: &Arc<Self>, listener: UnixListener) {
@@ -542,6 +544,9 @@ impl Server {
         let mut printed: Vec<u64> = Vec::new();
         loop {
             self.fleet.supervise(Instant::now());
+            if !self.down.load(Ordering::SeqCst) {
+                self.fleet.schedule(jiff::Timestamp::now());
+            }
             print_new(&self.fleet, &mut printed, print);
             if self.done() {
                 self.stop_answering();
@@ -599,7 +604,10 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
         UnixListener::bind(&paths.socket).with_context(|| paths.socket.display().to_string())?;
     std::fs::set_permissions(&paths.socket, std::fs::Permissions::from_mode(0o600))?;
     let removed = Removed(paths.socket.clone());
-    let accounts = config::load(&config).map_err(anyhow::Error::msg)?;
+    let config::Loaded {
+        accounts,
+        schedules,
+    } = config::load(&config).map_err(anyhow::Error::msg)?;
     let first: Vec<String> = match &wanted.accounts[..] {
         [] => accounts
             .iter()
@@ -613,6 +621,7 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
     };
     let fleet = Arc::new(Fleet::new(aqx_client::DeviceId::load()?));
     fleet.add_new(accounts);
+    fleet.set_schedules(schedules, crate::schedule::Fresh::Start);
     for (i, account) in fleet.accounts().iter().enumerate() {
         if first.contains(&account.name)
             && let Err(why) = fleet.act(i, wanted.start.action())
@@ -841,6 +850,43 @@ mod tests {
             );
         }
         assert!(server.done());
+    }
+
+    #[test]
+    fn an_enabled_schedule_keeps_an_idle_session_up_until_everyone_is_logged_out() {
+        use crate::schedule::{Fresh, Schedule};
+        let dir = std::env::temp_dir().join(format!("aqx-keep-tests-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("aqx.sock");
+        let fleet = Arc::new(Fleet::of(vec![Arc::new(Account::detached("player1"))]));
+        let server = Server::new(
+            Arc::clone(&fleet),
+            PathBuf::from("/srv/aqx.toml"),
+            socket.clone(),
+        );
+        server.listen(UnixListener::bind(&socket).unwrap());
+        let session = connect(&socket).unwrap();
+        assert_eq!(
+            session.source().act(0, Action::Next),
+            Err("the queue is empty".into())
+        );
+        assert!(server.done(), "without schedules, an idle session is done");
+        let schedule = Schedule::for_tests("player1", jiff::civil::time(9, 30, 0, 0));
+        let off = Schedule {
+            enabled: false,
+            ..schedule.clone()
+        };
+        fleet.set_schedules(vec![off], Fresh::Start);
+        assert!(server.done(), "a disabled schedule keeps nothing up");
+        fleet.set_schedules(vec![schedule], Fresh::Reload);
+        assert!(
+            !server.done(),
+            "an enabled schedule keeps the session up with everyone offline"
+        );
+        assert_eq!(session.source().end(), Ok(()));
+        assert!(server.done(), "logging everyone out still ends it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn shape(value: &serde_json::Value, path: &str, out: &mut std::collections::BTreeSet<String>) {

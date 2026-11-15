@@ -178,7 +178,11 @@ impl Web {
                 .collect());
         }
         let accounts = config::load_quietly(&self.config).map_err(Failure::internal)?;
-        Ok(accounts.into_iter().map(|a| (a.name, a.user)).collect())
+        Ok(accounts
+            .accounts
+            .into_iter()
+            .map(|a| (a.name, a.user))
+            .collect())
     }
 
     fn act(&self, asked: ActRequest) -> Result<Reply, Failure> {
@@ -611,6 +615,7 @@ impl Web {
         })?;
         let configured: Vec<String> = config::load_quietly(&self.config)
             .map_err(Failure::bad)?
+            .accounts
             .into_iter()
             .map(|a| a.name)
             .collect();

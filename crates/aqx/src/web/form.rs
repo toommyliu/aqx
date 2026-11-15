@@ -285,9 +285,33 @@ leader = "player1"
             saved.contains("user = \"player3\"\npassword = \"secret-three\""),
             "{saved}"
         );
-        let accounts = crate::config::read(&saved, std::path::Path::new("/srv")).unwrap();
+        let accounts = crate::config::read(&saved, std::path::Path::new("/srv"))
+            .unwrap()
+            .accounts;
         let names: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["healer", "player3"]);
+    }
+
+    #[test]
+    fn saving_the_form_leaves_schedules_as_they_were() {
+        let schedule = "\n# weeknights\n[[schedule]]\naccount = \"healer\" # the healer\nscripts = [{ script = \"a.ts\" }, { script = \"b.ts\" }]\nat = \"21:00\"\n";
+        let file = format!("{FILE}{schedule}");
+        let saved = apply(
+            &file,
+            form(json!({
+                "defaults": { "server": "Yorumi" },
+                "accounts": [
+                    { "from": 1, "fields": { "name": "healer", "user": "player2" }, "password": null },
+                    { "from": null, "fields": { "user": "player3" }, "password": "secret-three" },
+                ],
+            })),
+            &keys(),
+        )
+        .unwrap();
+        assert!(saved.contains(schedule), "{saved}");
+        let loaded = crate::config::read(&saved, std::path::Path::new("/srv")).unwrap();
+        assert_eq!(loaded.schedules.len(), 1);
+        assert_eq!(loaded.accounts.len(), 2);
     }
 
     #[test]

@@ -280,7 +280,7 @@ impl Idle {
         if modified.is_none() || modified != self.read_at {
             self.read_at = modified;
             self.accounts = config::load_quietly(config)
-                .map(|accounts| accounts.iter().map(offline).collect())
+                .map(|loaded| loaded.accounts.iter().map(offline).collect())
                 .unwrap_or_default();
         }
         self.accounts.clone()
@@ -399,7 +399,8 @@ mod tests {
                     ),
                     Path::new("/srv"),
                 )
-                .unwrap()[0],
+                .unwrap()
+                .accounts[0],
             )
         }
     }
