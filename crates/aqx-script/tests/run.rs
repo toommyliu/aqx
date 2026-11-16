@@ -651,6 +651,7 @@ fn cancelling_a_waiting_script_runs_its_finally_blocks() {
         import { script, wait } from "aqx";
         export default function* () {
           try {
+            script.log("started");
             yield* wait.ms(60_000);
           } finally {
             script.log("cleaned up");
@@ -659,14 +660,24 @@ fn cancelling_a_waiting_script_runs_its_finally_blocks() {
         "#,
     );
     let cancel = Cancel::default();
-    let canceller = cancel.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(50));
-        canceller.cancel();
-    });
-    let (outcome, outputs) = run_path(&path, &cancel);
+    let harness = serve(|_| {});
+    let (outcome, outputs) = run_in(&harness, &path, &cancel, cancel_once_started(&cancel));
+    finish(harness);
     assert_eq!(outcome, Ok(Outcome::Cancelled));
-    assert_eq!(logs(&outputs), ["cleaned up"]);
+    assert_eq!(logs(&outputs), ["started", "cleaned up"]);
+}
+
+fn cancel_once_started(cancel: &Cancel) -> impl FnMut(&Output) + 'static {
+    let cancel = cancel.clone();
+    move |output| {
+        if matches!(output, Output::Log { text, .. } if text == "started") {
+            let cancel = cancel.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(50));
+                cancel.cancel();
+            });
+        }
+    }
 }
 
 #[test]
@@ -729,13 +740,14 @@ fn cancelling_a_paused_script_stops_it() {
         "#,
     );
     let cancel = Cancel::default();
-    cancel.pause();
-    let canceller = cancel.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(80));
-        canceller.cancel();
+    let pauser = cancel.clone();
+    let mut then_cancel = cancel_once_started(&cancel);
+    let harness = serve(|_| {});
+    let (outcome, outputs) = run_in(&harness, &path, &cancel, move |output| {
+        pauser.pause();
+        then_cancel(output);
     });
-    let (outcome, outputs) = run_path(&path, &cancel);
+    finish(harness);
     assert_eq!(outcome, Ok(Outcome::Cancelled));
     assert!(!logs(&outputs).contains(&"never"), "{outputs:?}");
 }
@@ -832,14 +844,14 @@ fn check_compiles_a_script_and_its_imports_without_running_them() {
 #[test]
 fn cancelling_interrupts_a_script_stuck_in_a_loop() {
     let dir = Dir::new();
-    let path = dir.file("main.ts", "export default function* () { while (true) {} }");
+    let path = dir.file(
+        "main.ts",
+        "import { script } from \"aqx\";\nexport default function* () { script.log(\"started\"); while (true) {} }",
+    );
     let cancel = Cancel::default();
-    let canceller = cancel.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(50));
-        canceller.cancel();
-    });
-    let (outcome, _) = run_path(&path, &cancel);
+    let harness = serve(|_| {});
+    let (outcome, _) = run_in(&harness, &path, &cancel, cancel_once_started(&cancel));
+    finish(harness);
     assert_eq!(outcome, Ok(Outcome::Cancelled));
 }
 
@@ -940,6 +952,7 @@ fn a_closed_session_ends_the_run_and_runs_finally_blocks() {
         import { script, wait } from "aqx";
         export default function* () {
           try {
+            script.log("started");
             yield* wait.ms(60_000);
           } finally {
             script.log("cleaned up");
@@ -948,14 +961,18 @@ fn a_closed_session_ends_the_run_and_runs_finally_blocks() {
         "#,
     );
     let session = harness.session.clone();
-    thread::spawn(move || {
-        thread::sleep(Duration::from_millis(50));
-        session.logout();
+    let (outcome, outputs) = run_in(&harness, &path, &Cancel::default(), move |output| {
+        if matches!(output, Output::Log { text, .. } if text == "started") {
+            let session = session.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(50));
+                session.logout();
+            });
+        }
     });
-    let (outcome, outputs) = run_in(&harness, &path, &Cancel::default(), |_| {});
     harness.finish();
     assert_eq!(outcome, Ok(Outcome::Disconnected("logged out".into())));
-    assert_eq!(logs(&outputs), ["cleaned up"]);
+    assert_eq!(logs(&outputs), ["started", "cleaned up"]);
 }
 
 #[test]
@@ -2086,14 +2103,8 @@ fn logout_and_restart_end_the_run_their_own_way() {
         let harness = serve(|_| {});
         let dir = Dir::new();
         let path = dir.file("main.ts", source);
-        let session = harness.session.clone();
-        let closer = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            session.logout();
-        });
         let (outcome, _) = run_in(&harness, &path, &Cancel::default(), |_| {});
-        closer.join().unwrap();
-        harness.finish();
+        finish(harness);
         outcome
     };
     assert_eq!(
