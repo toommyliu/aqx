@@ -690,12 +690,13 @@ impl Account {
         Ok(())
     }
 
-    pub fn upcoming(&self, board: &Board) -> Option<(&Script, Timestamp)> {
+    pub fn upcoming(&self, board: &Board) -> Option<(String, Timestamp)> {
         self.schedules
             .iter()
             .zip(&board.due)
-            .filter_map(|(schedule, due)| due.map(|at| (&schedule.script, at)))
+            .filter_map(|(schedule, due)| due.map(|at| (schedule, at)))
             .min_by_key(|(_, at)| *at)
+            .map(|(schedule, at)| (schedule.label(), at))
     }
 
     fn fire_due(&self, now: Timestamp) {
@@ -705,7 +706,7 @@ impl Account {
             .partition(|&i| board.due[i].is_some_and(|at| now.duration_since(at) > SCHEDULE_LATE));
         let names = |at: &[usize]| {
             at.iter()
-                .map(|&i| self.schedules[i].script.path.display().to_string())
+                .map(|&i| self.schedules[i].label())
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -719,11 +720,7 @@ impl Account {
         if due.is_empty() {
             return;
         }
-        let mut scripts: Vec<Script> = due
-            .iter()
-            .map(|&i| self.schedules[i].script.clone())
-            .collect();
-        let names = names(&due);
+        let all = names(&due);
         let moment = board.moment();
         if let Moment::Changing = moment {
             return;
@@ -731,49 +728,85 @@ impl Account {
         for &i in &due {
             board.due[i] = self.schedules[i].next_after(now);
         }
-        let first = scripts.remove(0);
+        let relogin = due.iter().any(|&i| self.schedules[i].relogin);
+        let with_script: Vec<usize> = due
+            .iter()
+            .copied()
+            .filter(|&i| self.schedules[i].script.is_some())
+            .collect();
+        let names = names(&with_script);
+        let mut scripts = with_script
+            .iter()
+            .filter_map(|&i| self.schedules[i].script.clone());
+        let first = scripts.next();
+        let rest: Vec<Script> = scripts.collect();
         let busy_scheduled = board.scheduled == Some(board.runs);
-        let text = match moment {
-            Moment::Changing => unreachable!("returned above"),
-            Moment::Paused => format!("skipped {names}: the script is paused"),
-            Moment::Busy(_) if busy_scheduled => {
+        let relogging = relogin && matches!(moment, Moment::Busy(_) | Moment::Idle);
+        if relogging {
+            self.send(Command::Logout);
+            board.queued_logins += 1;
+            self.send(Command::Login { link: board.links });
+        }
+        let then = match (moment, first) {
+            (Moment::Changing, _) => unreachable!("returned above"),
+            (Moment::Paused, _) => Some(format!("skipped {all}: the script is paused")),
+            (Moment::Offline, None) => Some(format!("skipped {all}: the account is offline")),
+            (Moment::Busy(current), first) if busy_scheduled => {
                 let at = board.queue.iter().take_while(|q| q.scheduled).count();
-                for (i, script) in std::iter::once(first).chain(scripts).enumerate() {
+                for (i, script) in first.into_iter().chain(rest).enumerate() {
                     board.queue_at(at + i, script, true);
                 }
-                format!("{names} runs after the scheduled script")
+                if relogging {
+                    self.start(&mut board, current, true);
+                }
+                (!with_script.is_empty())
+                    .then(|| format!("{names} runs after the scheduled script"))
             }
-            Moment::Busy(current) => {
+            (Moment::Busy(current), None) => {
+                let text = format!("{} starts again after", current.path.display());
+                self.start(&mut board, current, false);
+                Some(text)
+            }
+            (Moment::Busy(current), Some(first)) => {
                 let text = format!(
                     "stopping {} to run {names}; it starts again after",
                     current.path.display()
                 );
                 board.queue_at(0, current, false);
-                for (i, script) in scripts.into_iter().enumerate() {
+                for (i, script) in rest.into_iter().enumerate() {
                     board.queue_at(i, script, true);
                 }
                 self.start(&mut board, first, true);
-                text
+                Some(text)
             }
-            Moment::Idle => {
+            (Moment::Idle, None) => None,
+            (Moment::Idle, Some(first)) => {
                 board.returning = Some(Return::Idle);
-                for (i, script) in scripts.into_iter().enumerate() {
+                for (i, script) in rest.into_iter().enumerate() {
                     board.queue_at(i, script, true);
                 }
                 self.start(&mut board, first, true);
-                format!("running {names}")
+                Some(format!("running {names}"))
             }
-            Moment::Offline => {
+            (Moment::Offline, Some(first)) => {
                 board.returning = Some(Return::Offline);
-                for (i, script) in scripts.into_iter().enumerate() {
+                for (i, script) in rest.into_iter().enumerate() {
                     board.queue_at(i, script, true);
                 }
                 board.queued_logins += 1;
                 self.send(Command::Login { link: board.links });
                 self.start(&mut board, first, true);
-                format!("logging in to run {names}")
+                Some(format!("logging in to run {names}"))
             }
         };
+        let text = [
+            relogging.then(|| "logging out and back in".to_owned()),
+            then,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("; ");
         board.log.push(Channel::Aqx, format!("schedule: {text}"));
     }
 
@@ -1987,7 +2020,8 @@ mod tests {
             at: jiff::civil::time(21, 0, 0, 0),
             days: crate::schedule::Days::EVERY,
             tz: Some(jiff::tz::TimeZone::UTC),
-            script,
+            script: Some(script),
+            relogin: false,
         }
     }
 
@@ -2162,6 +2196,107 @@ mod tests {
             (1, false),
             "the queue waits for the next login"
         );
+    }
+
+    #[test]
+    fn a_relogin_schedule_logs_out_and_back_in_before_the_scripts() {
+        let (hang_up_in, hang_up) = mpsc::channel::<()>();
+        let harness = Harness::start(Options::default(), move |listener| {
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready();
+            let _ = hang_up.recv();
+        });
+        harness.session.ready().wait().unwrap();
+        let daily = Script {
+            path: PathBuf::from("/srv/daily.ts"),
+            args: Vec::new(),
+        };
+        let relogin = Schedule {
+            script: None,
+            relogin: true,
+            ..every_day(daily.clone())
+        };
+        let fire = |schedules: Vec<Schedule>, farming: bool| {
+            let (mut account, inbox) = Account::queueing("player1", Some(farm()));
+            account.schedules = schedules;
+            {
+                let mut board = account.board();
+                board.link = Link::Session {
+                    session: harness.session.clone(),
+                    server: "Test".into(),
+                    since: Instant::now(),
+                };
+                if farming {
+                    board.run = Run::Running {
+                        script: farm().path,
+                        cancel: Cancel::default(),
+                    };
+                    board.last = Some(farm());
+                }
+                let now = Timestamp::now();
+                board.due = vec![Some(now); account.schedules.len()];
+                drop(board);
+                account.fire_due(now);
+            }
+            let linked = linked(account);
+            let taken: Vec<Option<PathBuf>> = inbox
+                .try_iter()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|command| match command {
+                    Command::Login { .. } => Some(PathBuf::from("login")),
+                    Command::Logout => Some(PathBuf::from("logout")),
+                    Command::Run { script, run } => {
+                        linked.take_run(&script, run).map(|_| script.path)
+                    }
+                })
+                .collect();
+            let queued: Vec<PathBuf> = linked
+                .account
+                .board()
+                .queue
+                .iter()
+                .map(|q| q.script.path.clone())
+                .collect();
+            (taken, queued)
+        };
+        let some = |path: &str| Some(PathBuf::from(path));
+        assert_eq!(
+            fire(vec![relogin.clone()], true),
+            (
+                vec![some("logout"), some("login"), some("/srv/farm.ts")],
+                vec![]
+            ),
+            "the running script starts again after the relogin"
+        );
+        assert_eq!(
+            fire(vec![relogin.clone()], false),
+            (vec![some("logout"), some("login")], vec![]),
+            "an idle account stays idle"
+        );
+        assert_eq!(
+            fire(vec![relogin, every_day(daily)], true),
+            (
+                vec![some("logout"), some("login"), some("/srv/daily.ts")],
+                vec![PathBuf::from("/srv/farm.ts")]
+            ),
+            "the scheduled script runs after the relogin, then the interrupted one"
+        );
+        let (mut offline, inbox) = Account::queueing("player2", Some(farm()));
+        offline.schedules = vec![Schedule {
+            script: None,
+            relogin: true,
+            ..every_day(farm())
+        }];
+        let now = Timestamp::now();
+        offline.board().due = vec![Some(now)];
+        offline.fire_due(now);
+        assert!(
+            inbox.try_recv().is_err(),
+            "an offline account has nothing to log back in"
+        );
+        hang_up_in.send(()).unwrap();
+        harness.session.logout();
     }
 
     #[test]
