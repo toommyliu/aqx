@@ -2568,7 +2568,7 @@ mod tests {
     fn a_logout_while_waiting_for_a_login_slot_cancels_the_login() {
         for (slot, logout_after) in [
             (Duration::from_secs(5), Duration::from_millis(100)),
-            (Duration::from_millis(150), Duration::from_millis(120)),
+            (Duration::from_millis(190), Duration::from_millis(145)),
         ] {
             logout_while_waiting(slot, logout_after);
         }
@@ -2579,7 +2579,7 @@ mod tests {
         account.login().unwrap();
         let link = account.board().links;
         let logins = Arc::new(Spacing::new(slot, Duration::ZERO));
-        logins.reserve();
+        let reserved = logins.reserve();
         let api = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let host = format!("http://{}", api.local_addr().unwrap());
         let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2610,7 +2610,11 @@ mod tests {
             let linked = Arc::clone(&linked);
             thread::spawn(move || linked.ensure_online(link, true).is_none())
         };
-        thread::sleep(logout_after);
+        while !matches!(linked.account.board().link, Link::Connecting) {
+            assert!(reserved.elapsed() < slot, "the login never started waiting");
+            thread::sleep(Duration::from_millis(1));
+        }
+        thread::sleep((reserved + logout_after).saturating_duration_since(Instant::now()));
         let asked = Instant::now();
         assert_eq!(linked.account.logout(), Ok(()));
         assert!(
