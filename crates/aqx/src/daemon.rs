@@ -137,22 +137,25 @@ fn read_resume(path: &Path) -> Vec<Resume> {
         .unwrap_or_default()
 }
 
-fn save_resume(path: &Path, resume: &[Resume]) {
+fn save_resume(path: &Path, resume: &[Resume]) -> bool {
     if resume.is_empty() {
-        let _ = std::fs::remove_file(path);
-        return;
+        return match std::fs::remove_file(path) {
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            Ok(()) => true,
+        };
     }
     let partial = path.with_extension("json.partial");
     let saved = serde_json::to_vec(resume)
         .map_err(std::io::Error::other)
         .and_then(|json| std::fs::write(&partial, json))
         .and_then(|()| std::fs::rename(&partial, path));
-    if let Err(e) = saved {
+    if let Err(e) = &saved {
         eprintln!(
             "aqx: couldn't save what to resume in {}: {e}",
             path.display()
         );
     }
+    saved.is_ok()
 }
 
 pub fn forget_resume(config: &Path) -> anyhow::Result<()> {
@@ -486,8 +489,7 @@ impl Server {
 
     fn save(&self, saved: &mut Option<Vec<Resume>>) {
         let now = self.fleet.to_resume();
-        if saved.as_ref() != Some(&now) {
-            save_resume(&self.resume, &now);
+        if saved.as_ref() != Some(&now) && save_resume(&self.resume, &now) {
             *saved = Some(now);
         }
     }
@@ -979,6 +981,21 @@ mod tests {
         let other = Arc::new(Account::detached("player2"));
         other.login().unwrap();
         let fleet = Arc::new(Fleet::of(vec![Arc::clone(&resuming), other]));
+        let later = dir.join("later");
+        let retried = Server::new(
+            Arc::clone(&fleet),
+            PathBuf::from("/srv/aqx.toml"),
+            dir.join("aqx.sock"),
+            false,
+            later.join("aqx.resume.json"),
+        );
+        retried.keep_resumable();
+        std::fs::create_dir_all(&later).unwrap();
+        retried.keep_resumable();
+        assert!(
+            later.join("aqx.resume.json").exists(),
+            "a save that failed is tried again"
+        );
         let server = Server::new(
             Arc::clone(&fleet),
             PathBuf::from("/srv/aqx.toml"),
