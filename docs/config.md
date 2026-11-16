@@ -59,7 +59,8 @@ An account's `schedule` list runs scripts at set times. Each `[[account.schedule
 | `at` | Time of day, like `"21:00"`, `"9pm"` or `"9:30pm"`. Required. |
 | `days` | Days to run on, like `["fri"]` or `["saturday", "sunday"]`. Every day unless set. |
 | `tz` | Time zone for `at`, like `"America/New_York"`. Defaults to this machine's time zone. |
-| `script` | Script to run, relative to `aqx.toml`. Required. |
+| `relogin` | Log out and back in first. Defaults to `false`. |
+| `script` | Script to run, relative to `aqx.toml`. Required unless `relogin` is on. |
 | `args` | Arguments for that script. |
 
 When a schedule comes due:
@@ -69,6 +70,7 @@ When a schedule comes due:
 - An offline account logs in, runs the scheduled script, then logs out. Its queue waits for the next login.
 - A paused script keeps running, and aqx logs that it skipped the schedule.
 - A schedule that comes due while another scheduled script runs waits behind it.
+- With `relogin = true`, an online account logs out and back in before anything else. A schedule with no script then starts the running script again, or leaves an idle account idle. An offline account skips a relogin schedule that has no script.
 
 A scheduled script that throws doesn't restart, even with `restart_on_error` on. aqx logs the error and moves on to the next script. A manual stop holds the queue as usual.
 

@@ -334,7 +334,7 @@ impl Shown {
                 .map(|r| r.path().display().to_string()),
             queue: board.queue.iter().cloned().collect(),
             next: account.upcoming(&board).map(|(script, at)| Next {
-                script: script.path.display().to_string(),
+                script,
                 at_ms: at.as_millisecond(),
             }),
         }

@@ -172,8 +172,13 @@ pub struct ScheduleConfig {
         description = "Time zone for at, like \"America/New_York\". Defaults to this machine's time zone."
     )]
     tz: Option<String>,
-    #[schemars(description = "Script to run, relative to this file.")]
-    script: PathBuf,
+    #[schemars(description = "Script to run, relative to this file. Optional when relogin is on.")]
+    script: Option<PathBuf>,
+    #[serde(default)]
+    #[schemars(
+        description = "Log out and back in first. Without a script, the script that was running starts again. Defaults to false."
+    )]
+    relogin: bool,
     #[serde(default)]
     #[schemars(description = ARGS, schema_with = "args_schema")]
     args: toml::Table,
@@ -426,14 +431,23 @@ impl ScheduleConfig {
                 })
             })
             .transpose()?;
+        let script = match &self.script {
+            Some(path) => Some(Script {
+                path: dir.join(path),
+                args: script_args(&self.args, &format!("{label}: args"))?,
+            }),
+            None if !self.args.is_empty() => {
+                return Err(format!("{label} has args but no script"));
+            }
+            None if self.relogin => None,
+            None => return Err(format!("{label} needs a script or relogin = true")),
+        };
         Ok(Schedule {
             at,
             days,
             tz,
-            script: Script {
-                path: dir.join(&self.script),
-                args: script_args(&self.args, &format!("{label}: args"))?,
-            },
+            script,
+            relogin: self.relogin,
         })
     }
 }
@@ -641,7 +655,7 @@ mod tests {
             (jiff::civil::time(21, 0, 0, 0), Days::EVERY, None)
         );
         assert_eq!(
-            dailies.script.path,
+            dailies.script.unwrap().path,
             PathBuf::from("/srv/aqx/scripts/dailies.ts")
         );
         assert_eq!(
@@ -652,7 +666,10 @@ mod tests {
             )
         );
         assert_eq!(weekly.tz, Some(TimeZone::get("America/New_York").unwrap()));
-        assert_eq!(weekly.script.args, [("fast".into(), "true".into())]);
+        assert_eq!(
+            weekly.script.unwrap().args,
+            [("fast".into(), "true".into())]
+        );
 
         assert_eq!(
             (healer.name.as_str(), healer.user.as_str()),
@@ -754,6 +771,23 @@ mod tests {
             let error = accounts(&text).unwrap_err();
             assert!(error.contains(why), "{bad}: {error}");
         }
+        let scriptless = |extra: &str| {
+            accounts(&one(&format!(
+                "server = \"Twilly\"\n[[account.schedule]]\nat = \"9pm\"\n{extra}"
+            )))
+        };
+        assert!(
+            scriptless("")
+                .unwrap_err()
+                .contains("needs a script or relogin = true")
+        );
+        assert!(
+            scriptless("relogin = true\nargs = { n = 1 }")
+                .unwrap_err()
+                .contains("args but no script")
+        );
+        let [account] = scriptless("relogin = true").unwrap().try_into().unwrap();
+        assert!(account.schedules[0].relogin && account.schedules[0].script.is_none());
         assert!(
             accounts("[defaults]\nserver = \"Twilly\"")
                 .unwrap_err()

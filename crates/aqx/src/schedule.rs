@@ -9,10 +9,17 @@ pub struct Schedule {
     pub at: Time,
     pub days: Days,
     pub tz: Option<TimeZone>,
-    pub script: Script,
+    pub script: Option<Script>,
+    pub relogin: bool,
 }
 
 impl Schedule {
+    pub fn label(&self) -> String {
+        self.script
+            .as_ref()
+            .map_or_else(|| "relogin".into(), |s| s.path.display().to_string())
+    }
+
     pub fn next_after(&self, after: Timestamp) -> Option<Timestamp> {
         let tz = self.tz.clone().unwrap_or_else(TimeZone::system);
         let mut date = after.to_zoned(tz.clone()).date();
@@ -113,10 +120,11 @@ mod tests {
             at: parse_time(at).unwrap(),
             days,
             tz: eastern(),
-            script: Script {
+            script: Some(Script {
                 path: "/srv/dailies.ts".into(),
                 args: Vec::new(),
-            },
+            }),
+            relogin: false,
         }
     }
 

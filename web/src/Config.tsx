@@ -58,7 +58,7 @@ type Setting = { key: string; label: string; help: string; kind: Kind; pattern: 
 
 type ArgKind = "text" | "number" | "bool";
 type Arg = { key: string; value: string; kind: ArgKind };
-type Schedule = { at: string; days: string[]; tz: string; script: string; args: Arg[] };
+type Schedule = { at: string; days: string[]; tz: string; relogin: boolean; script: string; args: Arg[] };
 type ScheduleDraft = Schedule & { read: Fields | null };
 type AccountDraft = {
   id: string;
@@ -131,6 +131,7 @@ const scheduleOf = (f: Fields): Schedule => ({
   at: text(f.at),
   days: Array.isArray(f.days) ? f.days.map(text) : [],
   tz: text(f.tz),
+  relogin: f.relogin === true,
   script: text(f.script),
   args: argsOf(f.args),
 });
@@ -193,11 +194,13 @@ function setArgs(fields: Fields, args: Arg[]) {
 
 function scheduleFields({ read, ...edited }: ScheduleDraft): Fields {
   if (read && canonical(edited) === canonical(scheduleOf(read))) return read;
-  const fields: Fields = { at: edited.at.trim(), script: edited.script.trim() };
+  const fields: Fields = { at: edited.at.trim() };
+  if (edited.relogin) fields.relogin = true;
+  if (edited.script.trim()) fields.script = edited.script.trim();
   const picked = new Set(edited.days.map(dayOf));
   if (picked.size > 0 && picked.size < DAYS.length) fields.days = edited.days;
   if (edited.tz.trim()) fields.tz = edited.tz.trim();
-  setArgs(fields, edited.args);
+  if (edited.script.trim()) setArgs(fields, edited.args);
   return fields;
 }
 
@@ -266,7 +269,8 @@ function problemsOf(
     a.schedules.forEach((s, i) => {
       const id = `${at}-sched${i}`;
       if (!isTime(s.at)) out.push({ id: `${id}-at`, account: a.id, message: "Use a time like 21:00 or 9pm" });
-      if (!s.script.trim()) out.push({ id: `${id}-script`, account: a.id, message: "Pick a script to run" });
+      if (!s.script.trim() && !s.relogin)
+        out.push({ id: `${id}-script`, account: a.id, message: "Pick a script to run, or log out and back in" });
       checkArgs(id, a.id, s.script, s.args);
     });
   }
@@ -680,7 +684,7 @@ function AccountEditor(props: {
     });
   const addSchedule = () => {
     const n = props.account.schedules.length;
-    props.edit((a) => void a.schedules.push({ at: "", days: [], tz: "", script: "", args: [], read: null }));
+    props.edit((a) => void a.schedules.push({ at: "", days: [], tz: "", relogin: false, script: "", args: [], read: null }));
     queueMicrotask(() => document.getElementById(`${at()}-sched${n}-at`)?.focus());
   };
   const removeSchedule = (i: number) => {
@@ -917,13 +921,25 @@ function ScheduleEditor(props: {
         placeholder="This machine's time zone"
         onInput={(v) => props.edit((s) => void (s.tz = v))}
       />
+      <span class="label">Relogin</span>
+      <label class="check">
+        <input
+          id={`${props.id}-relogin`}
+          type="checkbox"
+          checked={props.schedule.relogin}
+          onChange={(e) => props.edit((s) => void (s.relogin = e.currentTarget.checked))}
+        />
+        Log out and back in first
+      </label>
       <label class="label" for={`${props.id}-script`}>
         Script
-        <Required />
+        <Show when={!props.schedule.relogin}>
+          <Required />
+        </Show>
       </label>
       <ScriptField
         id={`${props.id}-script`}
-        required
+        required={!props.schedule.relogin}
         value={props.schedule.script}
         error={props.problem(`${props.id}-script`)}
         onChange={(v) => props.edit((s) => void (s.script = v))}
