@@ -622,9 +622,8 @@ impl Account {
                 board
                     .log
                     .push(Channel::Aqx, "the scheduled scripts are done".into());
-                drop(board);
                 if let Return::Offline = back {
-                    let _ = self.logout();
+                    let _ = self.log_out(&mut board);
                 }
             }
             back => {
@@ -797,7 +796,10 @@ impl Account {
     }
 
     pub fn logout(&self) -> Result<(), &'static str> {
-        let mut board = self.board();
+        self.log_out(&mut self.board())
+    }
+
+    fn log_out(&self, board: &mut Board) -> Result<(), &'static str> {
         board.returning = None;
         board.switched = None;
         board.runs += 1;
