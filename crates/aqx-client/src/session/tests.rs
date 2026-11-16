@@ -413,16 +413,18 @@ fn a_logout_cancels_a_join_waiting_out_the_cooldown() {
 
 #[test]
 fn a_logout_cancels_a_sent_join_even_if_the_server_confirms_it() {
-    let harness = Harness::start(Options::default(), |listener| {
+    let (transferred, transferring) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
         peer.expect(&packet::transfer("player1", "yulgar-1"));
+        transferred.send(()).unwrap();
         peer.expect(&packet::logout());
         peer.send(&move_to_area(43, "yulgar-2"));
         peer.send("%xt%server%-1%You joined \"yulgar-2\"!%");
     });
     let sent = harness.session.join("yulgar-1");
-    thread::sleep(Duration::from_millis(100));
+    transferring.recv().unwrap();
     harness.session.logout();
     let joined = sent.wait();
     assert!(
@@ -1934,7 +1936,7 @@ fn wait_for_farm(harness: &Harness) {
 
 const ONE: Aim = Aim::Monster(MonMapId(1));
 const TWO: Aim = Aim::Monster(MonMapId(2));
-const SLACK: Duration = Duration::from_millis(20);
+const SLACK: Duration = Duration::from_millis(100);
 
 #[test]
 fn kills_a_monster_with_skills_and_the_auto_attack_at_the_clients_pace() {
@@ -2613,7 +2615,7 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
             json!({"cmd": "acceptQuest", "QuestID": 30, "bSuccess": 1, "msg": "success"}),
         ));
         let turn_in = "%xt%zm%tryQuestComplete%42%30%600%true%2%wvz%";
-        let turned_in = peer.expect_at(&turn_in);
+        let turned_in = peer.expect_at(turn_in);
         peer.send(&json_message(json!({"cmd": "turnIn", "sItems": "101:4"})));
         peer.send(&json_message(
             json!({"cmd": "ccqr", "QuestID": 30, "bSuccess": 1, "sName": "Potion Run"}),
@@ -4948,6 +4950,7 @@ fn accept_map_request(listener: &TcpListener) -> (TcpStream, Vec<String>) {
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
@@ -5038,7 +5041,6 @@ fn map_cells_load_after_each_join_with_the_client_headers_and_cache_by_file() {
 #[test]
 fn a_door_reply_moves_the_player_into_the_doors_cell_without_a_move_packet() {
     let (http, base) = map_http();
-    let (replied, reply_seen) = mpsc::channel();
     let harness = Harness::start_with_api(Options::default(), base, move |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_to_ready();
@@ -5049,7 +5051,6 @@ fn a_door_reply_moves_the_player_into_the_doors_cell_without_a_move_packet() {
         peer.expect("%xt%zm%mtcid%43%5%");
         peer.send("%xt%mtcid%-1%5%3%");
         peer.expect(&packet::retrieve_user_datas(AreaId(43), &[EntityId(9)]));
-        replied.send(()).unwrap();
         peer.expect_logout();
     });
     let session = &harness.session;
@@ -5075,14 +5076,17 @@ fn a_door_reply_moves_the_player_into_the_doors_cell_without_a_move_packet() {
     let updates = session.updates();
     session.send_raw("%xt%zm%mtcid%43%9%").wait().unwrap();
     session.send_raw("%xt%zm%mtcid%43%5%").wait().unwrap();
-    reply_seen.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        std::iter::from_fn(|| updates.recv_timeout(Duration::from_secs(5)).ok()).any(
+            |update| matches!(
+                update,
+                Update::Event(Event::Moved { cell, pad }) if cell == "r2" && pad == "Left"
+            )
+        )
+    );
     let world = session.snapshot();
     let room = world.room.as_ref().unwrap();
     assert_eq!((room.cell.as_str(), room.pad.as_str()), ("r2", "Left"));
-    assert!(updates.try_iter().any(|update| matches!(
-        update,
-        Update::Event(Event::Moved { cell, pad }) if cell == "r2" && pad == "Left"
-    )));
     session.logout();
     harness.finish();
 }

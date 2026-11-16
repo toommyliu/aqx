@@ -277,7 +277,7 @@ impl Web {
                 .map(|(name, _)| name)
                 .collect::<Vec<_>>(),
         };
-        let accounts: Vec<(String, Option<&[(String, String)]>)> = r
+        let accounts: Vec<(String, Option<&[Pair]>)> = r
             .indices("accounts")
             .into_iter()
             .filter_map(|i| {
@@ -785,7 +785,7 @@ fn declared(path: &Path) -> Result<Vec<Arg>, Failure> {
 
 fn prefill(
     name: &str,
-    accounts: &[(String, Option<&[(String, String)]>)],
+    accounts: &[(String, Option<&[Pair]>)],
     recall: impl Fn(Option<&str>) -> Option<String>,
 ) -> (Vec<Option<String>>, Option<String>) {
     let current: Vec<Option<String>> = accounts
@@ -976,7 +976,7 @@ mod tests {
         let other = pairs(&[("target", "300")]);
         let recall =
             |account: Option<&str>| Some(if account.is_some() { "50" } else { "100" }.to_owned());
-        let form = |accounts: &[(&str, Option<&[(String, String)]>)]| {
+        let form = |accounts: &[(&str, Option<&[Pair]>)]| {
             let accounts: Vec<_> = accounts.iter().map(|(n, a)| (n.to_string(), *a)).collect();
             prefill("target", &accounts, recall)
         };
