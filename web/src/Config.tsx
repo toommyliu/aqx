@@ -200,7 +200,7 @@ function scheduleFields({ read, ...edited }: ScheduleDraft): Fields {
   const picked = new Set(edited.days.map(dayOf));
   if (picked.size > 0 && picked.size < DAYS.length) fields.days = edited.days;
   if (edited.tz.trim()) fields.tz = edited.tz.trim();
-  setArgs(fields, edited.args);
+  if (edited.script.trim()) setArgs(fields, edited.args);
   return fields;
 }
 
