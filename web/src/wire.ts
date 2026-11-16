@@ -382,6 +382,8 @@ export function stateWord(state: State): string {
 export const isOffline = (a: Account) => typeof a.state === "object" && "Offline" in a.state;
 export const isRunning = (a: Account) =>
   a.state === "Running" || a.state === "Paused" || a.state === "Stalled";
+export const isWorking = (a: Account) =>
+  isRunning(a) || (a.script !== null && typeof a.state === "object" && "Reconnecting" in a.state);
 export const isOnline = (a: Account) =>
   a.state === "Online" || isRunning(a);
 
