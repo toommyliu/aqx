@@ -44,7 +44,7 @@ import {
   toggleMark,
 } from "./store";
 import { Icon, type IconName, ServerName, Since, Tooltips, anchor, arrows, canHover, clock, number } from "./ui";
-import { type Account, isOffline, isOnline, isRunning, reason, stateLabel } from "./wire";
+import { type Account, isOffline, isOnline, isRunning, isWorking, reason, stateLabel } from "./wire";
 
 export function pauseOrResume(on: number[]) {
   const paused = on.length > 0 && on.every((i) => accounts[i]?.state === "Paused");
@@ -942,8 +942,9 @@ function Selection() {
   const count = (n: number) => `${n} account${n === 1 ? "" : "s"}`;
   const confirm = (title: string, body: string, label: string, run: () => void) =>
     setDialog({ kind: "confirm", title, body, label, danger: true, run });
+  const interrupts = (on: number[]) => on.length > 1 && on.some((i) => accounts[i] !== undefined && isWorking(accounts[i]));
   const ask = (verb: string, body: string, run: (on: number[]) => void) => (on: number[]) =>
-    on.length > 1 ? confirm(`${verb} ${count(on.length)}?`, body, verb, () => run(on)) : run(on);
+    interrupts(on) ? confirm(`${verb} ${count(on.length)}?`, body, verb, () => run(on)) : run(on);
   const paused = (on: number[]) => on.length > 0 && on.every((i) => accounts[i]?.state === "Paused");
   const skua = (a: Account) => a.script?.endsWith(".cs") ?? false;
   const pausable = (a: Account) => isRunning(a) && !skua(a);

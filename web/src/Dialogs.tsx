@@ -30,7 +30,7 @@ import {
   type SkuaPane,
   api,
   isOffline,
-  isRunning,
+  isWorking,
 } from "./wire";
 
 const close = () => setDialog(null);
@@ -95,10 +95,7 @@ const shownName = (path: string) => path.split("/").pop() ?? path;
 
 function runEffect(on: number[]): { body: string; danger: boolean } {
   const offline = on.filter((i) => accounts[i] !== undefined && isOffline(accounts[i])).length;
-  const running = on.filter((i) => {
-    const a = accounts[i];
-    return a !== undefined && (isRunning(a) || (a.script !== null && typeof a.state === "object" && "Reconnecting" in a.state));
-  }).length;
+  const running = on.filter((i) => accounts[i] !== undefined && isWorking(accounts[i])).length;
   if (on.length === 1) {
     const name = nameOf(on[0] ?? 0);
     const body = running
@@ -138,11 +135,12 @@ async function runNow(script: string, extra: [string, string][], queue: boolean)
       });
       if (Array.isArray(outcome)) report(outcome, `${queue ? "queued" : "running"} ${shownName(script)}`);
     };
-    if (on.length > 1 && !queue) {
+    const effect = runEffect(on);
+    if (!queue && effect.danger) {
       setDialog({
         kind: "confirm",
-        title: `Run ${shownName(script)} on ${on.length} accounts?`,
-        ...runEffect(on),
+        title: `Run ${shownName(script)} on ${on.length === 1 ? nameOf(on[0] ?? 0) : `${on.length} accounts`}?`,
+        ...effect,
         label: "Run",
         run: () => void start().catch((e) => fail(message(e))),
       });
