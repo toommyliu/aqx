@@ -2613,7 +2613,7 @@ fn loads_accepts_and_turns_in_quests_at_the_clients_pace() {
             json!({"cmd": "acceptQuest", "QuestID": 30, "bSuccess": 1, "msg": "success"}),
         ));
         let turn_in = "%xt%zm%tryQuestComplete%42%30%600%true%2%wvz%";
-        let turned_in = peer.expect_at(&turn_in);
+        let turned_in = peer.expect_at(turn_in);
         peer.send(&json_message(json!({"cmd": "turnIn", "sItems": "101:4"})));
         peer.send(&json_message(
             json!({"cmd": "ccqr", "QuestID": 30, "bSuccess": 1, "sName": "Potion Run"}),
@@ -4948,6 +4948,7 @@ fn accept_map_request(listener: &TcpListener) -> (TcpStream, Vec<String>) {
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .unwrap();

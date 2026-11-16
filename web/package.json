@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --test --conditions=browser test/*.test.mjs"
   },
   "dependencies": {
     "@floating-ui/dom": "1.8.0",
@@ -18,6 +19,7 @@
     "solid-sonner": "0.3.3"
   },
   "devDependencies": {
+    "@types/node": "26.6.6",
     "typescript": "7.0.2",
     "vite": "8.3.7",
     "vite-plugin-solid": "2.11.15"
