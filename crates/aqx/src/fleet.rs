@@ -419,6 +419,7 @@ pub struct Account {
     script: Option<Script>,
     schedules: Vec<Schedule>,
     restart_on_error: bool,
+    resume: bool,
     room: Option<u32>,
     stall_after: Duration,
     on_stall: OnStall,
@@ -447,6 +448,10 @@ impl Account {
 
     pub fn commanded(&self) -> bool {
         self.commanded.load(Ordering::SeqCst)
+    }
+
+    pub fn resumes(&self) -> bool {
+        self.resume
     }
 
     pub fn idle(&self) -> bool {
@@ -632,6 +637,31 @@ impl Account {
                     self.start(&mut board, next.script, next.scheduled);
                 }
             }
+        }
+    }
+
+    fn resumable(&self) -> Resume {
+        let board = self.board();
+        let running = matches!(
+            board.run,
+            Run::Starting { .. } | Run::Running { .. } | Run::Restarting { .. }
+        );
+        let mut queue = board
+            .queue
+            .iter()
+            .filter(|q| !q.scheduled)
+            .map(|q| q.script.clone());
+        let script = match (board.scheduled == Some(board.runs), &board.returning) {
+            _ if !running => None,
+            (false, _) => board.last.clone(),
+            (true, None) => queue.next(),
+            (true, Some(_)) => None,
+        };
+        Resume {
+            name: self.name.clone(),
+            online: !board.idle() && !matches!(board.returning, Some(Return::Offline)),
+            script,
+            queue: queue.collect(),
         }
     }
 
@@ -1058,6 +1088,7 @@ impl Fleet {
             script: config.script,
             schedules: config.schedules,
             restart_on_error: config.restart_on_error,
+            resume: config.resume,
             room: config.room,
             stall_after: config.stall_after,
             on_stall: config.on_stall,
@@ -1189,21 +1220,16 @@ impl Fleet {
     pub fn resumable(&self) -> Vec<Resume> {
         self.accounts()
             .iter()
-            .map(|a| {
-                let online = !a.idle();
-                let board = a.board();
-                let running = matches!(
-                    board.run,
-                    Run::Starting { .. } | Run::Running { .. } | Run::Restarting { .. }
-                );
-                Resume {
-                    name: a.name.clone(),
-                    online,
-                    script: if running { board.last.clone() } else { None },
-                    queue: board.queue.iter().map(|q| q.script.clone()).collect(),
-                }
-            })
+            .map(|a| a.resumable())
             .filter(|r| r.online || !r.queue.is_empty())
+            .collect()
+    }
+
+    pub fn to_resume(&self) -> Vec<Resume> {
+        self.accounts()
+            .iter()
+            .filter(|a| a.resume)
+            .map(|a| a.resumable())
             .collect()
     }
 
@@ -1352,6 +1378,7 @@ impl Linked {
         board.run = Run::Starting {
             script: script.path.clone(),
         };
+        board.last = Some(script.clone());
         Some(board.links)
     }
 
@@ -1543,7 +1570,6 @@ impl Linked {
                 }
                 return After::Hold;
             }
-            board.last = Some(script.clone());
             board.status.clear();
             board.registered = Registered::default();
             board.progressed(Instant::now());
@@ -1697,6 +1723,13 @@ impl Account {
         Account::queueing(name, Some(script)).0
     }
 
+    pub(crate) fn resuming(self) -> Account {
+        Account {
+            resume: true,
+            ..self
+        }
+    }
+
     fn queueing(name: &str, script: Option<Script>) -> (Account, Receiver<Command>) {
         let (commands, inbox) = mpsc::channel();
         let account = Account {
@@ -1706,6 +1739,7 @@ impl Account {
             script,
             schedules: Vec::new(),
             restart_on_error: false,
+            resume: false,
             room: None,
             stall_after: Duration::from_secs(300),
             on_stall: OnStall::Warn,
@@ -1979,7 +2013,10 @@ mod tests {
                 args: Vec::new(),
             }
         };
-        let fails = script("fails", r#"throw new Error("boom");"#);
+        let fails = script(
+            "fails",
+            r#"yield* wait.ms(1_000); throw new Error("boom");"#,
+        );
         let finishes = script("finishes", "");
         let farms = script("farms", "yield* wait.ms(60_000);");
         let (mut account, inbox) = Account::queueing("player1", None);
@@ -2010,11 +2047,24 @@ mod tests {
         };
         let farming = |board: &Board| matches!(&board.run, Run::Running { script, .. } if script.ends_with("farms.ts"));
 
-        account.run(farms);
+        account.run(farms.clone());
         until("farmed", &|board| ran(board).len() == 1);
         let now = Timestamp::now();
         account.board().due = vec![Some(now), Some(now)];
         account.fire_due(now);
+        until("started the scheduled script", &|board| {
+            ran(board).len() == 2
+        });
+        assert_eq!(
+            account.resumable(),
+            Resume {
+                name: "player1".into(),
+                online: true,
+                script: Some(farms.clone()),
+                queue: Vec::new(),
+            },
+            "an interrupted session resumes the script the schedule stopped, not the schedule"
+        );
         until("came back to the farm", &|board| {
             ran(board).len() == 5 && farming(board)
         });
@@ -2077,6 +2127,16 @@ mod tests {
         assert!(
             !account.commanded(),
             "a scheduled login doesn't end the session when the account goes offline"
+        );
+        assert_eq!(
+            account.resumable(),
+            Resume {
+                name: "player1".into(),
+                online: false,
+                script: None,
+                queue: vec![farm()],
+            },
+            "an account a schedule logged in resumes offline with its own queue"
         );
         let linked = linked(account);
         let account = &linked.account;
@@ -2327,7 +2387,7 @@ mod tests {
             args: Vec::new(),
         };
         account.run(other.clone());
-        account.run(other);
+        account.run(other.clone());
         let linked = linked(account);
         let taken: Vec<Option<PathBuf>> = (0..4).map(|_| take(&linked, &inbox)).collect();
         assert_eq!(
@@ -2341,6 +2401,11 @@ mod tests {
             "only the newest run starts, once"
         );
         assert!(matches!(linked.account.board().run, Run::Starting { .. }));
+        assert_eq!(
+            linked.account.resumable().script,
+            Some(other),
+            "a run still logging in resumes as that run"
+        );
     }
 
     #[test]

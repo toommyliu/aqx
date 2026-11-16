@@ -193,6 +193,7 @@ fn restart(old: Session, path: &Path, wanted: &Wanted) -> anyhow::Result<Session
         n => eprintln!("Logging out {n} accounts…"),
     }
     old.down()?;
+    daemon::forget_resume(path)?;
     eprintln!("Starting the new session…");
     let named = |r: &Resume| {
         wanted

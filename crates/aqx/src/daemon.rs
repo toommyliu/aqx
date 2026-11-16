@@ -72,6 +72,7 @@ pub struct Paths {
     lock: PathBuf,
     pub log: PathBuf,
     last: PathBuf,
+    resume: PathBuf,
 }
 
 pub fn paths_for(config: &Path) -> anyhow::Result<Paths> {
@@ -88,6 +89,7 @@ fn paths_in(dir: &Path, config: &Path) -> Paths {
         lock: dir.join(format!("{base}.lock")),
         log: dir.join(format!("{base}.log")),
         last: dir.join(format!("{base}.last.json")),
+        resume: dir.join(format!("{base}.resume.json")),
     }
 }
 
@@ -125,6 +127,38 @@ fn keep_last_lines(path: &Path, fleet: &Fleet) {
             "aqx: couldn't keep the last lines in {}: {e}",
             path.display()
         );
+    }
+}
+
+fn read_resume(path: &Path) -> Vec<Resume> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|json| serde_json::from_slice(&json).ok())
+        .unwrap_or_default()
+}
+
+fn save_resume(path: &Path, resume: &[Resume]) {
+    if resume.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let partial = path.with_extension("json.partial");
+    let saved = serde_json::to_vec(resume)
+        .map_err(std::io::Error::other)
+        .and_then(|json| std::fs::write(&partial, json))
+        .and_then(|()| std::fs::rename(&partial, path));
+    if let Err(e) = saved {
+        eprintln!(
+            "aqx: couldn't save what to resume in {}: {e}",
+            path.display()
+        );
+    }
+}
+
+pub fn forget_resume(config: &Path) -> anyhow::Result<()> {
+    match std::fs::remove_file(paths_for(config)?.resume) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
     }
 }
 
@@ -416,10 +450,12 @@ pub struct Server {
     config: PathBuf,
     socket: PathBuf,
     keep_alive: bool,
+    resume: PathBuf,
     started_ms: u64,
     ending: AtomicBool,
     down: AtomicBool,
     answering: Mutex<bool>,
+    saved: Mutex<Option<Vec<Resume>>>,
 }
 
 impl Server {
@@ -428,17 +464,46 @@ impl Server {
         config: PathBuf,
         socket: PathBuf,
         keep_alive: bool,
+        resume: PathBuf,
     ) -> Arc<Server> {
         Arc::new(Server {
             fleet,
             config,
             socket,
             keep_alive,
+            resume,
             started_ms: now_ms(),
             ending: AtomicBool::new(false),
             down: AtomicBool::new(false),
             answering: Mutex::new(true),
+            saved: Mutex::new(None),
         })
+    }
+
+    fn saved(&self) -> std::sync::MutexGuard<'_, Option<Vec<Resume>>> {
+        self.saved.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn save(&self, saved: &mut Option<Vec<Resume>>) {
+        let now = self.fleet.to_resume();
+        if saved.as_ref() != Some(&now) {
+            save_resume(&self.resume, &now);
+            *saved = Some(now);
+        }
+    }
+
+    fn keep_resumable(&self) {
+        let mut saved = self.saved();
+        if !self.down.load(Ordering::SeqCst) {
+            self.save(&mut saved);
+        }
+    }
+
+    fn finish(&self) {
+        let _saved = self.saved();
+        if !self.down.load(Ordering::SeqCst) {
+            save_resume(&self.resume, &[]);
+        }
     }
 
     fn stop_answering(&self) {
@@ -530,7 +595,11 @@ impl Server {
     }
 
     fn end(&self) {
-        self.down.store(true, Ordering::SeqCst);
+        let mut saved = self.saved();
+        if !self.down.swap(true, Ordering::SeqCst) {
+            self.save(&mut saved);
+        }
+        drop(saved);
         self.fleet.logout_all();
     }
 
@@ -557,8 +626,10 @@ impl Server {
             if !self.down.load(Ordering::SeqCst) {
                 self.fleet.fire_due(jiff::Timestamp::now());
             }
+            self.keep_resumable();
             print_new(&self.fleet, &mut printed, print);
             if self.done() {
+                self.finish();
                 self.stop_answering();
                 self.ending.store(true, Ordering::SeqCst);
                 release();
@@ -629,17 +700,16 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
     };
     let fleet = Arc::new(Fleet::new(aqx_client::DeviceId::load()?));
     fleet.add_new(accounts);
-    for (i, account) in fleet.accounts().iter().enumerate() {
-        if first.contains(&account.name)
-            && let Some(action) = wanted.start.action()
-            && let Err(why) = fleet.act(i, action)
-        {
-            account.say(format!("couldn't start: {why}"));
-        }
-    }
+    open(&fleet, wanted, &first, &read_resume(&paths.resume));
     fleet.watch(config.clone());
     let keep_alive = config::keep_alive(&config);
-    let server = Server::new(Arc::clone(&fleet), config, paths.socket.clone(), keep_alive);
+    let server = Server::new(
+        Arc::clone(&fleet),
+        config,
+        paths.socket.clone(),
+        keep_alive,
+        paths.resume.clone(),
+    );
     server.listen(listener);
     let presses = Arc::new(AtomicUsize::new(0));
     {
@@ -658,6 +728,36 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
         drop((removed, held));
     });
     Ok(())
+}
+
+fn open(fleet: &Fleet, wanted: &Wanted, first: &[String], saved: &[Resume]) {
+    for (i, account) in fleet.accounts().iter().enumerate() {
+        let saved = saved
+            .iter()
+            .find(|r| r.name == account.name && account.resumes());
+        let wanted_here = first.contains(&account.name);
+        let named = wanted_here && !wanted.accounts.is_empty();
+        if saved.is_some() {
+            account.say("resuming where the last session stopped");
+        }
+        if let Some(action) = opening(saved, wanted_here, named, &wanted.start)
+            && let Err(why) = fleet.act(i, action)
+        {
+            account.say(format!("couldn't start: {why}"));
+        }
+        if let Some(saved) = saved {
+            saved.clone().requeue(fleet, i);
+        }
+    }
+}
+
+fn opening(saved: Option<&Resume>, wanted: bool, named: bool, start: &Start) -> Option<Action> {
+    match saved {
+        Some(saved) if !named => saved
+            .online
+            .then(|| saved.script.clone().map_or(Action::LoginOnly, Action::Run)),
+        _ => wanted.then(|| start.action()).flatten(),
+    }
 }
 
 struct Removed(PathBuf);
@@ -701,6 +801,7 @@ mod tests {
             PathBuf::from("/srv/aqx.toml"),
             socket.clone(),
             false,
+            dir.join("aqx.resume.json"),
         );
         server.listen(UnixListener::bind(&socket).unwrap());
 
@@ -835,6 +936,7 @@ mod tests {
             PathBuf::from("/srv/aqx.toml"),
             socket.clone(),
             false,
+            dir.join("aqx.resume.json"),
         );
         server.listen(UnixListener::bind(&socket).unwrap());
         let session = connect(&socket).unwrap();
@@ -861,6 +963,116 @@ mod tests {
             );
         }
         assert!(server.done());
+    }
+
+    #[test]
+    fn a_session_keeps_what_to_resume_through_down_and_drops_it_on_a_clean_end() {
+        let dir = std::env::temp_dir().join(format!("aqx-resume-tests-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("aqx.resume.json");
+        let farm = Script {
+            path: PathBuf::from("/srv/farm.ts"),
+            args: Vec::new(),
+        };
+        let resuming = Arc::new(Account::detached("player1").resuming());
+        let other = Arc::new(Account::detached("player2"));
+        other.login().unwrap();
+        let fleet = Arc::new(Fleet::of(vec![Arc::clone(&resuming), other]));
+        let server = Server::new(
+            Arc::clone(&fleet),
+            PathBuf::from("/srv/aqx.toml"),
+            dir.join("aqx.sock"),
+            false,
+            path.clone(),
+        );
+        server.keep_resumable();
+        assert_eq!(
+            read_resume(&path),
+            [Resume {
+                name: "player1".into(),
+                online: false,
+                script: None,
+                queue: Vec::new(),
+            }],
+            "an offline account is kept so it stays offline"
+        );
+        resuming.login_only().unwrap();
+        resuming.enqueue(farm.clone());
+        server.keep_resumable();
+        let online = vec![Resume {
+            name: "player1".into(),
+            online: true,
+            script: None,
+            queue: vec![farm],
+        }];
+        assert_eq!(
+            read_resume(&path),
+            online,
+            "only accounts with resume on are kept"
+        );
+        server.end();
+        resuming.clear_queue().unwrap();
+        server.keep_resumable();
+        assert_eq!(
+            read_resume(&path),
+            online,
+            "down keeps the state from before its logouts"
+        );
+
+        let next = Server::new(
+            fleet,
+            PathBuf::from("/srv/aqx.toml"),
+            dir.join("aqx.sock"),
+            false,
+            path.clone(),
+        );
+        next.finish();
+        assert!(
+            !path.exists(),
+            "a session that ends on its own leaves nothing to resume"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_session_starts_resumed_accounts_as_they_were() {
+        let farm = Script {
+            path: PathBuf::from("/srv/farm.ts"),
+            args: Vec::new(),
+        };
+        let saved = |online: bool, script: Option<Script>| Resume {
+            name: "player1".into(),
+            online,
+            script,
+            queue: Vec::new(),
+        };
+        let running = saved(true, Some(farm.clone()));
+        let idle = saved(true, None);
+        let offline = saved(false, None);
+        let plain = Start::Login;
+        assert_eq!(
+            opening(Some(&running), true, false, &plain),
+            Some(Action::Run(farm.clone())),
+            "the saved script wins over the account's own"
+        );
+        assert_eq!(
+            opening(Some(&idle), false, false, &plain),
+            Some(Action::LoginOnly),
+            "a resumed account logs in even with auto_start off"
+        );
+        assert_eq!(
+            opening(Some(&offline), true, false, &plain),
+            None,
+            "an account that was offline stays offline"
+        );
+        assert_eq!(
+            opening(Some(&running), true, true, &Start::LoginOnly),
+            Some(Action::LoginOnly),
+            "naming the account asks for something else"
+        );
+        assert_eq!(opening(None, true, false, &plain), Some(Action::Login));
+        assert_eq!(opening(None, false, false, &plain), None);
     }
 
     fn shape(value: &serde_json::Value, path: &str, out: &mut std::collections::BTreeSet<String>) {

@@ -29,7 +29,7 @@ Each account has a script queue. The next script starts when the current script 
 
 A manual stop, an error, or a logout holds the queue. With `restart_on_error` on, the current script restarts after an error and the queue advances when it finishes. A relogin, server switch, stall restart, or reconnect restarts the current script. Running a script by hand leaves the queue intact.
 
-Queues persist across a session restart if at least one account is online to start the new session. `aqx down` clears them, as does a session ending when every account goes offline.
+Queues persist across a session restart if at least one account is online to start the new session. `aqx down` clears them, as does a session ending when every account goes offline. An account with [`resume`](config.md#resume) on keeps its queue through `aqx down` and crashes.
 
 A [schedule](config.md#schedules) puts the script it interrupts at the front of the queue. A scheduled script that throws moves the queue on instead of holding it.
 

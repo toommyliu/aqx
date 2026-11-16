@@ -46,6 +46,7 @@ aqx looks for `./aqx.toml`, then `~/aqx/aqx.toml`. Set `AQX_HOME` to replace `~/
 | `relogin_delay` | The wait before the first try, like `"5s"`. It doubles after each failed try, up to 5 minutes, and is never shorter than a kick's lockout. A connection that lasts 5 minutes starts the wait over. At least `"4s"`. Defaults to `"5s"`. |
 | `relogin_attempts` | How many failed tries in a row before the account goes offline. No limit unless set. |
 | `restart_on_error` | Run the script again when it throws, after 10 seconds, doubling up to 5 minutes. A run that lasts 5 minutes starts the wait over. Defaults to `false`. |
+| `resume` | After `aqx down`, `ctrl+c` or a crash, the next session brings back the script and queue the account had. See [Resume](#resume). Defaults to `false`. |
 | `stall_after` | How long a running script can go without progress before the account counts as stalled, like `"90s"`, `"5m"` or `"1h"`. Progress is a kill, an item change, a quest turn-in or a map join. Defaults to `"5m"`. |
 | `on_stall` | What a stall does: `warn` logs a warning, `restart` restarts the script, and `relogin` logs out, back in, and starts the script again. Defaults to `warn`. |
 
@@ -72,5 +73,15 @@ When a schedule comes due:
 A scheduled script that throws doesn't restart, even with `restart_on_error` on. aqx logs the error and moves on to the next script. A manual stop holds the queue as usual.
 
 Schedules fire only while a session runs, and a session with schedules keeps running when every account goes offline. A schedule never runs late. One missed while the session was down doesn't run, and one that comes due more than a minute late, like when the computer sleeps through it, is skipped and logged. AQW's daily quests reset at midnight US Eastern time, so `at = "00:00"` with `tz = "America/New_York"` runs right after the reset.
+
+## Resume
+
+With `resume = true`, aqx saves the account's running script and queue whenever they change. If the session ends with `aqx down`, `ctrl+c` or a crash, the next session starts the account the way the last one left it, in place of `auto_start` and `script`:
+
+- An account that was running a script logs in and runs that script again from the start.
+- An account that was online with nothing running logs in and stays idle.
+- An offline account stays offline. Its queue comes back either way.
+
+A session that ends because every account logged out leaves nothing to resume, so the next one follows `auto_start` again. Schedules aren't saved. An account resumes the script a schedule interrupted, and an account that a schedule logged in resumes offline. Accounts named with `aqx up ACCOUNT` start as asked and get their queues back, and the other saved accounts resume too.
 
 Script paths in the web UI also resolve relative to `aqx.toml`. New accounts appear offline within 2 seconds. Changes to existing accounts take effect after a session restart.

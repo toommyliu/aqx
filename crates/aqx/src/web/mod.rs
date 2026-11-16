@@ -617,6 +617,7 @@ impl Web {
             .into_iter()
             .partition(|r| configured.contains(&r.name));
         old.down().map_err(Failure::internal)?;
+        daemon::forget_resume(&self.config).map_err(Failure::internal)?;
         let first = resume.iter().find(|r| r.online);
         if first.is_none() && !kept {
             return Ok(Reply::json(
