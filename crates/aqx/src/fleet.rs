@@ -1478,6 +1478,8 @@ impl Linked {
             why: (!cancelled).then(|| why.clone()),
         };
         board.runs += 1;
+        board.returning = None;
+        board.queue.retain(|q| !q.scheduled);
         if !cancelled {
             board
                 .log
@@ -2095,6 +2097,35 @@ mod tests {
             (queue.len(), queue[0].scheduled),
             (1, false),
             "the queue waits for the next login"
+        );
+    }
+
+    #[test]
+    fn a_failed_scheduled_login_drops_the_scheduled_scripts() {
+        let daily = Script {
+            path: PathBuf::from("/srv/daily.ts"),
+            args: Vec::new(),
+        };
+        let (mut account, _inbox) = Account::queueing("player1", None);
+        account.schedules = vec![every_day(daily.clone()), every_day(daily)];
+        account.enqueue(farm());
+        let now = Timestamp::now();
+        account.board().due = vec![Some(now), Some(now)];
+        account.fire_due(now);
+        let linked = linked(account);
+        let link = linked.account.board().links;
+        linked.failed(link, "the server is down".into());
+        let queued: Vec<PathBuf> = linked
+            .account
+            .board()
+            .queue
+            .iter()
+            .map(|q| q.script.path.clone())
+            .collect();
+        assert_eq!(
+            queued,
+            [PathBuf::from("/srv/farm.ts")],
+            "a later login doesn't run the missed schedule"
         );
     }
 
