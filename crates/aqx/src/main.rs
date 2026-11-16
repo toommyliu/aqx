@@ -17,6 +17,7 @@ mod fleet;
 mod init;
 mod record;
 mod runner;
+mod schedule;
 mod view;
 mod web;
 

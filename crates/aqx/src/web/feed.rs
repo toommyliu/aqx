@@ -265,6 +265,7 @@ pub fn offline(account: &config::Account) -> Shown {
         game: None,
         recording: None,
         queue: Vec::new(),
+        next: None,
     }
 }
 

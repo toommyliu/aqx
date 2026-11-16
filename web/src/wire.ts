@@ -88,6 +88,7 @@ type AccountData = {
   game: Game | null;
   recording: string | null;
   queue: Queued[];
+  next: { script: string; at_ms: number } | null;
 };
 
 export type Account = AccountData & { sampledAt: number };
@@ -106,7 +107,7 @@ export type Ended = { endedMs: number; accounts: { name: string; user: string; l
 
 export type Script = { path: string; args: [string, string][] };
 
-export type Queued = { id: number; script: Script };
+export type Queued = { id: number; script: Script; scheduled: boolean };
 
 export type Action =
   | "login"

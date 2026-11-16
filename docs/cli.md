@@ -9,7 +9,7 @@ Each config gets its own session, so accounts from different `aqx.toml` files ca
 | `aqx up [ACCOUNT...] [-c PATH] [--json \| --quiet]` | Run the session in this terminal and print its log. `ctrl+c` logs everyone out; a second one exits at once. Fails when the session is already running. |
 | `aqx up -d [ACCOUNT...] [-c PATH]` | Start the session in the background and return. When it's already running, log in the named accounts. |
 | `aqx up [-d] [ACCOUNT...] --no-script` | Log the accounts in without running their scripts |
-| `aqx ps [--json]` | List every running session's accounts: state, script and how many are queued, where, uptime and status |
+| `aqx ps [--json]` | List every running session's accounts: state, script and how many are queued, where, uptime, next scheduled script and status |
 | `aqx logs [ACCOUNT] [-f] [--all]` | Print an account's recent log, or every account's when only one session runs. `-f` keeps printing, and `--all` adds game lines and the packets of a recording account. |
 | `aqx ctl ACCOUNT login\|logout\|stop\|restart\|pause\|resume\|relogin` | Drive an account in whichever session has it |
 | `aqx ctl ACCOUNT run SCRIPT [--arg KEY=VALUE]...` | Run a script, stopping the one running. Logs the account in if it's offline. |
@@ -30,6 +30,8 @@ Each account has a script queue. The next script starts when the current script 
 A manual stop, an error, or a logout holds the queue. With `restart_on_error` on, the current script restarts after an error and the queue advances when it finishes. A relogin, server switch, stall restart, or reconnect restarts the current script. Running a script by hand leaves the queue intact.
 
 Queues persist across a session restart if at least one account is online to start the new session. `aqx down` clears them, as does a session ending when every account goes offline.
+
+A [schedule](config.md#schedules) puts the script it interrupts at the front of the queue. A scheduled script that throws moves the queue on instead of holding it.
 
 ## Other tools
 

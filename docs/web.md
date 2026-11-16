@@ -18,7 +18,7 @@ An aqx built without Node still runs, but `aqx web` answers every page with a no
 aqx web [-c PATH] [--port N] [--up] [--tailscale]
 ```
 
-`-c` selects the config. `aqx web` attaches to its session if one is running. Otherwise, logging in or running a script starts a session. `--up` starts the session immediately and logs in accounts with `auto_start` enabled. Stopping `aqx web` leaves the session running. The session ends when every account goes offline, but `aqx web` stays open so you can start it again. The Session menu can restart the session or log everyone out.
+`-c` selects the config. `aqx web` attaches to its session if one is running. Otherwise, logging in or running a script starts a session. `--up` starts the session immediately and logs in accounts with `auto_start` enabled. Stopping `aqx web` leaves the session running. The session ends when every account goes offline, unless an account has a [schedule](config.md#schedules). `aqx web` stays open either way, so you can start it again. The Session menu can restart the session or log everyone out.
 
 `aqx web` listens on `127.0.0.1` only and has no login. It refuses requests whose `Host` isn't `localhost`, `127.0.0.1`, `[::1]` or a `*.ts.net` name.
 
@@ -35,6 +35,8 @@ This requires `tailscale` on your `PATH` and prints a URL for devices on your ta
 ## Edit aqx.toml
 
 Saved passwords are hidden. An empty password field keeps the saved password.
+
+An account's Schedules section edits its `[[account.schedule]]` tables. The account view shows the next scheduled run under Up next, even while the account is offline.
 
 aqx rejects invalid changes and refuses to save if the file changed on disk since the editor opened. See the [configuration reference](config.md) for the keys and when changes take effect.
 

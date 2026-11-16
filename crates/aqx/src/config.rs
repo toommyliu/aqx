@@ -2,8 +2,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use jiff::tz::TimeZone;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
+
+use crate::schedule::{self, Days, Schedule};
 
 pub const FILE_NAME: &str = "aqx.toml";
 const SERVER: &str = "Server to join, as aqx servers lists it. Required here or on each account.";
@@ -20,6 +23,7 @@ const RESTART_ON_ERROR: &str = "Run the script again when it throws, after 10 se
 const ROOM: &str = "Room number to join; scripts read it as settings.room.";
 const STALL_AFTER: &str = "How long a running script can go without progress before the account counts as stalled, like \"90s\", \"5m\" or \"1h\". Defaults to 5m.";
 const ON_STALL: &str = "What happens when the account stalls. Defaults to warn.";
+const ARGS: &str = "Arguments for the script. Values are strings, numbers or booleans.";
 const STALL_AFTER_DEFAULT: Duration = Duration::from_secs(300);
 pub const RELOGIN_DELAY_DEFAULT: Duration = Duration::from_secs(5);
 pub const RELOGIN_DELAY_MIN: Duration = Duration::from_secs(4);
@@ -111,11 +115,13 @@ pub struct AccountConfig {
     )]
     script: Option<PathBuf>,
     #[serde(default)]
-    #[schemars(
-        description = "Arguments for the script. Values are strings, numbers or booleans.",
-        schema_with = "args_schema"
-    )]
+    #[schemars(description = ARGS, schema_with = "args_schema")]
     args: toml::Table,
+    #[serde(default)]
+    #[schemars(
+        description = "Scripts to run at set times. aqx stops the running script, runs these, then starts it again. An offline account logs in for them and logs out after."
+    )]
+    schedule: Vec<ScheduleConfig>,
     #[schemars(description = SERVER)]
     server: Option<String>,
     #[schemars(description = AUTO_START)]
@@ -138,6 +144,30 @@ pub struct AccountConfig {
     on_stall: Option<OnStall>,
 }
 
+#[derive(Deserialize, JsonSchema, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleConfig {
+    #[schemars(
+        description = "Time of day to run the script, like \"21:00\" or \"9pm\".",
+        schema_with = "time_schema"
+    )]
+    at: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Days to run on, like [\"fri\"] or [\"saturday\", \"sunday\"]. Every day unless set."
+    )]
+    days: Option<Vec<String>>,
+    #[schemars(
+        description = "Time zone for at, like \"America/New_York\". Defaults to this machine's time zone."
+    )]
+    tz: Option<String>,
+    #[schemars(description = "Script to run, relative to this file.")]
+    script: PathBuf,
+    #[serde(default)]
+    #[schemars(description = ARGS, schema_with = "args_schema")]
+    args: toml::Table,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Relogin {
     pub delay: Duration,
@@ -158,6 +188,7 @@ pub struct Account {
     pub relogin: Option<Relogin>,
     pub restart_on_error: bool,
     pub script: Option<Script>,
+    pub schedules: Vec<Schedule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -310,11 +341,17 @@ impl AccountConfig {
         let script = match &self.script {
             Some(path) => Some(Script {
                 path: dir.join(path),
-                args: self.script_args()?,
+                args: script_args(&self.args, &format!("account {name}: args"))?,
             }),
             None if self.args.is_empty() => None,
             None => return Err(format!("account {name} has args but no script")),
         };
+        let schedules = self
+            .schedule
+            .iter()
+            .enumerate()
+            .map(|(i, s)| s.resolve(&format!("account {name}: schedule {}", i + 1), dir))
+            .collect::<Result<_, _>>()?;
         Ok(Account {
             user: self.user.clone(),
             password: self.password.clone(),
@@ -327,31 +364,77 @@ impl AccountConfig {
             relogin,
             restart_on_error: settings.restart_on_error.unwrap_or(false),
             script,
+            schedules,
             name,
         })
     }
+}
 
-    fn script_args(&self) -> Result<Vec<(String, String)>, String> {
-        self.args
-            .iter()
-            .map(|(key, value)| {
-                let text = match value {
-                    toml::Value::String(s) => s.clone(),
-                    toml::Value::Integer(n) => n.to_string(),
-                    toml::Value::Float(f) => f.to_string(),
-                    toml::Value::Boolean(b) => b.to_string(),
-                    other => {
-                        return Err(format!(
-                            "account {}: args.{key} is a {}; use a string, number or boolean",
-                            self.name(),
-                            other.type_str()
-                        ));
-                    }
-                };
-                Ok((key.clone(), text))
+impl ScheduleConfig {
+    fn resolve(&self, label: &str, dir: &Path) -> Result<Schedule, String> {
+        let at = schedule::parse_time(&self.at).ok_or_else(|| {
+            format!(
+                "{label}: at = {:?} isn't a time like \"21:00\" or \"9pm\"",
+                self.at
+            )
+        })?;
+        let days = match &self.days {
+            None => Days::EVERY,
+            Some(days) if days.is_empty() => {
+                return Err(format!(
+                    "{label}: days is empty; leave it out to run every day"
+                ));
+            }
+            Some(days) => Days::of(
+                &days
+                    .iter()
+                    .map(|day| {
+                        schedule::parse_day(day).ok_or_else(|| {
+                            format!("{label}: {day:?} isn't a day like \"fri\" or \"friday\"")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        };
+        let tz = self
+            .tz
+            .as_deref()
+            .map(|tz| {
+                TimeZone::get(tz).map_err(|_| {
+                    format!("{label}: {tz:?} isn't a time zone like \"America/New_York\"")
+                })
             })
-            .collect()
+            .transpose()?;
+        Ok(Schedule {
+            at,
+            days,
+            tz,
+            script: Script {
+                path: dir.join(&self.script),
+                args: script_args(&self.args, &format!("{label}: args"))?,
+            },
+        })
     }
+}
+
+fn script_args(args: &toml::Table, label: &str) -> Result<Vec<(String, String)>, String> {
+    args.iter()
+        .map(|(key, value)| {
+            let text = match value {
+                toml::Value::String(s) => s.clone(),
+                toml::Value::Integer(n) => n.to_string(),
+                toml::Value::Float(f) => f.to_string(),
+                toml::Value::Boolean(b) => b.to_string(),
+                other => {
+                    return Err(format!(
+                        "{label}.{key} is a {}; use a string, number or boolean",
+                        other.type_str()
+                    ));
+                }
+            };
+            Ok((key.clone(), text))
+        })
+        .collect()
 }
 
 pub fn schema() -> String {
@@ -360,6 +443,10 @@ pub fn schema() -> String {
 
 fn duration_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({ "type": "string", "pattern": r"^\s*\d+\s*(ms|s|m|h)?\s*$" })
+}
+
+fn time_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({ "type": "string", "pattern": r"^\s*\d{1,2}(:\d{2})?\s*([aApP][mM])?\s*$" })
 }
 
 fn args_schema(_: &mut SchemaGenerator) -> Schema {
@@ -419,6 +506,7 @@ impl Account {
             relogin: None,
             restart_on_error: false,
             script: None,
+            schedules: Vec::new(),
         }
     }
 }
@@ -443,6 +531,17 @@ mod tests {
         script = "scripts/farm.ts"
         args = { target = 7500, fast = true, label = "a=b" }
         auto_start = false
+
+        [[account.schedule]]
+        at = "9pm"
+        script = "scripts/dailies.ts"
+
+        [[account.schedule]]
+        at = "00:30"
+        days = ["Fri", "saturday"]
+        tz = "America/New_York"
+        script = "scripts/weekly.ts"
+        args = { fast = true }
 
         [[account]]
         name = "healer"
@@ -512,6 +611,24 @@ mod tests {
             args,
             [("fast", "true"), ("label", "a=b"), ("target", "7500")]
         );
+        let [dailies, weekly] = first.schedules.try_into().unwrap();
+        assert_eq!(
+            (dailies.at, dailies.days, dailies.tz),
+            (jiff::civil::time(21, 0, 0, 0), Days::EVERY, None)
+        );
+        assert_eq!(
+            dailies.script.path,
+            PathBuf::from("/srv/aqx/scripts/dailies.ts")
+        );
+        assert_eq!(
+            (weekly.at, weekly.days),
+            (
+                jiff::civil::time(0, 30, 0, 0),
+                Days::of(&[jiff::civil::Weekday::Friday, jiff::civil::Weekday::Saturday])
+            )
+        );
+        assert_eq!(weekly.tz, Some(TimeZone::get("America/New_York").unwrap()));
+        assert_eq!(weekly.script.args, [("fast".into(), "true".into())]);
 
         assert_eq!(
             (healer.name.as_str(), healer.user.as_str()),
@@ -523,6 +640,7 @@ mod tests {
             "accounts log in when a session starts unless auto_start is off"
         );
         assert_eq!(healer.script, None);
+        assert!(healer.schedules.is_empty());
         assert_eq!(
             healer.relogin,
             Some(Relogin {
@@ -593,6 +711,22 @@ mod tests {
             .unwrap_err()
             .contains("args.n is a array")
         );
+        for (bad, why) in [
+            ("at = \"25:00\"", "isn't a time"),
+            ("at = \"9pm\"\ndays = []", "days is empty"),
+            ("at = \"9pm\"\ndays = [\"fryday\"]", "isn't a day"),
+            ("at = \"9pm\"\ntz = \"Mars/Olympus\"", "isn't a time zone"),
+            (
+                "at = \"9pm\"\nargs = { n = [1] }",
+                "schedule 1: args.n is a array",
+            ),
+        ] {
+            let text = one(&format!(
+                "server = \"Twilly\"\n[[account.schedule]]\nscript = \"a.ts\"\n{bad}"
+            ));
+            let error = accounts(&text).unwrap_err();
+            assert!(error.contains(why), "{bad}: {error}");
+        }
         assert!(
             accounts("[defaults]\nserver = \"Twilly\"")
                 .unwrap_err()
