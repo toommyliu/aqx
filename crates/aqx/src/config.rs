@@ -20,6 +20,7 @@ const RELOGIN_DELAY: &str = "How long to wait before the first try to log back i
 const RELOGIN_ATTEMPTS: &str =
     "How many failed tries in a row before the account goes offline. No limit unless set.";
 const RESTART_ON_ERROR: &str = "Run the script again when it throws, after 10 seconds, doubling up to 5 minutes. Defaults to false.";
+const RESUME: &str = "After aqx down, ctrl+c or a crash, the next session brings back the script and queue the account had, in place of auto_start and script. Defaults to false.";
 const ROOM: &str = "Room number to join; scripts read it as settings.room.";
 const STALL_AFTER: &str = "How long a running script can go without progress before the account counts as stalled, like \"90s\", \"5m\" or \"1h\". Defaults to 5m.";
 const ON_STALL: &str = "What happens when the account stalls. Defaults to warn.";
@@ -65,6 +66,8 @@ pub struct Settings {
     pub relogin_attempts: Option<u32>,
     #[schemars(description = RESTART_ON_ERROR)]
     pub restart_on_error: Option<bool>,
+    #[schemars(description = RESUME)]
+    pub resume: Option<bool>,
     #[schemars(description = ROOM)]
     pub room: Option<u32>,
     #[serde(default, deserialize_with = "duration")]
@@ -98,6 +101,7 @@ impl Settings {
             relogin_delay: self.relogin_delay.or(defaults.relogin_delay),
             relogin_attempts: self.relogin_attempts.or(defaults.relogin_attempts),
             restart_on_error: self.restart_on_error.or(defaults.restart_on_error),
+            resume: self.resume.or(defaults.resume),
             room: self.room.or(defaults.room),
             stall_after: self.stall_after.or(defaults.stall_after),
             on_stall: self.on_stall.or(defaults.on_stall),
@@ -140,6 +144,8 @@ pub struct AccountConfig {
     relogin_attempts: Option<u32>,
     #[schemars(description = RESTART_ON_ERROR)]
     restart_on_error: Option<bool>,
+    #[schemars(description = RESUME)]
+    resume: Option<bool>,
     #[schemars(description = ROOM)]
     room: Option<u32>,
     #[serde(default, deserialize_with = "duration")]
@@ -192,6 +198,7 @@ pub struct Account {
     pub on_stall: OnStall,
     pub relogin: Option<Relogin>,
     pub restart_on_error: bool,
+    pub resume: bool,
     pub script: Option<Script>,
     pub schedules: Vec<Schedule>,
 }
@@ -320,6 +327,7 @@ impl AccountConfig {
             relogin_delay: self.relogin_delay,
             relogin_attempts: self.relogin_attempts,
             restart_on_error: self.restart_on_error,
+            resume: self.resume,
             room: self.room,
             stall_after: self.stall_after,
             on_stall: self.on_stall,
@@ -375,6 +383,7 @@ impl AccountConfig {
             on_stall: settings.on_stall.unwrap_or_default(),
             relogin,
             restart_on_error: settings.restart_on_error.unwrap_or(false),
+            resume: settings.resume.unwrap_or(false),
             script,
             schedules,
             name,
@@ -517,6 +526,7 @@ impl Account {
             on_stall: OnStall::Warn,
             relogin: None,
             restart_on_error: false,
+            resume: false,
             script: None,
             schedules: Vec::new(),
         }
@@ -533,6 +543,7 @@ mod tests {
         client_version = "5.32"
         relogin_delay = "30s"
         restart_on_error = true
+        resume = true
         room = 1234
         stall_after = "90s"
         on_stall = "relogin"
@@ -562,6 +573,7 @@ mod tests {
         server = "Yorumi"
         relogin_attempts = 2
         restart_on_error = false
+        resume = false
     "#;
 
     fn accounts(text: &str) -> Result<Vec<Account>, String> {
@@ -613,7 +625,7 @@ mod tests {
                 attempts: None
             })
         );
-        assert!(first.restart_on_error);
+        assert!(first.restart_on_error && first.resume);
         let script = first.script.unwrap();
         assert_eq!(script.path, PathBuf::from("/srv/aqx/scripts/farm.ts"));
         let mut args = script.args;
@@ -660,7 +672,10 @@ mod tests {
                 attempts: Some(2)
             })
         );
-        assert!(!healer.restart_on_error, "an account overrides a default");
+        assert!(
+            !healer.restart_on_error && !healer.resume,
+            "an account overrides a default"
+        );
     }
 
     #[test]
