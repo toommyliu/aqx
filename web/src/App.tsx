@@ -429,12 +429,51 @@ function Mark(props: { tone: ReturnType<typeof tone> }) {
   );
 }
 
+const doing = (a: Account) =>
+  `${a.script ? a.script.split("/").pop() : "no script"}${a.status ? ` · ${hide(a.status)}` : ""}`;
+
+function Peek(props: { row: HTMLElement; account: Account }) {
+  let card!: HTMLDivElement;
+  onMount(() => {
+    card.showPopover();
+    onCleanup(anchor(props.row, card, "right-start"));
+  });
+  const a = () => props.account;
+  return (
+    <div class="peek" popover="manual" ref={card} aria-hidden="true">
+      <Switch>
+        <Match when={reason(a())}>{(why) => <div class="bad ellipsis">{hide(why())}</div>}</Match>
+        <Match when={a().server}>
+          <div class="ellipsis">
+            <ServerName name={a().server} />
+            <Show when={a().game}>{(g) => <> · {hide(g().area)} {g().cell}</>}</Show>
+          </div>
+        </Match>
+      </Switch>
+      <Show when={a().game}>
+        {(g) => (
+          <div class="muted ellipsis">
+            lv {g().level} {g().class} · hp {number.format(g().hp)}/{number.format(g().max_hp)}
+            <Show when={g().dead}>
+              {" "}
+              <span class="badge bad">dead</span>
+            </Show>
+          </div>
+        )}
+      </Show>
+      <div class="muted ellipsis">{doing(a())}</div>
+    </div>
+  );
+}
+
 function stopSelecting() {
   setSelecting(false);
   setMarked(new Set<string>());
 }
 
 const HOLD_MS = 450;
+const PEEK_MS = 500;
+const UNPEEK_MS = 100;
 
 function AccountList(props: { onOpen: (i: number | null) => void }) {
   let ref!: HTMLUListElement;
@@ -498,6 +537,28 @@ function AccountList(props: { onOpen: (i: number | null) => void }) {
     }, HOLD_MS);
   };
   const release = () => clearTimeout(timer);
+  const [peek, setPeek] = createSignal<{ index: number; row: HTMLElement } | null>(null);
+  let peekTimer: number | undefined;
+  onCleanup(() => clearTimeout(peekTimer));
+  const peekLater = (next: { index: number; row: HTMLElement } | null, ms: number) => {
+    clearTimeout(peekTimer);
+    peekTimer = window.setTimeout(() => setPeek(next), ms);
+  };
+  const shown = () => {
+    const p = peek();
+    return p !== null && p.index !== selected() && !selecting() && menuFor() === undefined ? p : null;
+  };
+  const peekAt = (i: number, e: PointerEvent) => {
+    if (e.pointerType !== "mouse" || e.buttons !== 0 || !(e.currentTarget instanceof HTMLElement)) return;
+    const at = { index: i, row: e.currentTarget };
+    if (shown() === null) return peekLater(at, PEEK_MS);
+    clearTimeout(peekTimer);
+    setPeek(at);
+  };
+  const unpeek = () => {
+    clearTimeout(peekTimer);
+    setPeek(null);
+  };
   const rowFocus = (i: number) => ((selected() ?? ordered()[0]) === i ? 0 : -1);
   const firstOffline = () => {
     const order = ordered();
@@ -642,7 +703,12 @@ function AccountList(props: { onOpen: (i: number | null) => void }) {
               <li class="divider" role="separator" />
             </Show>
             <li
-              onPointerEnter={() => sweep(i())}
+              onPointerEnter={(e) => {
+                sweep(i());
+                peekAt(i(), e);
+              }}
+              onPointerLeave={() => peekLater(null, UNPEEK_MS)}
+              onPointerDown={unpeek}
               classList={{
                 current: !selecting() && selected() === i(),
                 marked: selecting() && isMarked(i()),
@@ -695,9 +761,7 @@ function AccountList(props: { onOpen: (i: number | null) => void }) {
                     <span class="visually-hidden">recording</span>
                   </span>
                 </Show>
-                <span class={`state s-${tone(a())}`} title={hide(reason(a()) ?? "") || undefined}>
-                  {stateLabel(a())}
-                </span>
+                <span class={`state s-${tone(a())}`}>{stateLabel(a())}</span>
               </button>
                 <button
                   type="button"
@@ -742,6 +806,9 @@ function AccountList(props: { onOpen: (i: number | null) => void }) {
       </ul>
       <Show when={selecting()}>
         <Selection />
+      </Show>
+      <Show when={shown()} keyed>
+        {(p) => <Show when={accounts[p.index]}>{(a) => <Peek row={p.row} account={a()} />}</Show>}
       </Show>
       <div
         id="account-menu"
@@ -842,10 +909,7 @@ function Dashboard(props: { onOpen: (i: number) => void }) {
                     </>
                   )}
                 </Show>
-                <span class="muted ellipsis">
-                  {a.script ? a.script.split("/").pop() : "no script"}
-                  {a.status ? ` · ${hide(a.status)}` : ""}
-                </span>
+                <span class="muted ellipsis">{doing(a)}</span>
                 <Show when={session()?.kind === "none" && lastLines(a.user).at(-1)}>
                   {(line) => <span class="muted ellipsis">{lineText(line())}</span>}
                 </Show>

@@ -254,7 +254,7 @@ export function VirtualList<T>(props: {
   );
 }
 
-export function anchor(reference: Element, floating: HTMLElement, placement: "bottom-start" | "bottom-end" | "top" = "bottom-end") {
+export function anchor(reference: Element, floating: HTMLElement, placement: "bottom-start" | "bottom-end" | "top" | "right-start" = "bottom-end") {
   floating.style.visibility = "hidden";
   return autoUpdate(reference, floating, () => {
     void computePosition(reference, floating, {
