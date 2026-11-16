@@ -744,6 +744,11 @@ meter.mp::-moz-meter-bar {
   font-size: 12px;
 }
 
+.up-next .next-run {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
 .register {
   display: flex;
   align-items: center;
@@ -1758,6 +1763,20 @@ dialog.tall .editor.script-chooser {
   display: flex;
   align-items: baseline;
   gap: 12px;
+}
+
+.schedule + .schedule {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.schedule > .remove {
+  grid-column: 2;
+  justify-self: start;
+}
+
+.days {
+  flex-wrap: wrap;
 }
 
 .settings-menu {

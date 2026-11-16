@@ -3,6 +3,7 @@ use serde_json::{Map, Value, json};
 use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike};
 
 const SECRET: &str = "password";
+const SCHEDULE: &str = "schedule";
 
 #[derive(Deserialize)]
 pub struct Form {
@@ -21,6 +22,7 @@ pub struct FormAccount {
 pub struct Keys {
     settings: Vec<String>,
     account: Vec<String>,
+    schedule: Vec<String>,
 }
 
 impl Keys {
@@ -28,12 +30,18 @@ impl Keys {
         let keys = |def: &str| {
             schema["$defs"][def]["properties"]
                 .as_object()
-                .map(|p| p.keys().filter(|k| *k != SECRET).cloned().collect())
+                .map(|p| {
+                    p.keys()
+                        .filter(|k| *k != SECRET && *k != SCHEDULE)
+                        .cloned()
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         Keys {
             settings: keys("Settings"),
             account: keys("AccountConfig"),
+            schedule: keys("ScheduleConfig"),
         }
     }
 }
@@ -86,7 +94,10 @@ pub fn apply(text: &str, form: Form, keys: &Keys) -> Result<String, String> {
                 .ok_or("an account moved while you edited")?,
             None => Table::new(),
         };
-        set_fields(&mut table, &account.fields, &keys.account)?;
+        let mut fields = account.fields;
+        let schedule = fields.remove(SCHEDULE);
+        set_fields(&mut table, &fields, &keys.account)?;
+        set_schedule(&mut table, schedule, &keys.schedule)?;
         match account.password.filter(|p| !p.is_empty()) {
             Some(password) => set(&mut table, SECRET, toml_edit::Value::from(password)),
             None if account.from.is_none() => return Err("a new account needs a password".into()),
@@ -112,7 +123,13 @@ fn json_of_item(item: &Item) -> Option<Value> {
     match item {
         Item::Value(value) => Some(json_of(value)),
         Item::Table(table) => Some(entries_of(table).collect::<Map<_, _>>().into()),
-        Item::None | Item::ArrayOfTables(_) => None,
+        Item::ArrayOfTables(tables) => Some(
+            tables
+                .iter()
+                .map(|t| Value::from(entries_of(t).collect::<Map<_, _>>()))
+                .collect(),
+        ),
+        Item::None => None,
     }
 }
 
@@ -183,6 +200,36 @@ fn set_fields(
     Ok(())
 }
 
+fn set_schedule(table: &mut Table, wanted: Option<Value>, known: &[String]) -> Result<(), String> {
+    let wanted = match wanted {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items,
+        Some(_) => return Err("schedule must be a list".into()),
+    };
+    if wanted.is_empty() {
+        table.remove(SCHEDULE);
+        return Ok(());
+    }
+    let now = table.get(SCHEDULE).and_then(json_of_item);
+    if now.as_ref().and_then(Value::as_array) == Some(&wanted) {
+        return Ok(());
+    }
+    let old: Vec<Table> = table
+        .get(SCHEDULE)
+        .and_then(Item::as_array_of_tables)
+        .map(|tables| tables.iter().cloned().collect())
+        .unwrap_or_default();
+    let mut tables = ArrayOfTables::new();
+    for (i, entry) in wanted.iter().enumerate() {
+        let fields = entry.as_object().ok_or("each schedule must be a table")?;
+        let mut entry = old.get(i).cloned().unwrap_or_default();
+        set_fields(&mut entry, fields, known)?;
+        tables.push(entry);
+    }
+    table.insert(SCHEDULE, Item::ArrayOfTables(tables));
+    Ok(())
+}
+
 fn set(table: &mut dyn TableLike, key: &str, mut value: toml_edit::Value) {
     match table.get_mut(key).and_then(Item::as_value_mut) {
         Some(old) => {
@@ -210,6 +257,18 @@ password = "secret-one"
 script = "farm.ts"
 args = { target = 7500 }
 
+# after the reset
+[[account.schedule]]
+at = "00:05"
+tz = "America/New_York"
+script = "dailies.ts"
+
+[[account.schedule]]
+at = "9pm"
+days = ["fri"]
+script = "weekly.ts"
+args = { fast = true }
+
 [[account]]
 name = "healer"
 user = "player2"
@@ -236,6 +295,54 @@ leader = "player1"
         assert_eq!(read["accounts"][0]["fields"]["args"]["target"], 7500);
         assert_eq!(read["accounts"][1]["fields"]["args"]["leader"], "player1");
         assert_eq!(read["defaults"]["server"], "Twilly");
+        assert_eq!(
+            read["accounts"][0]["fields"]["schedule"][1]["days"][0],
+            "fri"
+        );
+        assert_eq!(
+            read["accounts"][0]["fields"]["schedule"][1]["args"]["fast"],
+            true
+        );
+    }
+
+    #[test]
+    fn a_schedule_edit_keeps_the_other_schedules_as_written() {
+        let read = read(FILE).unwrap();
+        let mut farmer = read["accounts"][0]["fields"].clone();
+        farmer["schedule"][1]["at"] = json!("10pm");
+        let schedules = farmer["schedule"].as_array().unwrap().clone();
+        let saved = apply(
+            FILE,
+            form(json!({ "defaults": read["defaults"], "accounts": [{ "from": 0, "fields": farmer, "password": null }] })),
+            &keys(),
+        )
+        .unwrap();
+        assert!(
+            saved.contains("# after the reset\n[[account.schedule]]\nat = \"00:05\""),
+            "{saved}"
+        );
+        assert!(saved.contains("at = \"10pm\"\ndays = [\"fri\"]"), "{saved}");
+        let farmer = json!({ "user": "player1", "script": "farm.ts", "schedule": [schedules[0]] });
+        let saved = apply(
+            FILE,
+            form(json!({ "defaults": read["defaults"], "accounts": [{ "from": 0, "fields": farmer, "password": null }] })),
+            &keys(),
+        )
+        .unwrap();
+        assert!(
+            !saved.contains("weekly.ts") && saved.contains("dailies.ts"),
+            "{saved}"
+        );
+        let farmer = json!({ "user": "player1" });
+        let saved = apply(
+            FILE,
+            form(json!({ "defaults": read["defaults"], "accounts": [{ "from": 0, "fields": farmer, "password": null }] })),
+            &keys(),
+        )
+        .unwrap();
+        assert!(!saved.contains("schedule"), "{saved}");
+        let accounts = crate::config::read(&saved, std::path::Path::new("/srv")).unwrap();
+        assert!(accounts[0].schedules.is_empty());
     }
 
     #[test]

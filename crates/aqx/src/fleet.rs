@@ -12,12 +12,14 @@ use aqx_client::{
     Server, Spot, api,
 };
 use aqx_script::{Cancel, Edit, Level, Outcome, Output, Registered};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{self, OnStall, Script};
 use crate::describe::describe;
 use crate::record::{self, Recorder};
 use crate::runner::{self, Job, Login, Note};
+use crate::schedule::Schedule;
 
 pub const LOG_LINES: usize = 1000;
 
@@ -155,6 +157,21 @@ pub enum Ended {
 pub struct Queued {
     pub id: u64,
     pub script: Script,
+    #[serde(default)]
+    pub scheduled: bool,
+}
+
+enum Return {
+    Idle,
+    Offline,
+}
+
+enum Moment {
+    Offline,
+    Idle,
+    Busy(Script),
+    Paused,
+    Changing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,6 +240,9 @@ pub struct Board {
     pub recording: Option<Recorder>,
     pub queue: VecDeque<Queued>,
     queued_ids: u64,
+    due: Vec<Option<Timestamp>>,
+    scheduled: Option<u64>,
+    returning: Option<Return>,
     runs: u64,
     links: u64,
     queued_runs: usize,
@@ -247,6 +267,9 @@ impl Default for Board {
             recording: None,
             queue: VecDeque::new(),
             queued_ids: 0,
+            due: Vec::new(),
+            scheduled: None,
+            returning: None,
             runs: 0,
             links: 0,
             queued_runs: 0,
@@ -295,6 +318,38 @@ impl Board {
 
     pub fn paused(&self) -> bool {
         matches!(&self.run, Run::Running { cancel, .. } if cancel.is_paused())
+    }
+
+    fn moment(&self) -> Moment {
+        if self.paused() {
+            return Moment::Paused;
+        }
+        if self.idle() {
+            return Moment::Offline;
+        }
+        let changing = self.queued_runs + self.queued_logins > 0
+            || matches!(self.run, Run::Starting { .. })
+            || !matches!(self.link, Link::Session { .. });
+        match (&self.run, &self.last) {
+            _ if changing => Moment::Changing,
+            (Run::Running { .. } | Run::Restarting { .. }, Some(last)) => {
+                Moment::Busy(last.clone())
+            }
+            _ => Moment::Idle,
+        }
+    }
+
+    fn queue_at(&mut self, at: usize, script: Script, scheduled: bool) {
+        self.queued_ids += 1;
+        let id = self.queued_ids;
+        self.queue.insert(
+            at,
+            Queued {
+                id,
+                script,
+                scheduled,
+            },
+        );
     }
 
     fn script_output(&mut self, out: Output) {
@@ -362,6 +417,7 @@ pub struct Account {
     pub user: String,
     pub server: String,
     script: Option<Script>,
+    schedules: Vec<Schedule>,
     restart_on_error: bool,
     room: Option<u32>,
     stall_after: Duration,
@@ -432,7 +488,9 @@ impl Account {
         );
         let script =
             if running { board.last.clone() } else { None }.or_else(|| self.script.clone());
+        let scheduled = running && board.scheduled == Some(board.runs);
         board.runs += 1;
+        board.scheduled = scheduled.then_some(board.runs);
         if let Run::Running { cancel, .. } = &board.run {
             cancel.cancel();
         }
@@ -469,6 +527,7 @@ impl Account {
         if board.session().is_some_and(|s| !closed(s)) {
             return Err("already online");
         }
+        board.returning = None;
         board.queued_logins += 1;
         self.send(Command::Login { link: board.links });
         if let Some(script) = script {
@@ -483,11 +542,14 @@ impl Account {
 
     pub fn run(&self, script: Script) {
         self.commanded.store(true, Ordering::SeqCst);
-        self.start(&mut self.board(), script);
+        let mut board = self.board();
+        board.returning = None;
+        self.start(&mut board, script, false);
     }
 
-    fn start(&self, board: &mut Board, script: Script) {
+    fn start(&self, board: &mut Board, script: Script, scheduled: bool) {
         board.runs += 1;
+        board.scheduled = scheduled.then_some(board.runs);
         if let Run::Running { cancel, .. } = &board.run {
             cancel.cancel();
         }
@@ -500,9 +562,8 @@ impl Account {
 
     pub fn enqueue(&self, script: Script) {
         let mut board = self.board();
-        board.queued_ids += 1;
-        let id = board.queued_ids;
-        board.queue.push_back(Queued { id, script });
+        let end = board.queue.len();
+        board.queue_at(end, script, false);
     }
 
     pub fn unqueue(&self, id: u64) -> Result<(), &'static str> {
@@ -545,7 +606,8 @@ impl Account {
         self.commanded.store(true, Ordering::SeqCst);
         let mut board = self.board();
         let next = board.queue.pop_front().ok_or("the queue is empty")?;
-        self.start(&mut board, next.script);
+        board.returning = None;
+        self.start(&mut board, next.script, next.scheduled);
         Ok(())
     }
 
@@ -554,20 +616,136 @@ impl Account {
         if board.runs != run {
             return;
         }
-        if let Some(next) = board.queue.pop_front() {
-            self.start(&mut board, next.script);
+        let more_scheduled = board.queue.front().is_some_and(|q| q.scheduled);
+        match board.returning.take() {
+            Some(back) if !more_scheduled => {
+                board
+                    .log
+                    .push(Channel::Aqx, "the scheduled scripts are done".into());
+                if let Return::Offline = back {
+                    let _ = self.log_out(&mut board);
+                }
+            }
+            back => {
+                board.returning = back;
+                if let Some(next) = board.queue.pop_front() {
+                    self.start(&mut board, next.script, next.scheduled);
+                }
+            }
+        }
+    }
+
+    fn scheduled(&self, run: u64) -> bool {
+        self.board().scheduled == Some(run)
+    }
+
+    fn held(&self, run: u64) {
+        let mut board = self.board();
+        if board.runs == run {
+            board.returning = None;
         }
     }
 
     pub fn restart(&self) -> Result<(), &'static str> {
-        let script = self.board().last.clone().or_else(|| self.script.clone());
+        let mut board = self.board();
+        let script = board.last.clone().or_else(|| self.script.clone());
         let script = script.ok_or("no script to restart")?;
-        self.run(script);
+        let scheduled = board.scheduled == Some(board.runs);
+        self.commanded.store(true, Ordering::SeqCst);
+        self.start(&mut board, script, scheduled);
         Ok(())
+    }
+
+    pub fn upcoming(&self, board: &Board) -> Option<(&Script, Timestamp)> {
+        self.schedules
+            .iter()
+            .zip(&board.due)
+            .filter_map(|(schedule, due)| due.map(|at| (&schedule.script, at)))
+            .min_by_key(|(_, at)| *at)
+    }
+
+    fn fire_due(&self, now: Timestamp) {
+        let mut board = self.board();
+        let (missed, due): (Vec<usize>, Vec<usize>) = (0..board.due.len())
+            .filter(|&i| board.due[i].is_some_and(|at| at <= now))
+            .partition(|&i| board.due[i].is_some_and(|at| now.duration_since(at) > SCHEDULE_LATE));
+        let names = |at: &[usize]| {
+            at.iter()
+                .map(|&i| self.schedules[i].script.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if !missed.is_empty() {
+            for &i in &missed {
+                board.due[i] = self.schedules[i].next_after(now);
+            }
+            let text = format!("schedule: missed {}", names(&missed));
+            board.log.push(Channel::Aqx, text);
+        }
+        if due.is_empty() {
+            return;
+        }
+        let mut scripts: Vec<Script> = due
+            .iter()
+            .map(|&i| self.schedules[i].script.clone())
+            .collect();
+        let names = names(&due);
+        let moment = board.moment();
+        if let Moment::Changing = moment {
+            return;
+        }
+        for &i in &due {
+            board.due[i] = self.schedules[i].next_after(now);
+        }
+        let first = scripts.remove(0);
+        let busy_scheduled = board.scheduled == Some(board.runs);
+        let text = match moment {
+            Moment::Changing => unreachable!("returned above"),
+            Moment::Paused => format!("skipped {names}: the script is paused"),
+            Moment::Busy(_) if busy_scheduled => {
+                let at = board.queue.iter().take_while(|q| q.scheduled).count();
+                for (i, script) in std::iter::once(first).chain(scripts).enumerate() {
+                    board.queue_at(at + i, script, true);
+                }
+                format!("{names} runs after the scheduled script")
+            }
+            Moment::Busy(current) => {
+                let text = format!(
+                    "stopping {} to run {names}; it starts again after",
+                    current.path.display()
+                );
+                board.queue_at(0, current, false);
+                for (i, script) in scripts.into_iter().enumerate() {
+                    board.queue_at(i, script, true);
+                }
+                self.start(&mut board, first, true);
+                text
+            }
+            Moment::Idle => {
+                board.returning = Some(Return::Idle);
+                for (i, script) in scripts.into_iter().enumerate() {
+                    board.queue_at(i, script, true);
+                }
+                self.start(&mut board, first, true);
+                format!("running {names}")
+            }
+            Moment::Offline => {
+                board.returning = Some(Return::Offline);
+                for (i, script) in scripts.into_iter().enumerate() {
+                    board.queue_at(i, script, true);
+                }
+                board.queued_logins += 1;
+                self.send(Command::Login { link: board.links });
+                self.start(&mut board, first, true);
+                format!("logging in to run {names}")
+            }
+        };
+        board.log.push(Channel::Aqx, format!("schedule: {text}"));
     }
 
     pub fn stop(&self) -> Result<(), &'static str> {
         let mut board = self.board();
+        board.returning = None;
         board.runs += 1;
         let pending = board.queued_runs > 0;
         match &board.run {
@@ -618,7 +796,11 @@ impl Account {
     }
 
     pub fn logout(&self) -> Result<(), &'static str> {
-        let mut board = self.board();
+        self.log_out(&mut self.board())
+    }
+
+    fn log_out(&self, board: &mut Board) -> Result<(), &'static str> {
+        board.returning = None;
         board.switched = None;
         board.runs += 1;
         board.links += 1;
@@ -761,6 +943,7 @@ fn closed(session: &Handle) -> bool {
     matches!(session.snapshot().phase, Phase::Closed { .. })
 }
 
+const SCHEDULE_LATE: jiff::SignedDuration = jiff::SignedDuration::from_secs(60);
 const WATCH_EVERY: Duration = Duration::from_secs(2);
 const LOGIN_RETRY_MAX: Duration = Duration::from_secs(300);
 
@@ -863,18 +1046,24 @@ impl Fleet {
     fn spawn(&self, config: config::Account) -> Arc<Account> {
         let seen = Mutex::new(config.clone());
         let (commands, inbox) = mpsc::channel();
+        let now = Timestamp::now();
+        let board = Board {
+            due: config.schedules.iter().map(|s| s.next_after(now)).collect(),
+            ..Board::default()
+        };
         let account = Arc::new(Account {
             name: config.name,
             user: config.user.clone(),
             server: config.server,
             script: config.script,
+            schedules: config.schedules,
             restart_on_error: config.restart_on_error,
             room: config.room,
             stall_after: config.stall_after,
             on_stall: config.on_stall,
             commanded: AtomicBool::new(false),
             seen,
-            board: Mutex::new(Board::default()),
+            board: Mutex::new(board),
             commands,
         });
         let linked = Arc::new(Linked {
@@ -981,6 +1170,16 @@ impl Fleet {
         self.accounts().iter().any(|a| a.commanded())
     }
 
+    pub fn scheduled(&self) -> bool {
+        self.accounts().iter().any(|a| !a.schedules.is_empty())
+    }
+
+    pub fn fire_due(&self, now: Timestamp) {
+        for account in self.accounts() {
+            account.fire_due(now);
+        }
+    }
+
     pub fn logout_all(&self) {
         for account in self.accounts() {
             let _ = account.logout();
@@ -1070,6 +1269,7 @@ impl Backoff {
 enum After {
     Next,
     Retry,
+    Failed,
     Hold,
 }
 
@@ -1106,8 +1306,17 @@ impl Linked {
                             self.account.advance(run);
                             continue;
                         }
+                        After::Retry | After::Failed if self.account.scheduled(run) => {
+                            self.account.say("the scheduled script failed; moving on");
+                            self.account.advance(run);
+                            continue;
+                        }
                         After::Retry if self.account.restart_on_error => {}
-                        After::Retry | After::Hold => continue,
+                        After::Retry | After::Failed => continue,
+                        After::Hold => {
+                            self.account.held(run);
+                            continue;
+                        }
                     }
                     let delay = restarts.after(started.elapsed());
                     if !self.restarting(&script, run, delay) {
@@ -1269,6 +1478,8 @@ impl Linked {
             why: (!cancelled).then(|| why.clone()),
         };
         board.runs += 1;
+        board.returning = None;
+        board.queue.retain(|q| !q.scheduled);
         if !cancelled {
             board
                 .log
@@ -1357,7 +1568,7 @@ impl Linked {
         let (how, after) =
             match loaded {
                 Err((why, true)) => (Ended::Failed(why), After::Retry),
-                Err((why, false)) => (Ended::Failed(why), After::Hold),
+                Err((why, false)) => (Ended::Failed(why), After::Failed),
                 Ok((loaded, args)) => {
                     let relogin: Arc<dyn aqx_script::Account> = Arc::clone(self) as _;
                     let ran =
@@ -1493,6 +1704,7 @@ impl Account {
             user: name.into(),
             server: "Test".into(),
             script,
+            schedules: Vec::new(),
             restart_on_error: false,
             room: None,
             stall_after: Duration::from_secs(300),
@@ -1730,6 +1942,191 @@ mod tests {
         hang_up_in.send(()).unwrap();
         harness.session.logout();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn every_day(script: Script) -> Schedule {
+        Schedule {
+            at: jiff::civil::time(21, 0, 0, 0),
+            days: crate::schedule::Days::EVERY,
+            tz: Some(jiff::tz::TimeZone::UTC),
+            script,
+        }
+    }
+
+    #[test]
+    fn a_schedule_interrupts_the_script_runs_through_failures_and_resumes_it() {
+        let (hang_up_in, hang_up) = mpsc::channel::<()>();
+        let harness = Harness::start(Options::default(), move |listener| {
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready();
+            let _ = hang_up.recv();
+        });
+        harness.session.ready().wait().unwrap();
+        let dir = std::env::temp_dir().join(format!("aqx-schedule-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.join(format!("{name}.ts"));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"import {{ script, wait }} from "aqx";
+                    export default function* () {{ script.log("{name}"); {body} }}"#
+                ),
+            )
+            .unwrap();
+            Script {
+                path,
+                args: Vec::new(),
+            }
+        };
+        let fails = script("fails", r#"throw new Error("boom");"#);
+        let finishes = script("finishes", "");
+        let farms = script("farms", "yield* wait.ms(60_000);");
+        let (mut account, inbox) = Account::queueing("player1", None);
+        account.schedules = vec![every_day(fails), every_day(finishes)];
+        account.restart_on_error = true;
+        account.board().link = Link::Session {
+            session: harness.session.clone(),
+            server: "Test".into(),
+            since: Instant::now(),
+        };
+        let linked = linked(account);
+        let account = Arc::clone(&linked.account);
+        thread::spawn(move || linked.work(&inbox));
+        let until = |what: &str, done: &dyn Fn(&Board) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !done(&account.board()) {
+                assert!(Instant::now() < deadline, "never {what}");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let ran = |board: &Board| -> Vec<String> {
+            board
+                .log
+                .lines()
+                .filter(|l| l.channel == Channel::Script)
+                .map(|l| l.text.lines().next().unwrap_or_default().to_owned())
+                .collect()
+        };
+        let farming = |board: &Board| matches!(&board.run, Run::Running { script, .. } if script.ends_with("farms.ts"));
+
+        account.run(farms);
+        until("farmed", &|board| ran(board).len() == 1);
+        let now = Timestamp::now();
+        account.board().due = vec![Some(now), Some(now)];
+        account.fire_due(now);
+        until("came back to the farm", &|board| {
+            ran(board).len() == 5 && farming(board)
+        });
+        assert_eq!(
+            ran(&account.board())[1..],
+            ["fails", "error: Error: boom", "finishes", "farms"],
+            "a failed scheduled script moves on without restarting"
+        );
+        let board = account.board();
+        assert!(board.queue.is_empty());
+        assert!(board.due.iter().all(|due| due.is_some_and(|at| at > now)));
+        drop(board);
+
+        account.pause().unwrap();
+        account.board().due[0] = Some(now);
+        account.fire_due(now);
+        assert!(
+            account.board().paused(),
+            "a paused script isn't interrupted"
+        );
+        assert!(
+            account
+                .board()
+                .log
+                .lines()
+                .any(|l| l.text.starts_with("schedule: skipped")),
+            "the skip is logged"
+        );
+        hang_up_in.send(()).unwrap();
+        harness.session.logout();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_schedule_logs_an_offline_account_in_and_back_out() {
+        let daily = Script {
+            path: PathBuf::from("/srv/daily.ts"),
+            args: Vec::new(),
+        };
+        let (mut account, inbox) = Account::queueing("player1", Some(farm()));
+        account.schedules = vec![every_day(daily.clone()), every_day(daily)];
+        account.enqueue(farm());
+        let now = Timestamp::now();
+        let slept = now - jiff::SignedDuration::from_mins(2);
+        account.board().due = vec![Some(slept), Some(slept)];
+        account.fire_due(now);
+        assert!(
+            inbox.try_recv().is_err(),
+            "a schedule slept through doesn't run late"
+        );
+        assert!(
+            account
+                .board()
+                .due
+                .iter()
+                .all(|due| due.is_some_and(|at| at > now))
+        );
+        account.board().due = vec![Some(now), Some(now)];
+        account.fire_due(now);
+        assert!(
+            !account.commanded(),
+            "a scheduled login doesn't end the session when the account goes offline"
+        );
+        let linked = linked(account);
+        let account = &linked.account;
+        assert_eq!(take(&linked, &inbox), Some(PathBuf::from("login")));
+        assert_eq!(take(&linked, &inbox), Some(PathBuf::from("/srv/daily.ts")));
+        let run = account.board().runs;
+        account.advance(run);
+        assert_eq!(
+            take(&linked, &inbox),
+            Some(PathBuf::from("/srv/daily.ts")),
+            "the second scheduled script runs next"
+        );
+        let run = account.board().runs;
+        account.advance(run);
+        assert_eq!(take(&linked, &inbox), Some(PathBuf::from("logout")));
+        let queue = &account.board().queue;
+        assert_eq!(
+            (queue.len(), queue[0].scheduled),
+            (1, false),
+            "the queue waits for the next login"
+        );
+    }
+
+    #[test]
+    fn a_failed_scheduled_login_drops_the_scheduled_scripts() {
+        let daily = Script {
+            path: PathBuf::from("/srv/daily.ts"),
+            args: Vec::new(),
+        };
+        let (mut account, _inbox) = Account::queueing("player1", None);
+        account.schedules = vec![every_day(daily.clone()), every_day(daily)];
+        account.enqueue(farm());
+        let now = Timestamp::now();
+        account.board().due = vec![Some(now), Some(now)];
+        account.fire_due(now);
+        let linked = linked(account);
+        let link = linked.account.board().links;
+        linked.failed(link, "the server is down".into());
+        let queued: Vec<PathBuf> = linked
+            .account
+            .board()
+            .queue
+            .iter()
+            .map(|q| q.script.path.clone())
+            .collect();
+        assert_eq!(
+            queued,
+            [PathBuf::from("/srv/farm.ts")],
+            "a later login doesn't run the missed schedule"
+        );
     }
 
     #[test]

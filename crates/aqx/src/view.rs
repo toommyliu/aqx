@@ -24,6 +24,13 @@ pub struct Shown {
     pub game: Option<Game>,
     pub recording: Option<String>,
     pub queue: Vec<Queued>,
+    pub next: Option<Next>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Next {
+    pub script: String,
+    pub at_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -326,6 +333,10 @@ impl Shown {
                 .as_ref()
                 .map(|r| r.path().display().to_string()),
             queue: board.queue.iter().cloned().collect(),
+            next: account.upcoming(&board).map(|(script, at)| Next {
+                script: script.path.display().to_string(),
+                at_ms: at.as_millisecond(),
+            }),
         }
     }
 }

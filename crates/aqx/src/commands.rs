@@ -35,6 +35,8 @@ pub struct Open {
     /// Log the accounts in without running a script.
     #[arg(long, conflicts_with = "script")]
     pub no_script: bool,
+    #[arg(long, hide = true, conflicts_with_all = ["accounts", "script", "no_script"])]
+    pub nobody: bool,
 }
 
 impl Open {
@@ -45,6 +47,7 @@ impl Open {
                 args: self.args.clone(),
             }),
             None if self.no_script => Start::LoginOnly,
+            None if self.nobody => Start::Nobody,
             None => Start::Login,
         };
         Ok(Wanted {
@@ -254,7 +257,9 @@ fn act_on_named(session: &Session, wanted: &Wanted) -> anyhow::Result<()> {
     let accounts = names(session)?;
     for name in &wanted.accounts {
         let i = find(&accounts, name)?;
-        if let Err(why) = session.source().act(i, wanted.start.action()) {
+        if let Some(action) = wanted.start.action()
+            && let Err(why) = session.source().act(i, action)
+        {
             eprintln!("aqx: {}: {why}", accounts[i].name);
         }
     }
@@ -431,24 +436,32 @@ pub fn ps(json: bool) -> anyhow::Result<ExitCode> {
         }
     }
     if !json {
-        print_lines(&ps_lines(&rows));
+        let tz = jiff::tz::TimeZone::system();
+        print_lines(&ps_lines(&rows, jiff::Timestamp::now(), &tz));
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn ps_lines(rows: &[(String, Shown)]) -> Vec<String> {
-    let header = [
+fn ps_lines(
+    rows: &[(String, Shown)],
+    now: jiff::Timestamp,
+    tz: &jiff::tz::TimeZone,
+) -> Vec<String> {
+    let scheduled = rows.iter().any(|(_, a)| a.next.is_some());
+    let mut header: Vec<String> = [
         "SESSION", "ACCOUNT", "STATE", "SCRIPT", "WHERE", "UP", "STATUS",
     ]
-    .map(str::to_owned);
+    .map(str::to_owned)
+    .into();
+    if scheduled {
+        header.insert(6, "NEXT".into());
+    }
     let mut table = vec![header];
     for (session, a) in rows {
-        let name = a
-            .script
-            .as_deref()
-            .map(|s| s.rsplit('/').next().unwrap_or(s));
+        let file = |s: &str| s.rsplit('/').next().unwrap_or(s).to_owned();
+        let name = a.script.as_deref().map(file);
         let script = match (name, a.queue.len()) {
-            (name, 0) => name.unwrap_or_default().to_owned(),
+            (name, 0) => name.unwrap_or_default(),
             (Some(name), queued) => format!("{name}, {queued} queued"),
             (None, queued) => format!("{queued} queued"),
         };
@@ -463,7 +476,7 @@ fn ps_lines(rows: &[(String, Shown)]) -> Vec<String> {
             State::Reconnecting(detail) => detail.clone(),
             _ => a.status.clone(),
         };
-        table.push([
+        let mut row = vec![
             session.clone(),
             a.name.clone(),
             a.state.word().to_owned(),
@@ -471,9 +484,21 @@ fn ps_lines(rows: &[(String, Shown)]) -> Vec<String> {
             place,
             up,
             status,
-        ]);
+        ];
+        if scheduled {
+            let next = a.next.as_ref().map(|next| {
+                let at = jiff::Timestamp::from_millisecond(next.at_ms).unwrap_or(now);
+                format!(
+                    "{} {}",
+                    file(&next.script),
+                    crate::schedule::when(at, now, tz)
+                )
+            });
+            row.insert(6, next.unwrap_or_default());
+        }
+        table.push(row);
     }
-    let widths: Vec<usize> = (0..7)
+    let widths: Vec<usize> = (0..table[0].len())
         .map(|col| {
             table
                 .iter()
@@ -708,6 +733,7 @@ mod tests {
                     path: "/srv/farm/daily.ts".into(),
                     args: Vec::new(),
                 },
+                scheduled: false,
             })
             .collect()
     }
@@ -728,6 +754,7 @@ mod tests {
             game: None,
             recording: None,
             queue: Vec::new(),
+            next: None,
         }
     }
 
@@ -756,13 +783,44 @@ mod tests {
                 },
             )
         };
-        let lines = ps_lines(&[("farm".into(), farming), ("farm".into(), banned)]);
+        let now = jiff::Timestamp::from_second(1_800_000_000).unwrap();
+        let utc = jiff::tz::TimeZone::UTC;
+        let rows = [("farm".into(), farming), ("farm".into(), banned)];
         assert_eq!(
-            lines,
+            ps_lines(&rows, now, &utc),
             [
                 "SESSION  ACCOUNT  STATE    SCRIPT                  WHERE         UP    STATUS",
                 "farm     player1  running  void-aura.ts, 2 queued  farm-1 Enter  1h6m  Void Aura 12/7500",
                 "farm     healer   offline  1 queued                                    login rejected: banned",
+            ]
+        );
+        let [(_, farming), (_, banned)] = rows;
+        let next = |hours: i64| crate::view::Next {
+            script: "/srv/dailies.ts".into(),
+            at_ms: now.as_millisecond() + hours * 3_600_000,
+        };
+        let rows = [
+            (
+                "farm".into(),
+                Shown {
+                    next: Some(next(1)),
+                    ..farming
+                },
+            ),
+            (
+                "farm".into(),
+                Shown {
+                    next: Some(next(30)),
+                    ..banned
+                },
+            ),
+        ];
+        assert_eq!(
+            ps_lines(&rows, now, &utc),
+            [
+                "SESSION  ACCOUNT  STATE    SCRIPT                  WHERE         UP    NEXT                  STATUS",
+                "farm     player1  running  void-aura.ts, 2 queued  farm-1 Enter  1h6m  dailies.ts 09:00      Void Aura 12/7500",
+                "farm     healer   offline  1 queued                                    dailies.ts Sat 14:00  login rejected: banned",
             ]
         );
         let accounts = [

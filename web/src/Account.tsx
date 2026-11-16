@@ -75,7 +75,7 @@ export function AccountPanel(props: { account: Account; index: number }) {
     <section class="account" classList={{ details: details() }} aria-labelledby="account-name">
       <Header account={a()} index={props.index} />
       <Actions account={a()} index={props.index} />
-      <Show when={a().queue.length > 0}>
+      <Show when={a().queue.length > 0 || a().next}>
         <UpNext account={a()} index={props.index} />
       </Show>
       <Tabs views={views()} game={a().game} shown={shown()} />
@@ -465,6 +465,16 @@ function shownArgs(args: [string, string][]): string {
   return args.map(([k, v]) => `${k.replace(/^Options:/, "")}=${v}`).join(", ");
 }
 
+const weekday = new Intl.DateTimeFormat("en", { weekday: "short" });
+
+function runAt(ms: number): string {
+  const at = new Date(ms);
+  const time = clock(ms).slice(0, 5);
+  return at.toDateString() === new Date().toDateString() ? `at ${time}` : `on ${weekday.format(at)} at ${time}`;
+}
+
+const fileName = (path: string) => path.split("/").pop() ?? path;
+
 function UpNext(props: { account: Account; index: number }) {
   const a = () => props.account;
   const on = () => [props.index];
@@ -476,17 +486,19 @@ function UpNext(props: { account: Account; index: number }) {
         <h3 id="up-next-title" class="muted">
           Up next
         </h3>
-        <button type="button" class="ghost small" onClick={() => act("next", "running the next script", on())}>
-          {isRunning(a()) ? "Skip to next" : "Start"}
-        </button>
-        <button type="button" class="ghost small" onClick={() => act("clear_queue", "emptied the queue", on())}>
-          Clear
-        </button>
+        <Show when={a().queue.length > 0}>
+          <button type="button" class="ghost small" onClick={() => act("next", "running the next script", on())}>
+            {isRunning(a()) ? "Skip to next" : "Start"}
+          </button>
+          <button type="button" class="ghost small" onClick={() => act("clear_queue", "emptied the queue", on())}>
+            Clear
+          </button>
+        </Show>
       </div>
-      <ol>
+      <ol hidden={a().queue.length === 0}>
         <For each={a().queue}>
           {(q, i) => {
-            const name = () => q.script.path.split("/").pop() ?? q.script.path;
+            const name = () => fileName(q.script.path);
             return (
               <li>
                 <span class="ellipsis" data-tip={hide(q.script.path)}>
@@ -494,6 +506,9 @@ function UpNext(props: { account: Account; index: number }) {
                 </span>
                 <Show when={q.script.args.length > 0}>
                   <span class="muted ellipsis">{hide(shownArgs(q.script.args))}</span>
+                </Show>
+                <Show when={q.scheduled}>
+                  <span class="muted">scheduled</span>
                 </Show>
                 <span class="queued-actions">
                   <Show when={q.script.path.endsWith(".cs")}>
@@ -539,6 +554,13 @@ function UpNext(props: { account: Account; index: number }) {
           }}
         </For>
       </ol>
+      <Show when={a().next}>
+        {(next) => (
+          <p class="next-run muted ellipsis">
+            Scheduled: <span data-tip={hide(next().script)}>{fileName(next().script)}</span> {runAt(next().at_ms)}
+          </p>
+        )}
+      </Show>
     </section>
   );
 }

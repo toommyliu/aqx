@@ -140,7 +140,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 15;
+pub const PROTOCOL: u32 = 16;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -304,14 +304,16 @@ pub enum Start {
     Login,
     LoginOnly,
     Run(Script),
+    Nobody,
 }
 
 impl Start {
-    pub fn action(&self) -> Action {
+    pub fn action(&self) -> Option<Action> {
         match self {
-            Start::Login => Action::Login,
-            Start::LoginOnly => Action::LoginOnly,
-            Start::Run(script) => Action::Run(script.clone()),
+            Start::Login => Some(Action::Login),
+            Start::LoginOnly => Some(Action::LoginOnly),
+            Start::Run(script) => Some(Action::Run(script.clone())),
+            Start::Nobody => None,
         }
     }
 }
@@ -322,6 +324,7 @@ impl Wanted {
         match &self.start {
             Start::Login => {}
             Start::LoginOnly => args.push("--no-script".into()),
+            Start::Nobody => args.push("--nobody".into()),
             Start::Run(script) => {
                 args.push("--script".into());
                 args.push(script.path.display().to_string());
@@ -412,6 +415,7 @@ pub struct Server {
     fleet: Arc<Fleet>,
     config: PathBuf,
     socket: PathBuf,
+    keep_alive: bool,
     started_ms: u64,
     ending: AtomicBool,
     down: AtomicBool,
@@ -419,11 +423,17 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(fleet: Arc<Fleet>, config: PathBuf, socket: PathBuf) -> Arc<Server> {
+    pub fn new(
+        fleet: Arc<Fleet>,
+        config: PathBuf,
+        socket: PathBuf,
+        keep_alive: bool,
+    ) -> Arc<Server> {
         Arc::new(Server {
             fleet,
             config,
             socket,
+            keep_alive,
             started_ms: now_ms(),
             ending: AtomicBool::new(false),
             down: AtomicBool::new(false),
@@ -443,7 +453,9 @@ impl Server {
     }
 
     fn done(&self) -> bool {
-        self.fleet.idle() && (self.fleet.commanded() || self.down.load(Ordering::SeqCst))
+        let down = self.down.load(Ordering::SeqCst);
+        let kept = self.keep_alive || self.fleet.scheduled();
+        self.fleet.idle() && (down || (self.fleet.commanded() && !kept))
     }
 
     pub fn listen(self: &Arc<Self>, listener: UnixListener) {
@@ -542,6 +554,9 @@ impl Server {
         let mut printed: Vec<u64> = Vec::new();
         loop {
             self.fleet.supervise(Instant::now());
+            if !self.down.load(Ordering::SeqCst) {
+                self.fleet.fire_due(jiff::Timestamp::now());
+            }
             print_new(&self.fleet, &mut printed, print);
             if self.done() {
                 self.stop_answering();
@@ -601,6 +616,7 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
     let removed = Removed(paths.socket.clone());
     let accounts = config::load(&config).map_err(anyhow::Error::msg)?;
     let first: Vec<String> = match &wanted.accounts[..] {
+        _ if matches!(wanted.start, Start::Nobody) => Vec::new(),
         [] => accounts
             .iter()
             .filter(|a| a.auto_start)
@@ -615,13 +631,15 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
     fleet.add_new(accounts);
     for (i, account) in fleet.accounts().iter().enumerate() {
         if first.contains(&account.name)
-            && let Err(why) = fleet.act(i, wanted.start.action())
+            && let Some(action) = wanted.start.action()
+            && let Err(why) = fleet.act(i, action)
         {
             account.say(format!("couldn't start: {why}"));
         }
     }
     fleet.watch(config.clone());
-    let server = Server::new(Arc::clone(&fleet), config, paths.socket.clone());
+    let keep_alive = config::keep_alive(&config);
+    let server = Server::new(Arc::clone(&fleet), config, paths.socket.clone(), keep_alive);
     server.listen(listener);
     let presses = Arc::new(AtomicUsize::new(0));
     {
@@ -682,6 +700,7 @@ mod tests {
             Arc::clone(&fleet),
             PathBuf::from("/srv/aqx.toml"),
             socket.clone(),
+            false,
         );
         server.listen(UnixListener::bind(&socket).unwrap());
 
@@ -815,6 +834,7 @@ mod tests {
             Arc::clone(&fleet),
             PathBuf::from("/srv/aqx.toml"),
             socket.clone(),
+            false,
         );
         server.listen(UnixListener::bind(&socket).unwrap());
         let session = connect(&socket).unwrap();
@@ -978,7 +998,12 @@ mod tests {
             queue: vec![crate::fleet::Queued {
                 id: 1,
                 script: script.clone(),
+                scheduled: true,
             }],
+            next: Some(crate::view::Next {
+                script: "/srv/dailies.ts".into(),
+                at_ms: 0,
+            }),
         };
         let line = |channel: Channel| Line {
             seq: 0,
@@ -1168,7 +1193,8 @@ mod tests {
              Frame.accounts.game.temp Frame.accounts.game.temp.category Frame.accounts.game.temp.equipped Frame.accounts.game.temp.id \
              Frame.accounts.game.temp.max Frame.accounts.game.temp.name Frame.accounts.game.temp.qty \
              Frame.accounts.game.temp.rank Frame.accounts.gold_gained Frame.accounts.name \
-             Frame.accounts.queue Frame.accounts.queue.id Frame.accounts.queue.script \
+             Frame.accounts.next Frame.accounts.next.at_ms Frame.accounts.next.script \
+             Frame.accounts.queue Frame.accounts.queue.id Frame.accounts.queue.scheduled Frame.accounts.queue.script \
              Frame.accounts.queue.script.args Frame.accounts.queue.script.path \
              Frame.accounts.recording Frame.accounts.registered Frame.accounts.registered.drops \
              Frame.accounts.registered.quests Frame.accounts.registered.quests.id \
@@ -1187,7 +1213,7 @@ mod tests {
              Resumable.script.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (15, pinned),
+            (16, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

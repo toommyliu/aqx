@@ -1,7 +1,7 @@
 import { createDebouncedValue } from "@tanstack/solid-pacer";
 import { createMutation, createQuery, useQueryClient } from "@tanstack/solid-query";
 import { For, Index, Match, Show, Switch, createEffect, createMemo, createSignal, createUniqueId, on, onCleanup, onMount } from "solid-js";
-import { createStore, produce, reconcile } from "solid-js/store";
+import { createStore, produce, reconcile, unwrap } from "solid-js/store";
 import { type ConfigStart, persisted, session, setDialog } from "./store";
 import { ScriptPicker } from "./Dialogs";
 import { Icon, Modal, anchor, arrows, clock, serverList } from "./ui";
@@ -22,7 +22,7 @@ const saved = () =>
 
 const configTab = persisted<"accounts" | "defaults" | "toml">("aqx-config-tab", ["accounts", "defaults", "toml"], "accounts");
 
-const ACCOUNT_KEYS = ["user", "password", "name", "script", "args"];
+const ACCOUNT_KEYS = ["user", "password", "name", "script", "args", "schedule"];
 const IDENTITY = new Set(ACCOUNT_KEYS);
 
 const ORDER = [
@@ -56,6 +56,8 @@ type Setting = { key: string; label: string; help: string; kind: Kind; pattern: 
 
 type ArgKind = "text" | "number" | "bool";
 type Arg = { key: string; value: string; kind: ArgKind };
+type Schedule = { at: string; days: string[]; tz: string; script: string; args: Arg[] };
+type ScheduleDraft = Schedule & { read: Fields | null };
 type AccountDraft = {
   id: string;
   from: number | null;
@@ -65,6 +67,7 @@ type AccountDraft = {
   password: string;
   hasPassword: boolean;
   args: Arg[];
+  schedules: ScheduleDraft[];
   overrides: Record<string, string>;
   removed: boolean;
 };
@@ -105,6 +108,34 @@ function argsOf(v: JsonValue | undefined): Arg[] {
   }));
 }
 
+const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+const dayOf = (text: string) => {
+  const t = text.trim().toLowerCase();
+  return DAYS.findIndex((d) => t === d.toLowerCase() || t === d.slice(0, 3).toLowerCase());
+};
+
+const TIME = /^(\d{1,2})(?::(\d{2}))?\s*([ap]m)?$/;
+
+function isTime(raw: string): boolean {
+  const [, hour, minute, half] = TIME.exec(raw.trim().toLowerCase()) ?? [];
+  if (hour === undefined || Number(minute ?? 0) > 59) return false;
+  return half ? Number(hour) >= 1 && Number(hour) <= 12 : minute !== undefined && Number(hour) < 24;
+}
+
+const isFields = (v: JsonValue): v is Fields => typeof v === "object" && !Array.isArray(v);
+
+const scheduleOf = (f: Fields): Schedule => ({
+  at: text(f.at),
+  days: Array.isArray(f.days) ? f.days.map(text) : [],
+  tz: text(f.tz),
+  script: text(f.script),
+  args: argsOf(f.args),
+});
+
+const schedulesOf = (v: JsonValue | undefined): ScheduleDraft[] =>
+  Array.isArray(v) ? v.filter(isFields).map((read) => ({ ...scheduleOf(read), read: structuredClone(unwrap(read)) })) : [];
+
 function draftOf(file: ConfigFile): Draft {
   return {
     defaults: strings(file.form.defaults, () => true),
@@ -117,6 +148,7 @@ function draftOf(file: ConfigFile): Draft {
       password: "",
       hasPassword: a.hasPassword,
       args: argsOf(a.fields.args),
+      schedules: schedulesOf(a.fields.schedule),
       overrides: strings(a.fields, (k) => !IDENTITY.has(k)),
       removed: false,
     })),
@@ -132,6 +164,7 @@ const blank = (id: string): AccountDraft => ({
   password: "",
   hasPassword: false,
   args: [],
+  schedules: [],
   overrides: {},
   removed: false,
 });
@@ -151,10 +184,25 @@ function fieldsOf(values: Record<string, string>, kinds: Map<string, Kind>): Fie
 
 const argValue = (a: Arg): JsonValue => (a.kind === "bool" ? a.value === "true" : a.kind === "number" ? Number(a.value) : a.value);
 
+function setArgs(fields: Fields, args: Arg[]) {
+  const named = args.filter((r) => r.key.trim());
+  if (named.length > 0) fields.args = Object.fromEntries(named.map((r) => [r.key.trim(), argValue(r)]));
+}
+
+function scheduleFields({ read, ...edited }: ScheduleDraft): Fields {
+  if (read && canonical(edited) === canonical(scheduleOf(read))) return read;
+  const fields: Fields = { at: edited.at.trim(), script: edited.script.trim() };
+  const picked = new Set(edited.days.map(dayOf));
+  if (picked.size > 0 && picked.size < DAYS.length) fields.days = edited.days;
+  if (edited.tz.trim()) fields.tz = edited.tz.trim();
+  setArgs(fields, edited.args);
+  return fields;
+}
+
 function accountOf(a: AccountDraft, kinds: Map<string, Kind>): EditedAccount {
   const fields = fieldsOf({ ...a.overrides, user: a.user, name: a.name, script: a.script }, kinds);
-  const named = a.args.filter((r) => r.key.trim());
-  if (named.length > 0) fields.args = Object.fromEntries(named.map((r) => [r.key.trim(), argValue(r)]));
+  setArgs(fields, a.args);
+  if (a.schedules.length > 0) fields.schedule = a.schedules.map(scheduleFields);
   return { from: a.from, fields, password: a.password || null };
 }
 
@@ -181,40 +229,49 @@ function problemsOf(
       out.push({ id, account: owner, message: "Use a length like 5s, 90s, 5m or 1h" });
     }
   };
+  const checkArgs = (at: string, owner: string, script: string, args: Arg[]) => {
+    const known = declared[script.trim()];
+    args.forEach((r, i) => {
+      const key = argName(script, r.key);
+      const arg = known?.find((d) => d.name === key);
+      if (!key && r.value.trim()) out.push({ id: `${at}-arg${i}-key`, account: owner, message: "Name this arg" });
+      else if (known && key && !arg && !isSkua(script))
+        out.push({
+          id: `${at}-arg${i}-key`,
+          account: owner,
+          message: known.length > 0 ? `The script has no arg named ${key}` : "The script takes no args",
+        });
+      if (r.kind === "number" && !(r.value.trim() && Number.isFinite(Number(r.value))))
+        out.push({ id: arg ? `${at}-argd-${key}` : `${at}-arg${i}-value`, account: owner, message: "Use a number" });
+    });
+    for (const d of known ?? [])
+      if (!d.optional && !args.some((r) => argName(script, r.key) === d.name && r.value.trim()))
+        out.push({ id: `${at}-argd-${d.name}`, account: owner, message: "The script needs this" });
+  };
   for (const s of defaults) check(`defaults-${s.key}`, null, draft.defaults[s.key] ?? "", s, false);
   for (const a of draft.accounts) {
     if (a.removed) continue;
     const at = `acct-${a.id}`;
     if (!a.user.trim()) out.push({ id: `${at}-user`, account: a.id, message: "Every account needs a username" });
     if (!a.password && !a.hasPassword) out.push({ id: `${at}-password`, account: a.id, message: "A new account needs a password" });
-    const known = declared[a.script.trim()];
-    a.args.forEach((r, i) => {
-      const key = argName(a.script, r.key);
-      const arg = known?.find((d) => d.name === key);
-      if (!key && r.value.trim()) out.push({ id: `${at}-arg${i}-key`, account: a.id, message: "Name this arg" });
-      else if (known && key && !arg && !isSkua(a.script))
-        out.push({
-          id: `${at}-arg${i}-key`,
-          account: a.id,
-          message: known.length > 0 ? `The script has no arg named ${key}` : "The script takes no args",
-        });
-      if (r.kind === "number" && !(r.value.trim() && Number.isFinite(Number(r.value))))
-        out.push({ id: arg ? `${at}-argd-${key}` : `${at}-arg${i}-value`, account: a.id, message: "Use a number" });
-    });
-    for (const d of known ?? [])
-      if (!d.optional && !a.args.some((r) => argName(a.script, r.key) === d.name && r.value.trim()))
-        out.push({ id: `${at}-argd-${d.name}`, account: a.id, message: "The script needs this" });
+    checkArgs(at, a.id, a.script, a.args);
     for (const s of account) {
       const raw = a.overrides[s.key];
       if (s.key === "server" && !draft.defaults.server?.trim()) {
         if (!raw?.trim()) out.push({ id: `${at}-server`, account: a.id, message: "Pick a server here or in Defaults" });
       } else if (raw !== undefined) check(`${at}-${s.key}`, a.id, raw, s, true);
     }
+    a.schedules.forEach((s, i) => {
+      const id = `${at}-sched${i}`;
+      if (!isTime(s.at)) out.push({ id: `${id}-at`, account: a.id, message: "Use a time like 21:00 or 9pm" });
+      if (!s.script.trim()) out.push({ id: `${id}-script`, account: a.id, message: "Pick a script to run" });
+      checkArgs(id, a.id, s.script, s.args);
+    });
   }
   return out;
 }
 
-const canonical = (value: Draft | AccountDraft) =>
+const canonical = (value: unknown) =>
   JSON.stringify(value, (_, v: unknown) =>
     v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v,
   );
@@ -587,6 +644,7 @@ function AccountEditor(props: {
   const at = () => `acct-${props.account.id}`;
   const heading = createUniqueId();
   const overridesHeading = createUniqueId();
+  const schedulesHeading = createUniqueId();
   const argsLabel = createUniqueId();
   const pinned = (key: string) => key === "server" && !props.defaults.server?.trim();
   const overridden = () => props.settings.filter((s) => props.account.overrides[s.key] !== undefined || pinned(s.key));
@@ -598,11 +656,34 @@ function AccountEditor(props: {
     });
     queueMicrotask(() => document.getElementById(`${at()}-${key}`)?.focus());
   };
-  const [choosing, setChoosing] = createSignal(false);
+  const [choosing, setChoosing] = createSignal<{ field: string; set: (script: string) => void } | null>(null);
   const home = () => props.file.path.slice(0, props.file.path.lastIndexOf("/"));
   const back = () => {
-    setChoosing(false);
-    queueMicrotask(() => document.getElementById(`${at()}-script`)?.focus());
+    const field = choosing()?.field;
+    setChoosing(null);
+    if (field) queueMicrotask(() => document.getElementById(field)?.focus());
+  };
+  const choose = (field: string, set: (script: string) => void) => {
+    setChoosing({ field, set });
+    requestAnimationFrame(() => {
+      const picker = document.querySelector(".script-chooser");
+      if (picker && !picker.contains(document.activeElement))
+        picker.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
+    });
+  };
+  const editSchedule = (i: number, fn: (s: ScheduleDraft) => void) =>
+    props.edit((a) => {
+      const s = a.schedules[i];
+      if (s) fn(s);
+    });
+  const addSchedule = () => {
+    const n = props.account.schedules.length;
+    props.edit((a) => void a.schedules.push({ at: "", days: [], tz: "", script: "", args: [], read: null }));
+    queueMicrotask(() => document.getElementById(`${at()}-sched${n}-at`)?.focus());
+  };
+  const removeSchedule = (i: number) => {
+    props.edit((a) => void a.schedules.splice(i, 1));
+    queueMicrotask(() => document.getElementById(`${at()}-sched-add`)?.focus());
   };
   return (
     <Show
@@ -630,7 +711,7 @@ function AccountEditor(props: {
             pick={{
               options: false,
               onPick: (path) => {
-                props.edit((a) => void (a.script = path.startsWith(`${home()}/`) ? path.slice(home().length + 1) : path));
+                choosing()?.set(path.startsWith(`${home()}/`) ? path.slice(home().length + 1) : path);
                 back();
               },
             }}
@@ -692,14 +773,7 @@ function AccountEditor(props: {
             id={`${at()}-script`}
             value={props.account.script}
             onChange={(v) => props.edit((a) => void (a.script = v))}
-            onChoose={() => {
-            setChoosing(true);
-            requestAnimationFrame(() => {
-              const picker = document.querySelector(".script-chooser");
-              if (picker && !picker.contains(document.activeElement))
-                picker.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
-            });
-          }}
+            onChoose={() => choose(`${at()}-script`, (script) => props.edit((a) => void (a.script = script)))}
           />
           <span class="label" id={argsLabel}>
             {isSkua(props.account.script) ? "Script options" : "Script args"}
@@ -710,7 +784,7 @@ function AccountEditor(props: {
             script={props.account.script}
             args={props.account.args}
             problem={props.problem}
-            edit={props.edit}
+            edit={(fn) => props.edit((a) => fn(a.args))}
             onDeclared={props.onDeclared}
           />
         </div>
@@ -749,8 +823,126 @@ function AccountEditor(props: {
             </div>
           </Show>
         </section>
+        <section class="overrides" aria-labelledby={schedulesHeading}>
+          <div class="overrides-head">
+            <div class="grow">
+              <h4 id={schedulesHeading}>Schedules</h4>
+              <p class="muted small">
+                {props.account.schedules.length === 0
+                  ? "None. Add one to run a script at a set time."
+                  : "aqx runs these while the session runs, and logs the account in for them."}
+              </p>
+            </div>
+            <button type="button" id={`${at()}-sched-add`} class="ghost add" onClick={addSchedule}>
+              <Icon name="add" />
+              Add schedule
+            </button>
+          </div>
+          <Index each={props.account.schedules}>
+            {(schedule, i) => (
+              <ScheduleEditor
+                id={`${at()}-sched${i}`}
+                n={i + 1}
+                schedule={schedule()}
+                problem={props.problem}
+                edit={(fn) => editSchedule(i, fn)}
+                onRemove={() => removeSchedule(i)}
+                onChoose={() =>
+                  choose(`${at()}-sched${i}-script`, (script) => editSchedule(i, (s) => void (s.script = script)))
+                }
+                onDeclared={props.onDeclared}
+              />
+            )}
+          </Index>
+        </section>
       </section>
     </Show>
+  );
+}
+
+function ScheduleEditor(props: {
+  id: string;
+  n: number;
+  schedule: ScheduleDraft;
+  problem: (id: string) => string | undefined;
+  edit: (fn: (s: ScheduleDraft) => void) => void;
+  onRemove: () => void;
+  onChoose: () => void;
+  onDeclared: (script: string, args: Known[]) => void;
+}) {
+  const picked = createMemo(() => new Set(props.schedule.days.map(dayOf)));
+  const toggle = (day: number) =>
+    props.edit((s) => {
+      const next = new Set(s.days.map(dayOf));
+      if (!next.delete(day)) next.add(day);
+      s.days = DAYS.filter((_, d) => next.has(d)).map((d) => d.slice(0, 3).toLowerCase());
+    });
+  return (
+    <div class="identity schedule" role="group" aria-label={`Schedule ${props.n}`}>
+      <label class="label" for={`${props.id}-at`}>
+        Time
+        <Required />
+      </label>
+      <TextInput
+        id={`${props.id}-at`}
+        required
+        value={props.schedule.at}
+        placeholder="21:00 or 9pm"
+        error={props.problem(`${props.id}-at`)}
+        onInput={(v) => props.edit((s) => void (s.at = v))}
+      />
+      <span class="label" id={`${props.id}-days`}>
+        Days
+      </span>
+      <div class="row days" role="group" aria-labelledby={`${props.id}-days`}>
+        <For each={DAYS}>
+          {(day, d) => (
+            <button type="button" class="toggle" aria-pressed={picked().has(d())} onClick={() => toggle(d())}>
+              {day.slice(0, 3)}
+            </button>
+          )}
+        </For>
+        <Show when={picked().size === 0}>
+          <span class="muted small">Every day</span>
+        </Show>
+      </div>
+      <label class="label" for={`${props.id}-tz`}>
+        Time zone
+      </label>
+      <TextInput
+        id={`${props.id}-tz`}
+        value={props.schedule.tz}
+        placeholder="This machine's time zone"
+        onInput={(v) => props.edit((s) => void (s.tz = v))}
+      />
+      <label class="label" for={`${props.id}-script`}>
+        Script
+        <Required />
+      </label>
+      <ScriptField
+        id={`${props.id}-script`}
+        required
+        value={props.schedule.script}
+        error={props.problem(`${props.id}-script`)}
+        onChange={(v) => props.edit((s) => void (s.script = v))}
+        onChoose={() => props.onChoose()}
+      />
+      <span class="label" id={`${props.id}-args`}>
+        {isSkua(props.schedule.script) ? "Script options" : "Script args"}
+      </span>
+      <Args
+        id={props.id}
+        labelledBy={`${props.id}-args`}
+        script={props.schedule.script}
+        args={props.schedule.args}
+        problem={props.problem}
+        edit={(fn) => props.edit((s) => fn(s.args))}
+        onDeclared={props.onDeclared}
+      />
+      <button type="button" id={`${props.id}-remove`} class="ghost danger remove" onClick={() => props.onRemove()}>
+        Remove schedule
+      </button>
+    </div>
   );
 }
 
@@ -1030,7 +1222,7 @@ function Args(props: {
   script: string;
   args: Arg[];
   problem: (id: string) => string | undefined;
-  edit: (fn: (a: AccountDraft) => void) => void;
+  edit: (fn: (args: Arg[]) => void) => void;
   onDeclared: (script: string, args: Known[]) => void;
 }) {
   const [script] = createDebouncedValue(() => props.script.trim(), { wait: 300 });
@@ -1070,21 +1262,21 @@ function Args(props: {
   const rowOf = (name: string) => props.args.find((r) => argName(script(), r.key) === name);
   const valueOf = (name: string) => rowOf(name)?.value ?? "";
   const answer = (name: string, kind: ArgKind, v: string | null) =>
-    props.edit((a) => {
-      const at = a.args.findIndex((r) => argName(script(), r.key) === name);
-      const row = a.args[at];
+    props.edit((args) => {
+      const at = args.findIndex((r) => argName(script(), r.key) === name);
+      const row = args[at];
       if (v === null) {
-        if (row) a.args.splice(at, 1);
+        if (row) args.splice(at, 1);
         return;
       }
       if (row) {
         row.value = v;
         row.kind = kind;
-      } else a.args.push({ key: name, value: v, kind });
+      } else args.push({ key: name, value: v, kind });
     });
   const set = (i: number, fn: (arg: Arg) => void) =>
-    props.edit((a) => {
-      const arg = a.args[i];
+    props.edit((args) => {
+      const arg = args[i];
       if (arg) fn(arg);
     });
   return (
@@ -1285,7 +1477,7 @@ function Args(props: {
                       type="button"
                       class="icon-button"
                       aria-label={`Remove arg ${i + 1}`}
-                      onClick={() => props.edit((a) => void a.args.splice(i, 1))}
+                      onClick={() => props.edit((args) => void args.splice(i, 1))}
                     >
                       <Icon name="close" />
                     </button>
@@ -1308,7 +1500,7 @@ function Args(props: {
           type="button"
           class="ghost add"
           onClick={() => {
-            props.edit((a) => void a.args.push({ key: "", value: "", kind: "text" }));
+            props.edit((args) => void args.push({ key: "", value: "", kind: "text" }));
             queueMicrotask(() => document.getElementById(`${props.id}-arg${props.args.length - 1}-key`)?.focus());
           }}
         >
@@ -1415,6 +1607,7 @@ function typeOf(p: SchemaProperty, onStall: { const: string }[]): string {
   if (types.includes("boolean")) return "true | false";
   if (types.includes("integer")) return "integer";
   if (types.includes("object")) return "table";
+  if (types.includes("array")) return "list of tables";
   return "string";
 }
 
@@ -1476,28 +1669,46 @@ function Reference(props: { schema: ConfigSchema }) {
   );
 }
 
-function ScriptField(props: { id: string; value: string; onChange: (v: string) => void; onChoose: () => void }) {
+function ScriptField(props: {
+  id: string;
+  value: string;
+  required?: boolean;
+  error?: string | undefined;
+  onChange: (v: string) => void;
+  onChoose: () => void;
+}) {
+  const err = `${props.id}-error`;
   return (
-    <div class="control row">
-      <input
-        id={props.id}
-        class="grow"
-        type="text"
-        spellcheck={false}
-        autocapitalize="off"
-        autocorrect="off"
-        autocomplete="off"
-        placeholder="No script"
-        value={props.value}
-        onInput={(e) => props.onChange(e.currentTarget.value)}
-      />
-      <button type="button" onClick={() => props.onChoose()}>
-        Choose…
-      </button>
-      <Show when={props.value}>
-        <button type="button" class="icon-button" aria-label="No script" data-tip="No script" onClick={() => props.onChange("")}>
-          <Icon name="close" />
+    <div class="control">
+      <div class="row">
+        <input
+          id={props.id}
+          class="grow"
+          type="text"
+          spellcheck={false}
+          autocapitalize="off"
+          autocorrect="off"
+          autocomplete="off"
+          placeholder={props.required ? undefined : "No script"}
+          value={props.value}
+          aria-required={props.required ? "true" : undefined}
+          aria-invalid={props.error ? "true" : undefined}
+          aria-describedby={props.error ? err : undefined}
+          onInput={(e) => props.onChange(e.currentTarget.value)}
+        />
+        <button type="button" onClick={() => props.onChoose()}>
+          Choose…
         </button>
+        <Show when={props.value && !props.required}>
+          <button type="button" class="icon-button" aria-label="No script" data-tip="No script" onClick={() => props.onChange("")}>
+            <Icon name="close" />
+          </button>
+        </Show>
+      </div>
+      <Show when={props.error}>
+        <p id={err} class="error small">
+          {props.error}
+        </p>
       </Show>
     </div>
   );
