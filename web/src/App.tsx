@@ -432,11 +432,14 @@ function Mark(props: { tone: ReturnType<typeof tone> }) {
 const doing = (a: Account) =>
   `${a.script ? a.script.split("/").pop() : "no script"}${a.status ? ` · ${hide(a.status)}` : ""}`;
 
-function Peek(props: { row: HTMLElement; account: Account }) {
+function Peek(props: { row: HTMLElement; account: Account; onClose: () => void }) {
   let card!: HTMLDivElement;
   onMount(() => {
     card.showPopover();
     onCleanup(anchor(props.row, card, "right-start"));
+    const key = (e: KeyboardEvent) => (e.key === "Escape" ? props.onClose() : undefined);
+    document.addEventListener("keydown", key);
+    onCleanup(() => document.removeEventListener("keydown", key));
   });
   const a = () => props.account;
   return (
@@ -808,7 +811,7 @@ function AccountList(props: { onOpen: (i: number | null) => void }) {
         <Selection />
       </Show>
       <Show when={shown()} keyed>
-        {(p) => <Show when={accounts[p.index]}>{(a) => <Peek row={p.row} account={a()} />}</Show>}
+        {(p) => <Show when={accounts[p.index]}>{(a) => <Peek row={p.row} account={a()} onClose={unpeek} />}</Show>}
       </Show>
       <div
         id="account-menu"
