@@ -243,6 +243,7 @@ pub struct Board {
     due: Vec<Option<Timestamp>>,
     scheduled: Option<u64>,
     returning: Option<Return>,
+    requested: Option<(u64, Script)>,
     runs: u64,
     links: u64,
     queued_runs: usize,
@@ -270,6 +271,7 @@ impl Default for Board {
             due: Vec::new(),
             scheduled: None,
             returning: None,
+            requested: None,
             runs: 0,
             links: 0,
             queued_runs: 0,
@@ -506,11 +508,7 @@ impl Account {
         board.queued_logins += 1;
         self.send(Command::Login { link: board.links });
         if let Some(script) = script {
-            board.queued_runs += 1;
-            self.send(Command::Run {
-                script,
-                run: board.runs,
-            });
+            self.queue_run(&mut board, script);
         }
     }
 
@@ -536,11 +534,7 @@ impl Account {
         board.queued_logins += 1;
         self.send(Command::Login { link: board.links });
         if let Some(script) = script {
-            board.queued_runs += 1;
-            self.send(Command::Run {
-                script,
-                run: board.runs,
-            });
+            self.queue_run(&mut board, script);
         }
         Ok(())
     }
@@ -558,7 +552,12 @@ impl Account {
         if let Run::Running { cancel, .. } = &board.run {
             cancel.cancel();
         }
+        self.queue_run(board, script);
+    }
+
+    fn queue_run(&self, board: &mut Board, script: Script) {
         board.queued_runs += 1;
+        board.requested = Some((board.runs, script.clone()));
         self.send(Command::Run {
             script,
             run: board.runs,
@@ -651,9 +650,14 @@ impl Account {
             .iter()
             .filter(|q| !q.scheduled)
             .map(|q| q.script.clone());
+        let current = board
+            .requested
+            .as_ref()
+            .filter(|(run, _)| *run == board.runs && (running || board.queued_runs > 0))
+            .map(|(_, script)| script.clone());
         let script = match (board.scheduled == Some(board.runs), &board.returning) {
-            _ if !running => None,
-            (false, _) => board.last.clone(),
+            _ if current.is_none() => None,
+            (false, _) => current,
             (true, None) => queue.next(),
             (true, Some(_)) => None,
         };
@@ -1378,7 +1382,6 @@ impl Linked {
         board.run = Run::Starting {
             script: script.path.clone(),
         };
-        board.last = Some(script.clone());
         Some(board.links)
     }
 
@@ -1570,6 +1573,7 @@ impl Linked {
                 }
                 return After::Hold;
             }
+            board.last = Some(script.clone());
             board.status.clear();
             board.registered = Registered::default();
             board.progressed(Instant::now());
@@ -2382,6 +2386,11 @@ mod tests {
     fn a_new_run_supersedes_one_still_queued() {
         let (account, inbox) = Account::queueing("player1", Some(farm()));
         account.login().unwrap();
+        assert_eq!(
+            account.resumable().script,
+            Some(farm()),
+            "a run waiting on its login resumes as that run"
+        );
         let other = Script {
             path: PathBuf::from("/srv/other.ts"),
             args: Vec::new(),
