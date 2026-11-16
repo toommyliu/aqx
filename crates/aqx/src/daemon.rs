@@ -304,14 +304,16 @@ pub enum Start {
     Login,
     LoginOnly,
     Run(Script),
+    Nobody,
 }
 
 impl Start {
-    pub fn action(&self) -> Action {
+    pub fn action(&self) -> Option<Action> {
         match self {
-            Start::Login => Action::Login,
-            Start::LoginOnly => Action::LoginOnly,
-            Start::Run(script) => Action::Run(script.clone()),
+            Start::Login => Some(Action::Login),
+            Start::LoginOnly => Some(Action::LoginOnly),
+            Start::Run(script) => Some(Action::Run(script.clone())),
+            Start::Nobody => None,
         }
     }
 }
@@ -322,6 +324,7 @@ impl Wanted {
         match &self.start {
             Start::Login => {}
             Start::LoginOnly => args.push("--no-script".into()),
+            Start::Nobody => args.push("--nobody".into()),
             Start::Run(script) => {
                 args.push("--script".into());
                 args.push(script.path.display().to_string());
@@ -412,6 +415,7 @@ pub struct Server {
     fleet: Arc<Fleet>,
     config: PathBuf,
     socket: PathBuf,
+    keep_alive: bool,
     started_ms: u64,
     ending: AtomicBool,
     down: AtomicBool,
@@ -419,11 +423,17 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(fleet: Arc<Fleet>, config: PathBuf, socket: PathBuf) -> Arc<Server> {
+    pub fn new(
+        fleet: Arc<Fleet>,
+        config: PathBuf,
+        socket: PathBuf,
+        keep_alive: bool,
+    ) -> Arc<Server> {
         Arc::new(Server {
             fleet,
             config,
             socket,
+            keep_alive,
             started_ms: now_ms(),
             ending: AtomicBool::new(false),
             down: AtomicBool::new(false),
@@ -444,7 +454,8 @@ impl Server {
 
     fn done(&self) -> bool {
         let down = self.down.load(Ordering::SeqCst);
-        self.fleet.idle() && (down || (self.fleet.commanded() && !self.fleet.scheduled()))
+        let kept = self.keep_alive || self.fleet.scheduled();
+        self.fleet.idle() && (down || (self.fleet.commanded() && !kept))
     }
 
     pub fn listen(self: &Arc<Self>, listener: UnixListener) {
@@ -605,6 +616,7 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
     let removed = Removed(paths.socket.clone());
     let accounts = config::load(&config).map_err(anyhow::Error::msg)?;
     let first: Vec<String> = match &wanted.accounts[..] {
+        _ if matches!(wanted.start, Start::Nobody) => Vec::new(),
         [] => accounts
             .iter()
             .filter(|a| a.auto_start)
@@ -619,13 +631,15 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
     fleet.add_new(accounts);
     for (i, account) in fleet.accounts().iter().enumerate() {
         if first.contains(&account.name)
-            && let Err(why) = fleet.act(i, wanted.start.action())
+            && let Some(action) = wanted.start.action()
+            && let Err(why) = fleet.act(i, action)
         {
             account.say(format!("couldn't start: {why}"));
         }
     }
     fleet.watch(config.clone());
-    let server = Server::new(Arc::clone(&fleet), config, paths.socket.clone());
+    let keep_alive = config::keep_alive(&config);
+    let server = Server::new(Arc::clone(&fleet), config, paths.socket.clone(), keep_alive);
     server.listen(listener);
     let presses = Arc::new(AtomicUsize::new(0));
     {
@@ -686,6 +700,7 @@ mod tests {
             Arc::clone(&fleet),
             PathBuf::from("/srv/aqx.toml"),
             socket.clone(),
+            false,
         );
         server.listen(UnixListener::bind(&socket).unwrap());
 
@@ -819,6 +834,7 @@ mod tests {
             Arc::clone(&fleet),
             PathBuf::from("/srv/aqx.toml"),
             socket.clone(),
+            false,
         );
         server.listen(UnixListener::bind(&socket).unwrap());
         let session = connect(&socket).unwrap();

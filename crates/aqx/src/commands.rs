@@ -35,6 +35,8 @@ pub struct Open {
     /// Log the accounts in without running a script.
     #[arg(long, conflicts_with = "script")]
     pub no_script: bool,
+    #[arg(long, hide = true, conflicts_with_all = ["accounts", "script", "no_script"])]
+    pub nobody: bool,
 }
 
 impl Open {
@@ -45,6 +47,7 @@ impl Open {
                 args: self.args.clone(),
             }),
             None if self.no_script => Start::LoginOnly,
+            None if self.nobody => Start::Nobody,
             None => Start::Login,
         };
         Ok(Wanted {
@@ -254,7 +257,9 @@ fn act_on_named(session: &Session, wanted: &Wanted) -> anyhow::Result<()> {
     let accounts = names(session)?;
     for name in &wanted.accounts {
         let i = find(&accounts, name)?;
-        if let Err(why) = session.source().act(i, wanted.start.action()) {
+        if let Some(action) = wanted.start.action()
+            && let Err(why) = session.source().act(i, action)
+        {
             eprintln!("aqx: {}: {why}", accounts[i].name);
         }
     }

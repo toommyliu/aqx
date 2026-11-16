@@ -26,6 +26,8 @@ server = "Yorumi"
 auto_start = false
 ```
 
+A session ends when every account it logged in goes offline. Put `keep_alive = true` at the top of the file, above `[defaults]`, to keep it running until `aqx down`. A session with [schedules](#schedules) also keeps running.
+
 aqx looks for `./aqx.toml`, then `~/aqx/aqx.toml`. Set `AQX_HOME` to replace `~/aqx`, or pass `-c PATH` to select a file. The file holds passwords. aqx warns when other users can read it.
 
 `[defaults]` takes every key below except `user`, `password`, `name`, `script` and `args`, and applies it to each account. An `[[account]]` can override any of them except `client_version`, which only `[defaults]` sets.

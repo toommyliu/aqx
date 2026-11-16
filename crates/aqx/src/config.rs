@@ -23,6 +23,8 @@ const RESTART_ON_ERROR: &str = "Run the script again when it throws, after 10 se
 const ROOM: &str = "Room number to join; scripts read it as settings.room.";
 const STALL_AFTER: &str = "How long a running script can go without progress before the account counts as stalled, like \"90s\", \"5m\" or \"1h\". Defaults to 5m.";
 const ON_STALL: &str = "What happens when the account stalls. Defaults to warn.";
+const KEEP_ALIVE: &str =
+    "Keep the session running while every account is offline, until aqx down. Defaults to false.";
 const ARGS: &str = "Arguments for the script. Values are strings, numbers or booleans.";
 const STALL_AFTER_DEFAULT: Duration = Duration::from_secs(300);
 pub const RELOGIN_DELAY_DEFAULT: Duration = Duration::from_secs(5);
@@ -32,6 +34,9 @@ pub const RELOGIN_DELAY_MIN: Duration = Duration::from_secs(4);
 #[serde(deny_unknown_fields)]
 #[schemars(title = "aqx.toml")]
 pub struct Config {
+    #[serde(default)]
+    #[schemars(description = KEEP_ALIVE)]
+    pub keep_alive: bool,
     #[serde(default)]
     #[schemars(
         description = "Settings for every account. An [[account]] can override each one except client_version."
@@ -248,6 +253,13 @@ pub fn load_quietly(path: &Path) -> Result<Vec<Account>, String> {
     let path = std::path::absolute(path).map_err(|e| at(&e))?;
     let text = std::fs::read_to_string(&path).map_err(|e| at(&e))?;
     read(&text, path.parent().unwrap_or(Path::new("."))).map_err(|e| at(&e))
+}
+
+pub fn keep_alive(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| parse(&text).ok())
+        .is_some_and(|config| config.keep_alive)
 }
 
 pub fn read(text: &str, dir: &Path) -> Result<Vec<Account>, String> {
@@ -760,6 +772,21 @@ mod tests {
             "an empty AQX_HOME is unset"
         );
         assert_eq!(home(None, None), None);
+    }
+
+    #[test]
+    fn keep_alive_is_a_session_setting_off_by_default() {
+        let one = "[[account]]\nuser = \"player1\"\npassword = \"x\"\nserver = \"Twilly\"\n";
+        assert!(!parse(one).unwrap().keep_alive);
+        assert!(
+            parse(&format!("keep_alive = true\n{one}"))
+                .unwrap()
+                .keep_alive
+        );
+        assert!(
+            parse(&format!("[defaults]\nkeep_alive = true\n{one}")).is_err(),
+            "it isn't an account setting"
+        );
     }
 
     #[test]

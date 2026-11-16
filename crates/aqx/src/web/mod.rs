@@ -609,35 +609,38 @@ impl Web {
                 "couldn't read which accounts are online, so nothing was restarted: {e}"
             ))
         })?;
-        let configured: Vec<String> = config::load_quietly(&self.config)
-            .map_err(Failure::bad)?
-            .into_iter()
-            .map(|a| a.name)
-            .collect();
+        let configured = config::load_quietly(&self.config).map_err(Failure::bad)?;
+        let kept =
+            config::keep_alive(&self.config) || configured.iter().any(|a| !a.schedules.is_empty());
+        let configured: Vec<String> = configured.into_iter().map(|a| a.name).collect();
         let (resume, gone): (Vec<_>, Vec<_>) = resume
             .into_iter()
             .partition(|r| configured.contains(&r.name));
         old.down().map_err(Failure::internal)?;
-        let Some(first) = resume.iter().find(|r| r.online) else {
+        let first = resume.iter().find(|r| r.online);
+        if first.is_none() && !kept {
             return Ok(Reply::json(
                 &json!({ "restarted": false, "gone": gone.len() }),
             ));
-        };
-        let started = first.name.clone();
-        let fresh = daemon::start(
-            &self.config,
-            &Wanted {
-                accounts: vec![started.clone()],
+        }
+        let started = first.map(|f| f.name.clone());
+        let wanted = match first {
+            Some(first) => Wanted {
+                accounts: vec![first.name.clone()],
                 start: first.script.clone().map_or(Start::Login, Start::Run),
             },
-        )
-        .map_err(Failure::internal)?;
+            None => Wanted {
+                accounts: Vec::new(),
+                start: Start::Nobody,
+            },
+        };
+        let fresh = daemon::start(&self.config, &wanted).map_err(Failure::internal)?;
         let names = self.roster_of(Some(&fresh))?;
         for again in resume {
             let Some(i) = names.iter().position(|(n, _)| *n == again.name) else {
                 continue;
             };
-            if again.online && again.name != started {
+            if again.online && Some(&again.name) != started.as_ref() {
                 let _ = fresh
                     .source()
                     .act(i, again.script.clone().map_or(Action::Login, Action::Run));
