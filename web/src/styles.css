@@ -1187,6 +1187,10 @@ table.list .turn-in td:first-child {
   box-shadow: 0 8px 24px rgb(0 0 0 / 0.15);
 }
 
+:root [data-sonner-toast][data-styled="true"].skua-toast {
+  min-height: calc(24px + 2 * 10px + 2px);
+}
+
 .toast-layer {
   inset: auto;
   width: 0;
@@ -2585,4 +2589,14 @@ mark {
     display: inline;
     margin-right: 1ch;
   }
+}
+
+.library-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
 }

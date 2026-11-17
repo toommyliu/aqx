@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 use anyhow::Context;
-use aqx_script::skua::library::{self, Updated};
+use aqx_script::skua::library::{self, By, Updated};
 use aqx_script::skua::{self as skua_options, Kind, Settings};
 use aqx_script::{Arg, ArgKind, Scalar};
 use serde::{Deserialize, Serialize};
@@ -142,6 +142,7 @@ impl Web {
             ("/api/servers/all", false) => all_servers(),
             ("/api/files", false) => self.files(r),
             ("/api/skua", false) => Ok(skua_library(r.query("q").unwrap_or_default())),
+            ("/api/skua/status", false) => Ok(skua_status()),
             ("/api/skua/update", true) => self.update_skua(),
             ("/api/skua/options", false) => self.skua_options(r),
             ("/api/skua/options", true) => self.save_skua_options(r.body()?),
@@ -448,7 +449,7 @@ impl Web {
             return Err(Failure::conflict("the Skua scripts are already updating"));
         };
         let home = config::skua_home().map_err(Failure::internal)?;
-        let updated = library::update(&home).map_err(Failure::internal)?;
+        let updated = library::update(&home, By::Hand).map_err(Failure::internal)?;
         aqx_script::skua::worker(&mut || {}).map_err(Failure::internal)?;
         let message = match updated {
             Updated::Current => "the Skua scripts are up to date".to_owned(),
@@ -893,7 +894,7 @@ fn skua_library(query: String) -> Reply {
         Err(error) => Reply::json(&json!({ "state": "failed", "error": error })),
         Ok(None) => Reply::json(&json!({ "state": "missing", "folder": folder })),
         Ok(Some(found)) => {
-            let entries: Vec<Value> = library::search(&found.entries, &query)
+            let entries: Vec<Value> = library::search(&found, &query)
                 .into_iter()
                 .map(|e| {
                     json!({
@@ -906,12 +907,34 @@ fn skua_library(query: String) -> Reply {
                 .collect();
             Reply::json(&json!({
                 "state": "ready",
-                "commit": library::short(&found.commit),
                 "folder": folder,
                 "entries": entries,
             }))
         }
     }
+}
+
+fn skua_status() -> Reply {
+    let status = config::skua_home().and_then(|home| library::status(&home));
+    Reply::json(&match status {
+        Err(error) => json!({ "error": error }),
+        Ok(status) => json!({
+            "commit": status.commit.as_deref().map(library::short),
+            "lastCheck": status.last_check.map(|check| {
+                let mut shown = match &check.outcome {
+                    library::Outcome::Current => json!({ "outcome": "current" }),
+                    library::Outcome::Behind => json!({ "outcome": "behind" }),
+                    library::Outcome::Updated { commit } => {
+                        json!({ "outcome": "updated", "commit": library::short(commit) })
+                    }
+                    library::Outcome::Failed { error } => json!({ "outcome": "failed", "error": error }),
+                };
+                shown["atMs"] = json!(check.at_ms);
+                shown["by"] = json!(check.by);
+                shown
+            }),
+        }),
+    })
 }
 
 fn resolve(home: &Path, typed: &str) -> PathBuf {

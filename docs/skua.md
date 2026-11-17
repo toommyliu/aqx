@@ -18,11 +18,11 @@ aqx runs most [Skua](https://github.com/auqw/Skua) scripts unchanged using a .NE
 	```
 
 	The installed `aqx` builds the Skua worker from this clone. If you move or delete the clone, Skua scripts stop working until you install aqx again from a clone.
-3. Download the script library. In the web UI, press Run, switch to the Skua tab, then press Update. In a terminal, run `aqx skua update`.
+3. Download the script library. In the web UI, press Run, switch to the Skua tab, then press Download. In a terminal, run `aqx skua update`.
 
 	`aqx skua update` downloads the `Skua` branch of [auqw/Scripts](https://github.com/auqw/Scripts), about 3 MB, into `~/aqx/skua/Scripts`. Then it builds the worker. The first build takes about a minute, because .NET downloads the worker's packages.
 
-aqx contacts GitHub only when you press Update or run `aqx skua update`. Scripts can still use the network on their own, as they do under Skua. For example, CoreBots downloads its quest list when its copy is more than two weeks old.
+aqx contacts GitHub only when you press Update, run `aqx skua update`, or turn on [updates at session start](config.md#skua-updates). Scripts can still use the network on their own, as they do under Skua. For example, CoreBots downloads its quest list when its copy is more than two weeks old.
 
 ## Run a script from the library
 
@@ -77,7 +77,16 @@ If a folder above the script has its own `CoreBots.cs`, aqx reads the includes f
 
 ## Update the library
 
-In the web UI, press Run, switch to the Skua tab, and press Update. In a terminal, run `aqx skua update`. aqx downloads the library only when it changed upstream.
+In the web UI, press Run and then Update, at the bottom of any tab. Beside it, the Run dialog shows when the library was last checked. In a terminal, run `aqx skua update`. aqx downloads the library only when it changed upstream.
+
+To have each session check for updates or download them, add a `[skua]` section to `aqx.toml`:
+
+```toml
+[skua]
+update = "check"
+```
+
+See [Skua updates](config.md#skua-updates) for what each value does.
 
 An update replaces the whole `~/aqx/skua/Scripts` folder, so aqx discards any edits you made inside it. If the download fails, aqx keeps the current library. Scripts that are running keep running, and the next start uses the new library.
 

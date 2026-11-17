@@ -46,6 +46,31 @@ pub struct Config {
     #[serde(default, rename = "account")]
     #[schemars(description = "One account to log in.")]
     pub accounts: Vec<AccountConfig>,
+    #[serde(default)]
+    #[schemars(description = "Settings for the Skua script library.")]
+    pub skua: SkuaConfig,
+}
+
+#[derive(Deserialize, JsonSchema, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SkuaConfig {
+    #[serde(default)]
+    #[schemars(
+        description = "What a session does with the Skua script library when it starts. Defaults to off."
+    )]
+    pub update: SkuaUpdate,
+}
+
+#[derive(Deserialize, JsonSchema, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SkuaUpdate {
+    #[default]
+    #[schemars(description = "Never contact GitHub on its own.")]
+    Off,
+    #[schemars(description = "Ask GitHub whether the library changed, and say so in the web UI.")]
+    Check,
+    #[schemars(description = "Download the library when it changed upstream.")]
+    Auto,
 }
 
 #[derive(Deserialize, JsonSchema, Debug, Default, Clone, PartialEq, Eq)]
@@ -272,6 +297,13 @@ pub fn keep_alive(path: &Path) -> bool {
         .ok()
         .and_then(|text| parse(&text).ok())
         .is_some_and(|config| config.keep_alive)
+}
+
+pub fn skua_update(path: &Path) -> SkuaUpdate {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| parse(&text).ok())
+        .map_or(SkuaUpdate::Off, |config| config.skua.update)
 }
 
 pub fn read(text: &str, dir: &Path) -> Result<Vec<Account>, String> {
@@ -821,6 +853,20 @@ mod tests {
             "an empty AQX_HOME is unset"
         );
         assert_eq!(home(None, None), None);
+    }
+
+    #[test]
+    fn skua_update_is_off_unless_set() {
+        let one = "[[account]]\nuser = \"player1\"\npassword = \"x\"\nserver = \"Twilly\"\n";
+        assert_eq!(parse(one).unwrap().skua.update, SkuaUpdate::Off);
+        assert_eq!(
+            parse(&format!("[skua]\nupdate = \"check\"\n{one}"))
+                .unwrap()
+                .skua
+                .update,
+            SkuaUpdate::Check
+        );
+        assert!(parse(&format!("[skua]\nupdate = \"daily\"\n{one}")).is_err());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { createDebouncedValue } from "@tanstack/solid-pacer";
 import { createMutation, createQuery, keepPreviousData, useQueryClient } from "@tanstack/solid-query";
+import { toast } from "solid-sonner";
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, lazy, on, onCleanup, onMount } from "solid-js";
 
 const Config = lazy(() => import("./Config").then((m) => ({ default: m.Config })));
@@ -302,7 +303,143 @@ export function ScriptPicker(props: { pick?: Pick; queue?: boolean }) {
           </Match>
         </Switch>
       </div>
+      <SkuaLibraryStatus />
     </>
+  );
+}
+
+const ages: [Intl.RelativeTimeFormatUnit, number][] = [
+  ["year", 365 * 86_400_000],
+  ["month", 30 * 86_400_000],
+  ["week", 7 * 86_400_000],
+  ["day", 86_400_000],
+  ["hour", 3_600_000],
+  ["minute", 60_000],
+  ["second", 1000],
+];
+const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+const ago = (ms: number) => {
+  const elapsed = Date.now() - ms;
+  const [unit, size] = ages.find(([, size]) => elapsed >= size) ?? ["second", 1000];
+  return relative.format(-Math.floor(elapsed / size), unit);
+};
+
+const SKUA_TOAST = "skua-library";
+let skuaToastCheck: number | null = null;
+
+function createSkuaUpdate() {
+  const client = useQueryClient();
+  return createMutation(() => ({
+    mutationFn: api.updateSkua,
+    onSuccess: async (done) => {
+      const shown = skuaToastCheck;
+      skuaToastCheck = null;
+      if (shown !== null) dismissCheck(shown);
+      toast(hide(done.message), {
+        id: SKUA_TOAST,
+        class: "skua-toast",
+        duration: undefined,
+        action: undefined,
+        cancel: undefined,
+        onDismiss: undefined,
+      });
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["skua"] }),
+        client.invalidateQueries({ queryKey: ["skuaStatus"] }),
+      ]);
+    },
+    onError: (e: Error) => fail(e.message),
+  }));
+}
+
+const DISMISSED_KEY = "aqx-skua-check-dismissed";
+const [dismissedCheck, setDismissedCheck] = createSignal(
+  (() => {
+    try {
+      return Number(localStorage.getItem(DISMISSED_KEY));
+    } catch {
+      return 0;
+    }
+  })(),
+);
+const dismissCheck = (atMs: number) => {
+  setDismissedCheck(atMs);
+  try {
+    localStorage.setItem(DISMISSED_KEY, String(atMs));
+  } catch {
+    return;
+  }
+};
+
+export function SkuaLibraryToast() {
+  const status = createQuery(() => ({ queryKey: ["skuaStatus"], queryFn: api.skuaStatus, refetchInterval: 60_000 }));
+  const update = createSkuaUpdate();
+  createEffect(() => {
+    const s = status.data;
+    const check = s && "lastCheck" in s ? s.lastCheck : null;
+    if (!s || !("commit" in s) || !check || check.by !== "session" || check.outcome === "current" || check.atMs === dismissedCheck()) {
+      if (skuaToastCheck !== null) toast.dismiss(SKUA_TOAST);
+      skuaToastCheck = null;
+      return;
+    }
+    skuaToastCheck = check.atMs;
+    const dismiss = () => dismissCheck(check.atMs);
+    const shown = {
+      id: SKUA_TOAST,
+      class: "skua-toast",
+      duration: Infinity,
+      onDismiss: dismiss,
+      cancel: { label: "Dismiss", onClick: dismiss },
+    };
+    if (check.outcome === "behind" && update.isPending) {
+      toast("Updating the Skua scripts…", { ...shown, cancel: undefined, action: undefined });
+    } else if (check.outcome === "behind") {
+      toast(s.commit ? "New Skua scripts are available" : "The Skua scripts aren't downloaded", {
+        ...shown,
+        action: {
+          label: s.commit ? "Update" : "Download",
+          onClick: (e) => {
+            e.preventDefault();
+            update.mutate();
+          },
+        },
+      });
+    } else if (check.outcome === "updated") {
+      toast.success(`Updated the Skua scripts to ${check.commit}`, shown);
+    } else {
+      toast.error(hide(check.error), shown);
+    }
+  });
+  return null;
+}
+
+function SkuaLibraryStatus() {
+  const status = createQuery(() => ({ queryKey: ["skuaStatus"], queryFn: api.skuaStatus }));
+  const update = createSkuaUpdate();
+  const ready = () => {
+    const s = status.data;
+    return s && "commit" in s && s.commit !== null ? s : undefined;
+  };
+  const label = () => {
+    const s = status.data;
+    if (!s) return undefined;
+    if ("error" in s) return s.error;
+    if (s.commit === null) return "Skua scripts aren't downloaded";
+    const check = s.lastCheck;
+    if (!check) return `Skua scripts ${s.commit}`;
+    if (check.outcome === "behind") return `Skua scripts ${s.commit}, newer ones available`;
+    if (check.outcome === "failed") return `Skua scripts ${s.commit}, last check failed ${ago(check.atMs)}`;
+    return `Skua scripts ${s.commit}, checked ${ago(check.atMs)}`;
+  };
+  return (
+    <Show when={ready() || (status.data && pickerTab() === "skua")}>
+      <div class="library-status">
+        <span class="muted small">{label()}</span>
+        <button type="button" disabled={update.isPending} onClick={() => update.mutate()}>
+          {update.isPending ? "Updating…" : ready() ? "Update" : "Download"}
+        </button>
+      </div>
+    </Show>
   );
 }
 
@@ -447,7 +584,6 @@ function Files(props: Pick) {
 }
 
 function Skua(props: Pick) {
-  const client = useQueryClient();
   const [query, setQuery] = createSignal("");
   const [debounced] = createDebouncedValue(query, { wait: 150 });
   const found = createQuery(() => ({
@@ -456,15 +592,6 @@ function Skua(props: Pick) {
     placeholderData: keepPreviousData,
   }));
   const library = () => found.data;
-  const update = createMutation(() => ({
-    mutationFn: api.updateSkua,
-    onSuccess: (done) => {
-      say(done.message);
-      void client.invalidateQueries({ queryKey: ["skua"] });
-    },
-    onError: (e: Error) => fail(e.message),
-  }));
-  const updating = () => update.isPending;
   let scroller!: HTMLDivElement;
   let input!: HTMLInputElement;
   onMount(() => {
@@ -489,19 +616,13 @@ function Skua(props: Pick) {
             }}
           />
         </label>
-        <button type="button" disabled={updating()} onClick={() => update.mutate()}>
-          {updating() ? "Updating…" : "Update"}
-        </button>
-        <Show when={(() => { const l = library(); return l?.state === "ready" ? l : undefined; })()}>
-          {(l) => <span class="muted small">{l().commit}</span>}
-        </Show>
       </div>
       <Switch>
         <Match when={found.error}>
           <p class="error">{message(found.error)}</p>
         </Match>
         <Match when={library()?.state === "missing"}>
-          <p class="muted">The Skua scripts aren't downloaded yet. Update downloads them.</p>
+          <p class="muted">The Skua scripts aren't downloaded yet. Download fetches them from GitHub, about 3 MB.</p>
         </Match>
         <Match when={(() => { const l = library(); return l?.state === "failed" ? l : undefined; })()}>
           {(l) => <p class="error">{l().error}</p>}
