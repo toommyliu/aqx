@@ -52,6 +52,7 @@ public static class Runner
                 var main = ScriptMain(assembly);
                 bot.Config = new ScriptConfig(options);
                 Exception? error = null;
+                ManualResetEvent finished = new(false);
                 Thread script = new(() => {
                     try {
                         object instance = Activator.CreateInstance(main.DeclaringType!)!;
@@ -61,14 +62,15 @@ public static class Runner
                     }
                     catch (TargetInvocationException e) { error = e.InnerException ?? e; }
                     catch (Exception e) { error = e; }
+                    finally { finished.Set(); }
                 }) { IsBackground = true, Name = "Script thread" };
                 bool recover = false;
                 Task stopping = Task.CompletedTask;
-                using (AqxBackground background = new(bot, protocol))
+                using (AqxBackground background = new(bot, protocol, state))
                 {
                     background.Start();
                     script.Start();
-                    while (!script.Join(20) && !bot.ShouldExit) { }
+                    if (WaitHandle.WaitAny([finished, bot.ScriptCts.Token.WaitHandle]) == 0) script.Join();
                     recover = bot.Disconnected && bot.Options.AutoRelogin && !protocol.Stopping.IsCancellationRequested;
                     if (bot.ShouldExit) script.Join(TimeSpan.FromSeconds(8));
                     if (!script.IsAlive && (bot.ShouldExit || error is not null)) stopping = bot.RaiseStopping(error is OperationCanceledException ? null : error);

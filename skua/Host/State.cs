@@ -17,19 +17,40 @@ public sealed class State
     ShopSnapshot? shop;
     CombatSnapshot combat = new(null, ImmutableDictionary<string, SkillReadiness>.Empty);
     SettingsSnapshot settings = new(CounterMode.Off, new("off"), false, null, false);
-    public SessionSnapshot Session => Volatile.Read(ref session);
-    public MeSnapshot? Me => Volatile.Read(ref me);
-    public RoomSnapshot? Room => Volatile.Read(ref room);
-    public InventorySnapshot Inventory => Volatile.Read(ref inventory);
-    public ImmutableList<TempItemSnapshot> Temp => Volatile.Read(ref temp);
-    public ImmutableList<DropOfferSnapshot> Drops => Volatile.Read(ref drops);
-    public InventorySnapshot? Bank => Volatile.Read(ref bank);
-    public QuestsSnapshot Quests => Volatile.Read(ref quests);
-    public ImmutableList<FactionSnapshot> Factions => Volatile.Read(ref factions).Items;
-    public List<Faction> ScriptFactions => Volatile.Read(ref factions).ScriptItems;
-    public ShopSnapshot? Shop => Volatile.Read(ref shop);
-    public CombatSnapshot Combat => Volatile.Read(ref combat);
-    public SettingsSnapshot Settings => Volatile.Read(ref settings);
+    public SessionSnapshot Session => Read(ref session);
+    public MeSnapshot? Me => Read(ref me);
+    public RoomSnapshot? Room => Read(ref room);
+    public InventorySnapshot Inventory => Read(ref inventory);
+    public ImmutableList<TempItemSnapshot> Temp => Read(ref temp);
+    public ImmutableList<DropOfferSnapshot> Drops => Read(ref drops);
+    public InventorySnapshot? Bank => Read(ref bank);
+    public QuestsSnapshot Quests => Read(ref quests);
+    public ImmutableList<FactionSnapshot> Factions => Read(ref factions).Items;
+    public List<Faction> ScriptFactions => Read(ref factions).ScriptItems;
+    public ShopSnapshot? Shop => Read(ref shop);
+    public CombatSnapshot Combat => Read(ref combat);
+    public SettingsSnapshot Settings => Read(ref settings);
+    const int PaceWindowMs = 20;
+    const int PaceReads = 200;
+    [ThreadStatic] static long pacedVersion;
+    [ThreadStatic] static long paceStart;
+    [ThreadStatic] static int paceReads;
+    readonly object changes = new();
+    long version;
+    T Read<T>(ref T field) where T : class? { Pace(); return Volatile.Read(ref field); }
+    void Pace()
+    {
+        long now = Environment.TickCount64;
+        long current = Volatile.Read(ref version);
+        if (current != pacedVersion || now - paceStart >= PaceWindowMs) { pacedVersion = current; paceStart = now; paceReads = 0; }
+        if (++paceReads <= PaceReads) return;
+        lock (changes) if (version == current) Monitor.Wait(changes, (int)(paceStart + PaceWindowMs - now));
+        pacedVersion = Volatile.Read(ref version);
+        paceStart = Environment.TickCount64;
+        paceReads = 0;
+    }
+    public event Action? Updated;
+    void Changed() { lock (changes) { version++; Monitor.PulseAll(changes); } Updated?.Invoke(); }
     public void Reset()
     {
         State fresh = new();
@@ -45,6 +66,7 @@ public sealed class State
         Volatile.Write(ref shop, fresh.shop);
         Volatile.Write(ref combat, fresh.combat);
         Volatile.Write(ref settings, fresh.settings);
+        Changed();
     }
     public void Install(SectionUpdate section)
     {
@@ -64,6 +86,7 @@ public sealed class State
             case SectionName.Settings: Volatile.Write(ref settings, section.Value.Deserialize(StateJson.Default.SettingsSnapshot)!); break;
             default: throw new JsonException($"unknown state section: {section.Section}");
         }
+        Changed();
     }
 }
 public enum EntityState { Dead, Idle, [JsonStringEnumMemberName("in_combat")] InCombat }

@@ -87,8 +87,8 @@ public sealed class AqxOption : IScriptOption
     public int NameColor { get => nameColor; set => Set(ref nameColor, value); }
     bool privateRooms;
     public bool PrivateRooms { get => privateRooms; set => Set(ref privateRooms, value); }
-    volatile bool restPackets;
-    public bool RestPackets { get => restPackets; set => restPackets = value; }
+    bool restPackets;
+    public bool RestPackets { get => restPackets; set => Set(ref restPackets, value); }
     bool safeRelogin;
     public bool SafeRelogin { get => safeRelogin; set => Set(ref safeRelogin, value); }
     bool safeTimings = true;

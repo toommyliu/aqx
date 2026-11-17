@@ -9,7 +9,9 @@ public sealed class AqxHandlers(AqxBot bot) : IScriptHandlers
         public Func<IScriptInterface, bool> Function => function;
         public long Next;
     }
+    const int Tick = 20;
     readonly List<TimedHandler> handlers = [];
+    readonly AutoResetEvent registered = new(false);
     Thread? timer;
     int next;
     public IEnumerable<IHandler> CurrentHandlers { get { lock (handlers) return handlers.ToArray(); } }
@@ -17,8 +19,9 @@ public sealed class AqxHandlers(AqxBot bot) : IScriptHandlers
     {
         lock (handlers)
         {
-            TimedHandler handler = new(name ?? (next++).ToString(), ticks, function);
+            TimedHandler handler = new(name ?? (next++).ToString(), ticks, function) { Next = Environment.TickCount64 + Tick };
             handlers.Add(handler);
+            registered.Set();
             if (timer is null)
             {
                 timer = new(Run) { IsBackground = true, Name = "Script handlers" };
@@ -41,14 +44,15 @@ public sealed class AqxHandlers(AqxBot bot) : IScriptHandlers
     void Run()
     {
         var token = bot.ScriptCts.Token;
-        while (!token.WaitHandle.WaitOne(20))
+        int wait = Tick;
+        while (WaitHandle.WaitAny([token.WaitHandle, registered], wait) != 0)
         {
             TimedHandler[] due;
             lock (handlers)
             {
                 long now = Environment.TickCount64;
                 due = handlers.Where(h => now >= h.Next).ToArray();
-                foreach (var handler in due) handler.Next = now + (long)handler.Ticks * 20;
+                foreach (var handler in due) handler.Next = now + (long)handler.Ticks * Tick;
             }
             foreach (var handler in due)
             {
@@ -57,6 +61,8 @@ public sealed class AqxHandlers(AqxBot bot) : IScriptHandlers
                 catch (OperationCanceledException) when (bot.ShouldExit) { return; }
                 catch (Exception e) { bot.Log($"handler {handler.Name} threw: {e.Message}"); }
             }
+            lock (handlers)
+                wait = handlers.Count == 0 ? Timeout.Infinite : (int)Math.Clamp(handlers.Min(h => h.Next) - Environment.TickCount64, Tick, int.MaxValue);
         }
     }
 }
