@@ -22,6 +22,14 @@ use crate::runner::{self, Job, Login, Note};
 use crate::schedule::Schedule;
 
 pub const LOG_LINES: usize = 1000;
+const REPEATS_EVERY_MS: u64 = 10_000;
+const REPEATS_EVERY_MAX_MS: u64 = 600_000;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,22 +91,40 @@ pub struct Log {
     lines: VecDeque<Line>,
     kept: HashMap<Channel, usize>,
     next: u64,
+    original: u64,
+    repeats: u64,
+    repeats_since_ms: u64,
+    repeated_at_ms: u64,
+    repeats_every_ms: u64,
 }
 
 impl Log {
     pub fn push(&mut self, channel: Channel, text: String) {
-        let line = Line {
+        let at_ms = now_ms();
+        if self
+            .original()
+            .is_some_and(|l| l.channel == channel && l.text == text)
+        {
+            if self.repeats == 0 {
+                self.repeats_since_ms = at_ms;
+            }
+            self.repeats += 1;
+            self.repeated_at_ms = at_ms;
+            self.flush_repeats_due(at_ms);
+            return;
+        }
+        self.flush_repeats();
+        self.original = self.next;
+        self.repeats_every_ms = REPEATS_EVERY_MS;
+        self.insert(Line {
             seq: self.next,
-            at_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_millis() as u64),
+            at_ms,
             channel,
             text,
-        };
-        self.insert(line);
+        });
     }
 
-    pub fn insert(&mut self, line: Line) {
+    fn insert(&mut self, line: Line) {
         self.next = line.seq + 1;
         let channel = line.channel;
         self.lines.push_back(line);
@@ -112,11 +138,45 @@ impl Log {
         }
     }
 
-    pub fn since(&self, seq: u64) -> impl Iterator<Item = &Line> {
+    fn original(&self) -> Option<&Line> {
+        let at = self.lines.partition_point(|l| l.seq < self.original);
+        self.lines.get(at).filter(|l| l.seq == self.original)
+    }
+
+    fn flush_repeats_due(&mut self, now_ms: u64) {
+        let quiet = now_ms.saturating_sub(self.repeated_at_ms) >= REPEATS_EVERY_MS;
+        let overdue = now_ms.saturating_sub(self.repeats_since_ms) >= self.repeats_every_ms;
+        if quiet || overdue {
+            self.flush_repeats();
+        }
+    }
+
+    fn flush_repeats(&mut self) {
+        if self.repeats == 0 {
+            return;
+        }
+        let count = std::mem::take(&mut self.repeats);
+        self.repeats_every_ms = (self.repeats_every_ms * 2).min(REPEATS_EVERY_MAX_MS);
+        let Some(original) = self.original() else {
+            return;
+        };
+        let times = if count == 1 { "time" } else { "times" };
+        let line = Line {
+            seq: self.next,
+            at_ms: self.repeated_at_ms,
+            channel: original.channel,
+            text: format!("repeated {count} more {times}: {}", original.text),
+        };
+        self.insert(line);
+    }
+
+    pub fn since(&mut self, seq: u64) -> impl DoubleEndedIterator<Item = &Line> {
+        self.flush_repeats_due(now_ms());
         let skip = self.lines.partition_point(|l| l.seq < seq);
         self.lines.range(skip..)
     }
 
+    #[cfg(test)]
     pub fn lines(&self) -> impl DoubleEndedIterator<Item = &Line> {
         self.lines.iter()
     }
@@ -1209,10 +1269,10 @@ impl Fleet {
         self.accounts()
             .iter()
             .map(|account| {
-                let board = account.board();
+                let mut board = account.board();
                 let kept = board
                     .log
-                    .lines()
+                    .since(0)
                     .rev()
                     .filter(|l| {
                         !matches!(l.channel, Channel::Chat | Channel::Game)
@@ -2768,11 +2828,43 @@ mod tests {
     }
 
     #[test]
-    fn each_channel_keeps_its_own_last_lines() {
+    fn noise_doesnt_push_out_older_lines() {
         let mut log = Log::default();
         for i in 0..10 {
             log.push(Channel::Script, format!("script {i}"));
         }
+        for _ in 0..LOG_LINES + 500 {
+            log.push(Channel::Script, "spam".into());
+        }
+        assert_eq!(log.since(0).last().unwrap().text, "spam");
+        log.repeats_since_ms -= REPEATS_EVERY_MS;
+        log.push(Channel::Script, "spam".into());
+        assert_eq!(
+            log.since(0).last().unwrap().text,
+            "repeated 1500 more times: spam",
+            "a run that never pauses still shows its count"
+        );
+        log.push(Channel::Script, "spam".into());
+        log.repeated_at_ms -= REPEATS_EVERY_MS;
+        assert_eq!(
+            log.since(0).last().unwrap().text,
+            "repeated 1 more time: spam",
+            "a reader sees the count once the repeats go quiet"
+        );
+        log.push(Channel::Aqx, "the script stopped".into());
+        let texts: Vec<&str> = log.lines().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            texts[8..],
+            [
+                "script 8",
+                "script 9",
+                "spam",
+                "repeated 1500 more times: spam",
+                "repeated 1 more time: spam",
+                "the script stopped"
+            ],
+            "a repeated line doesn't push out the lines before it"
+        );
         for i in 0..LOG_LINES + 500 {
             log.push(Channel::Game, format!("game {i}"));
         }
@@ -2785,7 +2877,7 @@ mod tests {
             .iter()
             .filter(|l| l.channel == Channel::Game)
             .collect();
-        assert_eq!(script, 10, "a noisy channel doesn't push out a quiet one");
+        assert_eq!(script, 13, "a noisy channel doesn't push out a quiet one");
         assert_eq!(game.len(), LOG_LINES);
         assert_eq!(game[0].text, "game 500");
         assert_eq!(log.since(log.next - 2).count(), 2);
