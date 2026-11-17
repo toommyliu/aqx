@@ -10,9 +10,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
+use aqx_script::skua::library::{self, By};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{self, Script};
+use crate::config::{self, Script, SkuaUpdate};
 use crate::control::{Action, Frame, Source, Want};
 use crate::fleet::{Fleet, LastLines, Line, Resume};
 
@@ -700,6 +701,7 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
             .map(|wanted| find_config_account(&accounts, wanted))
             .collect::<anyhow::Result<_>>()?,
     };
+    refresh_skua_library(config::skua_update(&config));
     let fleet = Arc::new(Fleet::new(aqx_client::DeviceId::load()?));
     fleet.add_new(accounts);
     open(&fleet, wanted, &first, &read_resume(&paths.resume));
@@ -730,6 +732,21 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
         drop((removed, held));
     });
     Ok(())
+}
+
+fn refresh_skua_library(update: SkuaUpdate) {
+    let Ok(home) = config::skua_home() else {
+        return;
+    };
+    match update {
+        SkuaUpdate::Off => {}
+        SkuaUpdate::Check => {
+            thread::spawn(move || library::check(&home, By::Session));
+        }
+        SkuaUpdate::Auto => {
+            thread::spawn(move || library::update(&home, By::Session));
+        }
+    }
 }
 
 fn open(fleet: &Fleet, wanted: &Wanted, first: &[String], saved: &[Resume]) {

@@ -1,7 +1,7 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,7 @@ const ARCHIVE: &str = "https://codeload.github.com/auqw/Scripts/tar.gz/refs/head
 const DOWNLOAD_LIMIT: u64 = 64 << 20;
 const UNPACK_LIMIT: u64 = 512 << 20;
 const VERSION: &str = ".aqx-version";
+const LAST_CHECK: &str = ".aqx-check";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Updated {
@@ -17,10 +18,34 @@ pub enum Updated {
     To(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum By {
+    Hand,
+    Session,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "kebab-case")]
+pub enum Outcome {
+    Current,
+    Behind,
+    Updated { commit: String },
+    Failed { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Check {
+    pub at_ms: u64,
+    pub by: By,
+    #[serde(flatten)]
+    pub outcome: Outcome,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Library {
-    pub commit: String,
-    pub entries: Vec<Entry>,
+pub struct Status {
+    pub commit: Option<String>,
+    pub last_check: Option<Check>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,15 +79,26 @@ pub fn scripts(skua: &Path) -> PathBuf {
     skua.join("Scripts")
 }
 
-pub fn open(skua: &Path) -> Result<Option<Library>, String> {
+pub fn open(skua: &Path) -> Result<Option<Vec<Entry>>, String> {
     let scripts = scripts(skua);
-    let Some(version) = version(&scripts)? else {
+    if version(&scripts)?.is_none() {
         return Ok(None);
+    }
+    entries(&scripts).map(Some)
+}
+
+pub fn status(skua: &Path) -> Result<Status, String> {
+    let path = skua.join(LAST_CHECK);
+    let unreadable = |e: &dyn std::fmt::Display| format!("couldn't read {}: {e}", path.display());
+    let last_check = match fs::read(&path) {
+        Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|e| unreadable(&e))?),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(unreadable(&e)),
     };
-    Ok(Some(Library {
-        commit: version.commit,
-        entries: entries(&scripts)?,
-    }))
+    Ok(Status {
+        commit: version(&scripts(skua))?.map(|v| v.commit),
+        last_check,
+    })
 }
 
 fn entries(scripts: &Path) -> Result<Vec<Entry>, String> {
@@ -142,15 +178,101 @@ impl Entry {
     }
 }
 
-pub fn update(skua: &Path) -> Result<Updated, String> {
-    update_from(skua, ARCHIVE, UNPACK_LIMIT)
+pub fn update(skua: &Path, by: By) -> Result<Updated, String> {
+    update_from(skua, by, ARCHIVE, UNPACK_LIMIT)
 }
 
-fn update_from(skua: &Path, url: &str, unpack_limit: u64) -> Result<Updated, String> {
+pub fn check(skua: &Path, by: By) -> Result<bool, String> {
+    check_from(skua, by, ARCHIVE)
+}
+
+fn update_from(skua: &Path, by: By, url: &str, unpack_limit: u64) -> Result<Updated, String> {
+    let updated = download(skua, url, unpack_limit);
+    record(skua, by, updated, |updated| match updated {
+        Updated::Current => Outcome::Current,
+        Updated::To(commit) => Outcome::Updated {
+            commit: commit.clone(),
+        },
+    })
+}
+
+fn check_from(skua: &Path, by: By, url: &str) -> Result<bool, String> {
+    let behind = ask(skua, url);
+    record(skua, by, behind, |&behind| {
+        if behind {
+            Outcome::Behind
+        } else {
+            Outcome::Current
+        }
+    })
+}
+
+fn record<T>(
+    skua: &Path,
+    by: By,
+    done: Result<T, String>,
+    outcome: impl FnOnce(&T) -> Outcome,
+) -> Result<T, String> {
+    let outcome = match (&done, by) {
+        (Ok(done), _) => outcome(done),
+        (Err(_), By::Hand) => return done,
+        (Err(error), By::Session) => Outcome::Failed {
+            error: error.clone(),
+        },
+    };
+    let check = Check {
+        at_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64),
+        by,
+        outcome,
+    };
+    let check = serde_json::to_vec(&check).expect("a check serializes");
+    let written = fs::create_dir_all(skua).and_then(|()| fs::write(skua.join(LAST_CHECK), check));
+    match (done, written) {
+        (Ok(_), Err(e)) => Err(format!("couldn't save the Skua script check: {e}")),
+        (done, _) => done,
+    }
+}
+
+fn lock(skua: &Path) -> io::Result<File> {
+    fs::create_dir_all(skua)?;
+    let lock = File::create(skua.join(".update.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_global(Some(Duration::from_secs(300)))
+        .build()
+        .into()
+}
+
+fn ask(skua: &Path, url: &str) -> Result<bool, String> {
+    let failed =
+        |e: &dyn std::fmt::Display| format!("couldn't check the Skua scripts for updates: {e}");
+    let _lock = lock(skua).map_err(|e| failed(&e))?;
+    let Some(current) = version(&scripts(skua))? else {
+        return Ok(true);
+    };
+    let mut request = agent().head(url);
+    if let Some(etag) = current.etag.as_deref() {
+        request = request.header("If-None-Match", etag);
+    }
+    let response = request.call().map_err(|e| failed(&e))?;
+    match response.status().as_u16() {
+        304 => Ok(false),
+        200 => Ok(true),
+        status => Err(failed(&format!("GitHub answered {status}"))),
+    }
+}
+
+fn download(skua: &Path, url: &str, unpack_limit: u64) -> Result<Updated, String> {
     let failed = |e: io::Error| format!("couldn't update the Skua scripts: {e}");
-    fs::create_dir_all(skua).map_err(failed)?;
-    let lock = File::create(skua.join(".update.lock")).map_err(failed)?;
-    lock.lock().map_err(failed)?;
+    let _lock = lock(skua).map_err(failed)?;
     let scripts = scripts(skua);
     let staged = skua.join(".Scripts.new");
     let old = skua.join(".Scripts.old");
@@ -166,13 +288,7 @@ fn update_from(skua: &Path, url: &str, unpack_limit: u64) -> Result<Updated, Str
             scripts.display()
         ));
     }
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_connect(Some(Duration::from_secs(15)))
-        .timeout_global(Some(Duration::from_secs(300)))
-        .build()
-        .into();
-    let mut request = agent.get(url);
+    let mut request = agent().get(url);
     if let Some(etag) = current.as_ref().and_then(|v| v.etag.as_deref()) {
         request = request.header("If-None-Match", etag);
     }
@@ -302,6 +418,7 @@ mod tests {
         archive: Arc<Mutex<Vec<u8>>>,
         etag: Arc<Mutex<String>>,
         asked: Arc<Mutex<Vec<Option<String>>>>,
+        methods: Arc<Mutex<Vec<String>>>,
     }
 
     impl Upstream {
@@ -311,13 +428,24 @@ mod tests {
             let archive = Arc::new(Mutex::new(archive));
             let etag = Arc::new(Mutex::new("\"one\"".to_owned()));
             let asked = Arc::new(Mutex::new(Vec::new()));
-            let (served, tag, log) = (archive.clone(), etag.clone(), asked.clone());
+            let methods = Arc::new(Mutex::new(Vec::new()));
+            let (served, tag, log, verbs) = (
+                archive.clone(),
+                etag.clone(),
+                asked.clone(),
+                methods.clone(),
+            );
             thread::spawn(move || {
                 for stream in listener.incoming() {
                     let mut stream = stream.unwrap();
                     let mut sent = None;
+                    let mut head = false;
                     for line in BufReader::new(&stream).lines() {
                         let line = line.unwrap();
+                        if let Some((verb, _)) = line.split_once(" /") {
+                            head = verb == "HEAD";
+                            verbs.lock().unwrap().push(verb.to_owned());
+                        }
                         if line.is_empty() {
                             break;
                         }
@@ -342,7 +470,9 @@ mod tests {
                         "HTTP/1.1 200 OK\r\nETag: {tag}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     );
-                    let _ = stream.write_all(&body);
+                    if !head {
+                        let _ = stream.write_all(&body);
+                    }
                 }
             });
             Upstream {
@@ -350,6 +480,7 @@ mod tests {
                 archive,
                 etag,
                 asked,
+                methods,
             }
         }
 
@@ -424,14 +555,13 @@ mod tests {
         assert_eq!(open(&skua), Ok(None));
 
         assert_eq!(
-            update_from(&skua, &upstream.url, UNPACK_LIMIT),
+            update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT),
             Ok(Updated::To("aaaaaaa".into()))
         );
         assert_eq!(read(&skua, "Farm/VoidAura.cs").as_deref(), Some("farm"));
-        let library = open(&skua).unwrap().unwrap();
-        assert_eq!(library.commit, "aaaaaaa");
+        assert_eq!(status(&skua).unwrap().commit.as_deref(), Some("aaaaaaa"));
         assert_eq!(
-            library.entries,
+            open(&skua).unwrap().unwrap(),
             [
                 Entry {
                     name: "Void Aura".into(),
@@ -449,7 +579,7 @@ mod tests {
         );
 
         assert_eq!(
-            update_from(&skua, &upstream.url, UNPACK_LIMIT),
+            update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT),
             Ok(Updated::Current)
         );
 
@@ -458,7 +588,7 @@ mod tests {
             "\"two\"",
         );
         assert_eq!(
-            update_from(&skua, &upstream.url, UNPACK_LIMIT),
+            update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT),
             Ok(Updated::To("bbbbbbb".into()))
         );
         assert_eq!(read(&skua, "CoreBots.cs").as_deref(), Some("v2"));
@@ -471,21 +601,79 @@ mod tests {
     }
 
     #[test]
+    fn a_check_asks_upstream_without_downloading_and_both_are_recorded() {
+        let skua = skua();
+        let upstream = Upstream::start(archive(
+            "aaaaaaa",
+            &[("scripts.json", "[]"), ("CoreBots.cs", "v1")],
+        ));
+        let last = |skua: &Path| {
+            let check = status(skua).unwrap().last_check.unwrap();
+            (check.by, check.outcome)
+        };
+        assert_eq!(
+            status(&skua),
+            Ok(Status {
+                commit: None,
+                last_check: None
+            })
+        );
+
+        assert_eq!(check_from(&skua, By::Session, &upstream.url), Ok(true));
+        assert_eq!(last(&skua), (By::Session, Outcome::Behind));
+        assert!(upstream.asked.lock().unwrap().is_empty());
+
+        update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap();
+        assert_eq!(
+            last(&skua),
+            (
+                By::Hand,
+                Outcome::Updated {
+                    commit: "aaaaaaa".into()
+                }
+            )
+        );
+        assert_eq!(status(&skua).unwrap().commit.as_deref(), Some("aaaaaaa"));
+
+        assert_eq!(check_from(&skua, By::Session, &upstream.url), Ok(false));
+        assert_eq!(last(&skua), (By::Session, Outcome::Current));
+
+        upstream.publish(
+            archive("bbbbbbb", &[("scripts.json", "[]"), ("CoreBots.cs", "v2")]),
+            "\"two\"",
+        );
+        assert_eq!(check_from(&skua, By::Session, &upstream.url), Ok(true));
+        assert_eq!(last(&skua), (By::Session, Outcome::Behind));
+        assert_eq!(read(&skua, "CoreBots.cs").as_deref(), Some("v1"));
+
+        assert!(update_from(&skua, By::Hand, "http://127.0.0.1:1/", UNPACK_LIMIT).is_err());
+        assert_eq!(last(&skua), (By::Session, Outcome::Behind));
+        assert_eq!(*upstream.methods.lock().unwrap(), ["GET", "HEAD", "HEAD"]);
+
+        let unreachable = check_from(&skua, By::Session, "http://127.0.0.1:1/").unwrap_err();
+        assert_eq!(
+            last(&skua),
+            (By::Session, Outcome::Failed { error: unreachable })
+        );
+        let _ = fs::remove_dir_all(&skua);
+    }
+
+    #[test]
     fn a_failed_or_unsafe_download_keeps_the_current_library() {
         let skua = skua();
         let upstream = Upstream::start(archive(
             "aaaaaaa",
             &[("scripts.json", "[]"), ("CoreBots.cs", "v1")],
         ));
-        update_from(&skua, &upstream.url, UNPACK_LIMIT).unwrap();
+        update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap();
 
         upstream.publish(b"not a tarball".to_vec(), "\"two\"");
-        assert!(update_from(&skua, &upstream.url, UNPACK_LIMIT).is_err());
+        assert!(update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).is_err());
         upstream.publish(
             archive("bbbbbbb", &[("CoreBots.cs", "v2"), ("../escaped.cs", "x")]),
             "\"three\"",
         );
-        let escaped = update_from(&skua, &upstream.url, UNPACK_LIMIT).unwrap_err();
+        let escaped = update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap_err();
         assert!(escaped.contains("outside the library"), "{escaped}");
         upstream.publish(
             archive(
@@ -494,7 +682,7 @@ mod tests {
             ),
             "\"four\"",
         );
-        let unlisted = update_from(&skua, &upstream.url, UNPACK_LIMIT).unwrap_err();
+        let unlisted = update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap_err();
         assert!(unlisted.contains("script list"), "{unlisted}");
         upstream.publish(
             archive(
@@ -503,12 +691,12 @@ mod tests {
             ),
             "\"five\"",
         );
-        let oversized = update_from(&skua, &upstream.url, 64).unwrap_err();
+        let oversized = update_from(&skua, By::Hand, &upstream.url, 64).unwrap_err();
         assert!(oversized.contains("larger than"), "{oversized}");
 
         assert!(!skua.join("escaped.cs").exists());
         assert_eq!(read(&skua, "CoreBots.cs").as_deref(), Some("v1"));
-        assert_eq!(open(&skua).unwrap().unwrap().commit, "aaaaaaa");
+        assert_eq!(status(&skua).unwrap().commit.as_deref(), Some("aaaaaaa"));
         let _ = fs::remove_dir_all(&skua);
     }
 
@@ -519,7 +707,7 @@ mod tests {
         fs::write(scripts(&skua).join("Mine.cs"), "mine").unwrap();
         let upstream = Upstream::start(archive("aaaaaaa", &[("CoreBots.cs", "v1")]));
 
-        let refused = update_from(&skua, &upstream.url, UNPACK_LIMIT).unwrap_err();
+        let refused = update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap_err();
 
         assert!(refused.contains("wasn't downloaded by aqx"), "{refused}");
         assert_eq!(read(&skua, "Mine.cs").as_deref(), Some("mine"));
@@ -534,12 +722,12 @@ mod tests {
             "aaaaaaa",
             &[("scripts.json", "[]"), ("CoreBots.cs", "v1")],
         ));
-        update_from(&skua, &upstream.url, UNPACK_LIMIT).unwrap();
+        update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap();
         fs::rename(scripts(&skua), skua.join(".Scripts.old")).unwrap();
         fs::create_dir_all(skua.join(".Scripts.new")).unwrap();
 
         assert_eq!(
-            update_from(&skua, &upstream.url, UNPACK_LIMIT),
+            update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT),
             Ok(Updated::Current)
         );
 

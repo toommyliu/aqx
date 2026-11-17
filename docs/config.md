@@ -76,6 +76,23 @@ A scheduled script that throws doesn't restart, even with `restart_on_error` on.
 
 Schedules fire only while a session runs, and a session with schedules keeps running when every account goes offline. A schedule never runs late. One missed while the session was down doesn't run, and one that comes due more than a minute late, like when the computer sleeps through it, is skipped and logged. AQW's daily quests reset at midnight US Eastern time, so `at = "00:00"` with `tz = "America/New_York"` runs right after the reset.
 
+## Skua updates
+
+A `[skua]` section sets what a session does with the [Skua script library](skua.md) when it starts:
+
+```toml
+[skua]
+update = "check"
+```
+
+| `update` | When a session starts |
+| --- | --- |
+| `off` | Nothing. The default. |
+| `check` | aqx asks GitHub whether the library changed, without downloading it. If it did, the web UI shows a toast with an Update button. |
+| `auto` | aqx downloads the library if it changed upstream, and the web UI says so in a toast. |
+
+Accounts log in while the check runs, so a script that starts before a download finishes runs the old library and picks up the new one on its next start. A toast stays until you dismiss it, and the next session's check can show a new one. A failed check shows its error the same way.
+
 ## Resume
 
 With `resume = true`, aqx saves the account's running script and queue whenever they change. If the session ends with `aqx down`, `ctrl+c` or a crash, the next session starts the account the way the last one left it, in place of `auto_start` and `script`:

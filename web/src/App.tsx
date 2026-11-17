@@ -9,7 +9,7 @@ import {
 import { For, type JSX, Match, Show, Switch, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 import { Toaster, useSonner } from "solid-sonner";
 import { AccountPanel, LoginMenu, RunMenu } from "./Account";
-import { Dialogs, logOut, openPicker, openServers, openScriptOptions } from "./Dialogs";
+import { Dialogs, logOut, openPicker, openServers, openScriptOptions, SkuaLibraryToast } from "./Dialogs";
 import { inBrowserTab } from "./hotkeys";
 import {
   accounts,
@@ -201,6 +201,7 @@ export function App() {
         </main>
       </div>
       <Toasts />
+      <SkuaLibraryToast />
       <Dialogs />
       <Shortcuts onOpen={open} />
       <Tooltips />

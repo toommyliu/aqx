@@ -155,10 +155,18 @@ export type SkuaLibrary =
   | { state: "failed"; error: string }
   | {
       state: "ready";
-      commit: string;
       folder: string;
       entries: { name: string; description: string; tags: string[]; path: string }[];
     };
+
+export type SkuaCheck = { atMs: number; by: "hand" | "session" } & (
+  | { outcome: "current" }
+  | { outcome: "behind" }
+  | { outcome: "updated"; commit: string }
+  | { outcome: "failed"; error: string }
+);
+
+export type SkuaStatus = { error: string } | { commit: string | null; lastCheck: SkuaCheck | null };
 
 export type ArgKind = "string" | "number" | "boolean" | "list" | "map";
 
@@ -266,6 +274,7 @@ export const api = {
   servers: () => call<Server[]>("/api/servers/all"),
   files: (dir: string) => call<Folder>(`/api/files?${q({ dir })}`),
   skua: (query: string) => call<SkuaLibrary>(`/api/skua?${q({ q: query })}`),
+  skuaStatus: () => call<SkuaStatus>("/api/skua/status"),
   updateSkua: () => call<{ message: string }>("/api/skua/update", {}),
   skuaOptions: (account: number, name: string, script: string) =>
     call<{ corebots: SkuaPane; script: SkuaPane }>(

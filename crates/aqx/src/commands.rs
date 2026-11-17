@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail};
 use aqx_script::Cancel;
-use aqx_script::skua::library::{self, Updated};
+use aqx_script::skua::library::{self, By, Updated};
 use aqx_script::skua::{self, SkuaScript};
 
 use crate::config::{self, Script};
@@ -663,7 +663,7 @@ pub fn skua(action: Skua) -> anyhow::Result<ExitCode> {
     match action {
         Skua::Path => println!("{}", home.display()),
         Skua::Update => {
-            match library::update(&home).map_err(|e| anyhow!(e))? {
+            match library::update(&home, By::Hand).map_err(|e| anyhow!(e))? {
                 Updated::Current => println!("the Skua scripts are up to date"),
                 Updated::To(commit) => println!(
                     "updated the Skua scripts to {} in {}",
@@ -680,7 +680,7 @@ pub fn skua(action: Skua) -> anyhow::Result<ExitCode> {
             let query = query.join(" ");
             let scripts = library::scripts(&home);
             let mut out = std::io::stdout().lock();
-            for entry in library::search(&found.entries, &query) {
+            for entry in library::search(&found, &query) {
                 let path = scripts.join(&entry.path);
                 if writeln!(out, "{}  {}", path.display(), entry.name).is_err() {
                     break;
