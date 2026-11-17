@@ -105,12 +105,12 @@ impl Log {
             .original()
             .is_some_and(|l| l.channel == channel && l.text == text)
         {
+            self.flush_repeats_due(at_ms);
             if self.repeats == 0 {
                 self.repeats_since_ms = at_ms;
             }
             self.repeats += 1;
             self.repeated_at_ms = at_ms;
-            self.flush_repeats_due(at_ms);
             return;
         }
         self.flush_repeats();
@@ -2841,14 +2841,17 @@ mod tests {
         log.push(Channel::Script, "spam".into());
         assert_eq!(
             log.since(0).last().unwrap().text,
-            "repeated 1500 more times: spam",
+            "repeated 1499 more times: spam",
             "a run that never pauses still shows its count"
         );
+        log.repeated_at_ms -= REPEATS_EVERY_MS;
         log.push(Channel::Script, "spam".into());
         log.repeated_at_ms -= REPEATS_EVERY_MS;
+        let next = log.next;
+        let flushed: Vec<String> = log.since(next).map(|l| l.text.clone()).collect();
         assert_eq!(
-            log.since(0).last().unwrap().text,
-            "repeated 1 more time: spam",
+            flushed,
+            ["repeated 1 more time: spam"],
             "a reader sees the count once the repeats go quiet"
         );
         log.push(Channel::Aqx, "the script stopped".into());
@@ -2859,11 +2862,12 @@ mod tests {
                 "script 8",
                 "script 9",
                 "spam",
-                "repeated 1500 more times: spam",
+                "repeated 1499 more times: spam",
+                "repeated 1 more time: spam",
                 "repeated 1 more time: spam",
                 "the script stopped"
             ],
-            "a repeated line doesn't push out the lines before it"
+            "a repeated line doesn't push out the lines before it, and a pause ends its count"
         );
         for i in 0..LOG_LINES + 500 {
             log.push(Channel::Game, format!("game {i}"));
@@ -2877,7 +2881,7 @@ mod tests {
             .iter()
             .filter(|l| l.channel == Channel::Game)
             .collect();
-        assert_eq!(script, 13, "a noisy channel doesn't push out a quiet one");
+        assert_eq!(script, 14, "a noisy channel doesn't push out a quiet one");
         assert_eq!(game.len(), LOG_LINES);
         assert_eq!(game[0].text, "game 500");
         assert_eq!(log.since(log.next - 2).count(), 2);
