@@ -334,6 +334,38 @@ fn rest_packets_and_aggro_all_monsters_send_in_the_background() {
 
 #[test]
 #[ignore = "run with npm run skua:test"]
+fn rest_packets_start_when_combat_ends_while_an_event_handler_runs() {
+    let (outcome, logs, sent) = Fake::start(|m, w| match m {
+        "fight" => w.object(r#"{"cmd":"uotls","unm":"player1","o":{"intState":2}}"#),
+        "calm" => w.object(r#"{"cmd":"uotls","unm":"player1","o":{"intState":1}}"#),
+        _ => {}
+    })
+    .run(
+        r#"
+using Skua.Core.Interfaces;
+public class RestAfterCombat {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Send.Packet("fight");
+        bot.Wait.ForTrue(() => bot.Player.State == 2, 20);
+        bot.Options.RestPackets = true;
+        bot.Events.CellChanged += (_, _, _) => Thread.Sleep(2000);
+        bot.Map.Jump("r2", "Left");
+        bot.Send.Packet("calm");
+        bot.Wait.ForTrue(() => bot.Player.State == 1, 20);
+        bot.Sleep(500);
+        bot.Send.Packet("marker");
+    }
+}
+"#,
+    );
+    assert_finished(outcome, &logs);
+    let rest = sent.iter().position(|m| m.contains("%restRequest%"));
+    let marker = sent.iter().position(|m| m == "marker");
+    assert!(rest.is_some() && rest < marker, "{sent:?}");
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
 fn aggro_monsters_pulls_the_cell_and_outlasts_aggro_all_monsters() {
     let (outcome, logs, sent) = Fake::start(|_, _| {}).run(
         r#"

@@ -22,7 +22,10 @@ public class Hello
         bot.ShowMessageBox("Continue?", "Question", true);
         Ioc.Default.GetRequiredService<IThemeService>().ApplyBaseTheme(false);
         bot.Log($"picked {Ioc.Default.GetRequiredService<IFileDialogService>().OpenFile() ?? "nothing"}");
-        bot.Sleep(10);
+        int runs = 0;
+        bot.Handlers.RegisterHandler(5, _ => ++runs < 3, "count");
+        bot.Sleep(400);
+        bot.Log($"handler ran {runs} times");
     }
 }
 "#;
@@ -95,7 +98,8 @@ fn the_skua_host_runs_a_script_against_the_session() {
             "version unknown",
             "tries 5, default delay 800, exit False",
             "Question: Continue? (dismissed, as if the window were closed)",
-            "picked nothing"
+            "picked nothing",
+            "handler ran 3 times"
         ]
     );
 }
@@ -408,6 +412,31 @@ public class CellMessages {
         logs.contains(&"cell changed farm r2 Left".into()),
         "{logs:?}"
     );
+}
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn a_script_spinning_on_unchanged_state_is_paced_and_still_sees_changes() {
+    let source = r#"
+using System.Diagnostics;
+using Skua.Core.Interfaces;
+public class Spin {
+    public void ScriptMain(IScriptInterface bot) {
+        long reads = 0;
+        var clock = Stopwatch.StartNew();
+        while (clock.ElapsedMilliseconds < 500) { _ = bot.Player.Cell; reads++; }
+        bot.Log($"paced {reads < 50000}");
+        var jump = Task.Run(() => bot.Map.Jump("r2", "Left"));
+        clock.Restart();
+        while (bot.Player.Cell != "r2" && clock.ElapsedMilliseconds < 5000) { }
+        jump.Wait();
+        bot.Log($"saw {bot.Player.Cell}");
+    }
+}
+"#;
+    let (outcome, logs, _) = Fake::start(|_, _| {}).run(source);
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert_eq!(logs, ["paced True", "saw r2"]);
 }
 
 #[test]
