@@ -18,6 +18,7 @@ const AWAIT_ONLINE: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 pub struct SkuaScript {
     path: PathBuf,
     skua: PathBuf,
+    library: Option<library::Pinned>,
     output: Box<dyn FnMut(Output)>,
     cancel: Cancel,
 }
@@ -166,7 +167,9 @@ pub fn script_options(
     changes: &[(String, String)],
 ) -> Result<Settings, LoadError> {
     let path = std::path::absolute(path).map_err(|e| LoadError(e.to_string()))?;
-    settings("options", path.as_os_str(), skua, changes)
+    let library = pin(skua)?;
+    let path = locate(library.as_ref(), path);
+    settings("options", path.as_os_str(), skua, library.as_ref(), changes)
 }
 
 pub fn core_bots_options(
@@ -174,16 +177,17 @@ pub fn core_bots_options(
     skua: &Path,
     changes: &[(String, String)],
 ) -> Result<Settings, LoadError> {
-    settings("cbo", user.as_ref(), skua, changes)
+    settings("cbo", user.as_ref(), skua, None, changes)
 }
 
 fn settings(
     mode: &str,
     arg: &std::ffi::OsStr,
     skua: &Path,
+    library: Option<&library::Pinned>,
     changes: &[(String, String)],
 ) -> Result<Settings, LoadError> {
-    let mut command = command(mode, arg, skua, &mut || {})?;
+    let mut command = command(mode, arg, skua, library, &mut || {})?;
     for (key, value) in changes {
         command.arg("--set").arg(format!("{key}={value}"));
     }
@@ -204,11 +208,26 @@ fn command(
     mode: &str,
     arg: &std::ffi::OsStr,
     skua: &Path,
+    library: Option<&library::Pinned>,
     building: &mut dyn FnMut(),
 ) -> Result<Command, LoadError> {
     let mut command = Command::new(worker(building)?);
     command.arg(mode).arg(arg).env("AQX_SKUA_DATA", skua);
+    if let Some(library) = library {
+        command.env("AQX_SKUA_SCRIPTS", library.root());
+    }
     Ok(command)
+}
+
+fn pin(skua: &Path) -> Result<Option<library::Pinned>, LoadError> {
+    library::pin(skua).map_err(LoadError)
+}
+
+fn locate(library: Option<&library::Pinned>, path: PathBuf) -> PathBuf {
+    match library {
+        Some(library) => library.locate(&path),
+        None => path,
+    }
 }
 
 fn failed(skua: &Path, why: String) -> LoadError {
@@ -234,9 +253,17 @@ impl SkuaScript {
                 text: "building the Skua worker".into(),
             });
         };
-        let checked = command("check", path.as_os_str(), skua, &mut building)?
-            .output()
-            .map_err(|e| LoadError(format!("couldn't check the C# script: {e}")))?;
+        let library = pin(skua)?;
+        let path = locate(library.as_ref(), path);
+        let checked = command(
+            "check",
+            path.as_os_str(),
+            skua,
+            library.as_ref(),
+            &mut building,
+        )?
+        .output()
+        .map_err(|e| LoadError(format!("couldn't check the C# script: {e}")))?;
         if !checked.status.success() {
             return Err(failed(
                 skua,
@@ -250,6 +277,7 @@ impl SkuaScript {
         Ok(Self {
             path,
             skua: skua.to_path_buf(),
+            library,
             output: Box::new(output),
             cancel: cancel.clone(),
         })
@@ -300,8 +328,14 @@ impl SkuaScript {
                 text: "building the Skua worker".into(),
             });
         };
-        let mut command = command("serve", self.path.as_os_str(), &self.skua, &mut building)
-            .map_err(io::Error::other)?;
+        let mut command = command(
+            "serve",
+            self.path.as_os_str(),
+            &self.skua,
+            self.library.as_ref(),
+            &mut building,
+        )
+        .map_err(io::Error::other)?;
         for (key, value) in args {
             command.arg("--arg").arg(format!(
                 "{key}={}",

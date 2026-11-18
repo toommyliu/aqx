@@ -91,7 +91,7 @@ update = "check"
 | `check` | aqx asks GitHub whether the library changed, without downloading it. If it did, the web UI shows a toast with an Update button. |
 | `auto` | aqx downloads the library if it changed upstream, and the web UI says so in a toast. |
 
-Accounts log in while the check runs, so a script that starts before a download finishes runs the old library and picks up the new one on its next start. A toast stays until you dismiss it, and the next session's check can show a new one. A failed check shows its error the same way.
+Accounts log in while the check runs, so a script that starts before a download finishes keeps the old library until it stops and uses the new one on its next start. A toast stays until you dismiss it, and the next session's check can show a new one. A failed check shows its error the same way.
 
 ## Resume
 
