@@ -88,7 +88,7 @@ update = "check"
 
 See [Skua updates](config.md#skua-updates) for what each value does.
 
-An update replaces the whole `~/aqx/skua/Scripts` folder, so aqx discards any edits you made inside it. If the download fails, aqx keeps the current library. Scripts that are running keep running, and the next start uses the new library.
+An update downloads the library into a new folder and points `~/aqx/skua/Scripts` at it, so aqx discards any edits you made inside the old one. If the download fails, aqx keeps the current library. A running script keeps the library it started with, even when it reconnects, and its next start uses the new one. aqx deletes an old library once no script uses it.
 
 ## Update aqx
 

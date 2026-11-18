@@ -730,3 +730,63 @@ public class Includes { public void ScriptMain(IScriptInterface bot) { bot.Log(I
         .unwrap();
     assert!(error.to_string().contains("CS1513"), "{error}");
 }
+
+#[test]
+#[ignore = "run with npm run skua:test"]
+fn a_script_runs_the_library_it_started_with_while_an_update_lands() {
+    const RUN: &str = r#"//cs_include Scripts/CoreBots.cs
+using Skua.Core.Interfaces;
+public class Run {
+    public void ScriptMain(IScriptInterface bot) {
+        bot.Log(Included.Value);
+        bot.Log(File.ReadAllText(Path.Combine(ClientFileSources.SkuaScriptsDIR, "Note.txt")));
+        bot.Log(bot.Manager.LoadedScript.Split("/Scripts/").Last());
+    }
+}
+"#;
+    let home = Dir::new();
+    let publish = |commit: &str, value: &str| {
+        let version = home.0.join(".versions").join(commit);
+        let root = version.join("Scripts");
+        std::fs::create_dir_all(root.join("Farm")).unwrap();
+        std::fs::write(version.join(".aqx-pin"), "").unwrap();
+        std::fs::write(
+            root.join("CoreBots.cs"),
+            format!(r#"internal class Included {{ internal static string Value => "{value}"; }}"#),
+        )
+        .unwrap();
+        std::fs::write(root.join("Note.txt"), value).unwrap();
+        std::fs::write(root.join("Farm/Run.cs"), RUN).unwrap();
+        let link = home.0.join(".Scripts.link");
+        std::os::unix::fs::symlink(format!(".versions/{commit}/Scripts"), &link).unwrap();
+        std::fs::rename(&link, home.0.join("Scripts")).unwrap();
+    };
+    publish("aaaaaaa", "one");
+
+    let (outcome, logs, _) =
+        Fake::start(|_, _| {}).run_library(&home.0.join("Scripts/Farm/Run.cs"), &home.0, || {
+            publish("bbbbbbb", "two")
+        });
+
+    assert_eq!(outcome, Outcome::Finished, "{logs:?}");
+    assert_eq!(logs, ["one", "one", "Farm/Run.cs"]);
+
+    let built = || std::fs::read_dir(home.0.join("cache")).unwrap().count();
+    let load = || {
+        SkuaScript::load(
+            &home.0.join("Scripts/Farm/Run.cs"),
+            &home.0,
+            |_| {},
+            &Cancel::default(),
+        )
+        .unwrap()
+    };
+    load();
+    let before = built();
+    publish("ccccccc", "two");
+    load();
+    assert_eq!(built(), before, "an unchanged script reuses its build");
+    publish("ddddddd", "three");
+    load();
+    assert_eq!(built(), before + 1);
+}

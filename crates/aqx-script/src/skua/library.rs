@@ -11,6 +11,8 @@ const DOWNLOAD_LIMIT: u64 = 64 << 20;
 const UNPACK_LIMIT: u64 = 512 << 20;
 const VERSION: &str = ".aqx-version";
 const LAST_CHECK: &str = ".aqx-check";
+const VERSIONS: &str = ".versions";
+const PIN: &str = ".aqx-pin";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Updated {
@@ -79,12 +81,103 @@ pub fn scripts(skua: &Path) -> PathBuf {
     skua.join("Scripts")
 }
 
+pub struct Pinned {
+    link: PathBuf,
+    root: PathBuf,
+    hold: Option<File>,
+}
+
+impl Pinned {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn locate(&self, path: &Path) -> PathBuf {
+        path.strip_prefix(&self.link)
+            .map_or_else(|_| path.to_path_buf(), |rest| self.root.join(rest))
+    }
+}
+
+impl Drop for Pinned {
+    fn drop(&mut self) {
+        if self.hold.take().is_none() {
+            return;
+        }
+        let skua = self.link.parent().expect("Scripts sits in the Skua folder");
+        if let Ok(lock) = File::create(skua.join(".update.lock"))
+            && lock.try_lock().is_ok()
+        {
+            collect(skua);
+        }
+    }
+}
+
+pub fn pin(skua: &Path) -> Result<Option<Pinned>, String> {
+    let failed = |e: &dyn std::fmt::Display| format!("couldn't open the Skua scripts: {e}");
+    let link = std::path::absolute(scripts(skua)).map_err(|e| failed(&e))?;
+    let unpinned = |link: PathBuf| Pinned {
+        root: link.clone(),
+        link,
+        hold: None,
+    };
+    loop {
+        let target = match fs::read_link(&link) {
+            Ok(target) => target,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+                return Ok(link.is_dir().then(|| unpinned(link)));
+            }
+            Err(e) => return Err(failed(&e)),
+        };
+        if !target.starts_with(VERSIONS) {
+            return Ok(Some(unpinned(link)));
+        }
+        let root = link
+            .parent()
+            .expect("Scripts sits in the Skua folder")
+            .join(&target);
+        let marker = root.parent().expect("a version holds Scripts").join(PIN);
+        let hold = match File::open(&marker) {
+            Ok(hold) => hold,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if fs::read_link(&link).is_ok_and(|now| now == target) {
+                    return Err(failed(&format!("{} is missing", root.display())));
+                }
+                continue;
+            }
+            Err(e) => return Err(failed(&e)),
+        };
+        match hold.try_lock_shared() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => continue,
+            Err(fs::TryLockError::Error(e)) => return Err(failed(&e)),
+        }
+        if same_file(&hold, &marker) {
+            return Ok(Some(Pinned {
+                link,
+                root,
+                hold: Some(hold),
+            }));
+        }
+    }
+}
+
+fn same_file(file: &File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), fs::metadata(path)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => false,
+    }
+}
+
 pub fn open(skua: &Path) -> Result<Option<Vec<Entry>>, String> {
-    let scripts = scripts(skua);
-    if version(&scripts)?.is_none() {
+    let Some(pinned) = pin(skua)? else {
+        return Ok(None);
+    };
+    if version(pinned.root())?.is_none() {
         return Ok(None);
     }
-    entries(&scripts).map(Some)
+    entries(pinned.root()).map(Some)
 }
 
 pub fn status(skua: &Path) -> Result<Status, String> {
@@ -255,6 +348,7 @@ fn ask(skua: &Path, url: &str) -> Result<bool, String> {
     let failed =
         |e: &dyn std::fmt::Display| format!("couldn't check the Skua scripts for updates: {e}");
     let _lock = lock(skua).map_err(|e| failed(&e))?;
+    collect(skua);
     let Some(current) = version(&scripts(skua))? else {
         return Ok(true);
     };
@@ -274,19 +368,21 @@ fn download(skua: &Path, url: &str, unpack_limit: u64) -> Result<Updated, String
     let failed = |e: io::Error| format!("couldn't update the Skua scripts: {e}");
     let _lock = lock(skua).map_err(failed)?;
     let scripts = scripts(skua);
-    let staged = skua.join(".Scripts.new");
-    let old = skua.join(".Scripts.old");
-    if !scripts.exists() && old.exists() {
-        fs::rename(&old, &scripts).map_err(failed)?;
-    }
-    remove(&staged).map_err(failed)?;
-    remove(&old).map_err(failed)?;
+    let versions = skua.join(VERSIONS);
+    let incoming = versions.join(".incoming");
+    remove(&incoming).map_err(failed)?;
     let current = version(&scripts)?;
-    if current.is_none() && scripts.exists() {
+    let linked = fs::read_link(&scripts).is_ok_and(|target| target.starts_with(VERSIONS));
+    if current.is_none() && !linked && fs::symlink_metadata(&scripts).is_ok() {
         return Err(format!(
             "{} wasn't downloaded by aqx, so aqx won't replace it. Move it somewhere else, then update again",
             scripts.display()
         ));
+    }
+    if let Some(current) = &current
+        && !linked
+    {
+        adopt(skua, &current.commit)?;
     }
     let mut request = agent().get(url);
     if let Some(etag) = current.as_ref().and_then(|v| v.etag.as_deref()) {
@@ -296,7 +392,10 @@ fn download(skua: &Path, url: &str, unpack_limit: u64) -> Result<Updated, String
         .call()
         .map_err(|e| format!("couldn't download the Skua scripts: {e}"))?;
     match response.status().as_u16() {
-        304 if current.is_some() => return Ok(Updated::Current),
+        304 if current.is_some() => {
+            collect(skua);
+            return Ok(Updated::Current);
+        }
         200 => {}
         status => {
             return Err(format!(
@@ -314,21 +413,100 @@ fn download(skua: &Path, url: &str, unpack_limit: u64) -> Result<Updated, String
         .into_with_config()
         .limit(DOWNLOAD_LIMIT)
         .reader();
+    let staged = incoming.join("Scripts");
     let commit = unpack(body, &staged, unpack_limit)
         .map_err(|e| format!("couldn't unpack the Skua scripts: {e}"))?;
+    named(&commit)?;
     let version = serde_json::to_vec(&Version {
         etag,
         commit: commit.clone(),
     })
     .expect("a version serializes");
     entries(&staged)?;
-    fs::write(staged.join(VERSION), version).map_err(failed)?;
-    if scripts.exists() {
-        fs::rename(&scripts, &old).map_err(failed)?;
+    let published = versions.join(&commit);
+    if published.exists() {
+        remove(&incoming).map_err(failed)?;
+        let record = published.join("Scripts").join(VERSION);
+        let temporary = published.join(".aqx-version.new");
+        fs::write(&temporary, version)
+            .and_then(|()| fs::rename(&temporary, &record))
+            .map_err(failed)?;
+    } else {
+        fs::write(staged.join(VERSION), version).map_err(failed)?;
+        File::create(incoming.join(PIN)).map_err(failed)?;
+        fs::rename(&incoming, &published).map_err(failed)?;
     }
-    fs::rename(&staged, &scripts).map_err(failed)?;
-    remove(&old).map_err(failed)?;
+    point(skua, &commit).map_err(failed)?;
+    collect(skua);
     Ok(Updated::To(commit))
+}
+
+fn named(commit: &str) -> Result<(), String> {
+    if commit.is_empty() || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "couldn't update the Skua scripts: {commit:?} isn't a commit"
+        ));
+    }
+    Ok(())
+}
+
+fn adopt(skua: &Path, commit: &str) -> Result<(), String> {
+    named(commit)?;
+    let version = skua.join(VERSIONS).join(commit);
+    fs::create_dir_all(&version)
+        .and_then(|()| File::create(version.join(PIN)))
+        .and_then(|_| fs::rename(scripts(skua), version.join("Scripts")))
+        .and_then(|()| point(skua, commit))
+        .map_err(|e| {
+            format!(
+                "couldn't move the Skua scripts into {}: {e}",
+                version.display()
+            )
+        })
+}
+
+fn point(skua: &Path, commit: &str) -> io::Result<()> {
+    let link = skua.join(".Scripts.link");
+    match fs::remove_file(&link) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    std::os::unix::fs::symlink(Path::new(VERSIONS).join(commit).join("Scripts"), &link)?;
+    fs::rename(&link, scripts(skua))
+}
+
+fn collect(skua: &Path) {
+    let versions = skua.join(VERSIONS);
+    let current = fs::read_link(scripts(skua)).ok();
+    let Ok(listed) = fs::read_dir(&versions) else {
+        return;
+    };
+    for entry in listed.flatten() {
+        let name = entry.file_name();
+        if current
+            .as_ref()
+            .is_some_and(|current| current.starts_with(Path::new(VERSIONS).join(&name)))
+        {
+            continue;
+        }
+        let path = entry.path();
+        if name.to_string_lossy().starts_with('.') {
+            let _ = remove(&path);
+            continue;
+        }
+        let hold = match File::open(path.join(PIN)) {
+            Ok(hold) => Some(hold),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(_) => continue,
+        };
+        if hold.as_ref().is_some_and(|hold| hold.try_lock().is_err()) {
+            continue;
+        }
+        let trash = versions.join(format!(".trash-{}", name.to_string_lossy()));
+        if fs::rename(&path, &trash).is_ok() {
+            let _ = remove(&trash);
+        }
+    }
 }
 
 fn unpack(body: impl io::Read, into: &Path, limit: u64) -> io::Result<String> {
@@ -693,6 +871,15 @@ mod tests {
         );
         let oversized = update_from(&skua, By::Hand, &upstream.url, 64).unwrap_err();
         assert!(oversized.contains("larger than"), "{oversized}");
+        upstream.publish(
+            archive(
+                "../aaaaaaa",
+                &[("scripts.json", "[]"), ("CoreBots.cs", "v6")],
+            ),
+            "\"six\"",
+        );
+        let named = update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap_err();
+        assert!(named.contains("isn't a commit"), "{named}");
 
         assert!(!skua.join("escaped.cs").exists());
         assert_eq!(read(&skua, "CoreBots.cs").as_deref(), Some("v1"));
@@ -715,25 +902,113 @@ mod tests {
         let _ = fs::remove_dir_all(&skua);
     }
 
+    fn kept(skua: &Path) -> Vec<String> {
+        let mut kept: Vec<String> = fs::read_dir(skua.join(VERSIONS))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        kept.sort();
+        kept
+    }
+
     #[test]
-    fn an_update_recovers_a_library_left_aside_by_an_interrupted_swap() {
+    fn a_pinned_library_keeps_its_version_until_it_is_released() {
         let skua = skua();
         let upstream = Upstream::start(archive(
             "aaaaaaa",
             &[("scripts.json", "[]"), ("CoreBots.cs", "v1")],
         ));
         update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap();
-        fs::rename(scripts(&skua), skua.join(".Scripts.old")).unwrap();
-        fs::create_dir_all(skua.join(".Scripts.new")).unwrap();
+        let pinned = pin(&skua).unwrap().unwrap();
+        let entry = std::path::absolute(scripts(&skua).join("Farm/VoidAura.cs")).unwrap();
+        assert_eq!(
+            pinned.locate(&entry),
+            pinned.root().join("Farm/VoidAura.cs")
+        );
+        assert!(pinned.root().ends_with("Scripts"));
+
+        upstream.publish(
+            archive("bbbbbbb", &[("scripts.json", "[]"), ("CoreBots.cs", "v2")]),
+            "\"two\"",
+        );
+        update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap();
+        upstream.publish(
+            archive("ccccccc", &[("scripts.json", "[]"), ("CoreBots.cs", "v3")]),
+            "\"three\"",
+        );
+        update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap();
+
+        assert_eq!(read(&skua, "CoreBots.cs").as_deref(), Some("v3"));
+        let pinned_text = fs::read_to_string(pinned.root().join("CoreBots.cs")).unwrap();
+        assert_eq!(pinned_text, "v1");
+        assert_eq!(kept(&skua), ["aaaaaaa", "ccccccc"]);
+
+        drop(pinned);
+        assert_eq!(kept(&skua), ["ccccccc"]);
+
+        let killed = File::open(skua.join(VERSIONS).join("ccccccc").join(PIN)).unwrap();
+        killed.lock_shared().unwrap();
+        upstream.publish(
+            archive("ddddddd", &[("scripts.json", "[]"), ("CoreBots.cs", "v4")]),
+            "\"four\"",
+        );
+        update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap();
+        drop(killed);
+        assert_eq!(kept(&skua), ["ccccccc", "ddddddd"]);
+        assert_eq!(
+            update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT),
+            Ok(Updated::Current)
+        );
+        assert_eq!(kept(&skua), ["ddddddd"]);
+        assert_eq!(read(&skua, "CoreBots.cs").as_deref(), Some("v4"));
+
+        let unopenable = skua.join(VERSIONS).join("eeeeeee");
+        fs::create_dir_all(unopenable.join("Scripts")).unwrap();
+        std::os::unix::fs::symlink(PIN, unopenable.join(PIN)).unwrap();
+        update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT).unwrap();
+        assert_eq!(kept(&skua), ["ddddddd", "eeeeeee"]);
+        let _ = fs::remove_dir_all(&skua);
+    }
+
+    #[test]
+    fn an_update_moves_a_library_from_before_versions_into_one() {
+        let skua = skua();
+        fs::create_dir_all(scripts(&skua)).unwrap();
+        fs::write(scripts(&skua).join("CoreBots.cs"), "v1").unwrap();
+        fs::write(
+            scripts(&skua).join(VERSION),
+            r#"{"etag": "\"one\"", "commit": "aaaaaaa"}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(skua.join(VERSIONS).join(".incoming/Scripts")).unwrap();
+        fs::write(skua.join(".Scripts.link"), "").unwrap();
+        let upstream = Upstream::start(archive("aaaaaaa", &[("CoreBots.cs", "v1")]));
 
         assert_eq!(
             update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT),
             Ok(Updated::Current)
         );
-
+        assert!(fs::symlink_metadata(scripts(&skua)).unwrap().is_symlink());
         assert_eq!(read(&skua, "CoreBots.cs").as_deref(), Some("v1"));
-        assert!(!skua.join(".Scripts.old").exists());
-        assert!(!skua.join(".Scripts.new").exists());
+        assert_eq!(kept(&skua), ["aaaaaaa"]);
+        assert!(
+            pin(&skua)
+                .unwrap()
+                .unwrap()
+                .root()
+                .ends_with(".versions/aaaaaaa/Scripts")
+        );
+
+        upstream.publish(
+            archive("bbbbbbb", &[("scripts.json", "[]"), ("CoreBots.cs", "v2")]),
+            "\"two\"",
+        );
+        assert_eq!(
+            update_from(&skua, By::Hand, &upstream.url, UNPACK_LIMIT),
+            Ok(Updated::To("bbbbbbb".into()))
+        );
+        assert_eq!(read(&skua, "CoreBots.cs").as_deref(), Some("v2"));
+        assert_eq!(kept(&skua), ["bbbbbbb"]);
         let _ = fs::remove_dir_all(&skua);
     }
 

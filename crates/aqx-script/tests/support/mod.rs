@@ -8,7 +8,7 @@ use aqx_script::{Account, Cancel, Outcome, Output, Start};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -259,7 +259,7 @@ impl Fake {
         cancel: &Cancel,
         args: serde_json::Map<String, Value>,
         account: Arc<dyn Account>,
-        mut observe: impl FnMut(&str) + 'static,
+        observe: impl FnMut(&str) + 'static,
     ) -> (Outcome, Vec<String>, Vec<String>) {
         let dir = Dir::new();
         let scripts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skua/vendor/Scripts");
@@ -273,11 +273,42 @@ impl Fake {
             }
         }
         let path = dir.script(source);
+        self.run_path(&path, &data(), cancel, args, account, observe, || {})
+    }
+    pub fn run_library(
+        self,
+        path: &Path,
+        skua: &Path,
+        between: impl FnOnce(),
+    ) -> (Outcome, Vec<String>, Vec<String>) {
+        let args = Default::default();
+        let account = Arc::new(NoAccount);
+        self.run_path(
+            path,
+            skua,
+            &Cancel::default(),
+            args,
+            account,
+            |_| {},
+            between,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn run_path(
+        self,
+        path: &Path,
+        skua: &Path,
+        cancel: &Cancel,
+        args: serde_json::Map<String, Value>,
+        account: Arc<dyn Account>,
+        mut observe: impl FnMut(&str) + 'static,
+        between: impl FnOnce(),
+    ) -> (Outcome, Vec<String>, Vec<String>) {
         let logs = Arc::new(Mutex::new(Vec::new()));
         let sink = logs.clone();
         let script = SkuaScript::load(
-            &path,
-            &data(),
+            path,
+            skua,
             move |out| {
                 let text = match out {
                     Output::Log { text, .. } => text,
@@ -292,6 +323,7 @@ impl Fake {
             cancel,
         )
         .unwrap();
+        between();
         let ended = script.run(Start {
             session: self.harness.session.clone(),
             server: "Test".into(),

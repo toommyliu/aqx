@@ -34,6 +34,7 @@ public sealed class ScriptCompiler(string root)
             visiting.Remove(file);
         }
         Read(path);
+        sources = sources.ToDictionary(s => Shown(s.Key), s => s.Value, StringComparer.OrdinalIgnoreCase);
         string host = string.Join("\n", Directory.EnumerateFiles(AppContext.BaseDirectory, "*.dll").Order().Select(p => { var f = new FileInfo(p); return $"{f.Name}:{f.Length}:{f.LastWriteTimeUtc.Ticks}"; }));
         using SHA256 sha = SHA256.Create();
         using (StreamWriter hashed = new(new CryptoStream(Stream.Null, sha, CryptoStreamMode.Write), new UTF8Encoding(false)))
@@ -52,6 +53,10 @@ public sealed class ScriptCompiler(string root)
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
         return new(image, path);
     }
+    string Shown(string file) =>
+        Root == Path.GetFullPath(ClientFileSources.SkuaScriptsDIR) && file.StartsWith(Root + Path.DirectorySeparatorChar)
+            ? Path.Combine(ClientFileSources.SkuaDIR, "Scripts", Path.GetRelativePath(Root, file))
+            : file;
     static string? Resolve(string path)
     {
         string full = Path.GetFullPath(path), current = Path.GetPathRoot(full)!;
