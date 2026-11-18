@@ -45,12 +45,19 @@ public sealed class ScriptCompiler(string root)
         }
         string key = Convert.ToHexString(sha.Hash!);
         string cache = Path.Combine(ClientFileSources.SkuaDIR, "cache", key + ".dll");
-        if (File.Exists(cache)) return new(File.ReadAllBytes(cache), path);
+        if (File.Exists(cache))
+        {
+            try { File.SetLastWriteTimeUtc(cache, DateTime.UtcNow); return new(File.ReadAllBytes(cache), path); }
+            catch (FileNotFoundException) { }
+        }
         byte[] image = Emit(sources, key);
-        Directory.CreateDirectory(Path.GetDirectoryName(cache)!);
+        string folder = Path.GetDirectoryName(cache)!;
+        Directory.CreateDirectory(folder);
         string temporary = cache + "." + Guid.NewGuid() + ".tmp";
         try { File.WriteAllBytes(temporary, image); File.Move(temporary, cache, true); }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        DateTime unused = DateTime.UtcNow - TimeSpan.FromDays(7);
+        foreach (FileInfo stale in new DirectoryInfo(folder).EnumerateFiles().Where(f => f.Exists && f.LastWriteTimeUtc < unused)) stale.Delete();
         return new(image, path);
     }
     string Shown(string file) =>

@@ -789,4 +789,21 @@ public class Run {
     publish("ddddddd", "three");
     load();
     assert_eq!(built(), before + 1);
+
+    let week_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600);
+    for build in std::fs::read_dir(home.0.join("cache")).unwrap() {
+        std::fs::File::options()
+            .write(true)
+            .open(build.unwrap().path())
+            .unwrap()
+            .set_modified(week_ago)
+            .unwrap();
+    }
+    load();
+    publish("eeeeeee", "four");
+    load();
+    assert_eq!(built(), 2, "builds unused for a week are deleted");
+    publish("fffffff", "three");
+    load();
+    assert_eq!(built(), 2, "a build used this week is kept");
 }
