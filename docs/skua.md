@@ -107,3 +107,8 @@ If the worker sources changed, the next Skua script start rebuilds the worker, a
 Run `aqx skua path` to print the folder. To move it, set `AQX_HOME`, which moves the rest of `~/aqx` too.
 
 The folder holds the library in `Scripts`, CoreBots and script options in `options`, and compiled scripts in `cache`. aqx doesn't read the data folder of Skua itself. To keep options that you set in Skua, copy its `options` folder into `~/aqx/skua`.
+
+## Known issues
+
+- `Story/LordsofChaos/Core13LoC.cs` gets stuck on `Speak to Dage The Good` (`2918`) and relogs every second, because aqx doesn't run the map code that completes it.
+  - Fix: in `overworld`, collect map item `1804` and turn in `2918`.
