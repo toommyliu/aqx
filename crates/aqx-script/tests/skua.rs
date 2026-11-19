@@ -24,7 +24,9 @@ public class Hello
         bot.Log($"picked {Ioc.Default.GetRequiredService<IFileDialogService>().OpenFile() ?? "nothing"}");
         int runs = 0;
         bot.Handlers.RegisterHandler(5, _ => ++runs < 3, "count");
-        bot.Sleep(400);
+        for (int i = 0; i < 100 && runs < 3; i++)
+            bot.Sleep(20);
+        bot.Sleep(300);
         bot.Log($"handler ran {runs} times");
     }
 }
