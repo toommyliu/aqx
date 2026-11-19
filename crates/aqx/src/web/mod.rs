@@ -387,7 +387,14 @@ impl Web {
                     let current = self.running_args(&running, account, &path);
                     detour(runs.detours.entry(key).or_default(), current, args);
                 } else if !asked.queue {
-                    runs.detours.remove(&key);
+                    let queued: Vec<&[Pair]> = running
+                        .get(account)
+                        .map_or(&[][..], |a| a.queue.as_slice())
+                        .iter()
+                        .filter(|q| resolve(&self.home, &q.script.path.to_string_lossy()) == path)
+                        .map(|q| q.script.args.as_slice())
+                        .collect();
+                    rejoin(runs.detours.entry(key).or_default(), &args, &queued);
                 }
             }
             if !asked.temporary {
@@ -847,6 +854,13 @@ fn offered<'a>(running: Option<&'a [Pair]>, detours: &'a [Detour]) -> Option<&'a
         .map_or(running, |detour| detour.before.as_deref())
 }
 
+fn rejoin(detours: &mut Vec<Detour>, args: &[Pair], queued: &[&[Pair]]) {
+    detours.retain(|detour| detour.args != args && queued.contains(&detour.args.as_slice()));
+    for detour in detours {
+        detour.before = Some(args.to_vec());
+    }
+}
+
 fn detour(detours: &mut Vec<Detour>, running: Option<&[Pair]>, args: Vec<Pair>) {
     let before = offered(running, detours).map(<[Pair]>::to_vec);
     detours.retain(|detour| detour.args != args);
@@ -1118,6 +1132,28 @@ mod tests {
             offered(Some(&later), &detours),
             Some(later.as_slice()),
             "once the account runs other args, the temporary runs are ignored"
+        );
+    }
+
+    #[test]
+    fn a_normal_run_keeps_queued_temporary_runs_going_back_to_it() {
+        let before = pairs(&[("target", "200")]);
+        let running = pairs(&[("target", "5")]);
+        let queued = pairs(&[("target", "9")]);
+        let normal = pairs(&[("target", "300")]);
+        let mut detours = Vec::new();
+        detour(&mut detours, Some(&before), running.clone());
+        detour(&mut detours, Some(&running), queued.clone());
+        rejoin(&mut detours, &normal, &[queued.as_slice()]);
+        assert_eq!(
+            offered(Some(&queued), &detours),
+            Some(normal.as_slice()),
+            "the queued temporary run goes back to the normal run that replaced the first"
+        );
+        assert_eq!(
+            offered(Some(&running), &detours),
+            Some(running.as_slice()),
+            "the replaced temporary run is forgotten"
         );
     }
 
