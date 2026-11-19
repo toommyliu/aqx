@@ -110,5 +110,6 @@ The folder holds the library in `Scripts`, CoreBots and script options in `optio
 
 ## Known issues
 
-- `Story/LordsofChaos/Core13LoC.cs` gets stuck on `Speak to Dage The Good` (`2918`) and relogs every second, because aqx doesn't run the map code that completes it.
-  - Fix: in `overworld`, collect map item `1804` and turn in `2918`.
+### Map code
+
+Some maps run their own code in the game client. It reacts to kills, deaths, clicks, or entering a cell by collecting a map item, turning in a quest, or moving the player. aqx doesn't run map code, so a script waiting on one of those steps waits forever. It usually shows up as a loop where the script retries a quest, relogs, or keeps attacking. A workaround is to do those steps by hand, then restart the script.
