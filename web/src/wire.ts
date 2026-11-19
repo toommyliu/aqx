@@ -266,6 +266,7 @@ export const api = {
     runs: { account: number; name: string; args: [string, string][] }[];
     shared: boolean;
     queue: boolean;
+    temporary: boolean;
   }) => call<Outcome[] | { problems: Problem[] }>("/api/run", body),
   args: (script: string, accounts: number[]) =>
     call<Declared>(`/api/args?${q({ script, accounts: accounts.join(",") })}`),
