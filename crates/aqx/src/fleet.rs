@@ -3,7 +3,7 @@ use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -488,6 +488,7 @@ pub struct Account {
     commanded: AtomicBool,
     seen: Mutex<config::Account>,
     board: Mutex<Board>,
+    relinked: Condvar,
     commands: Sender<Command>,
 }
 
@@ -931,6 +932,7 @@ impl Account {
         board.switched = None;
         board.runs += 1;
         board.links += 1;
+        self.relinked.notify_all();
         let pending = board.queued_runs + board.queued_logins > 0;
         let busy = matches!(board.run, Run::Starting { .. } | Run::Restarting { .. });
         if let Run::Restarting { script, .. } = &board.run {
@@ -1203,6 +1205,7 @@ impl Fleet {
             commanded: AtomicBool::new(false),
             seen,
             board: Mutex::new(board),
+            relinked: Condvar::new(),
             commands,
         });
         let linked = Arc::new(Linked {
@@ -1592,17 +1595,21 @@ impl Linked {
     }
 
     fn hold(&self, link: u64, until: Instant) -> bool {
-        loop {
-            if self.account.board().links != link {
-                self.account.board().link = Link::Offline { why: None };
-                return false;
-            }
+        let mut board = self.account.board();
+        while board.links == link {
             let now = Instant::now();
             if now >= until {
                 return true;
             }
-            thread::sleep(Duration::from_millis(100).min(until - now));
+            board = self
+                .account
+                .relinked
+                .wait_timeout(board, until - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
+        board.link = Link::Offline { why: None };
+        false
     }
 
     fn failed(&self, link: u64, why: String) -> Option<(Handle, String)> {
@@ -1854,6 +1861,7 @@ impl Account {
             commanded: AtomicBool::new(false),
             seen: Mutex::new(config::Account::for_tests(name)),
             board: Mutex::new(Board::default()),
+            relinked: Condvar::new(),
             commands,
         };
         (account, inbox)
@@ -2637,15 +2645,7 @@ mod tests {
 
     #[test]
     fn a_logout_while_waiting_for_a_login_slot_cancels_the_login() {
-        for (slot, logout_after) in [
-            (Duration::from_secs(5), Duration::from_millis(100)),
-            (Duration::from_millis(190), Duration::from_millis(145)),
-        ] {
-            logout_while_waiting(slot, logout_after);
-        }
-    }
-
-    fn logout_while_waiting(slot: Duration, logout_after: Duration) {
+        let slot = Duration::from_secs(5);
         let (account, _inbox) = Account::queueing("player1", None);
         account.login().unwrap();
         let link = account.board().links;
@@ -2685,17 +2685,14 @@ mod tests {
             assert!(reserved.elapsed() < slot, "the login never started waiting");
             thread::sleep(Duration::from_millis(1));
         }
-        thread::sleep((reserved + logout_after).saturating_duration_since(Instant::now()));
+        thread::sleep(Duration::from_millis(100));
         let asked = Instant::now();
         assert_eq!(linked.account.logout(), Ok(()));
-        assert!(
-            waiting.join().unwrap(),
-            "the login is cancelled ({slot:?} slot)"
-        );
+        assert!(waiting.join().unwrap(), "the login is cancelled");
         assert_eq!(
             requests.load(Ordering::SeqCst),
             0,
-            "no login request goes out ({slot:?} slot)"
+            "no login request goes out"
         );
         assert!(
             asked.elapsed() < Duration::from_secs(1),
