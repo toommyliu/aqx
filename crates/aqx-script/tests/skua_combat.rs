@@ -153,8 +153,10 @@ public class Rest
         Stopwatch clock = Stopwatch.StartNew();
         bot.Player.Rest();
         long quick = clock.ElapsedMilliseconds;
+        bot.Wait.ForActionCooldown("rest");
+        clock.Restart();
         bot.Player.Rest(true);
-        bot.Log($"rest {(quick < 1000 ? "returned" : "blocked")}, full rest gave up {(clock.ElapsedMilliseconds - quick < 5000 ? "after 2 s" : "late")}");
+        bot.Log($"rest {(quick < 1000 ? "returned" : "blocked")}, full rest gave up {(clock.ElapsedMilliseconds < 5000 ? "after 2 s" : "late")}");
     }
 }
 "#;

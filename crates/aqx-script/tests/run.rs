@@ -1211,6 +1211,7 @@ fn follower() -> PathBuf {
 #[test]
 fn the_follower_example_equips_its_class_and_keeps_to_the_leaders_cell() {
     let (sent, frames) = mpsc::channel();
+    let (joined, together) = mpsc::channel();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
         peer.serve_with_items(follower_items());
@@ -1219,6 +1220,9 @@ fn the_follower_example_equips_its_class_and_keeps_to_the_leaders_cell() {
             json!({"cmd": "equipItem", "uid": 7, "ItemID": 50}),
         ));
         peer.expect(&packet::move_to_cell(AreaId(42), "r2", "Left"));
+        together
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the follower never reported being with Player3 in r2");
         peer.send("%xt%uotls%-1%player3%strFrame:r6,strPad:Up%");
         loop {
             let frame = peer.recv();
@@ -1251,7 +1255,11 @@ fn the_follower_example_equips_its_class_and_keeps_to_the_leaders_cell() {
         &cancel,
         &[("target", "Player3"), ("class", "necromancer")],
         Arc::new(NoAccount),
-        |_| {},
+        move |output| {
+            if matches!(output, Output::Status(text) if text == "with Player3 in r2") {
+                let _ = joined.send(());
+            }
+        },
     );
     finish(harness);
     let seen = watcher.join().unwrap();
