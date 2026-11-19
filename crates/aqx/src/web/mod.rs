@@ -29,6 +29,13 @@ type Pair = (String, String);
 
 type Remembered = HashMap<(PathBuf, String, Option<String>), String>;
 
+struct Detour {
+    args: Vec<Pair>,
+    before: Option<Vec<Pair>>,
+}
+
+type Detours = HashMap<(PathBuf, String), Vec<Detour>>;
+
 pub struct Web {
     config: PathBuf,
     home: PathBuf,
@@ -42,6 +49,7 @@ struct Runs {
     history: History,
     recent: Recent,
     remembered: Remembered,
+    detours: Detours,
     hidden: BTreeSet<PathBuf>,
 }
 
@@ -86,6 +94,7 @@ pub fn serve(config: PathBuf, port: u16, up: bool, tailnet: bool) -> anyhow::Res
             history,
             recent,
             remembered: Remembered::new(),
+            detours: Detours::new(),
             hidden: load_hidden(),
         }),
         updating: Mutex::new(()),
@@ -278,22 +287,20 @@ impl Web {
                 .map(|(name, _)| name)
                 .collect::<Vec<_>>(),
         };
+        let runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
         let accounts: Vec<(String, Option<&[Pair]>)> = r
             .indices("accounts")
             .into_iter()
             .filter_map(|i| {
-                let current = running
-                    .get(i)
-                    .filter(|a| {
-                        a.script
-                            .as_deref()
-                            .is_some_and(|s| resolve(&self.home, s) == path)
-                    })
-                    .and_then(|a| a.args.as_deref());
-                Some((names.get(i)?.clone(), current))
+                let name = names.get(i)?;
+                let current = self.running_args(&running, i, &path);
+                let detours = runs.detours.get(&(path.clone(), name.clone()));
+                Some((
+                    name.clone(),
+                    offered(current, detours.map_or(&[], Vec::as_slice)),
+                ))
             })
             .collect();
-        let runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
         let recall = |name: &str, account: Option<&str>| {
             runs.remembered
                 .get(&(path.clone(), name.to_owned(), account.map(str::to_owned)))
@@ -324,12 +331,24 @@ impl Web {
     fn run(&self, asked: RunRequest) -> Result<Reply, Failure> {
         let path = self.script_path(&asked.script)?;
         let declared = declared(&path)?;
-        let names = self.roster()?;
+        let running = match self.session()? {
+            Some(session) => shown(&session)?,
+            None => Vec::new(),
+        };
+        let names: Vec<String> = if running.is_empty() {
+            self.roster_of(None)?
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        } else {
+            running.iter().map(|a| a.name.clone()).collect()
+        };
         let mut problems = Vec::new();
         let mut actions = Vec::new();
         let mut answers = Vec::new();
+        let mut detours = Vec::new();
         for run in &asked.runs {
-            let name = names.get(run.account).map(|(name, _)| name.clone());
+            let name = names.get(run.account).cloned();
             let (mut args, values) = split_args(&declared, &asked.extra, &run.args);
             for (arg, given) in values {
                 answers.push((arg.name.clone(), name.clone(), given.to_owned()));
@@ -349,6 +368,7 @@ impl Web {
                 path: path.clone(),
                 args,
             };
+            detours.push((run.account, run.name.clone(), script.args.clone()));
             let action = if asked.queue {
                 Action::Enqueue(script)
             } else {
@@ -361,26 +381,43 @@ impl Web {
         }
         {
             let mut runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
-            let shared = asked.runs.len() > 1 && asked.shared;
-            for (arg, account, value) in answers {
-                let account = if shared { None } else { account };
-                runs.remembered.insert((path.clone(), arg, account), value);
+            for (account, name, args) in detours {
+                let key = (path.clone(), name);
+                if asked.temporary {
+                    let current = self.running_args(&running, account, &path);
+                    detour(runs.detours.entry(key).or_default(), current, args);
+                } else if !asked.queue {
+                    let queued: Vec<&[Pair]> = running
+                        .get(account)
+                        .map_or(&[][..], |a| a.queue.as_slice())
+                        .iter()
+                        .filter(|q| resolve(&self.home, &q.script.path.to_string_lossy()) == path)
+                        .map(|q| q.script.args.as_slice())
+                        .collect();
+                    rejoin(runs.detours.entry(key).or_default(), &args, &queued);
+                }
             }
-            runs.recent.add(Script {
-                path: path.clone(),
-                args: asked.extra.clone(),
-            });
-            if runs.hidden.remove(&path) && runs.save_hidden().is_err() {
-                eprintln!("aqx: couldn't save the hidden recent scripts");
-            }
-            let Runs {
-                history, recent, ..
-            } = &*runs;
-            if let Err(e) = history.save(recent) {
-                eprintln!("aqx: couldn't save the run history: {e}");
+            if !asked.temporary {
+                remember(&mut runs, &path, &asked, answers);
             }
         }
         self.perform(actions)
+    }
+
+    fn running_args<'a>(
+        &self,
+        running: &'a [Shown],
+        account: usize,
+        path: &Path,
+    ) -> Option<&'a [Pair]> {
+        running
+            .get(account)
+            .filter(|a| {
+                a.script
+                    .as_deref()
+                    .is_some_and(|s| resolve(&self.home, s) == path)
+            })
+            .and_then(|a| a.args.as_deref())
     }
 
     fn recent(&self) -> Reply {
@@ -670,6 +707,8 @@ struct RunRequest {
     shared: bool,
     #[serde(default)]
     queue: bool,
+    #[serde(default)]
+    temporary: bool,
 }
 
 #[derive(Deserialize)]
@@ -782,6 +821,50 @@ fn declared(path: &Path) -> Result<Vec<Arg>, Failure> {
         return Ok(Vec::new());
     }
     aqx_script::script_args(path).map_err(Failure::bad)
+}
+
+fn remember(
+    runs: &mut Runs,
+    path: &Path,
+    asked: &RunRequest,
+    answers: Vec<(String, Option<String>, String)>,
+) {
+    let shared = asked.runs.len() > 1 && asked.shared;
+    for (arg, account, value) in answers {
+        let account = if shared { None } else { account };
+        runs.remembered
+            .insert((path.to_path_buf(), arg, account), value);
+    }
+    runs.recent.add(Script {
+        path: path.to_path_buf(),
+        args: asked.extra.clone(),
+    });
+    if runs.hidden.remove(path) && runs.save_hidden().is_err() {
+        eprintln!("aqx: couldn't save the hidden recent scripts");
+    }
+    if let Err(e) = runs.history.save(&runs.recent) {
+        eprintln!("aqx: couldn't save the run history: {e}");
+    }
+}
+
+fn offered<'a>(running: Option<&'a [Pair]>, detours: &'a [Detour]) -> Option<&'a [Pair]> {
+    detours
+        .iter()
+        .find(|detour| running == Some(detour.args.as_slice()))
+        .map_or(running, |detour| detour.before.as_deref())
+}
+
+fn rejoin(detours: &mut Vec<Detour>, args: &[Pair], queued: &[&[Pair]]) {
+    detours.retain(|detour| detour.args != args && queued.contains(&detour.args.as_slice()));
+    for detour in detours {
+        detour.before = Some(args.to_vec());
+    }
+}
+
+fn detour(detours: &mut Vec<Detour>, running: Option<&[Pair]>, args: Vec<Pair>) {
+    let before = offered(running, detours).map(<[Pair]>::to_vec);
+    detours.retain(|detour| detour.args != args);
+    detours.push(Detour { args, before });
 }
 
 fn prefill(
@@ -1018,6 +1101,59 @@ mod tests {
             form(&[("player1", Some(&running)), ("player2", None)]),
             (vec![some("200"), some("50")], some("100")),
             "an account not running the script falls back to its remembered answer"
+        );
+    }
+
+    #[test]
+    fn the_args_form_offers_the_args_from_before_a_temporary_run() {
+        let before = pairs(&[("target", "200")]);
+        let first = pairs(&[("target", "5")]);
+        let queued = pairs(&[("target", "9")]);
+        let mut detours = Vec::new();
+        detour(&mut detours, Some(&before), first.clone());
+        assert_eq!(
+            offered(Some(&first), &detours),
+            Some(before.as_slice()),
+            "while the temporary args run, the form offers the ones from before"
+        );
+        detour(&mut detours, Some(&first), queued.clone());
+        assert_eq!(
+            offered(Some(&first), &detours),
+            Some(before.as_slice()),
+            "queueing a second temporary run keeps the first one going back"
+        );
+        assert_eq!(
+            offered(Some(&queued), &detours),
+            Some(before.as_slice()),
+            "the queued temporary run goes back to the args from before the first"
+        );
+        let later = pairs(&[("target", "300")]);
+        assert_eq!(
+            offered(Some(&later), &detours),
+            Some(later.as_slice()),
+            "once the account runs other args, the temporary runs are ignored"
+        );
+    }
+
+    #[test]
+    fn a_normal_run_keeps_queued_temporary_runs_going_back_to_it() {
+        let before = pairs(&[("target", "200")]);
+        let running = pairs(&[("target", "5")]);
+        let queued = pairs(&[("target", "9")]);
+        let normal = pairs(&[("target", "300")]);
+        let mut detours = Vec::new();
+        detour(&mut detours, Some(&before), running.clone());
+        detour(&mut detours, Some(&running), queued.clone());
+        rejoin(&mut detours, &normal, &[queued.as_slice()]);
+        assert_eq!(
+            offered(Some(&queued), &detours),
+            Some(normal.as_slice()),
+            "the queued temporary run goes back to the normal run that replaced the first"
+        );
+        assert_eq!(
+            offered(Some(&running), &detours),
+            Some(running.as_slice()),
+            "the replaced temporary run is forgotten"
         );
     }
 

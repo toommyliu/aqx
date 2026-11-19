@@ -133,6 +133,7 @@ async function runNow(script: string, extra: [string, string][], queue: boolean)
         runs: targetsOf(on).map((t) => ({ ...t, args: [] })),
         shared: true,
         queue,
+        temporary: false,
       });
       if (Array.isArray(outcome)) report(outcome, `${queue ? "queued" : "running"} ${shownName(script)}`);
     };
@@ -770,6 +771,7 @@ function RunArgs(props: { script: string; extra: [string, string][]; queue: bool
   const asked = createQuery(() => ({ queryKey: ["args", props.script, on], queryFn: () => api.args(props.script, on), staleTime: 0 }));
   const declared = () => asked.data;
   const [shared, setShared] = createSignal(true);
+  const [temporary, setTemporary] = createSignal(false);
   const [answers, setAnswers] = createSignal<Record<string, string>>({});
   const [problems, setProblems] = createSignal<Problem[]>([]);
   const [busy, setBusy] = createSignal(false);
@@ -825,6 +827,7 @@ function RunArgs(props: { script: string; extra: [string, string][]; queue: bool
         extra: [...sent],
         shared: !perAccount(),
         queue,
+        temporary: temporary(),
         runs: targetsOf(on).map(({ account, name }) => ({
           account,
           name,
@@ -985,6 +988,10 @@ function RunArgs(props: { script: string; extra: [string, string][]; queue: bool
             onInput={(e) => setExtra(e.currentTarget.value)}
           />
         </div>
+        <label class="check">
+          <input type="checkbox" checked={temporary()} onChange={(e) => setTemporary(e.currentTarget.checked)} />
+          Just this run <span class="muted">don't remember these args</span>
+        </label>
       </form>
     </Modal>
   );
