@@ -773,6 +773,19 @@ table.list td .icon-button {
   height: 22px;
 }
 
+table.list td .equip {
+  min-height: 20px;
+  margin-left: 4px;
+  padding: 0 6px;
+}
+
+@media (hover: hover) {
+  table.list tr:not(:hover, :focus-within) .equip {
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+
 .queued-actions {
   display: flex;
   flex: none;

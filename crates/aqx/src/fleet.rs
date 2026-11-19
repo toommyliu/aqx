@@ -1012,6 +1012,17 @@ impl Account {
         });
         Ok(())
     }
+
+    pub fn equip(self: &Arc<Self>, item: ItemId) -> Result<(), &'static str> {
+        let pending = self.board().session().ok_or("offline")?.equip(item);
+        let account = Arc::clone(self);
+        thread::spawn(move || {
+            if let Err(e) = pending.wait() {
+                account.say(format!("couldn't equip that item: {e}"));
+            }
+        });
+        Ok(())
+    }
 }
 
 fn queued_at(board: &Board, id: u64) -> Result<usize, &'static str> {
