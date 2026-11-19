@@ -127,6 +127,7 @@ export type Action =
   | "clear_queue"
   | "next"
   | { pick_up: number[] }
+  | { equip: number }
   | { registry: Edit }
   | { record: null }
   | "stop_recording";

@@ -851,8 +851,16 @@ const ITEM_CATEGORIES: readonly [ItemCategory, string][] = [
 
 type ItemFilter = "all" | "equipped" | ItemCategory;
 const ITEM_FILTERS: readonly [ItemFilter, string][] = [["all", "All"], ["equipped", "Equipped"], ...ITEM_CATEGORIES];
+const WEARABLE: ReadonlySet<ItemCategory> = new Set(["classes", "weapons", "armor", "helms", "capes", "pets", "accessories", "consumables"]);
 
-function Stacks(props: { label: string; stacks: Stack[]; note?: string; categories?: boolean; account?: number }) {
+function Stacks(props: {
+  label: string;
+  stacks: Stack[];
+  note?: string;
+  categories?: boolean;
+  account?: number;
+  equip?: (item: Stack) => void;
+}) {
   const [selected, setSelected] = createSignal<ItemFilter>("all");
   createEffect(on(() => props.account, () => setSelected("all"), { defer: true }));
   const find = createMemo(() => finder(search()));
@@ -909,6 +917,13 @@ function Stacks(props: { label: string; stacks: Stack[]; note?: string; categori
                 <Found text={s.name} find={find()} />
                 <Show when={s.equipped}>
                   <span class="badge">equipped</span>
+                </Show>
+                <Show when={!s.equipped && WEARABLE.has(s.category) && props.equip}>
+                  {(equip) => (
+                    <button type="button" class="ghost small equip" onClick={() => equip()(s)}>
+                      Equip
+                    </button>
+                  )}
                 </Show>
               </td>
               <td class="num">
@@ -1348,6 +1363,7 @@ function Lists(props: { game: Game; view: View; index: number; registered: Regis
           categories
           account={props.index}
           stacks={g().inventory}
+          equip={(s) => void act({ equip: s.id }, `equipping ${s.name}`, [props.index])}
           note={`bag ${g().bag_used}/${g().bag_slots} · misc ${g().misc_used}`}
         />
       </Match>

@@ -178,7 +178,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 16;
+pub const PROTOCOL: u32 = 17;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -1285,6 +1285,7 @@ mod tests {
                 args: vec![("a".into(), "1".into())],
             },
             Action::PickUp(vec![1]),
+            Action::Equip(1),
             Action::Registry(aqx_script::Edit::RegisterDrop(aqx_script::Item::Id(1))),
             Action::Registry(aqx_script::Edit::UnregisterDrop(aqx_script::Item::Name(
                 "Bone Dust".into(),
@@ -1393,7 +1394,7 @@ mod tests {
              =Online =Paused =Resumable =Running =Stalled =aqx =chat =clear_queue =game =login \
              =login_only =logout =next =pause =received =relogin =restart =resume =script =sent \
              =server =stop =stop_recording Act Act.account Act.action Act.action.enqueue \
-             Act.action.enqueue.args Act.action.enqueue.path Act.action.move_queued \
+             Act.action.enqueue.args Act.action.enqueue.path Act.action.equip Act.action.move_queued \
              Act.action.move_queued.id Act.action.move_queued.to Act.action.pick_up Act.action.record \
              Act.action.registry Act.action.registry.register_drop Act.action.registry.register_quest \
              Act.action.registry.register_quest.id Act.action.registry.register_quest.reward \
@@ -1459,7 +1460,7 @@ mod tests {
              Resumable.script.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (16, pinned),
+            (17, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }
