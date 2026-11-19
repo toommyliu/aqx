@@ -50,7 +50,7 @@ mod quests;
 mod reconnect;
 mod shops;
 
-pub const DEFAULT_CLIENT_VERSION: &str = "5.32";
+pub const DEFAULT_CLIENT_VERSION: &str = "5.33";
 
 const SOCKET: mio::Token = mio::Token(0);
 const WAKER: mio::Token = mio::Token(1);
