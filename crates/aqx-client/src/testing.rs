@@ -377,7 +377,7 @@ fn door_setters(cells: &[MapCell]) -> Vec<u8> {
             out.push(byte | 128);
         }
     }
-    let doors: Vec<_> = (1..)
+    let doors: Vec<_> = (0..)
         .zip(cells)
         .flat_map(|(frame, cell)| cell.doors.iter().map(move |door| (frame, door)))
         .collect();
@@ -433,10 +433,20 @@ fn door_setters(cells: &[MapCell]) -> Vec<u8> {
     }
     abc.extend([0, 0, 1, 0, 0]);
     u30(&mut abc, names.len());
-    for (n, (instance, _, cell, pad)) in names.iter().enumerate() {
+    for (n, ((frame, _), (instance, _, cell, pad))) in doors.iter().zip(&names).enumerate() {
         u30(&mut abc, n + 1);
         abc.extend([2, 1, 0, 1]);
+        let first = *frame as u8 + 1;
         let mut code = vec![0xd0, 0x30];
+        code.extend([0xd1, 0x24, first, 0xb0, 0x12, 0, 0, 0]);
+        code.extend([0xd1, 0x24, first, 0xae, 0x12, 0, 0, 0]);
+        code.extend([0x20, 0x20, 0xab, 0x96, 0x12, 0, 0, 0]);
+        code.push(0x5d);
+        u30(&mut code, multiname("MainTimeline"));
+        code.push(0xd1);
+        code.push(0x46);
+        u30(&mut code, multiname("MainTimeline"));
+        code.extend([1, 0x29]);
         for (op, operand, property) in [
             (0x2c, string(cell), "tCell"),
             (0x2c, string(pad), "tPad"),

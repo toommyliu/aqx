@@ -173,7 +173,7 @@ fn timeline(body: &[u8]) -> Option<MapFile> {
         })
         .collect();
     for setter in setters.into_iter().filter(|s| Some(&s.class) == document) {
-        let Some(at) = labeled.iter().rposition(|l| l.frame < setter.frame) else {
+        let Some(at) = labeled.iter().rposition(|l| l.frame <= setter.frame) else {
             continue;
         };
         cells[at].doors.extend(setter.door());
@@ -628,7 +628,7 @@ mod abc {
 
     const BARE: &[u8] = &[
         0x02, 0x09, 0x1d, 0x29, 0x2a, 0x2b, 0x30, 0x47, 0x48, 0x57, 0x64, 0x73, 0x82, 0x85, 0xd0,
-        0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7,
+        0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0x96, 0xab, 0xae, 0xb0,
     ];
     const INDEXED: &[u8] = &[
         0x08, 0x5a, 0x5d, 0x5e, 0x62, 0x63, 0x6c, 0x6d, 0x80, 0xf0, 0xf1,
@@ -662,6 +662,7 @@ mod abc {
                 op if BARE.contains(&op) => Some(()),
                 op if INDEXED.contains(&op) => r.u30().map(drop),
                 0x65 => r.u8().map(drop),
+                0x46 => r.u30().and(r.u30()).map(drop),
                 0x0c..=0x1a => r.bytes(3).map(drop),
                 0xef => r.u8().and(r.u30()).and(r.u8()).and(r.u30()).map(drop),
                 _ => None,
