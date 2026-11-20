@@ -1,6 +1,7 @@
 import { toast } from "solid-sonner";
 import { type Accessor, batch, createEffect, createSignal, on, onCleanup } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
+import { latestFarmGoal, type FarmGoal } from "./farming";
 import { type Account, type Action, type Channel, type Ended, type Line, type Session, type Target, api, follow, isOffline } from "./wire";
 
 export const VIEWS = [
@@ -123,6 +124,7 @@ export function finder(query: string): RegExp | null {
 }
 
 const [log, setLog] = createSignal<Line[]>([]);
+const [farmGoal, setFarmGoal] = createSignal<FarmGoal | null>(null);
 const [logLoading, setLogLoading] = createSignal(true);
 const [ended, setEnded] = createSignal<Ended | null>(null);
 const [connected, setConnected] = createSignal(false);
@@ -172,6 +174,7 @@ export {
   connected,
   dialog,
   ended,
+  farmGoal,
   gameLines,
   log,
   logLoading,
@@ -324,12 +327,16 @@ export function startFeed() {
   createEffect(
     on(selected, (i) => {
       setLog([]);
+      setFarmGoal(null);
       setLogLoading(true);
       let started: number | null = null;
       const stop = follow(i, {
         session: (next) => {
           const startedMs = next.kind === "running" ? next.startedMs : null;
-          if (startedMs !== null && started !== null && startedMs !== started) setLog([]);
+          if (startedMs !== null && started !== null && startedMs !== started) {
+            setLog([]);
+            setFarmGoal(null);
+          }
           if (startedMs !== null) started = startedMs;
           setSession(next);
         },
@@ -339,8 +346,10 @@ export function startFeed() {
           if (selected() !== null && (selected() ?? 0) >= all.length) setSelected(all.length ? 0 : null);
         },
         account: (at, account) => setAccounts(at, reconcile(account)),
-        log: (lines) =>
-          setLog((kept) => keepNewest(kept.concat(lines))),
+        log: (lines) => {
+          setFarmGoal((previous) => latestFarmGoal(lines, previous, current()));
+          setLog((kept) => keepNewest(kept.concat(lines)));
+        },
         ended: setEnded,
         connected: setConnected,
       });
