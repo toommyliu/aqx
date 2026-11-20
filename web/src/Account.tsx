@@ -16,6 +16,7 @@ import {
 import { type AppHotkeyId } from "@tanstack/hotkeys";
 import { createFormatForDisplay, useAppHotkeys } from "@tanstack/solid-hotkeys";
 import { createCountdown } from "./timing";
+import { farmProgress } from "./farming";
 import { pauseOrResume, recordOrStop, recordable, tone } from "./App";
 import { logOut, openPicker, openQueuePicker, openQueuedOptions, openServers, openScriptOptions } from "./Dialogs";
 import {
@@ -23,6 +24,7 @@ import {
   type View,
   act,
   ended,
+  farmGoal,
   finder,
   gameLines,
   isPacket,
@@ -82,10 +84,10 @@ export function AccountPanel(props: { account: Account; index: number }) {
       <div class="panel" id={`panel-${shown()}`} role="tabpanel" aria-labelledby={`tab-${shown()}`}>
         <Switch>
           <Match when={shown() === "log"}>
-            <Log user={a().user} />
+            <Log account={a()} />
           </Match>
           <Match when={shown() === "packets"}>
-            <Log user={a().user} packets />
+            <Log account={a()} packets />
           </Match>
           <Match when={a().game}>
             {(g) => <Lists game={g()} view={shown()} index={props.index} registered={a().registered} />}
@@ -691,15 +693,22 @@ async function copyPacket(line: Line) {
   }
 }
 
-function Log(props: { user: string; packets?: boolean }) {
+function Log(props: { account: Account; packets?: boolean }) {
   let ref!: HTMLDivElement;
   const [stuck, setStuck] = createSignal(true);
   let lastTop = 0;
   const past = () => (session()?.kind === "none" ? ended() : null);
+  const farming = createMemo(() => {
+    const goal = farmGoal();
+    const a = props.account;
+    return goal && !props.packets && session()?.kind === "running" && isRunning(a) && a.script?.toLowerCase().endsWith(".cs")
+      ? farmProgress(goal, a.game)
+      : null;
+  });
   const find = createMemo(() => finder(search()));
   const lines = createMemo(() => {
     const query = find();
-    const source = past() ? lastLines(props.user) : log();
+    const source = past() ? lastLines(props.account.user) : log();
     const wanted = (channel: Channel) => (props.packets ? isPacket(channel) : shows(gameLines(), channel));
     return source.filter((l) => wanted(l.channel) && (!query || query.test(lineText(l))));
   });
@@ -725,6 +734,16 @@ function Log(props: { user: string; packets?: boolean }) {
       <div class="toolbar">
         <Show when={past()}>
           {(e) => <span class="muted small">The session ended at {clock(e().endedMs)}. These are its last lines.</span>}
+        </Show>
+        <Show when={farming()}>
+          {(goal) => (
+            <div class="farm-progress">
+              <span class="muted">Farming</span>
+              <span class="ellipsis" title={hide(goal().item)}>{hide(goal().item)}</span>
+              <progress aria-label={`Farming ${hide(goal().item)}`} value={goal().have} max={goal().need} />
+              <span class="num">{number.format(goal().have)}/{number.format(goal().need)}</span>
+            </div>
+          )}
         </Show>
         <Search label={props.packets ? "Search the packets" : "Search the log"} />
         <span class="visually-hidden" role="status">
