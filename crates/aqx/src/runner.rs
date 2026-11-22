@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::time::{Duration, Instant};
 
 const CLOSING: Duration = Duration::from_secs(10);
 
-use aqx_client::{DeviceId, Event, Handle, Options, Phase, Reconnect, Server, api};
+use aqx_client::{DeviceId, Event, Gear, Handle, Options, Phase, Reconnect, Server, api};
 use aqx_script::skua::SkuaScript;
 use aqx_script::{Cancel, LoadError, Outcome, Output, Script, Start};
 use serde_json::{Map, Value};
@@ -20,6 +21,7 @@ pub struct Login {
     pub relogin: Option<crate::config::Relogin>,
     pub api: Option<String>,
     pub record: Option<crate::record::Recorder>,
+    pub gear: BTreeMap<String, Gear>,
 }
 
 impl Login {
@@ -77,6 +79,10 @@ impl aqx_script::Account for Login {
     fn login_as(&self, server: &str, username: &str, password: &str) -> Result<Handle, String> {
         self.connect_as(server, username, password)
             .map_err(|e| format!("{e:#}"))
+    }
+
+    fn gear(&self) -> BTreeMap<String, Gear> {
+        self.gear.clone()
     }
 }
 

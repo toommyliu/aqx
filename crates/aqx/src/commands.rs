@@ -756,6 +756,7 @@ mod tests {
             recording: None,
             queue: Vec::new(),
             next: None,
+            gear: Vec::new(),
         }
     }
 

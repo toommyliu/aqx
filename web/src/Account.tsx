@@ -90,7 +90,7 @@ export function AccountPanel(props: { account: Account; index: number }) {
             <Log account={a()} packets />
           </Match>
           <Match when={a().game}>
-            {(g) => <Lists game={g()} view={shown()} index={props.index} registered={a().registered} />}
+            {(g) => <Lists game={g()} view={shown()} index={props.index} registered={a().registered} gear={a().gear} />}
           </Match>
         </Switch>
       </div>
@@ -879,6 +879,7 @@ function Stacks(props: {
   categories?: boolean;
   account?: number;
   equip?: (item: Stack) => void;
+  actions?: JSX.Element;
 }) {
   const [selected, setSelected] = createSignal<ItemFilter>("all");
   createEffect(on(() => props.account, () => setSelected("all"), { defer: true }));
@@ -927,6 +928,7 @@ function Stacks(props: {
         <Show when={props.note}>
           <span class="muted small">{props.note}</span>
         </Show>
+        {props.actions}
       </div>
       <Table label={props.label} head={["Item", "Qty"]} empty={rows().length === 0}>
         <For each={rows()}>
@@ -1312,7 +1314,7 @@ function RegisteredQuests(props: { game: Game; registered: Registered; index: nu
   );
 }
 
-function Lists(props: { game: Game; view: View; index: number; registered: Registered | null }) {
+function Lists(props: { game: Game; view: View; index: number; registered: Registered | null; gear: string[] }) {
   const g = () => props.game;
   const find = createMemo(() => finder(search()));
   return (
@@ -1384,6 +1386,25 @@ function Lists(props: { game: Game; view: View; index: number; registered: Regis
           stacks={g().inventory}
           equip={(s) => void act({ equip: s.id }, `equipping ${s.name}`, [props.index])}
           note={`bag ${g().bag_used}/${g().bag_slots} · misc ${g().misc_used}`}
+          actions={
+            <Show when={props.gear.length > 0}>
+              <select
+                class="item-category"
+                aria-label="Equip a gear set"
+                value=""
+                onChange={(e) => {
+                  const set = e.currentTarget.value;
+                  e.currentTarget.value = "";
+                  if (set) void act({ equip_set: set }, `equipping ${set}`, [props.index]);
+                }}
+              >
+                <option value="" disabled>
+                  Equip set…
+                </option>
+                <For each={props.gear}>{(set) => <option value={set}>{set}</option>}</For>
+              </select>
+            </Show>
+          }
         />
       </Match>
       <Match when={props.view === "bank"}>

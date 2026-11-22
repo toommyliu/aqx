@@ -4,6 +4,7 @@ use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike}
 
 const SECRET: &str = "password";
 const SCHEDULE: &str = "schedule";
+const GEAR: &str = "gear";
 
 #[derive(Deserialize)]
 pub struct Form {
@@ -32,7 +33,7 @@ impl Keys {
                 .as_object()
                 .map(|p| {
                     p.keys()
-                        .filter(|k| *k != SECRET && *k != SCHEDULE)
+                        .filter(|k| ![SECRET, SCHEDULE, GEAR].contains(&k.as_str()))
                         .cloned()
                         .collect()
                 })
@@ -68,10 +69,11 @@ pub fn read(text: &str) -> Result<Value, String> {
     Ok(json!({ "defaults": defaults, "accounts": accounts }))
 }
 
-pub fn apply(text: &str, form: Form, keys: &Keys) -> Result<String, String> {
+pub fn apply(text: &str, mut form: Form, keys: &Keys) -> Result<String, String> {
     let mut doc: DocumentMut = text
         .parse()
         .map_err(|e: toml_edit::TomlError| e.to_string())?;
+    form.defaults.remove(GEAR);
     if !form.defaults.is_empty() || doc.contains_key("defaults") {
         let defaults = doc
             .entry("defaults")
@@ -95,6 +97,7 @@ pub fn apply(text: &str, form: Form, keys: &Keys) -> Result<String, String> {
             None => Table::new(),
         };
         let mut fields = account.fields;
+        fields.remove(GEAR);
         let schedule = fields.remove(SCHEDULE);
         set_fields(&mut table, &fields, &keys.account)?;
         set_schedule(&mut table, schedule, &keys.schedule)?;
@@ -250,6 +253,9 @@ mod tests {
 [defaults]
 server = "Twilly" # most of them
 
+[defaults.gear.boss]
+cape = "Cape of Awe"
+
 # the farmer
 [[account]]
 user = "player1"
@@ -276,6 +282,9 @@ password = "secret-two"
 
 [account.args]
 leader = "player1"
+
+[account.gear.boss]
+class = "ArchPaladin"
 "#;
 
     fn keys() -> Keys {
@@ -388,6 +397,11 @@ leader = "player1"
         );
         assert!(saved.contains("password = \"secret-two\""), "{saved}");
         assert!(saved.contains("auto_start = false"), "{saved}");
+        assert!(
+            saved.contains("[defaults.gear.boss]\ncape = \"Cape of Awe\"")
+                && saved.contains("[account.gear.boss]\nclass = \"ArchPaladin\""),
+            "the form leaves gear sets as written: {saved}"
+        );
         assert!(
             saved.contains("user = \"player3\"\npassword = \"secret-three\""),
             "{saved}"

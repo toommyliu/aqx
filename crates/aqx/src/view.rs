@@ -25,6 +25,7 @@ pub struct Shown {
     pub recording: Option<String>,
     pub queue: Vec<Queued>,
     pub next: Option<Next>,
+    pub gear: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,6 +338,7 @@ impl Shown {
                 script,
                 at_ms: at.as_millisecond(),
             }),
+            gear: account.gear_sets().map(str::to_owned).collect(),
         }
     }
 }

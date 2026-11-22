@@ -243,6 +243,7 @@ fn run_from(with: RunWith) -> anyhow::Result<ExitCode> {
                 delay: config::RELOGIN_DELAY_DEFAULT,
                 attempts: None,
             }),
+            gear: Default::default(),
             api: None,
             record: recorder(&with.record)?,
         };
@@ -282,6 +283,7 @@ fn run_from(with: RunWith) -> anyhow::Result<ExitCode> {
         relogin: account.relogin,
         api: None,
         record: recorder(&with.record)?,
+        gear: account.gear,
     };
     run(
         &script,

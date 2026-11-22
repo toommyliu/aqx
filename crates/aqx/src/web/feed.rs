@@ -266,6 +266,7 @@ pub fn offline(account: &config::Account) -> Shown {
         recording: None,
         queue: Vec::new(),
         next: None,
+        gear: account.gear.keys().cloned().collect(),
     }
 }
 

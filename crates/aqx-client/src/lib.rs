@@ -6,6 +6,7 @@ mod combat;
 mod enhancement;
 mod event;
 mod faction;
+mod gear;
 mod inventory;
 mod map;
 mod player;
@@ -26,6 +27,7 @@ pub use combat::Readiness;
 pub use enhancement::Enhancement;
 pub use event::{Direction, Event, Holder, NoticeKind, Place};
 pub use faction::Faction;
+pub use gear::{Gear, Missing};
 pub use inventory::{DropOffer, Item, ItemDetails, Pool, TempItem};
 pub use player::{BoostKind, Boosts, Me, Skill, SkillDetails, SkillTarget, Stats};
 pub use quest::{

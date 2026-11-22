@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aqx_client::{
-    ActionError, CombatState, DeviceId, Direction, Event, Handle, ItemId, NoticeKind, Phase,
+    ActionError, CombatState, DeviceId, Direction, Event, Gear, Handle, ItemId, NoticeKind, Phase,
     Server, Spot, api,
 };
 use aqx_script::{Cancel, Edit, Level, Outcome, Output, Registered};
@@ -485,6 +485,8 @@ pub struct Account {
     room: Option<u32>,
     stall_after: Duration,
     on_stall: OnStall,
+    gear: BTreeMap<String, Gear>,
+    gearing: AtomicBool,
     commanded: AtomicBool,
     seen: Mutex<config::Account>,
     board: Mutex<Board>,
@@ -1015,6 +1017,34 @@ impl Account {
         Ok(())
     }
 
+    pub fn gear_sets(&self) -> impl Iterator<Item = &str> {
+        self.gear.keys().map(String::as_str)
+    }
+
+    pub fn equip_set(self: &Arc<Self>, name: &str) -> Result<(), &'static str> {
+        let gear = self.gear.get(name).cloned().ok_or("no such gear set")?;
+        let session = self.board().session().cloned().ok_or("offline")?;
+        if self.gearing.swap(true, Ordering::SeqCst) {
+            return Err("a gear set is still going on");
+        }
+        let (account, name) = (Arc::clone(self), name.to_owned());
+        thread::spawn(move || {
+            match session.equip_gear(&gear, &|| false) {
+                Ok(missing) if missing.is_empty() => account.say(format!("equipped {name}")),
+                Ok(missing) => {
+                    let lacking: Vec<String> = missing
+                        .iter()
+                        .map(|m| format!("{} ({})", m.item, m.why))
+                        .collect();
+                    account.say(format!("equipped {name} without {}", lacking.join(", ")));
+                }
+                Err(e) => account.say(format!("couldn't equip {name}: {e}")),
+            }
+            account.gearing.store(false, Ordering::SeqCst);
+        });
+        Ok(())
+    }
+
     pub fn equip(self: &Arc<Self>, item: ItemId) -> Result<(), &'static str> {
         let pending = self.board().session().ok_or("offline")?.equip(item);
         let account = Arc::clone(self);
@@ -1202,6 +1232,8 @@ impl Fleet {
             room: config.room,
             stall_after: config.stall_after,
             on_stall: config.on_stall,
+            gear: config.gear.clone(),
+            gearing: AtomicBool::new(false),
             commanded: AtomicBool::new(false),
             seen,
             board: Mutex::new(board),
@@ -1220,6 +1252,7 @@ impl Fleet {
                 relogin: config.relogin,
                 api: None,
                 record: None,
+                gear: config.gear,
             },
         });
         thread::Builder::new()
@@ -1815,6 +1848,10 @@ impl aqx_script::Account for Linked {
         self.connect(server, username, password)
             .map_err(Failure::into_reason)
     }
+
+    fn gear(&self) -> BTreeMap<String, Gear> {
+        self.login.gear.clone()
+    }
 }
 
 #[cfg(test)]
@@ -1858,6 +1895,8 @@ impl Account {
             room: None,
             stall_after: Duration::from_secs(300),
             on_stall: OnStall::Warn,
+            gear: BTreeMap::new(),
+            gearing: AtomicBool::new(false),
             commanded: AtomicBool::new(false),
             seen: Mutex::new(config::Account::for_tests(name)),
             board: Mutex::new(Board::default()),
@@ -1918,6 +1957,7 @@ mod tests {
                 relogin: None,
                 api: None,
                 record: None,
+                gear: BTreeMap::new(),
             },
         })
     }
@@ -2675,6 +2715,7 @@ mod tests {
                 relogin: None,
                 api: Some(host),
                 record: None,
+                gear: BTreeMap::new(),
             },
         });
         let waiting = {

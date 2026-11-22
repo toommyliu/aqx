@@ -49,6 +49,7 @@ aqx looks for `./aqx.toml`, then `~/aqx/aqx.toml`. Set `AQX_HOME` to replace `~/
 | `resume` | After `aqx down`, `ctrl+c` or a crash, the next session brings back the script and queue the account had. See [Resume](#resume). Defaults to `false`. |
 | `stall_after` | How long a running script can go without progress before the account counts as stalled, like `"90s"`, `"5m"` or `"1h"`. Progress is a kill, an item change, a quest turn-in or a map join. Defaults to `"5m"`. |
 | `on_stall` | What a stall does: `warn` logs a warning, `restart` restarts the script, and `relogin` logs out, back in, and starts the script again. Defaults to `warn`. |
+| `gear` | Named sets of gear to equip in one step. See [Gear sets](#gear-sets). |
 
 ## Schedules
 
@@ -75,6 +76,38 @@ When a schedule comes due:
 A scheduled script that throws doesn't restart, even with `restart_on_error` on. aqx logs the error and moves on to the next script. A manual stop holds the queue as usual.
 
 Schedules fire only while a session runs, and a session with schedules keeps running when every account goes offline. A schedule never runs late. One missed while the session was down doesn't run, and one that comes due more than a minute late, like when the computer sleeps through it, is skipped and logged. AQW's daily quests reset at midnight US Eastern time, so `at = "00:00"` with `tz = "America/New_York"` runs right after the reset.
+
+## Gear sets
+
+A gear set names the items to wear for a job. Put the pieces every account shares under `[defaults.gear.NAME]`, and the pieces one account wears differently under that account's `[account.gear.NAME]`:
+
+```toml
+[defaults.gear.boss]
+weapon = "Necrotic Sword of Doom"
+cape = "Cape of Awe"
+consumable = "Scroll of Enrage"
+use = ["Potent Battle Elixir"]
+
+[[account]]
+user = "player1"
+password = "change-me"
+
+[account.gear.boss]
+class = "Legion Revenant"
+```
+
+player1's `boss` set is Legion Revenant plus every piece in the default set. An account's set replaces only the keys it names, so `use = []` takes the default elixirs out of that account's set. An account without its own `boss` set uses the default one as it is.
+
+| Key | Meaning |
+| --- | --- |
+| `class` | Class to equip. |
+| `weapon`, `helm`, `armor`, `cape`, `pet` | Items to equip. |
+| `use` | Items to use once while gearing up, like elixirs and potions. |
+| `consumable` | Item to leave in the consumable slot. |
+
+Items match by name, ignoring case. Equipping a set puts on the class first, then the other pieces, then uses each item in `use`, and puts `consumable` in the consumable slot last. A potion in `use` goes through the consumable slot, so `consumable` ends up there whatever `use` holds. aqx leaves combat first, and takes an item out of the bank when it isn't in the inventory.
+
+An item that can't go on doesn't stop the rest of the set. That covers an item that's missing, needs an enhancement or doesn't fit in the bag, and an item in `use` that the server doesn't take within 10 seconds. Scripts get the list of those items from `inventory.equipSet`. In the web UI, an account with gear sets has an Equip set menu in its Inventory tab, and the account's log lists what didn't go on.
 
 ## Skua updates
 

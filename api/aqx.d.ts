@@ -184,6 +184,21 @@ export interface Server {
     readonly players: number;
     readonly capacity: number;
 }
+/** A gear set from aqx.toml, with the account's pieces over the defaults. Unset slots are null. */
+export interface GearSet {
+    readonly class: string | null;
+    readonly weapon: string | null;
+    readonly helm: string | null;
+    readonly armor: string | null;
+    readonly cape: string | null;
+    readonly pet: string | null;
+    readonly consumable: string | null;
+    readonly use: readonly string[];
+}
+export interface Missing {
+    readonly item: string;
+    readonly why: string;
+}
 export interface QuestRegistration {
     readonly id: number;
     readonly reward?: ItemRef;
@@ -481,6 +496,14 @@ export declare const inventory: InventoryFields & {
     unequip(item: ItemRef): Action<void>;
     /** For the slotted consumable, use combat.useSkill(5). */
     use(item: ItemRef): Action<void>;
+    /** The account's gear set by that name in aqx.toml. */
+    gear(name: string): GearSet | undefined;
+    /**
+     * Leaves combat, then equips the class, the other pieces, each item in
+     * `use`, and the consumable last, taking items out of the bank as needed.
+     * Resolves to the items that couldn't go on and why; empty when all did.
+     */
+    equipSet(name: string): Action<readonly Missing[]>;
 };
 export declare const bank: BankFields & {
     load(): Action<readonly Item[]>;

@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use aqx_client::testing::{Harness, Peer, json_message, move_to_area};
 use aqx_client::{ActionError, Aim, MapItemId, MonMapId, Options, Update};
-use aqx_client::{Handle, Server};
+use aqx_client::{Gear, Handle, Server};
 use aqx_protocol::packet;
 use aqx_protocol::{AreaId, EntityId, ItemId, QuestId, ShopId};
 use aqx_script::{
@@ -1989,6 +1990,70 @@ fn registered_quests_turn_in_and_accept_again() {
     );
     assert_eq!(outcome, Ok(Outcome::Finished));
     assert_eq!(logs(&outputs), [r#"[{"id":30}]"#, "0"]);
+}
+
+struct Geared;
+
+impl Account for Geared {
+    fn servers(&self) -> Result<Vec<Server>, String> {
+        Err("no server list in this test".into())
+    }
+
+    fn login(&self, _: &str) -> Result<Handle, String> {
+        Err("no logins in this test".into())
+    }
+
+    fn gear(&self) -> BTreeMap<String, Gear> {
+        BTreeMap::from([(
+            "boss".into(),
+            Gear {
+                weapon: Some("default sword".into()),
+                use_items: vec!["Health Potion".into()],
+                ..Gear::default()
+            },
+        )])
+    }
+}
+
+#[test]
+fn a_script_reads_and_equips_the_accounts_gear_sets() {
+    let harness = serve(|_| {});
+    let dir = Dir::new();
+    let path = dir.file(
+        "main.ts",
+        r#"
+        import { inventory, script, type Script } from "aqx";
+
+        export default function* (): Script {
+          script.log(JSON.stringify(inventory.gear("boss")));
+          script.log(String(inventory.gear("toString")));
+          script.log(JSON.stringify(yield* inventory.equipSet("boss")));
+          try {
+            yield* inventory.equipSet("raid");
+          } catch (e) {
+            script.log((e as Error).message);
+          }
+        }"#,
+    );
+    let (outcome, outputs) = run_with(
+        &harness,
+        &path,
+        &Cancel::default(),
+        &[],
+        Arc::new(Geared),
+        |_| {},
+    );
+    finish(harness);
+    assert_eq!(outcome, Ok(Outcome::Finished));
+    assert_eq!(
+        logs(&outputs),
+        [
+            r#"{"class":null,"weapon":"default sword","helm":null,"armor":null,"cape":null,"pet":null,"consumable":null,"use":["Health Potion"]}"#,
+            "undefined",
+            r#"[{"item":"Health Potion","why":"Health Potion can't go in the item slot"}]"#,
+            "no gear set named raid; add [defaults.gear.raid] or [account.gear.raid] to aqx.toml",
+        ]
+    );
 }
 
 struct Relogins(Mutex<Vec<Harness>>);

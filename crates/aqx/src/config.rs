@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use aqx_client::Gear;
 use jiff::tz::TimeZone;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
@@ -27,6 +29,7 @@ const ON_STALL: &str = "What happens when the account stalls. Defaults to warn."
 const KEEP_ALIVE: &str =
     "Keep the session running while every account is offline, until aqx down. Defaults to false.";
 const ARGS: &str = "Arguments for the script. Values are strings, numbers or booleans.";
+const GEAR: &str = "Gear sets by name. An account's set replaces the pieces it names in the [defaults] set of the same name and keeps the rest.";
 const STALL_AFTER_DEFAULT: Duration = Duration::from_secs(300);
 pub const RELOGIN_DELAY_DEFAULT: Duration = Duration::from_secs(5);
 pub const RELOGIN_DELAY_MIN: Duration = Duration::from_secs(4);
@@ -100,6 +103,55 @@ pub struct Settings {
     pub stall_after: Option<Duration>,
     #[schemars(description = ON_STALL)]
     pub on_stall: Option<OnStall>,
+    #[serde(default)]
+    #[schemars(description = GEAR)]
+    pub gear: BTreeMap<String, GearConfig>,
+}
+
+#[derive(Deserialize, JsonSchema, Debug, Default, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GearConfig {
+    #[schemars(description = "Class to equip first.")]
+    class: Option<String>,
+    #[schemars(description = "Weapon to equip.")]
+    weapon: Option<String>,
+    #[schemars(description = "Helm to equip.")]
+    helm: Option<String>,
+    #[schemars(description = "Armor to equip.")]
+    armor: Option<String>,
+    #[schemars(description = "Cape to equip.")]
+    cape: Option<String>,
+    #[schemars(description = "Pet to equip.")]
+    pet: Option<String>,
+    #[schemars(description = "Item to leave in the consumable slot, equipped last.")]
+    consumable: Option<String>,
+    #[serde(rename = "use")]
+    #[schemars(description = "Items to use once while gearing up, like elixirs and potions.")]
+    use_items: Option<Vec<String>>,
+}
+
+impl GearConfig {
+    fn or(&self, defaults: Option<&GearConfig>) -> Gear {
+        let empty = GearConfig::default();
+        let defaults = defaults.unwrap_or(&empty);
+        let pick = |own: &Option<String>, default: &Option<String>| {
+            own.clone().or_else(|| default.clone())
+        };
+        Gear {
+            class: pick(&self.class, &defaults.class),
+            weapon: pick(&self.weapon, &defaults.weapon),
+            helm: pick(&self.helm, &defaults.helm),
+            armor: pick(&self.armor, &defaults.armor),
+            cape: pick(&self.cape, &defaults.cape),
+            pet: pick(&self.pet, &defaults.pet),
+            consumable: pick(&self.consumable, &defaults.consumable),
+            use_items: self
+                .use_items
+                .clone()
+                .or_else(|| defaults.use_items.clone())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -130,7 +182,18 @@ impl Settings {
             room: self.room.or(defaults.room),
             stall_after: self.stall_after.or(defaults.stall_after),
             on_stall: self.on_stall.or(defaults.on_stall),
+            gear: self.gear,
         }
+    }
+
+    fn gear_sets(&self, defaults: &Settings) -> BTreeMap<String, Gear> {
+        let names = defaults.gear.keys().chain(self.gear.keys());
+        names
+            .map(|name| {
+                let own = self.gear.get(name).cloned().unwrap_or_default();
+                (name.clone(), own.or(defaults.gear.get(name)))
+            })
+            .collect()
     }
 }
 
@@ -178,6 +241,9 @@ pub struct AccountConfig {
     stall_after: Option<Duration>,
     #[schemars(description = ON_STALL)]
     on_stall: Option<OnStall>,
+    #[serde(default)]
+    #[schemars(description = GEAR)]
+    gear: BTreeMap<String, GearConfig>,
 }
 
 #[derive(Deserialize, JsonSchema, Debug)]
@@ -231,6 +297,7 @@ pub struct Account {
     pub resume: bool,
     pub script: Option<Script>,
     pub schedules: Vec<Schedule>,
+    pub gear: BTreeMap<String, Gear>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -368,8 +435,10 @@ impl AccountConfig {
             room: self.room,
             stall_after: self.stall_after,
             on_stall: self.on_stall,
-        }
-        .or(defaults);
+            gear: self.gear.clone(),
+        };
+        let gear = settings.gear_sets(defaults);
+        let settings = settings.or(defaults);
         let server = settings.server.ok_or_else(|| {
             format!("account {name} has no server; set `server` on it or in [defaults]")
         })?;
@@ -423,6 +492,7 @@ impl AccountConfig {
             resume: settings.resume.unwrap_or(false),
             script,
             schedules,
+            gear,
             name,
         })
     }
@@ -575,6 +645,7 @@ impl Account {
             resume: false,
             script: None,
             schedules: Vec::new(),
+            gear: BTreeMap::new(),
         }
     }
 }
@@ -834,6 +905,81 @@ mod tests {
                 .unwrap_err()
                 .contains("two accounts are named player1")
         );
+    }
+
+    #[test]
+    fn an_accounts_gear_set_replaces_only_the_pieces_it_names() {
+        let [main, alt] = accounts(
+            r#"
+            [defaults]
+            server = "Twilly"
+
+            [defaults.gear.boss]
+            weapon = "Necrotic Sword of Doom"
+            cape = "Cape of Awe"
+            use = ["Potent Battle Elixir"]
+
+            [[account]]
+            name = "main"
+            user = "player1"
+            password = "x"
+
+            [account.gear.boss]
+            class = "Legion Revenant"
+
+            [account.gear.solo]
+            class = "ArchPaladin"
+
+            [[account]]
+            name = "alt"
+            user = "player2"
+            password = "y"
+
+            [account.gear.boss]
+            weapon = "Exalted Apotheosis"
+            use = []
+            "#,
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        let set = |class: Option<&str>, weapon: &str, used: &[&str]| Gear {
+            class: class.map(Into::into),
+            weapon: Some(weapon.into()),
+            cape: Some("Cape of Awe".into()),
+            use_items: used.iter().map(|&u| u.into()).collect(),
+            ..Gear::default()
+        };
+        assert_eq!(
+            main.gear,
+            BTreeMap::from([
+                (
+                    "boss".into(),
+                    set(
+                        Some("Legion Revenant"),
+                        "Necrotic Sword of Doom",
+                        &["Potent Battle Elixir"]
+                    )
+                ),
+                (
+                    "solo".into(),
+                    Gear {
+                        class: Some("ArchPaladin".into()),
+                        ..Gear::default()
+                    }
+                ),
+            ])
+        );
+        assert_eq!(
+            alt.gear,
+            BTreeMap::from([("boss".into(), set(None, "Exalted Apotheosis", &[]))]),
+            "an empty use clears the default elixirs"
+        );
+        let typo = accounts(
+            "[defaults]\nserver = \"Twilly\"\n[[account]]\nuser = \"p\"\npassword = \"x\"\n[account.gear.boss]\nweapom = \"Sword\"\n",
+        )
+        .unwrap_err();
+        assert!(typo.contains("unknown field `weapom`"), "{typo}");
     }
 
     #[test]
