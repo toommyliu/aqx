@@ -237,6 +237,21 @@ impl Peer {
     }
 
     pub fn serve(&mut self, version: &str, token: &str, items: Value, hitems: Value) {
+        self.serve_bag(version, token, items, hitems, 2);
+    }
+
+    pub fn serve_with_bag(&mut self, items: Value, bag_slots: u32) {
+        self.serve_bag(DEFAULT_CLIENT_VERSION, TOKEN, items, json!([]), bag_slots);
+    }
+
+    fn serve_bag(
+        &mut self,
+        version: &str,
+        token: &str,
+        items: Value,
+        hitems: Value,
+        bag_slots: u32,
+    ) {
         self.expect(&packet::version_check());
         self.send(API_OK);
         self.expect(&packet::login("player1", version, token));
@@ -255,7 +270,7 @@ impl Peer {
             "data": {
                 "intLevel": "50", "intGold": 1200, "intCoins": 30, "intExp": 400, "intExpToLevel": 2000,
                 "strQuests": format!("00A{}", "0".repeat(97)), "strQuests2": "1".repeat(60),
-                "iUpgDays": -1, "iCP": 899, "iBoostRep": 120, "iBagSlots": 2,
+                "iUpgDays": -1, "iCP": 899, "iBoostRep": 120, "iBagSlots": bag_slots,
                 "CharID": "4242", "iBankSlots": 3, "iHouseSlots": 1,
                 "ia0": 5, "iw0": "8", "im0": 2.147483648E9,
                 "strEmail": "player1@example.com", "strIP": "192.0.2.1",

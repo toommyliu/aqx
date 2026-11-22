@@ -89,6 +89,7 @@ type AccountData = {
   recording: string | null;
   queue: Queued[];
   next: { script: string; at_ms: number } | null;
+  gear: string[];
 };
 
 export type Account = AccountData & { sampledAt: number };
@@ -128,6 +129,7 @@ export type Action =
   | "next"
   | { pick_up: number[] }
   | { equip: number }
+  | { equip_set: string }
   | { registry: Edit }
   | { record: null }
   | "stop_recording";

@@ -8,6 +8,7 @@ pub mod skua;
 mod source;
 mod views;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::path::Path;
@@ -15,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 
-use aqx_client::{Handle, Phase, Server, Settings, Update};
+use aqx_client::{Gear, Handle, Missing, Phase, Server, Settings, Update};
 use rquickjs::{Context, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -87,6 +88,9 @@ pub trait Account: Send + Sync {
     fn login_as(&self, _server: &str, _username: &str, _password: &str) -> Result<Handle, String> {
         Err("changing login identity is unavailable".into())
     }
+    fn gear(&self) -> BTreeMap<String, Gear> {
+        BTreeMap::new()
+    }
 }
 
 pub struct Start {
@@ -145,6 +149,7 @@ enum Wake {
 enum External {
     Servers(Result<Vec<Server>, String>),
     Relogged(Result<Relogged, String>),
+    Geared(Result<Vec<Missing>, String>),
 }
 
 struct Relogged(Option<(Handle, String)>);
@@ -331,6 +336,9 @@ impl Script {
                 start.session.set_auto_relogin(host.settings().auto_relogin);
                 host.set_server(&start.server);
                 host.set_args(Value::Object(start.args.clone()).to_string());
+                host.set_gear(
+                    serde_json::to_string(&start.account.gear()).expect("gear sets serialize"),
+                );
                 host.take_loaded()
             });
             let loaded = loaded.expect("a loaded script keeps what it loaded until it runs");

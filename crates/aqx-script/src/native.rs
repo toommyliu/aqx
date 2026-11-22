@@ -31,6 +31,7 @@ pub struct Host<'js> {
     packet_handlers: Cell<u32>,
     server: RefCell<String>,
     args: RefCell<String>,
+    gear: RefCell<String>,
     restart: Cell<bool>,
 }
 
@@ -57,6 +58,7 @@ impl<'js> Host<'js> {
             packet_handlers: Cell::new(0),
             server: RefCell::new(String::new()),
             args: RefCell::new("{}".into()),
+            gear: RefCell::new("{}".into()),
             restart: Cell::new(false),
         }
     }
@@ -67,6 +69,10 @@ impl<'js> Host<'js> {
 
     pub fn set_args(&self, json: String) {
         self.args.replace(json);
+    }
+
+    pub fn set_gear(&self, json: String) {
+        self.gear.replace(json);
     }
 
     pub fn restart_requested(&self) -> bool {
@@ -134,7 +140,7 @@ fn host<'a, 'js>(ctx: &'a Ctx<'js>) -> rquickjs::runtime::UserDataGuard<'a, Host
 
 pub struct Native;
 
-const NAMES: [&str; 27] = [
+const NAMES: [&str; 28] = [
     "aqxVersion",
     "versionCompare",
     "setCounterHold",
@@ -146,6 +152,7 @@ const NAMES: [&str; 27] = [
     "server",
     "restart",
     "args",
+    "gear",
     "spawn",
     "halt",
     "watchPackets",
@@ -338,6 +345,17 @@ impl ModuleDef for Native {
                     return Ok(None);
                 }
                 let json = host.args.borrow().clone();
+                ctx.json_parse(json).map(Some)
+            })?,
+        )?;
+        exports.export(
+            "gear",
+            Function::new(ctx.clone(), |ctx: Ctx<'js>| -> Result<Option<Value<'js>>> {
+                let host = host(&ctx);
+                if host.session.borrow().is_none() {
+                    return Ok(None);
+                }
+                let json = host.gear.borrow().clone();
                 ctx.json_parse(json).map(Some)
             })?,
         )?;

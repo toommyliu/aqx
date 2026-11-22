@@ -193,6 +193,23 @@ export interface Server {
   readonly capacity: number;
 }
 
+/** A gear set from aqx.toml, with the account's pieces over the defaults. Unset slots are null. */
+export interface GearSet {
+  readonly class: string | null;
+  readonly weapon: string | null;
+  readonly helm: string | null;
+  readonly armor: string | null;
+  readonly cape: string | null;
+  readonly pet: string | null;
+  readonly consumable: string | null;
+  readonly use: readonly string[];
+}
+
+export interface Missing {
+  readonly item: string;
+  readonly why: string;
+}
+
 export interface QuestRegistration {
   readonly id: number;
   readonly reward?: ItemRef;
@@ -383,6 +400,7 @@ interface Native {
   untarget(): boolean;
   server(): string;
   args(): Readonly<Record<string, ArgValue>> | undefined;
+  gear(): Readonly<Record<string, GearSet>> | undefined;
   spawn(tag: number, task: Task): void;
   halt(tag: number): void;
   watchPackets(count: number): void;
@@ -785,6 +803,22 @@ export const inventory = view(
     /** For the slotted consumable, use combat.useSkill(5). */
     use(item: ItemRef): Action<void> {
       return act("use", { item: itemRef(item, "inventory.use's item") });
+    },
+    /** The account's gear set by that name in aqx.toml. */
+    gear(name: string): GearSet | undefined {
+      const wanted = checkText(name, "inventory.gear's name");
+      const sets = native.gear();
+      if (sets === undefined) throw aqxError("inventory.gear can't run before the script starts");
+      return Object.hasOwn(sets, wanted) ? sets[wanted] : undefined;
+    },
+    /**
+     * Leaves combat, then equips the class, the other pieces, each item in
+     * `use`, and the consumable last, taking items out of the bank as needed.
+     * Resolves to the items that couldn't go on and why; empty when all did.
+     */
+    equipSet(name: string): Action<readonly Missing[]> {
+      const set = checkText(name, "inventory.equipSet's name");
+      return action(() => ({ kind: "equipSet", set }));
     },
   },
 );

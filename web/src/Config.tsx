@@ -22,7 +22,7 @@ const saved = () =>
 
 const configTab = persisted<"accounts" | "defaults" | "toml">("aqx-config-tab", ["accounts", "defaults", "toml"], "accounts");
 
-const ACCOUNT_KEYS = ["user", "password", "name", "script", "args", "schedule"];
+const ACCOUNT_KEYS = ["user", "password", "name", "script", "args", "schedule", "gear"];
 const IDENTITY = new Set(ACCOUNT_KEYS);
 
 const ORDER = [
@@ -141,7 +141,7 @@ const schedulesOf = (v: JsonValue | undefined): ScheduleDraft[] =>
 
 function draftOf(file: ConfigFile): Draft {
   return {
-    defaults: strings(file.form.defaults, () => true),
+    defaults: strings(file.form.defaults, (k) => !IDENTITY.has(k)),
     accounts: file.form.accounts.map((a, i) => ({
       id: `a${i}`,
       from: i,

@@ -178,7 +178,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 17;
+pub const PROTOCOL: u32 = 18;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -1250,6 +1250,7 @@ mod tests {
                 script: "/srv/dailies.ts".into(),
                 at_ms: 0,
             }),
+            gear: vec!["boss".into()],
         };
         let line = |channel: Channel| Line {
             seq: 0,
@@ -1286,6 +1287,7 @@ mod tests {
             },
             Action::PickUp(vec![1]),
             Action::Equip(1),
+            Action::EquipSet("boss".into()),
             Action::Registry(aqx_script::Edit::RegisterDrop(aqx_script::Item::Id(1))),
             Action::Registry(aqx_script::Edit::UnregisterDrop(aqx_script::Item::Name(
                 "Bone Dust".into(),
@@ -1394,7 +1396,7 @@ mod tests {
              =Online =Paused =Resumable =Running =Stalled =aqx =chat =clear_queue =game =login \
              =login_only =logout =next =pause =received =relogin =restart =resume =script =sent \
              =server =stop =stop_recording Act Act.account Act.action Act.action.enqueue \
-             Act.action.enqueue.args Act.action.enqueue.path Act.action.equip Act.action.move_queued \
+             Act.action.enqueue.args Act.action.enqueue.path Act.action.equip Act.action.equip_set Act.action.move_queued \
              Act.action.move_queued.id Act.action.move_queued.to Act.action.pick_up Act.action.record \
              Act.action.registry Act.action.registry.register_drop Act.action.registry.register_quest \
              Act.action.registry.register_quest.id Act.action.registry.register_quest.reward \
@@ -1439,7 +1441,7 @@ mod tests {
              Frame.accounts.game.target.max_hp Frame.accounts.game.target.name \
              Frame.accounts.game.temp Frame.accounts.game.temp.category Frame.accounts.game.temp.equipped Frame.accounts.game.temp.id \
              Frame.accounts.game.temp.max Frame.accounts.game.temp.name Frame.accounts.game.temp.qty \
-             Frame.accounts.game.temp.rank Frame.accounts.gold_gained Frame.accounts.name \
+             Frame.accounts.game.temp.rank Frame.accounts.gear Frame.accounts.gold_gained Frame.accounts.name \
              Frame.accounts.next Frame.accounts.next.at_ms Frame.accounts.next.script \
              Frame.accounts.queue Frame.accounts.queue.id Frame.accounts.queue.scheduled Frame.accounts.queue.script \
              Frame.accounts.queue.script.args Frame.accounts.queue.script.path \
@@ -1460,7 +1462,7 @@ mod tests {
              Resumable.script.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (17, pinned),
+            (18, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

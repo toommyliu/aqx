@@ -6,7 +6,9 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aqx_client::{ActionError, ActionId, Direction, Event, Handle, Phase, Server, Update, World};
+use aqx_client::{
+    ActionError, ActionId, Direction, Event, GearStop, Handle, Phase, Server, Update, World,
+};
 use rquickjs::function::This;
 use rquickjs::{
     Array, CatchResultExt, CaughtError, Coerced, Constructor, Ctx, Error, FromJs, Function, Module,
@@ -74,6 +76,7 @@ enum Op<'js> {
     Servers,
     Relogin(Option<String>),
     Logout,
+    EquipSet(String),
 }
 
 enum End<'js> {
@@ -103,6 +106,7 @@ pub struct Engine<'js> {
     generation: u64,
     externals: HashMap<u64, TaskId>,
     next_external: u64,
+    gearing: HashMap<u64, GearStop>,
     link: Link,
     logged_out: bool,
 }
@@ -193,6 +197,7 @@ impl<'js> Engine<'js> {
             generation: 0,
             externals: HashMap::new(),
             next_external: 0,
+            gearing: HashMap::new(),
             link: Link::Live,
             logged_out: false,
             internals: loaded.internals,
@@ -685,7 +690,27 @@ impl<'js> Engine<'js> {
         Ok(())
     }
 
+    fn start_equip_set(&mut self, task: TaskId, name: &str) -> rquickjs::Result<()> {
+        let Some(gear) = self.account.gear().remove(name) else {
+            let error = self.aqx_error(&format!(
+                "no gear set named {name}; add [defaults.gear.{name}] or [account.gear.{name}] to aqx.toml"
+            ))?;
+            self.ready.push_back((task, Resume::Throw(error)));
+            return Ok(());
+        };
+        let id = self.external(task);
+        let stop = GearStop::default();
+        self.gearing.insert(id, stop.clone());
+        let (session, wake) = (self.session.clone(), self.wake.clone());
+        thread::spawn(move || {
+            let geared = session.equip_gear(&gear, &stop).map_err(|e| e.to_string());
+            let _ = wake.send(Wake::External(id, External::Geared(geared)));
+        });
+        Ok(())
+    }
+
     fn on_external(&mut self, id: u64, external: External) -> rquickjs::Result<()> {
+        self.gearing.remove(&id);
         let task = self
             .externals
             .remove(&id)
@@ -693,6 +718,11 @@ impl<'js> Engine<'js> {
         let resume = match external {
             External::Servers(Ok(servers)) => Resume::Next(self.servers(&servers)?),
             External::Servers(Err(message)) => Resume::Throw(self.aqx_error(&message)?),
+            External::Geared(Ok(missing)) => {
+                let json = serde_json::to_string(&missing).expect("missing items serialize");
+                Resume::Next(self.ctx.json_parse(json)?)
+            }
+            External::Geared(Err(message)) => Resume::Throw(self.aqx_error(&message)?),
             External::Relogged(Ok(relogged)) => {
                 let (session, server) = relogged.take();
                 if let Err(e) = forward(&session, self.generation, self.wake.clone()) {
@@ -780,7 +810,7 @@ impl<'js> Engine<'js> {
                     .collect();
                 self.wait(id, Wait::First(children));
             }
-            Some(Op::Act(_)) if !matches!(self.link, Link::Live) => {
+            Some(Op::Act(_) | Op::EquipSet(_)) if !matches!(self.link, Link::Live) => {
                 let message = match self.link {
                     Link::Lost => "the session is logged out",
                     Link::Live | Link::Relogging => "the session is relogging",
@@ -797,6 +827,7 @@ impl<'js> Engine<'js> {
                 });
             }
             Some(Op::Relogin(server)) => self.start_relogin(id, server)?,
+            Some(Op::EquipSet(name)) => self.start_equip_set(id, &name)?,
             Some(Op::Logout) => {
                 self.logged_out = true;
                 self.session.logout();
@@ -859,6 +890,7 @@ impl<'js> Engine<'js> {
             "servers" => Some(Op::Servers),
             "relogin" => Some(Op::Relogin(op.get("server").ok()?)),
             "logout" => Some(Op::Logout),
+            "equipSet" => Some(Op::EquipSet(op.get("set").ok()?)),
             "once" => Some(Op::Once(op.get("event").ok()?, filter()?)),
             "packet" => {
                 let json = match op.get::<_, String>("packetKind").ok()?.as_str() {
@@ -962,6 +994,9 @@ impl<'js> Engine<'js> {
             }
             Wait::External(external) => {
                 self.externals.remove(&external);
+                if let Some(stop) = self.gearing.remove(&external) {
+                    stop.stop(&self.session);
+                }
             }
             Wait::Running
             | Wait::Timer(_)

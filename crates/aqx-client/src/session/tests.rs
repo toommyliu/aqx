@@ -16,8 +16,8 @@ use crate::testing::{
     login_reply, move_to_area, read_request, serve_api,
 };
 use crate::{
-    Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Item, Monster, Readiness, Skill,
-    SkillTarget, StatEffect, Stats, TempItem,
+    Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Gear, GearStop, Item, Missing, Monster,
+    Readiness, Skill, SkillTarget, StatEffect, Stats, TempItem,
 };
 use crate::{Holder, NoticeKind, Place};
 
@@ -3444,6 +3444,178 @@ fn equips_gear_after_the_clients_checks_and_waits_out_each_lock() {
         Err(ActionError::InCombat)
     ));
     session.equip_unchecked(ItemId(5)).wait().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn equips_a_gear_set_class_first_and_the_consumable_last_reporting_what_it_lacks() {
+    let (base, http) = serve_bank(json!([{"ItemID": 301, "CharItemID": 9301,
+        "sName": "Cape of Awe", "iQty": 1, "iStk": 1, "sType": "Cape", "sES": "ba",
+        "EnhID": 5, "EnhLvl": 1, "bBank": true}]));
+    let harness =
+        Harness::start_with_api(Options::default(), base, |listener| {
+            let mut peer = Peer::accept(&listener);
+            let gear = |id: i64, name: &str, kind: &str, slot: &str| {
+                json!({"ItemID": id, "CharItemID": 8000 + id, "sName": name, "iQty": 1,
+                "iStk": 1, "sType": kind, "sES": slot, "EnhID": 5, "EnhLvl": 1})
+            };
+            peer.serve_with_bag(json!([
+            gear(1, "Old Sword", "Sword", "Weapon"),
+            gear(2, "New Sword", "Sword", "Weapon"),
+            gear(3, "Lord Of Order", "Class", "ar"),
+            {"ItemID": 4, "CharItemID": 8004, "sName": "Battle Elixir", "iQty": 3,
+             "iStk": 10, "sType": "ServerUse", "sES": "None"},
+            {"ItemID": 5, "CharItemID": 8005, "sName": "Honor Potion", "iQty": 3,
+             "iStk": 10, "sType": "Item", "sES": "None", "sLink": "potion", "sMeta": "1044"},
+            {"ItemID": 6, "CharItemID": 8006, "sName": "Scroll of Enrage", "iQty": 3,
+             "iStk": 10, "sType": "Item", "sES": "None", "sLink": "scroll", "sMeta": "2077"},
+            {"ItemID": 7, "CharItemID": 8007, "sName": "Bare Helm", "iQty": 1, "iStk": 1,
+             "sType": "Helm", "sES": "he", "EnhID": 0},
+        ]), 8);
+            peer.send(&json_message(json!({"cmd": "sAct", "actions": {"active": [
+                {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "tgt": "h"},
+                {"ref": "i1", "nam": "Potions", "cd": 60000, "tgt": "f", "mp": 0},
+            ]}})));
+            let worn = |id: i64| json_message(json!({"cmd": "equipItem", "uid": 7, "ItemID": id}));
+            let slotted = |id: u32| {
+                json_message(json!({"cmd": "seia", "iRes": 1, "o": {
+                    "id": id, "cd": 2500, "tgt": "s", "mp": 0, "anim": "Salute", "strl": "",
+                }}))
+            };
+            peer.expect(&packet::equip_item(AreaId(42), ItemId(3)));
+            peer.send(&worn(3));
+            peer.expect(&packet::equip_item(AreaId(42), ItemId(2)));
+            peer.send(&worn(2));
+            peer.expect(&packet::bank_to_inv(
+                AreaId(42),
+                ItemId(301),
+                CharItemId(9301),
+            ));
+            peer.send(&json_message(json!({"cmd": "bankToInv", "ItemID": "301"})));
+            peer.expect(&packet::equip_item(AreaId(42), ItemId(301)));
+            peer.send(&worn(301));
+            let used =
+                |id: i64| json_message(json!({"cmd": "turnIn", "sItems": format!("{id}:1")}));
+            peer.expect(&packet::use_item(ItemId(4)));
+            peer.send(&used(4));
+            peer.expect(&packet::geia(AreaId(42), "potion", "1044", ItemId(5)));
+            peer.send(&slotted(1044));
+            let me = [Aim::Player(EntityId(7))];
+            peer.expect(&packet::gar_item(0, "i1", &me, ItemId(5)));
+            peer.answer(0, 1);
+            peer.send(&used(5));
+            peer.expect(&packet::geia(AreaId(42), "scroll", "2077", ItemId(6)));
+            peer.send(&slotted(2077));
+            peer.expect(&packet::logout());
+        });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    wait_until(session, |me| me.skills.iter().any(|s| s.slot == "i1"));
+    let set = Gear {
+        class: Some("lord of order".into()),
+        weapon: Some("New Sword".into()),
+        helm: Some("Bare Helm".into()),
+        cape: Some("Cape of Awe".into()),
+        pet: Some("Nope Pet".into()),
+        consumable: Some("Scroll of Enrage".into()),
+        use_items: vec![
+            "Old Sword".into(),
+            "Battle Elixir".into(),
+            "Honor Potion".into(),
+        ],
+        ..Gear::default()
+    };
+    assert!(matches!(
+        session.equip_gear(&set, &{
+            let stop = GearStop::default();
+            stop.stop(session);
+            stop
+        }),
+        Err(ActionError::Cancelled)
+    ));
+    let missing = session.equip_gear(&set, &GearStop::default()).unwrap();
+    assert_eq!(
+        missing,
+        [
+            Missing {
+                item: "Bare Helm".into(),
+                why: "Bare Helm needs an enhancement first".into(),
+            },
+            Missing {
+                item: "Nope Pet".into(),
+                why: "not in the inventory or bank".into(),
+            },
+            Missing {
+                item: "Old Sword".into(),
+                why: "Old Sword can't be used".into(),
+            },
+        ]
+    );
+    let world = session.snapshot();
+    let worn: Vec<ItemId> = world
+        .inventory
+        .iter()
+        .filter(|i| i.equipped && i.kind != "Item")
+        .map(|i| i.id)
+        .collect();
+    assert_eq!(worn, [ItemId(2), ItemId(3), ItemId(301)]);
+    assert_eq!(world.me.as_ref().unwrap().item_slot, Some(ItemId(6)));
+    let left: Vec<(ItemId, u32)> = world
+        .inventory
+        .iter()
+        .filter(|i| [ItemId(4), ItemId(5)].contains(&i.id))
+        .map(|i| (i.id, i.qty))
+        .collect();
+    assert_eq!(left, [(ItemId(4), 2), (ItemId(5), 2)]);
+    http.join().unwrap();
+    session.logout();
+    harness.finish();
+}
+
+#[test]
+fn a_stopped_gear_set_cancels_a_cast_waiting_on_its_cooldown() {
+    let (quiet, heard) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_with_items(json!([
+            {"ItemID": 5, "CharItemID": 8005, "sName": "Honor Potion", "iQty": 3,
+             "iStk": 10, "sType": "Item", "sES": "None", "sLink": "potion", "sMeta": "1044"},
+        ]));
+        peer.send(&json_message(json!({"cmd": "sAct", "actions": {"active": [
+            {"ref": "aa", "nam": "Auto Attack", "cd": 2000, "tgt": "h"},
+            {"ref": "i1", "nam": "Potions", "cd": 60000, "tgt": "f", "mp": 0},
+        ]}})));
+        peer.expect(&packet::geia(AreaId(42), "potion", "1044", ItemId(5)));
+        peer.send(&json_message(json!({"cmd": "seia", "iRes": 1, "o": {
+            "id": 1044, "cd": 1500, "tgt": "s", "mp": 0, "anim": "Salute", "strl": "",
+        }})));
+        let me = [Aim::Player(EntityId(7))];
+        peer.expect(&packet::gar_item(0, "i1", &me, ItemId(5)));
+        peer.answer(0, 1);
+        peer.send(&json_message(json!({"cmd": "turnIn", "sItems": "5:1"})));
+        peer.expect_silence(Duration::from_millis(2500));
+        quiet.send(()).unwrap();
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    wait_until(session, |me| me.skills.iter().any(|s| s.slot == "i1"));
+    let set = Gear {
+        use_items: vec!["Honor Potion".into()],
+        ..Gear::default()
+    };
+    assert_eq!(session.equip_gear(&set, &GearStop::default()).unwrap(), []);
+    let stop = GearStop::default();
+    let again = {
+        let (session, set, stop) = (session.clone(), set.clone(), stop.clone());
+        thread::spawn(move || session.equip_gear(&set, &stop))
+    };
+    thread::sleep(Duration::from_millis(300));
+    stop.stop(session);
+    let result = again.join().unwrap();
+    assert!(matches!(result, Err(ActionError::Cancelled)), "{result:?}");
+    heard.recv().unwrap();
     session.logout();
     harness.finish();
 }
