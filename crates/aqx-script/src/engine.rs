@@ -2,12 +2,13 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aqx_client::{ActionError, ActionId, Direction, Event, Handle, Phase, Server, Update, World};
+use aqx_client::{
+    ActionError, ActionId, Direction, Event, GearStop, Handle, Phase, Server, Update, World,
+};
 use rquickjs::function::This;
 use rquickjs::{
     Array, CatchResultExt, CaughtError, Coerced, Constructor, Ctx, Error, FromJs, Function, Module,
@@ -105,7 +106,7 @@ pub struct Engine<'js> {
     generation: u64,
     externals: HashMap<u64, TaskId>,
     next_external: u64,
-    gearing: HashMap<u64, Arc<AtomicBool>>,
+    gearing: HashMap<u64, GearStop>,
     link: Link,
     logged_out: bool,
 }
@@ -698,13 +699,11 @@ impl<'js> Engine<'js> {
             return Ok(());
         };
         let id = self.external(task);
-        let stop = Arc::new(AtomicBool::new(false));
-        self.gearing.insert(id, Arc::clone(&stop));
+        let stop = GearStop::default();
+        self.gearing.insert(id, stop.clone());
         let (session, wake) = (self.session.clone(), self.wake.clone());
         thread::spawn(move || {
-            let geared = session
-                .equip_gear(&gear, &|| stop.load(Ordering::Relaxed))
-                .map_err(|e| e.to_string());
+            let geared = session.equip_gear(&gear, &stop).map_err(|e| e.to_string());
             let _ = wake.send(Wake::External(id, External::Geared(geared)));
         });
         Ok(())
@@ -996,7 +995,7 @@ impl<'js> Engine<'js> {
             Wait::External(external) => {
                 self.externals.remove(&external);
                 if let Some(stop) = self.gearing.remove(&external) {
-                    stop.store(true, Ordering::Relaxed);
+                    stop.stop(&self.session);
                 }
             }
             Wait::Running

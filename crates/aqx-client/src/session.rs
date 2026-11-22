@@ -1102,22 +1102,12 @@ impl Pending {
     }
 
     pub fn wait(self) -> Result<(), ActionError> {
-        self.result.recv().unwrap_or_else(|_| self.ended())
-    }
-
-    pub(crate) fn wait_for(&self, timeout: Duration) -> Option<Result<(), ActionError>> {
-        match self.result.recv_timeout(timeout) {
-            Ok(result) => Some(result),
-            Err(mpsc::RecvTimeoutError::Timeout) => None,
-            Err(mpsc::RecvTimeoutError::Disconnected) => Some(self.ended()),
-        }
-    }
-
-    fn ended(&self) -> Result<(), ActionError> {
-        match &latest(&self.world).phase {
-            Phase::Closed { reason } => Err(ActionError::Closed(reason.clone())),
-            _ => Err(ActionError::Stopped),
-        }
+        self.result
+            .recv()
+            .unwrap_or_else(|_| match &latest(&self.world).phase {
+                Phase::Closed { reason } => Err(ActionError::Closed(reason.clone())),
+                _ => Err(ActionError::Stopped),
+            })
     }
 }
 

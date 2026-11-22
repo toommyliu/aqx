@@ -27,7 +27,7 @@ pub use combat::Readiness;
 pub use enhancement::Enhancement;
 pub use event::{Direction, Event, Holder, NoticeKind, Place};
 pub use faction::Faction;
-pub use gear::{Gear, Missing};
+pub use gear::{Gear, GearStop, Missing};
 pub use inventory::{DropOffer, Item, ItemDetails, Pool, TempItem};
 pub use player::{BoostKind, Boosts, Me, Skill, SkillDetails, SkillTarget, Stats};
 pub use quest::{

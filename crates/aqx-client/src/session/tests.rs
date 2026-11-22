@@ -16,7 +16,7 @@ use crate::testing::{
     login_reply, move_to_area, read_request, serve_api,
 };
 use crate::{
-    Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Gear, Item, Missing, Monster,
+    Aura, Auras, BoostKind, Caster, CombatState, DropOffer, Gear, GearStop, Item, Missing, Monster,
     Readiness, Skill, SkillTarget, StatEffect, Stats, TempItem,
 };
 use crate::{Holder, NoticeKind, Place};
@@ -3527,10 +3527,14 @@ fn equips_a_gear_set_class_first_and_the_consumable_last_reporting_what_it_lacks
         ..Gear::default()
     };
     assert!(matches!(
-        session.equip_gear(&set, &|| true),
+        session.equip_gear(&set, &{
+            let stop = GearStop::default();
+            stop.stop(session);
+            stop
+        }),
         Err(ActionError::Cancelled)
     ));
-    let missing = session.equip_gear(&set, &|| false).unwrap();
+    let missing = session.equip_gear(&set, &GearStop::default()).unwrap();
     assert_eq!(
         missing,
         [
@@ -3570,10 +3574,7 @@ fn equips_a_gear_set_class_first_and_the_consumable_last_reporting_what_it_lacks
 }
 
 #[test]
-fn a_stopped_gear_set_cancels_its_action_and_casts_nothing_after() {
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let stopping = Arc::clone(&stop);
-    let (returned, cancelled) = mpsc::channel::<()>();
+fn a_stopped_gear_set_cancels_a_cast_waiting_on_its_cooldown() {
     let (quiet, heard) = mpsc::channel::<()>();
     let harness = Harness::start(Options::default(), move |listener| {
         let mut peer = Peer::accept(&listener);
@@ -3586,12 +3587,14 @@ fn a_stopped_gear_set_cancels_its_action_and_casts_nothing_after() {
             {"ref": "i1", "nam": "Potions", "cd": 60000, "tgt": "f", "mp": 0},
         ]}})));
         peer.expect(&packet::geia(AreaId(42), "potion", "1044", ItemId(5)));
-        stopping.store(true, std::sync::atomic::Ordering::Relaxed);
-        cancelled.recv().unwrap();
         peer.send(&json_message(json!({"cmd": "seia", "iRes": 1, "o": {
-            "id": 1044, "cd": 2500, "tgt": "s", "mp": 0, "anim": "Salute", "strl": "",
+            "id": 1044, "cd": 1500, "tgt": "s", "mp": 0, "anim": "Salute", "strl": "",
         }})));
-        peer.expect_silence(Duration::from_millis(300));
+        let me = [Aim::Player(EntityId(7))];
+        peer.expect(&packet::gar_item(0, "i1", &me, ItemId(5)));
+        peer.answer(0, 1);
+        peer.send(&json_message(json!({"cmd": "turnIn", "sItems": "5:1"})));
+        peer.expect_silence(Duration::from_millis(2500));
         quiet.send(()).unwrap();
         peer.expect(&packet::logout());
     });
@@ -3602,10 +3605,16 @@ fn a_stopped_gear_set_cancels_its_action_and_casts_nothing_after() {
         use_items: vec!["Honor Potion".into()],
         ..Gear::default()
     };
-    let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
-    let result = session.equip_gear(&set, &stopped);
+    assert_eq!(session.equip_gear(&set, &GearStop::default()).unwrap(), []);
+    let stop = GearStop::default();
+    let again = {
+        let (session, set, stop) = (session.clone(), set.clone(), stop.clone());
+        thread::spawn(move || session.equip_gear(&set, &stop))
+    };
+    thread::sleep(Duration::from_millis(300));
+    stop.stop(session);
+    let result = again.join().unwrap();
     assert!(matches!(result, Err(ActionError::Cancelled)), "{result:?}");
-    returned.send(()).unwrap();
     heard.recv().unwrap();
     session.logout();
     harness.finish();

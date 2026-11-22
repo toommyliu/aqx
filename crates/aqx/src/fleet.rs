@@ -8,8 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aqx_client::{
-    ActionError, CombatState, DeviceId, Direction, Event, Gear, Handle, ItemId, NoticeKind, Phase,
-    Server, Spot, api,
+    ActionError, CombatState, DeviceId, Direction, Event, Gear, GearStop, Handle, ItemId,
+    NoticeKind, Phase, Server, Spot, api,
 };
 use aqx_script::{Cancel, Edit, Level, Outcome, Output, Registered};
 use jiff::Timestamp;
@@ -1029,7 +1029,7 @@ impl Account {
         }
         let (account, name) = (Arc::clone(self), name.to_owned());
         thread::spawn(move || {
-            match session.equip_gear(&gear, &|| false) {
+            match session.equip_gear(&gear, &GearStop::default()) {
                 Ok(missing) if missing.is_empty() => account.say(format!("equipped {name}")),
                 Ok(missing) => {
                     let lacking: Vec<String> = missing

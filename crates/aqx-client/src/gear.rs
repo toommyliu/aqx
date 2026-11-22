@@ -1,4 +1,5 @@
 use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use aqx_protocol::ItemId;
@@ -8,7 +9,7 @@ use crate::REPLY_TIMEOUT;
 use crate::combat::ITEM_SLOT;
 use crate::inventory::Item;
 use crate::room::CombatState;
-use crate::session::{ActionError, Handle, Pending};
+use crate::session::{ActionError, ActionId, Handle, Pending};
 
 const STOP_CHECK: Duration = Duration::from_millis(100);
 
@@ -31,15 +32,52 @@ pub struct Missing {
     pub why: String,
 }
 
+#[derive(Clone, Default)]
+pub struct GearStop(Arc<Mutex<Stopping>>);
+
+#[derive(Default)]
+struct Stopping {
+    stopped: bool,
+    current: Option<ActionId>,
+}
+
+impl GearStop {
+    pub fn stop(&self, session: &Handle) {
+        let mut state = self.lock();
+        state.stopped = true;
+        if let Some(id) = state.current.take() {
+            session.cancel(id);
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Stopping> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn stopped(&self) -> bool {
+        self.lock().stopped
+    }
+
+    fn start(&self, act: impl FnOnce() -> Pending) -> Result<Pending, ActionError> {
+        let mut state = self.lock();
+        if state.stopped {
+            return Err(ActionError::Cancelled);
+        }
+        let pending = act();
+        state.current = Some(pending.id());
+        Ok(pending)
+    }
+
+    fn finish(&self) {
+        self.lock().current = None;
+    }
+}
+
 impl Handle {
-    pub fn equip_gear(
-        &self,
-        gear: &Gear,
-        stopped: &dyn Fn() -> bool,
-    ) -> Result<Vec<Missing>, ActionError> {
+    pub fn equip_gear(&self, gear: &Gear, stop: &GearStop) -> Result<Vec<Missing>, ActionError> {
         let mut wearing = Wearing {
             session: self,
-            stopped,
+            stop,
             missing: Vec::new(),
             bank_failed: None,
         };
@@ -74,7 +112,7 @@ impl Handle {
 
 struct Wearing<'a> {
     session: &'a Handle,
-    stopped: &'a dyn Fn() -> bool,
+    stop: &'a GearStop,
     missing: Vec<Missing>,
     bank_failed: Option<ActionError>,
 }
@@ -127,7 +165,7 @@ impl Wearing<'_> {
         }
         let deadline = Instant::now() + REPLY_TIMEOUT;
         while held_qty(self.session, item.id) >= item.qty {
-            if (self.stopped)() {
+            if self.stop.stopped() {
                 return Err(ActionError::Cancelled);
             }
             let left = deadline.saturating_duration_since(Instant::now());
@@ -148,23 +186,14 @@ impl Wearing<'_> {
     }
 
     fn run(&self, act: impl FnOnce(&Handle) -> Pending) -> Result<(), ActionError> {
-        if (self.stopped)() {
-            return Err(ActionError::Cancelled);
-        }
-        let pending = act(self.session);
-        loop {
-            if let Some(result) = pending.wait_for(STOP_CHECK) {
-                return result;
-            }
-            if (self.stopped)() {
-                self.session.cancel(pending.id());
-                return Err(ActionError::Cancelled);
-            }
-        }
+        let pending = self.stop.start(|| act(self.session))?;
+        let result = pending.wait();
+        self.stop.finish();
+        result
     }
 
     fn held(&mut self, name: &str) -> Result<Option<Item>, ActionError> {
-        if (self.stopped)() {
+        if self.stop.stopped() {
             return Err(ActionError::Cancelled);
         }
         if let Some(item) = carried(self.session, name) {
