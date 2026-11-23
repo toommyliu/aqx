@@ -728,6 +728,11 @@ function Log(props: { account: Account; packets?: boolean }) {
       if (stuck()) requestAnimationFrame(newest);
     }),
   );
+  const resized = new ResizeObserver(() => {
+    if (stuck()) ref.scrollTop = ref.scrollHeight;
+  });
+  onMount(() => resized.observe(ref));
+  onCleanup(() => resized.disconnect());
 
   return (
     <>
