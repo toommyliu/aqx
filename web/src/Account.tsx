@@ -999,9 +999,10 @@ function Drops(props: { drops: Stack[]; index: number; registered: Registered | 
     if (!next.delete(id)) next.add(id);
     setChosen(next);
   };
-  const accept = async (ids: number[]) => {
+  const settle = async (action: { pick_up: number[] } | { reject: number[] }) => {
+    const [verb, ids] = "reject" in action ? ["rejecting", action.reject] : ["accepting", action.pick_up];
     try {
-      report(await api.act(targetsOf([props.index]), { pick_up: ids }), `accepting ${ids.length} drop${ids.length === 1 ? "" : "s"}`);
+      report(await api.act(targetsOf([props.index]), action), `${verb} ${ids.length} drop${ids.length === 1 ? "" : "s"}`);
       setChosen(new Set<number>());
     } catch (e) {
       report([{ account: props.index, error: e instanceof Error ? e.message : String(e) }], "");
@@ -1012,11 +1013,17 @@ function Drops(props: { drops: Stack[]; index: number; registered: Registered | 
       <div class="toolbar">
         <DropSwitch pending={props.drops.length} registered={props.registered} />
         <Search label="Search drops" />
-        <button type="button" disabled={chosen().size === 0} onClick={() => accept([...chosen()])}>
+        <button type="button" disabled={chosen().size === 0} onClick={() => settle({ pick_up: [...chosen()] })}>
           Accept {chosen().size || ""}
         </button>
-        <button type="button" disabled={props.drops.length === 0} onClick={() => accept(props.drops.map((d) => d.id))}>
+        <button type="button" disabled={chosen().size === 0} onClick={() => settle({ reject: [...chosen()] })}>
+          Reject {chosen().size || ""}
+        </button>
+        <button type="button" disabled={props.drops.length === 0} onClick={() => settle({ pick_up: props.drops.map((d) => d.id) })}>
           Accept all
+        </button>
+        <button type="button" disabled={props.drops.length === 0} onClick={() => settle({ reject: props.drops.map((d) => d.id) })}>
+          Reject all
         </button>
       </div>
       <Table

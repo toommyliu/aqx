@@ -128,6 +128,7 @@ export type Action =
   | "clear_queue"
   | "next"
   | { pick_up: number[] }
+  | { reject: number[] }
   | { equip: number }
   | { equip_set: string }
   | { registry: Edit }

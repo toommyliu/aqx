@@ -1017,6 +1017,16 @@ impl Account {
         Ok(())
     }
 
+    pub fn reject(&self, items: Vec<ItemId>) -> Result<(), &'static str> {
+        let session = self.board().session().cloned().ok_or("offline")?;
+        for item in items {
+            if let Err(e) = session.reject_drop(item).wait() {
+                self.say(format!("couldn't reject a drop: {e}"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn gear_sets(&self) -> impl Iterator<Item = &str> {
         self.gear.keys().map(String::as_str)
     }

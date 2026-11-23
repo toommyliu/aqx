@@ -2834,6 +2834,64 @@ fn picks_up_drops_while_the_bag_has_room() {
 }
 
 #[test]
+fn rejecting_a_drop_clears_the_offer_until_it_drops_again() {
+    let (step, next) = mpsc::channel::<()>();
+    let (asked, picking) = mpsc::channel::<()>();
+    let harness = Harness::start(Options::default(), move |listener| {
+        let mut peer = Peer::accept(&listener);
+        peer.serve_to_ready();
+        let offer = |id: i64, name: &str| {
+            json_message(json!({"cmd": "dropItem", "items": {id.to_string(): {
+                "ItemID": id, "sName": name, "sType": "Item", "iStk": 10, "iQty": 1,
+            }}}))
+        };
+        peer.send(&offer(1, "Bone Dust"));
+        peer.send(&offer(2, "Ash"));
+        next.recv().unwrap();
+        peer.send(&offer(1, "Bone Dust"));
+        peer.expect(&packet::get_drop(AreaId(42), ItemId(2)));
+        asked.send(()).unwrap();
+        next.recv().unwrap();
+        peer.send(&json_message(json!({
+            "cmd": "getDrop", "bSuccess": 1, "ItemID": 2, "CharItemID": 7002, "iQty": 1,
+        })));
+        peer.expect(&packet::logout());
+    });
+    let session = &harness.session;
+    session.ready().wait().unwrap();
+    let pending = |session: &Handle| -> Vec<ItemId> {
+        session.snapshot().drops.iter().map(|d| d.id).collect()
+    };
+    while pending(session).len() < 2 {
+        thread::sleep(Duration::from_millis(5));
+    }
+    session.reject_drop(ItemId(1)).wait().unwrap();
+    assert_eq!(pending(session), [ItemId(2)]);
+    let missing = session.reject_drop(ItemId(1)).wait();
+    assert!(matches!(missing, Err(ActionError::NoTarget(_))));
+    step.send(()).unwrap();
+    while pending(session).len() < 2 {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(pending(session), [ItemId(2), ItemId(1)]);
+    let pick = session.pick_drop(ItemId(2));
+    picking.recv().unwrap();
+    let busy = session.reject_drop(ItemId(2)).wait();
+    assert!(matches!(busy, Err(ActionError::Unusable(_))));
+    step.send(()).unwrap();
+    pick.wait().unwrap();
+    assert!(
+        session
+            .snapshot()
+            .inventory
+            .iter()
+            .any(|i| i.id == ItemId(2))
+    );
+    session.logout();
+    harness.finish();
+}
+
+#[test]
 fn a_join_leaves_combat_before_and_after_sending_and_waits_out_a_death_before_sending() {
     let (step, next) = mpsc::channel::<()>();
     let harness = Harness::start(Options::default(), move |listener| {

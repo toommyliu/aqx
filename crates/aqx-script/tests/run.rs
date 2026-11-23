@@ -1429,6 +1429,7 @@ fn inventory_and_drops_follow_the_bag() {
           script.log(yield* drops.pickup(300));
           script.log(yield* drops.pickup("health potion"));
           script.log(inventory.count("Health Potion"), drops.pending.map((d) => d.name).join());
+          script.log(yield* drops.reject("mace"), yield* drops.reject("mace"), drops.pending.length);
           yield* packets.send("apply-enhancement");
           yield* packets.once({ kind: "json", cmd: "enhanceItemShop" });
           script.log(inventory.get(100)?.enhancement, inventory.get(102)?.enhancement, player.gold, player.coins);
@@ -1449,6 +1450,7 @@ fn inventory_and_drops_follow_the_bag() {
             "no_room",
             "picked",
             "7 Mace",
+            "rejected gone 0",
             "Lucky +5, Awe Blast null 800 30",
         ]
     );
