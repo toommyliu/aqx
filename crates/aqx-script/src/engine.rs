@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -18,8 +18,8 @@ use rquickjs::{
 use crate::act::{self, Act, Answer, Reply, Started};
 use crate::native::{Host, Internals};
 use crate::{
-    Account, Cancel, Edit, External, Level, LoadError, Outcome, Output, Relogged, Start, Wake,
-    events, forward, restore, source, views,
+    Account, Cancel, Edit, External, Level, LoadError, Member, Outcome, Output, Relogged, Start,
+    Wake, events, forward, restore, source, views,
 };
 
 const MAIN: TaskId = TaskId(0);
@@ -77,6 +77,8 @@ enum Op<'js> {
     Relogin(Option<String>),
     Logout,
     EquipSet(String),
+    ArmyJoin(String),
+    ArmyStep(String, serde_json::Value),
 }
 
 enum End<'js> {
@@ -107,6 +109,8 @@ pub struct Engine<'js> {
     externals: HashMap<u64, TaskId>,
     next_external: u64,
     gearing: HashMap<u64, GearStop>,
+    army: Option<Member>,
+    army_waits: HashSet<u64>,
     link: Link,
     logged_out: bool,
 }
@@ -198,6 +202,8 @@ impl<'js> Engine<'js> {
             externals: HashMap::new(),
             next_external: 0,
             gearing: HashMap::new(),
+            army: None,
+            army_waits: HashSet::new(),
             link: Link::Live,
             logged_out: false,
             internals: loaded.internals,
@@ -709,8 +715,64 @@ impl<'js> Engine<'js> {
         Ok(())
     }
 
+    fn army_answer(&mut self, task: TaskId) -> (u64, crate::army::Answer) {
+        let id = self.external(task);
+        self.army_waits.insert(id);
+        let wake = self.wake.clone();
+        let answer = Box::new(move |result| {
+            let _ = wake.send(Wake::External(id, External::Army(result)));
+        });
+        (id, answer)
+    }
+
+    fn join_army(&mut self, task: TaskId, name: &str) -> rquickjs::Result<()> {
+        if !self.army_waits.is_empty() {
+            let error = self.aqx_error("another army step is still waiting")?;
+            self.ready.push_back((task, Resume::Throw(error)));
+            return Ok(());
+        }
+        self.army = None;
+        let Some((armies, account)) = self.account.armies() else {
+            let error =
+                self.aqx_error("armies run only in a session started with aqx up or aqx web")?;
+            self.ready.push_back((task, Resume::Throw(error)));
+            return Ok(());
+        };
+        let (id, answer) = self.army_answer(task);
+        match armies.join(name, &account, answer) {
+            Ok(member) => self.army = Some(member),
+            Err(message) => {
+                self.externals.remove(&id);
+                self.army_waits.remove(&id);
+                self.wait(task, Wait::Running);
+                let error = self.aqx_error(&message)?;
+                self.ready.push_back((task, Resume::Throw(error)));
+            }
+        }
+        Ok(())
+    }
+
+    fn army_step(
+        &mut self,
+        task: TaskId,
+        label: &str,
+        value: serde_json::Value,
+    ) -> rquickjs::Result<()> {
+        if self.army.is_none() {
+            let error = self.aqx_error("join an army with yield* army.join(name) first")?;
+            self.ready.push_back((task, Resume::Throw(error)));
+            return Ok(());
+        }
+        let (_, answer) = self.army_answer(task);
+        if let Some(member) = &self.army {
+            member.arrive(label, value, answer);
+        }
+        Ok(())
+    }
+
     fn on_external(&mut self, id: u64, external: External) -> rquickjs::Result<()> {
         self.gearing.remove(&id);
+        self.army_waits.remove(&id);
         let task = self
             .externals
             .remove(&id)
@@ -723,6 +785,8 @@ impl<'js> Engine<'js> {
                 Resume::Next(self.ctx.json_parse(json)?)
             }
             External::Geared(Err(message)) => Resume::Throw(self.aqx_error(&message)?),
+            External::Army(Ok(value)) => Resume::Next(self.ctx.json_parse(value.to_string())?),
+            External::Army(Err(message)) => Resume::Throw(self.aqx_error(&message)?),
             External::Relogged(Ok(relogged)) => {
                 let (session, server) = relogged.take();
                 if let Err(e) = forward(&session, self.generation, self.wake.clone()) {
@@ -782,6 +846,7 @@ impl<'js> Engine<'js> {
             Resume::Next(value) => self.next.call::<_, Object>((This(generator), value)),
             Resume::Throw(error) => self.throw.call::<_, Object>((This(generator), error)),
         };
+        self.drop_left_army();
         match called {
             Ok(result) if result.get::<_, bool>("done")? => {
                 self.settle(id, Ok(result.get("value")?))
@@ -828,6 +893,8 @@ impl<'js> Engine<'js> {
             }
             Some(Op::Relogin(server)) => self.start_relogin(id, server)?,
             Some(Op::EquipSet(name)) => self.start_equip_set(id, &name)?,
+            Some(Op::ArmyJoin(name)) => self.join_army(id, &name)?,
+            Some(Op::ArmyStep(label, value)) => self.army_step(id, &label, value)?,
             Some(Op::Logout) => {
                 self.logged_out = true;
                 self.session.logout();
@@ -891,6 +958,14 @@ impl<'js> Engine<'js> {
             "relogin" => Some(Op::Relogin(op.get("server").ok()?)),
             "logout" => Some(Op::Logout),
             "equipSet" => Some(Op::EquipSet(op.get("set").ok()?)),
+            "armyJoin" => Some(Op::ArmyJoin(op.get("army").ok()?)),
+            "armyStep" => {
+                let json: String = op.get("json").ok()?;
+                Some(Op::ArmyStep(
+                    op.get("label").ok()?,
+                    serde_json::from_str(&json).ok()?,
+                ))
+            }
             "once" => Some(Op::Once(op.get("event").ok()?, filter()?)),
             "packet" => {
                 let json = match op.get::<_, String>("packetKind").ok()?.as_str() {
@@ -979,6 +1054,22 @@ impl<'js> Engine<'js> {
     }
 
     fn halt(&mut self, id: TaskId) -> rquickjs::Result<()> {
+        let halted = self.unwind(id);
+        self.drop_left_army();
+        halted
+    }
+
+    fn drop_left_army(&mut self) {
+        if self
+            .ctx
+            .userdata::<Host>()
+            .is_some_and(|host| host.take_left_army())
+        {
+            self.army = None;
+        }
+    }
+
+    fn unwind(&mut self, id: TaskId) -> rquickjs::Result<()> {
         let Some(task) = self.tasks.remove(&id) else {
             return Ok(());
         };
@@ -996,6 +1087,9 @@ impl<'js> Engine<'js> {
                 self.externals.remove(&external);
                 if let Some(stop) = self.gearing.remove(&external) {
                     stop.stop(&self.session);
+                }
+                if self.army_waits.remove(&external) {
+                    self.army = None;
                 }
             }
             Wait::Running

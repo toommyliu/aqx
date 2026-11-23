@@ -33,6 +33,7 @@ pub struct Host<'js> {
     args: RefCell<String>,
     gear: RefCell<String>,
     restart: Cell<bool>,
+    left_army: Cell<bool>,
 }
 
 unsafe impl<'js> JsLifetime<'js> for Host<'js> {
@@ -60,6 +61,7 @@ impl<'js> Host<'js> {
             args: RefCell::new("{}".into()),
             gear: RefCell::new("{}".into()),
             restart: Cell::new(false),
+            left_army: Cell::new(false),
         }
     }
 
@@ -73,6 +75,10 @@ impl<'js> Host<'js> {
 
     pub fn set_gear(&self, json: String) {
         self.gear.replace(json);
+    }
+
+    pub fn take_left_army(&self) -> bool {
+        self.left_army.replace(false)
     }
 
     pub fn restart_requested(&self) -> bool {
@@ -140,7 +146,7 @@ fn host<'a, 'js>(ctx: &'a Ctx<'js>) -> rquickjs::runtime::UserDataGuard<'a, Host
 
 pub struct Native;
 
-const NAMES: [&str; 28] = [
+const NAMES: [&str; 29] = [
     "aqxVersion",
     "versionCompare",
     "setCounterHold",
@@ -151,6 +157,7 @@ const NAMES: [&str; 28] = [
     "autoRelogin",
     "server",
     "restart",
+    "leaveArmy",
     "args",
     "gear",
     "spawn",
@@ -336,6 +343,10 @@ impl ModuleDef for Native {
         exports.export(
             "restart",
             Function::new(ctx.clone(), |ctx: Ctx<'js>| host(&ctx).restart.set(true))?,
+        )?;
+        exports.export(
+            "leaveArmy",
+            Function::new(ctx.clone(), |ctx: Ctx<'js>| host(&ctx).left_army.set(true))?,
         )?;
         exports.export(
             "args",

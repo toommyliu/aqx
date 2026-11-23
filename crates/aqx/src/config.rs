@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aqx_client::Gear;
+use aqx_script::ArmyConfig;
 use jiff::tz::TimeZone;
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,22 @@ pub struct Config {
     #[serde(default)]
     #[schemars(description = "Settings for the Skua script library.")]
     pub skua: SkuaConfig,
+    #[serde(default, rename = "army")]
+    #[schemars(description = "Accounts whose scripts step together after army.join.")]
+    pub armies: Vec<ArmyTable>,
+}
+
+#[derive(Deserialize, JsonSchema, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct ArmyTable {
+    #[schemars(description = "What scripts pass to army.join.")]
+    name: String,
+    #[schemars(
+        description = "The accounts in the army, by name. Their order sets each member's number."
+    )]
+    accounts: Vec<String>,
+    #[schemars(description = "Room number scripts read from the joined army.")]
+    room: Option<u32>,
 }
 
 #[derive(Deserialize, JsonSchema, Debug, Default)]
@@ -374,7 +391,21 @@ pub fn skua_update(path: &Path) -> SkuaUpdate {
 }
 
 pub fn read(text: &str, dir: &Path) -> Result<Vec<Account>, String> {
-    parse(text)?.accounts(dir)
+    let config = parse(text)?;
+    let accounts = config.accounts(dir)?;
+    config.armies(&accounts)?;
+    Ok(accounts)
+}
+
+pub fn armies(path: &Path) -> Result<Vec<ArmyConfig>, String> {
+    let at = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let path = std::path::absolute(path).map_err(|e| at(&e))?;
+    let text = std::fs::read_to_string(&path).map_err(|e| at(&e))?;
+    let config = parse(&text).map_err(|e| at(&e))?;
+    let accounts = config
+        .accounts(path.parent().unwrap_or(Path::new(".")))
+        .map_err(|e| at(&e))?;
+    config.armies(&accounts).map_err(|e| at(&e))
 }
 
 fn password<'de, D: serde::Deserializer<'de>>(given: D) -> Result<String, D::Error> {
@@ -413,6 +444,41 @@ impl Config {
             ));
         }
         Ok(accounts)
+    }
+}
+
+impl Config {
+    fn armies(&self, accounts: &[Account]) -> Result<Vec<ArmyConfig>, String> {
+        let mut armies: Vec<ArmyConfig> = Vec::new();
+        for army in &self.armies {
+            let name = army.name.trim();
+            if name.is_empty() {
+                return Err("an [[army]] has no name".into());
+            }
+            if armies.iter().any(|a| a.name.eq_ignore_ascii_case(name)) {
+                return Err(format!("two armies are named {name}"));
+            }
+            if army.accounts.is_empty() {
+                return Err(format!("army {name} lists no accounts"));
+            }
+            let mut members: Vec<String> = Vec::new();
+            for listed in &army.accounts {
+                let account = accounts
+                    .iter()
+                    .find(|a| a.name.eq_ignore_ascii_case(listed.trim()))
+                    .ok_or_else(|| format!("army {name} lists {listed}, which isn't an account"))?;
+                if members.contains(&account.name) {
+                    return Err(format!("army {name} lists {listed} twice"));
+                }
+                members.push(account.name.clone());
+            }
+            armies.push(ArmyConfig {
+                name: name.to_owned(),
+                accounts: members,
+                room: army.room,
+            });
+        }
+        Ok(armies)
     }
 }
 
@@ -980,6 +1046,71 @@ mod tests {
         )
         .unwrap_err();
         assert!(typo.contains("unknown field `weapom`"), "{typo}");
+    }
+
+    #[test]
+    fn an_army_lists_accounts_by_name_in_order() {
+        let accounts = r#"
+            [defaults]
+            server = "Twilly"
+
+            [[account]]
+            name = "main"
+            user = "player1"
+            password = "x"
+
+            [[account]]
+            user = "player2"
+            password = "y"
+        "#;
+        let armies = |extra: &str| {
+            let config = parse(&format!("{accounts}\n{extra}")).unwrap();
+            let accounts = config.accounts(Path::new("/srv/aqx")).unwrap();
+            config.armies(&accounts)
+        };
+        assert_eq!(
+            armies("[[army]]\nname = \"ultras\"\naccounts = [\"PLAYER2\", \"Main\"]\nroom = 4821")
+                .unwrap(),
+            [ArmyConfig {
+                name: "ultras".into(),
+                accounts: vec!["player2".into(), "main".into()],
+                room: Some(4821),
+            }]
+        );
+        for (bad, why) in [
+            (
+                "[[army]]\nname = \"u\"\naccounts = [\"alt9\"]",
+                "lists alt9, which isn't an account",
+            ),
+            (
+                "[[army]]\nname = \"u\"\naccounts = [\"main\", \"MAIN\"]",
+                "lists MAIN twice",
+            ),
+            ("[[army]]\nname = \"u\"\naccounts = []", "lists no accounts"),
+            (
+                "[[army]]\nname = \" \"\naccounts = [\"main\"]",
+                "has no name",
+            ),
+            (
+                "[[army]]\nname = \"u\"\naccounts = [\"main\"]\n[[army]]\nname = \"U\"\naccounts = [\"main\"]",
+                "two armies are named U",
+            ),
+        ] {
+            let error = armies(bad).unwrap_err();
+            assert!(error.contains(why), "{bad}: {error}");
+        }
+        let typo = parse(&format!(
+            "{accounts}\n[[army]]\nname = \"u\"\nacounts = [\"main\"]"
+        ));
+        assert!(typo.unwrap_err().contains("unknown field `acounts`"));
+        assert!(
+            read(
+                &format!("{accounts}\n[[army]]\nname = \"u\"\naccounts = [\"alt9\"]"),
+                Path::new("/srv/aqx")
+            )
+            .is_err(),
+            "loading the config checks its armies"
+        );
     }
 
     #[test]

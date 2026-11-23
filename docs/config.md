@@ -109,6 +109,25 @@ Items match by name, ignoring case. Equipping a set puts on the class first, the
 
 An item that can't go on doesn't stop the rest of the set. That covers an item that's missing, needs an enhancement or doesn't fit in the bag, and an item in `use` that the server doesn't take within 10 seconds. Scripts get the list of those items from `inventory.equipSet`. In the web UI, an account with gear sets has an Equip set menu in its Inventory tab, and the account's log lists what didn't go on.
 
+## Armies
+
+An `[[army]]` names accounts whose scripts step together. A script joins with `army.join`, and then every member waits for the others at each `army.sync`, `army.gather` and `army.until`. See [Coordinate accounts](writing-scripts.md#coordinate-accounts).
+
+```toml
+[[army]]
+name = "ultras"
+accounts = ["player1", "healer"]
+room = 4821
+```
+
+| Key | Meaning |
+| --- | --- |
+| `name` | What scripts pass to `army.join`. Required. |
+| `accounts` | The accounts in the army, by `name`. Their order sets each member's number, starting at 1. Required. |
+| `room` | Room number the joined scripts read, so they can meet in the same room. |
+
+Armies form inside one session, so every account in one has to run in the same `aqx up` or `aqx web` session. `aqx run` can't join an army. Changes to armies take effect after a session restart.
+
 ## Skua updates
 
 A `[skua]` section sets what a session does with the [Skua script library](skua.md) when it starts:

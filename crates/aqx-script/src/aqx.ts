@@ -210,6 +210,16 @@ export interface Missing {
   readonly why: string;
 }
 
+/** This account's place in an `[[army]]` from aqx.toml. */
+export interface ArmyMember {
+  readonly name: string;
+  /** Starts at 1 and follows the order of the army's `accounts`. */
+  readonly number: number;
+  readonly size: number;
+  readonly room: number | null;
+  readonly players: readonly string[];
+}
+
 export interface QuestRegistration {
   readonly id: number;
   readonly reward?: ItemRef;
@@ -380,6 +390,7 @@ interface Native {
   registered(json: string): void;
   stop(reason: string | undefined): void;
   restart(): void;
+  leaveArmy(): void;
   version(): number;
   view(name: "player"): PlayerFields | null;
   view(name: "map"): MapFields | null;
@@ -1019,6 +1030,77 @@ export const wait = {
     }
     for (const [, value] of entries) unstarted.delete(value);
     return action(() => ({ kind: "first", entries: entries.map(([key, value]) => [key, delegate(value)]) }));
+  },
+};
+
+/** Other members send their own values, so literal types widen. */
+type Shared<T> = T extends string
+  ? string
+  : T extends number
+    ? number
+    : T extends boolean
+      ? boolean
+      : T extends readonly unknown[]
+        ? readonly Shared<T[number]>[]
+        : { readonly [K in keyof T]: Shared<T[K]> };
+
+function finite(value: unknown): boolean {
+  if (typeof value === "number") return Number.isFinite(value);
+  if (value !== null && typeof value === "object") return Object.values(value).every(finite);
+  return true;
+}
+
+function armyStep<T>(label: string, value: unknown): Action<T> {
+  return action(() => ({ kind: "armyStep", label, json: JSON.stringify(value) }));
+}
+
+/**
+ * Steps that every account in the army reaches together. Each member has to
+ * reach the same steps in the same order; a member that reaches a different
+ * step, stops waiting, or whose script ends, ends the army, and every step
+ * still waiting throws.
+ */
+export const army = {
+  /** Waits until every account the army lists has joined it. */
+  join(name: string): Action<ArmyMember> {
+    const army = checkText(name, "army.join's name");
+    return action(() => ({ kind: "armyJoin", army }));
+  },
+  /** Waits until every member reaches this sync. */
+  sync(label: string): Action<void> {
+    const step = `sync ${JSON.stringify(checkText(label, "army.sync's label"))}`;
+    return runnable(function* (): Generator<Step, void, unknown> {
+      yield* armyStep<unknown>(step, null);
+    });
+  },
+  /** Waits for every member's value and resolves to all of them, in member order. */
+  gather<T extends ArgValue>(label: string, value: T): Action<readonly Shared<T>[]> {
+    const step = `gather ${JSON.stringify(checkText(label, "army.gather's label"))}`;
+    if (value === undefined) throw new TypeError("army.gather takes a value to share");
+    if (!finite(value)) throw new RangeError("army.gather can't share NaN or Infinity");
+    return armyStep<readonly Shared<T>[]>(step, value);
+  },
+  /**
+   * Runs rounds of `work` until `done` is true for every member at once. A
+   * member that is done keeps working while the others aren't.
+   */
+  until(label: string, step: { readonly done: () => boolean; readonly work: () => Action<unknown> }): Action<void> {
+    const name = `until ${JSON.stringify(checkText(label, "army.until's label"))}`;
+    if (step === null || typeof step !== "object" || typeof step.done !== "function" || typeof step.work !== "function") {
+      throw new TypeError("army.until takes { done, work } functions");
+    }
+    const { done, work } = step;
+    return runnable(function* (): Generator<Step, void, unknown> {
+      let settled = false;
+      try {
+        while (!(yield* armyStep<readonly boolean[]>(name, Boolean(done()))).every(Boolean)) {
+          yield* work();
+        }
+        settled = true;
+      } finally {
+        if (!settled) native.leaveArmy();
+      }
+    });
   },
 };
 
