@@ -1044,6 +1044,12 @@ type Shared<T> = T extends string
         ? readonly Shared<T[number]>[]
         : { readonly [K in keyof T]: Shared<T[K]> };
 
+function finite(value: unknown): boolean {
+  if (typeof value === "number") return Number.isFinite(value);
+  if (value !== null && typeof value === "object") return Object.values(value).every(finite);
+  return true;
+}
+
 function armyStep<T>(label: string, value: unknown): Action<T> {
   return action(() => ({ kind: "armyStep", label, json: JSON.stringify(value) }));
 }
@@ -1071,6 +1077,7 @@ export const army = {
   gather<T extends ArgValue>(label: string, value: T): Action<readonly Shared<T>[]> {
     const step = `gather ${JSON.stringify(checkText(label, "army.gather's label"))}`;
     if (value === undefined) throw new TypeError("army.gather takes a value to share");
+    if (!finite(value)) throw new RangeError("army.gather can't share NaN or Infinity");
     return armyStep<readonly Shared<T>[]>(step, value);
   },
   /**

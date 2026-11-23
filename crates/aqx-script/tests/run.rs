@@ -2198,6 +2198,11 @@ fn a_caught_error_in_army_until_work_leaves_the_army() {
         import { army, script, type Script } from "aqx";
 
         export default function* (): Script {
+          try {
+            army.gather("limits", { most: Infinity });
+          } catch (e) {
+            script.log((e as Error).message);
+          }
           yield* army.join("duo");
           try {
             yield* army.until("farm", {
@@ -2228,7 +2233,11 @@ fn a_caught_error_in_army_until_work_leaves_the_army() {
     assert_eq!(outcome, Ok(Outcome::Finished));
     assert_eq!(
         logs(&outputs),
-        ["boom", "join an army with yield* army.join(name) first"]
+        [
+            "army.gather can't share NaN or Infinity",
+            "boom",
+            "join an army with yield* army.join(name) first"
+        ]
     );
     let (first_round, second_round) = alt.join().unwrap();
     assert_eq!(first_round.unwrap(), json!([false, false]));
