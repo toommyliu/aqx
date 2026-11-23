@@ -530,6 +530,7 @@ enum Action {
 enum Direct {
     Sync,
     Send(String),
+    RejectDrop(ItemId),
     Cast { slot: String, target: Option<Aim> },
 }
 
@@ -958,6 +959,10 @@ impl Handle {
 
     pub fn pick_drop(&self, item: ItemId) -> Pending {
         self.act(Action::PickDrop(item))
+    }
+
+    pub fn reject_drop(&self, item: ItemId) -> Pending {
+        self.direct(Direct::RejectDrop(item))
     }
 
     pub fn complete_quest(&self, id: QuestId, reward: Option<ItemId>, times: u32) -> Pending {
@@ -1489,6 +1494,7 @@ impl Session {
         let result = match direct {
             Direct::Sync => Ok(()),
             Direct::Send(text) => self.ensure_ready().map(|()| self.send(&text)),
+            Direct::RejectDrop(item) => self.reject_drop(item),
             Direct::Cast { .. } if self.pending_cast.is_some() => Err(ActionError::Unusable(
                 "another skill is waiting to fire".into(),
             )),
@@ -3048,6 +3054,21 @@ impl Session {
         let area = room.area;
         self.send(&packet::get_drop(area, item));
         Ok(now + REPLY_TIMEOUT)
+    }
+
+    fn reject_drop(&mut self, item: ItemId) -> Result<(), ActionError> {
+        if matches!(&self.current, Some(Op::Pick { item: picking, .. }) if *picking == item) {
+            return Err(ActionError::Unusable(format!(
+                "item {item} is being picked up"
+            )));
+        }
+        let drops = &mut self.inventory.drops;
+        let at = drops
+            .iter()
+            .position(|d| d.id == item)
+            .ok_or_else(|| ActionError::NoTarget(format!("item {item} isn't on offer")))?;
+        drops.remove(at);
+        Ok(())
     }
 
     fn picked(&mut self, id: ItemId, ok: bool) {

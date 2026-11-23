@@ -36,6 +36,7 @@ pub enum Act {
     Withdraw(Ref),
     Swap(Ref, Ref),
     Pickup(Ref),
+    Reject(Ref),
     LoadQuests(Vec<i64>),
     Accept(i64),
     Complete {
@@ -74,6 +75,7 @@ pub enum Answer {
     Killed,
     Arrived,
     Picked,
+    Rejected,
     View(&'static str),
 }
 
@@ -102,6 +104,8 @@ impl Answer {
             (Answer::Picked, Ok(())) => Ok(Reply::Text("picked")),
             (Answer::Picked, Err(ActionError::Unusable(_))) => Ok(Reply::Text("no_room")),
             (Answer::Picked, Err(ActionError::NoTarget(_))) => Ok(Reply::Text("gone")),
+            (Answer::Rejected, Ok(())) => Ok(Reply::Text("rejected")),
+            (Answer::Rejected, Err(ActionError::NoTarget(_))) => Ok(Reply::Text("gone")),
             (Answer::View(view), Ok(())) => Ok(Reply::View(view)),
             (_, Err(e)) => Err(e.to_string()),
         }
@@ -167,6 +171,7 @@ pub fn parse(op: &Object<'_>) -> Option<Act> {
         "withdraw" => Some(Act::Withdraw(item()?)),
         "swap" => Some(Act::Swap(item()?, reference("bankItem")??)),
         "pickup" => Some(Act::Pickup(item()?)),
+        "reject" => Some(Act::Reject(item()?)),
         "loadQuests" => {
             let ids: Array = op.get("ids").ok()?;
             Some(Act::LoadQuests(
@@ -206,6 +211,14 @@ fn slot_name(slot: u32) -> Option<&'static str> {
         5 => Some("i1"),
         _ => None,
     }
+}
+
+fn offered(world: &World, item: &Ref) -> Option<ItemId> {
+    let offer = world.drops.iter().find(|offer| match item {
+        Ref::Id(id) => offer.id.0 == *id,
+        Ref::Name(name) => offer.name.eq_ignore_ascii_case(name),
+    });
+    offer.map(|offer| offer.id)
 }
 
 fn ref_of(value: Value<'_>) -> Option<Ref> {
@@ -255,16 +268,14 @@ impl Act {
                 session.swap(held(item)?, banked(world, bank)?),
                 Answer::Nothing,
             ),
-            Act::Pickup(item) => {
-                let offer = world.drops.iter().find(|offer| match &item {
-                    Ref::Id(id) => offer.id.0 == *id,
-                    Ref::Name(name) => offer.name.eq_ignore_ascii_case(name),
-                });
-                match offer {
-                    Some(offer) => sent(session.pick_drop(offer.id), Answer::Picked),
-                    None => Ok(Started::Answered("gone")),
-                }
-            }
+            Act::Pickup(item) => match offered(world, &item) {
+                Some(id) => sent(session.pick_drop(id), Answer::Picked),
+                None => Ok(Started::Answered("gone")),
+            },
+            Act::Reject(item) => match offered(world, &item) {
+                Some(id) => sent(session.reject_drop(id), Answer::Rejected),
+                None => Ok(Started::Answered("gone")),
+            },
             Act::LoadQuests(ids) => {
                 let ids: Vec<QuestId> = ids.into_iter().map(QuestId).collect();
                 sent(session.load_quests(&ids), Answer::Nothing)

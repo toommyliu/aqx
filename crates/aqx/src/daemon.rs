@@ -178,7 +178,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 18;
+pub const PROTOCOL: u32 = 19;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -1290,6 +1290,7 @@ mod tests {
                 args: vec![("a".into(), "1".into())],
             },
             Action::PickUp(vec![1]),
+            Action::Reject(vec![1]),
             Action::Equip(1),
             Action::EquipSet("boss".into()),
             Action::Registry(aqx_script::Edit::RegisterDrop(aqx_script::Item::Id(1))),
@@ -1404,7 +1405,7 @@ mod tests {
              Act.action.move_queued.id Act.action.move_queued.to Act.action.pick_up Act.action.record \
              Act.action.registry Act.action.registry.register_drop Act.action.registry.register_quest \
              Act.action.registry.register_quest.id Act.action.registry.register_quest.reward \
-             Act.action.registry.unregister_drop Act.action.registry.unregister_quest \
+             Act.action.registry.unregister_drop Act.action.registry.unregister_quest Act.action.reject \
              Act.action.run Act.action.run.args Act.action.run.path Act.action.set_queued_args \
              Act.action.set_queued_args.args Act.action.set_queued_args.id Act.action.switch \
              Act.action.unqueue Busy Configured Configured.args Configured.path Frame Frame.accounts \
@@ -1466,7 +1467,7 @@ mod tests {
              Resumable.script.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (18, pinned),
+            (19, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

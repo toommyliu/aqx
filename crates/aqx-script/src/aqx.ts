@@ -888,6 +888,10 @@ export const drops = view(
     pickup(item: ItemRef): Action<"picked" | "no_room" | "gone"> {
       return act("pickup", { item: itemRef(item, "drops.pickup's item") });
     },
+    /** Clears the offer without taking it. "gone" when the offer is no longer pending. */
+    reject(item: ItemRef): Action<"rejected" | "gone"> {
+      return act("reject", { item: itemRef(item, "drops.reject's item") });
+    },
     get registered(): readonly ItemRef[] {
       return [...wantedDrops];
     },

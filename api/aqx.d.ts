@@ -523,6 +523,8 @@ export declare const bank: BankFields & {
 export declare const drops: DropsFields & {
     /** "gone" when the offer is no longer pending. */
     pickup(item: ItemRef): Action<"picked" | "no_room" | "gone">;
+    /** Clears the offer without taking it. "gone" when the offer is no longer pending. */
+    reject(item: ItemRef): Action<"rejected" | "gone">;
     readonly registered: readonly ItemRef[];
     /** Includes offers already pending. A failed pickup is logged and stays pending. */
     register(...items: ItemRef[]): void;
