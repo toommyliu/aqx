@@ -90,6 +90,43 @@ events.on("killed", function* () {
 });
 ```
 
+## Coordinate accounts
+
+Accounts listed in an [`[[army]]`](config.md#armies) in `aqx.toml` can run scripts that wait for each other. `army.join` waits until every account in the army has joined, then resolves to this account's place in it:
+
+```ts
+import { army, combat, inventory, map, player, script, wait, type Script } from "aqx";
+
+export default function* (): Script {
+	const me = yield* army.join("ultras");
+	yield* map.join(`ultraezrajal-${me.room}`, { cell: "Boss" });
+	yield* army.sync("in the room");
+
+	const classes = yield* army.gather("class", player.class);
+	if (me.number === 1) script.log(classes.join(", "));
+
+	yield* army.until("insignias", {
+		done: () => inventory.count("Ezrajal Insignia") >= 5,
+		work: () => combat.kill("Ultra Ezrajal", { waitForRespawn: true }),
+	});
+}
+```
+
+- `army.sync(label)` waits until every member reaches the same sync.
+- `army.gather(label, value)` waits the same way and resolves to every member's value, in the order of the army's `accounts`.
+- `army.until(label, { done, work })` runs `work` in rounds until `done` is true for every member in the same round. A member that is done keeps working, so it still helps the others.
+
+Every member has to reach the same steps in the same order. The army ends when a member reaches a different step, when a member's script ends or restarts, and when a member stops waiting, such as when a step or an `army.until` loses a `wait.first`. Every step still waiting then throws an `AqxError` that says what happened. The army forms again once every account calls `army.join` again. `restart_on_error` restarts only scripts that throw, so a member whose script finished or stopped has to be started again before the others can meet it.
+
+To give up on a step after a while, race it with `wait.ms`:
+
+```ts
+const met = yield* wait.first({ all: army.sync("in the room"), timeout: wait.ms(120_000) });
+if (met.winner === "timeout") script.stop("the army didn't gather in 2 minutes");
+```
+
+An account waiting at a step doesn't count as stalled.
+
 ## Clean up in `finally` blocks
 
 When the script stops, aqx runs its `finally` blocks. That happens on `script.stop()`, on Ctrl+C, when the connection drops, and when an action loses a `wait.first`. A `catch` block can't keep the script going after a stop.

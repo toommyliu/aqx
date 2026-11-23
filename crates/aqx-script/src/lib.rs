@@ -1,5 +1,6 @@
 mod act;
 mod args;
+mod army;
 mod check;
 mod engine;
 mod events;
@@ -22,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub use args::{Arg, ArgKind, Scalar};
+pub use army::{Armies, ArmyConfig, Member};
 pub use check::check;
 
 pub const AQX_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -91,6 +93,9 @@ pub trait Account: Send + Sync {
     fn gear(&self) -> BTreeMap<String, Gear> {
         BTreeMap::new()
     }
+    fn armies(&self) -> Option<(Armies, String)> {
+        None
+    }
 }
 
 pub struct Start {
@@ -150,6 +155,7 @@ enum External {
     Servers(Result<Vec<Server>, String>),
     Relogged(Result<Relogged, String>),
     Geared(Result<Vec<Missing>, String>),
+    Army(Result<Value, String>),
 }
 
 struct Relogged(Option<(Handle, String)>);

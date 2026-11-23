@@ -11,7 +11,7 @@ use aqx_client::{
     ActionError, CombatState, DeviceId, Direction, Event, Gear, GearStop, Handle, ItemId,
     NoticeKind, Phase, Server, Spot, api,
 };
-use aqx_script::{Cancel, Edit, Level, Outcome, Output, Registered};
+use aqx_script::{Armies, Cancel, Edit, Level, Outcome, Output, Registered};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
@@ -1176,14 +1176,16 @@ pub struct Fleet {
     device: DeviceId,
     accounts: Accounts,
     logins: Arc<Spacing>,
+    armies: Armies,
 }
 
 impl Fleet {
-    pub fn new(device: DeviceId) -> Fleet {
+    pub fn new(device: DeviceId, armies: Armies) -> Fleet {
         Fleet {
             device,
             accounts: Accounts::default(),
             logins: Arc::new(Spacing::new(LOGIN_GAP, LOGIN_JITTER)),
+            armies,
         }
     }
 
@@ -1244,6 +1246,7 @@ impl Fleet {
             account: Arc::clone(&account),
             fleet: Arc::clone(&self.accounts),
             logins: Arc::clone(&self.logins),
+            armies: self.armies.clone(),
             login: Login {
                 device: self.device.clone(),
                 user: config.user,
@@ -1381,6 +1384,9 @@ impl Fleet {
         for account in self.accounts() {
             let stalled = {
                 let mut board = account.board();
+                if self.armies.waiting(&account.name) {
+                    board.progressed(now);
+                }
                 let due = matches!(&board.run, Run::Running { cancel, .. } if !cancel.is_paused())
                     && !board.stalled
                     && now.saturating_duration_since(board.last_progress) >= account.stall_after
@@ -1447,6 +1453,7 @@ struct Linked {
     account: Arc<Account>,
     fleet: Accounts,
     logins: Arc<Spacing>,
+    armies: Armies,
     login: Login,
 }
 
@@ -1852,6 +1859,10 @@ impl aqx_script::Account for Linked {
     fn gear(&self) -> BTreeMap<String, Gear> {
         self.login.gear.clone()
     }
+
+    fn armies(&self) -> Option<(Armies, String)> {
+        Some((self.armies.clone(), self.account.name.clone()))
+    }
 }
 
 #[cfg(test)]
@@ -1861,6 +1872,7 @@ impl Fleet {
             device: aqx_client::testing::device_id(),
             accounts: Arc::new(RwLock::new(accounts)),
             logins: Arc::new(Spacing::new(Duration::ZERO, Duration::ZERO)),
+            armies: Armies::default(),
         }
     }
 }
@@ -1949,6 +1961,7 @@ mod tests {
             account: Arc::new(account),
             fleet: Accounts::default(),
             logins: Arc::new(Spacing::new(Duration::ZERO, Duration::ZERO)),
+            armies: Armies::default(),
             login: Login {
                 device: aqx_client::testing::device_id(),
                 user: "player1".into(),
@@ -2047,6 +2060,57 @@ mod tests {
             "time spent reconnecting isn't a stall"
         );
         harness.session.logout();
+    }
+
+    #[test]
+    fn an_account_waiting_for_its_army_does_not_stall() {
+        let harness = Harness::start(Options::default(), |listener| {
+            let mut peer = Peer::accept(&listener);
+            peer.serve_to_ready();
+            peer.expect_logout();
+        });
+        harness.session.ready().wait().unwrap();
+        let (account, _inbox) = Account::queueing("player1", Some(farm()));
+        let account = Arc::new(account);
+        let fleet = Fleet {
+            armies: Armies::new(vec![aqx_script::ArmyConfig {
+                name: "duo".into(),
+                accounts: vec!["player1".into(), "player2".into()],
+                room: None,
+            }]),
+            ..Fleet::of(vec![Arc::clone(&account)])
+        };
+        let now = Instant::now();
+        {
+            let mut board = account.board();
+            board.link = Link::Session {
+                session: harness.session.clone(),
+                server: "Test".into(),
+                since: now,
+            };
+            board.run = Run::Running {
+                script: PathBuf::from("/srv/farm.ts"),
+                cancel: Cancel::default(),
+            };
+            board.last_progress = now - Duration::from_secs(3600);
+        }
+        let member = fleet
+            .armies
+            .join("duo", "player1", Box::new(|_| {}))
+            .unwrap();
+        fleet.supervise(now);
+        assert!(
+            !account.board().stalled(),
+            "waiting for the army isn't a stall"
+        );
+        drop(member);
+        fleet.supervise(now + Duration::from_secs(301));
+        assert!(
+            account.board().stalled(),
+            "the stall clock starts once it stops waiting"
+        );
+        harness.session.logout();
+        harness.finish();
     }
 
     #[test]
@@ -2707,6 +2771,7 @@ mod tests {
             account: Arc::new(account),
             fleet: Accounts::default(),
             logins,
+            armies: Armies::default(),
             login: Login {
                 device: aqx_client::testing::device_id(),
                 user: "player1".into(),

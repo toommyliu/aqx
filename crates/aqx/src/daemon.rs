@@ -702,7 +702,11 @@ pub fn serve(config: &Path, wanted: &Wanted, print: Print) -> anyhow::Result<()>
             .collect::<anyhow::Result<_>>()?,
     };
     refresh_skua_library(config::skua_update(&config));
-    let fleet = Arc::new(Fleet::new(aqx_client::DeviceId::load()?));
+    let armies = config::armies(&config).map_err(anyhow::Error::msg)?;
+    let fleet = Arc::new(Fleet::new(
+        aqx_client::DeviceId::load()?,
+        aqx_script::Armies::new(armies),
+    ));
     fleet.add_new(accounts);
     open(&fleet, wanted, &first, &read_resume(&paths.resume));
     fleet.watch(config.clone());

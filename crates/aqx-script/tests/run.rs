@@ -13,8 +13,8 @@ use aqx_client::{Gear, Handle, Server};
 use aqx_protocol::packet;
 use aqx_protocol::{AreaId, EntityId, ItemId, QuestId, ShopId};
 use aqx_script::{
-    Account, Cancel, Edit, Item, Level, LoadError, Outcome, Output, Registered, RegisteredQuest,
-    Script, Start,
+    Account, Armies, ArmyConfig, Cancel, Edit, Item, Level, LoadError, Outcome, Output, Registered,
+    RegisteredQuest, Script, Start,
 };
 use std::sync::{Arc, Mutex};
 
@@ -2054,6 +2054,185 @@ fn a_script_reads_and_equips_the_accounts_gear_sets() {
             "no gear set named raid; add [defaults.gear.raid] or [account.gear.raid] to aqx.toml",
         ]
     );
+}
+
+struct Enlisted(Armies);
+
+impl Account for Enlisted {
+    fn servers(&self) -> Result<Vec<Server>, String> {
+        Err("no server list in this test".into())
+    }
+
+    fn login(&self, _: &str) -> Result<Handle, String> {
+        Err("no logins in this test".into())
+    }
+
+    fn armies(&self) -> Option<(Armies, String)> {
+        Some((self.0.clone(), "main".into()))
+    }
+}
+
+#[test]
+fn a_script_steps_with_its_army_and_leaving_a_step_ends_it() {
+    let armies = Armies::new(vec![ArmyConfig {
+        name: "duo".into(),
+        accounts: vec!["main".into(), "alt".into()],
+        room: None,
+    }]);
+    let (formed, joined) = mpsc::channel();
+    let alt = armies
+        .join(
+            "duo",
+            "alt",
+            Box::new(move |result| {
+                let _ = formed.send(result);
+            }),
+        )
+        .unwrap();
+    let alt = thread::spawn(move || {
+        joined.recv().unwrap().unwrap();
+        let step = |label: &str, value: Value| {
+            let (answered, heard) = mpsc::channel();
+            alt.arrive(
+                label,
+                value,
+                Box::new(move |result| {
+                    let _ = answered.send(result);
+                }),
+            );
+            heard.recv_timeout(Duration::from_secs(5)).unwrap()
+        };
+        let gathered = step("gather \"class\"", json!("AP"));
+        let first_round = step("until \"never\"", json!(false));
+        let second_round = step("until \"never\"", json!(false));
+        (gathered, first_round, second_round)
+    });
+    let harness = serve(|_| {});
+    let dir = Dir::new();
+    let path = dir.file(
+        "main.ts",
+        r#"
+        import { army, script, wait, type Script } from "aqx";
+
+        export default function* (): Script {
+          script.log(JSON.stringify(yield* army.join("duo")));
+          script.log(JSON.stringify(yield* army.gather("class", "LOO")));
+          const raced = yield* wait.first({
+            farm: army.until("never", { done: () => false, work: () => wait.ms(10_000) }),
+            timeout: wait.ms(50),
+          });
+          script.log(raced.winner);
+          try {
+            yield* army.sync("after");
+          } catch (e) {
+            script.log((e as Error).message);
+          }
+        }"#,
+    );
+    let (outcome, outputs) = run_with(
+        &harness,
+        &path,
+        &Cancel::default(),
+        &[],
+        Arc::new(Enlisted(armies)),
+        |_| {},
+    );
+    finish(harness);
+    assert_eq!(outcome, Ok(Outcome::Finished));
+    assert_eq!(
+        logs(&outputs),
+        [
+            r#"{"name":"duo","number":1,"players":["main","alt"],"room":null,"size":2}"#,
+            r#"["LOO","AP"]"#,
+            "timeout",
+            "join an army with yield* army.join(name) first",
+        ]
+    );
+    let (gathered, first_round, second_round) = alt.join().unwrap();
+    assert_eq!(gathered.unwrap(), json!(["LOO", "AP"]));
+    assert_eq!(first_round.unwrap(), json!([false, false]));
+    assert_eq!(
+        second_round.unwrap_err(),
+        "the duo army ended: main left",
+        "a member whose until stops during work leaves the army"
+    );
+}
+
+#[test]
+fn a_caught_error_in_army_until_work_leaves_the_army() {
+    let armies = Armies::new(vec![ArmyConfig {
+        name: "duo".into(),
+        accounts: vec!["main".into(), "alt".into()],
+        room: None,
+    }]);
+    let (formed, joined) = mpsc::channel();
+    let alt = armies
+        .join(
+            "duo",
+            "alt",
+            Box::new(move |result| {
+                let _ = formed.send(result);
+            }),
+        )
+        .unwrap();
+    let alt = thread::spawn(move || {
+        joined.recv().unwrap().unwrap();
+        let step = |value: Value| {
+            let (answered, heard) = mpsc::channel();
+            alt.arrive(
+                "until \"farm\"",
+                value,
+                Box::new(move |result| {
+                    let _ = answered.send(result);
+                }),
+            );
+            heard.recv_timeout(Duration::from_secs(5)).unwrap()
+        };
+        (step(json!(false)), step(json!(false)))
+    });
+    let harness = serve(|_| {});
+    let dir = Dir::new();
+    let path = dir.file(
+        "main.ts",
+        r#"
+        import { army, script, type Script } from "aqx";
+
+        export default function* (): Script {
+          yield* army.join("duo");
+          try {
+            yield* army.until("farm", {
+              done: () => false,
+              work: function* (): Script {
+                throw new Error("boom");
+              },
+            });
+          } catch (e) {
+            script.log((e as Error).message);
+          }
+          try {
+            yield* army.sync("after");
+          } catch (e) {
+            script.log((e as Error).message);
+          }
+        }"#,
+    );
+    let (outcome, outputs) = run_with(
+        &harness,
+        &path,
+        &Cancel::default(),
+        &[],
+        Arc::new(Enlisted(armies)),
+        |_| {},
+    );
+    finish(harness);
+    assert_eq!(outcome, Ok(Outcome::Finished));
+    assert_eq!(
+        logs(&outputs),
+        ["boom", "join an army with yield* army.join(name) first"]
+    );
+    let (first_round, second_round) = alt.join().unwrap();
+    assert_eq!(first_round.unwrap(), json!([false, false]));
+    assert_eq!(second_round.unwrap_err(), "the duo army ended: main left");
 }
 
 struct Relogins(Mutex<Vec<Harness>>);
