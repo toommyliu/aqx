@@ -2417,9 +2417,11 @@ fn a_death_keeps_the_target_and_stops_the_auto_attack_until_the_respawn_move() {
         peer.serve_farm();
         peer.expect(&gar(0, "aa", &[ONE]));
         peer.answer(0, 1);
-        peer.send(&json_message(
-            json!({"cmd": "ct", "p": {"player1": {"intHP": 0, "intState": 0}}}),
-        ));
+        peer.send(&json_message(json!({
+            "cmd": "ct",
+            "p": {"player1": {"intHP": 0, "intState": 0}},
+            "anims": [{"cInf": "m:1", "tInf": "p:7", "msg": ["The walls fall", " and so do you."]}],
+        })));
         next.recv().unwrap();
         peer.expect_silence(Duration::from_millis(1500));
         peer.send(&json_message(
