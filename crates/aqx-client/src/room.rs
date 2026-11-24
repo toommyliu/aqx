@@ -620,10 +620,25 @@ pub(crate) struct Tick {
 
 #[derive(Deserialize)]
 pub(crate) struct Anim {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "anim_message")]
     pub(crate) msg: Option<String>,
     #[serde(rename = "cInf", default)]
     pub(crate) caster: Option<String>,
+}
+
+fn anim_message<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Message {
+        Line(String),
+        Lines(Vec<String>),
+    }
+    Ok(
+        Option::<Message>::deserialize(d)?.map(|message| match message {
+            Message::Line(line) => line,
+            Message::Lines(lines) => lines.join(","),
+        }),
+    )
 }
 
 #[cfg(test)]
