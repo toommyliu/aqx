@@ -2481,10 +2481,6 @@ dialog.tall .dialog-foot.sticky {
   height: 18px;
 }
 
-.accounts li .tick {
-  margin: 0 0.5px;
-}
-
 .state.s-run {
   color: var(--run);
 }

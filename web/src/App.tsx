@@ -748,9 +748,7 @@ function AccountList(props: { onOpen: (i: number | null) => void }) {
                   when={selecting()}
                   fallback={<Mark tone={tone(a())} />}
                 >
-                  <span class="mark">
-                    <span class="tick" classList={{ on: isMarked(i()) }} aria-hidden="true" />
-                  </span>
+                  <span class="tick" classList={{ on: isMarked(i()) }} aria-hidden="true" />
                 </Show>
                 <span class="name">{hide(a().name)}</span>
                 <Show when={revealed() && JUMPS[i()]}>
