@@ -489,11 +489,12 @@ fn ps_lines(
         if scheduled {
             let next = a.next.as_ref().map(|next| {
                 let at = jiff::Timestamp::from_millisecond(next.at_ms).unwrap_or(now);
-                format!(
-                    "{} {}",
-                    file(&next.script),
-                    crate::schedule::when(at, now, tz)
-                )
+                let first = next.scripts.first().map(|s| file(s)).unwrap_or_default();
+                let more = match next.scripts.len() {
+                    0 | 1 => String::new(),
+                    n => format!(" +{}", n - 1),
+                };
+                format!("{first}{more} {}", crate::schedule::when(at, now, tz))
             });
             row.insert(6, next.unwrap_or_default());
         }
@@ -798,14 +799,17 @@ mod tests {
         );
         let [(_, farming), (_, banned)] = rows;
         let next = |hours: i64| crate::view::Next {
-            script: "/srv/dailies.ts".into(),
+            scripts: vec!["/srv/dailies.ts".into()],
             at_ms: now.as_millisecond() + hours * 3_600_000,
         };
         let rows = [
             (
                 "farm".into(),
                 Shown {
-                    next: Some(next(1)),
+                    next: Some(crate::view::Next {
+                        scripts: vec!["/srv/dailies.ts".into(), "/srv/mine.ts".into()],
+                        ..next(1)
+                    }),
                     ..farming
                 },
             ),
@@ -821,7 +825,7 @@ mod tests {
             ps_lines(&rows, now, &utc),
             [
                 "SESSION  ACCOUNT  STATE    SCRIPT                  WHERE         UP    NEXT                  STATUS",
-                "farm     player1  running  void-aura.ts, 2 queued  farm-1 Enter  1h6m  dailies.ts 09:00      Void Aura 12/7500",
+                "farm     player1  running  void-aura.ts, 2 queued  farm-1 Enter  1h6m  dailies.ts +1 09:00   Void Aura 12/7500",
                 "farm     healer   offline  1 queued                                    dailies.ts Sat 14:00  login rejected: banned",
             ]
         );

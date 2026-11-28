@@ -30,7 +30,7 @@ pub struct Shown {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Next {
-    pub script: String,
+    pub scripts: Vec<String>,
     pub at_ms: i64,
 }
 
@@ -334,8 +334,8 @@ impl Shown {
                 .as_ref()
                 .map(|r| r.path().display().to_string()),
             queue: board.queue.iter().cloned().collect(),
-            next: account.upcoming(&board).map(|(script, at)| Next {
-                script,
+            next: account.upcoming(&board).map(|(scripts, at)| Next {
+                scripts,
                 at_ms: at.as_millisecond(),
             }),
             gear: account.gear_sets().map(str::to_owned).collect(),

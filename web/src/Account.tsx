@@ -558,8 +558,9 @@ function UpNext(props: { account: Account; index: number }) {
       </ol>
       <Show when={a().next}>
         {(next) => (
-          <p class="next-run muted ellipsis">
-            Scheduled: <span data-tip={hide(next().script)}>{fileName(next().script)}</span> {runAt(next().at_ms)}
+          <p class="next-run muted">
+            Scheduled: <span data-tip={hide(next().scripts.join(", "))}>{next().scripts.map(fileName).join(", ")}</span>{" "}
+            {runAt(next().at_ms)}
           </p>
         )}
       </Show>

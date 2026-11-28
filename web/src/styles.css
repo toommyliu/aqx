@@ -747,6 +747,7 @@ meter.mp::-moz-meter-bar {
 .up-next .next-run {
   margin: 2px 0 0;
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .register {
