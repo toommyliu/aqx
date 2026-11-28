@@ -753,13 +753,16 @@ impl Account {
         Ok(())
     }
 
-    pub fn upcoming(&self, board: &Board) -> Option<(String, Timestamp)> {
-        self.schedules
+    pub fn upcoming(&self, board: &Board) -> Option<(Vec<String>, Timestamp)> {
+        let at = board.due.iter().flatten().min().copied()?;
+        let labels = self
+            .schedules
             .iter()
             .zip(&board.due)
-            .filter_map(|(schedule, due)| due.map(|at| (schedule, at)))
-            .min_by_key(|(_, at)| *at)
-            .map(|(schedule, at)| (schedule.label(), at))
+            .filter(|(_, due)| **due == Some(at))
+            .map(|(schedule, _)| schedule.label())
+            .collect();
+        Some((labels, at))
     }
 
     fn fire_due(&self, now: Timestamp) {
@@ -2490,6 +2493,26 @@ mod tests {
         );
         hang_up_in.send(()).unwrap();
         harness.session.logout();
+    }
+
+    #[test]
+    fn upcoming_names_every_schedule_due_first() {
+        let at = |path: &str| {
+            every_day(Script {
+                path: PathBuf::from(path),
+                args: Vec::new(),
+            })
+        };
+        let (mut account, _inbox) = Account::queueing("player1", None);
+        account.schedules = vec![at("/srv/later.ts"), at("/srv/mine.ts"), at("/srv/daily.ts")];
+        assert_eq!(account.upcoming(&account.board()), None);
+        let now = Timestamp::now();
+        let later = now + jiff::SignedDuration::from_hours(1);
+        account.board().due = vec![Some(later), Some(now), Some(now)];
+        assert_eq!(
+            account.upcoming(&account.board()),
+            Some((vec!["/srv/mine.ts".into(), "/srv/daily.ts".into()], now))
+        );
     }
 
     #[test]

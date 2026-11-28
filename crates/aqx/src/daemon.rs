@@ -178,7 +178,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-pub const PROTOCOL: u32 = 19;
+pub const PROTOCOL: u32 = 20;
 const BUILD: &str = env!("AQX_BUILD");
 
 pub struct Session {
@@ -1251,7 +1251,7 @@ mod tests {
                 scheduled: true,
             }],
             next: Some(crate::view::Next {
-                script: "/srv/dailies.ts".into(),
+                scripts: vec!["/srv/dailies.ts".into()],
                 at_ms: 0,
             }),
             gear: vec!["boss".into()],
@@ -1447,7 +1447,7 @@ mod tests {
              Frame.accounts.game.temp Frame.accounts.game.temp.category Frame.accounts.game.temp.equipped Frame.accounts.game.temp.id \
              Frame.accounts.game.temp.max Frame.accounts.game.temp.name Frame.accounts.game.temp.qty \
              Frame.accounts.game.temp.rank Frame.accounts.gear Frame.accounts.gold_gained Frame.accounts.name \
-             Frame.accounts.next Frame.accounts.next.at_ms Frame.accounts.next.script \
+             Frame.accounts.next Frame.accounts.next.at_ms Frame.accounts.next.scripts \
              Frame.accounts.queue Frame.accounts.queue.id Frame.accounts.queue.scheduled Frame.accounts.queue.script \
              Frame.accounts.queue.script.args Frame.accounts.queue.script.path \
              Frame.accounts.recording Frame.accounts.registered Frame.accounts.registered.drops \
@@ -1467,7 +1467,7 @@ mod tests {
              Resumable.script.path";
         assert_eq!(
             (PROTOCOL, shape.as_str()),
-            (19, pinned),
+            (20, pinned),
             "the session messages changed: bump PROTOCOL, then update this shape"
         );
     }

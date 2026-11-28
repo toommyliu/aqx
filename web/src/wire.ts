@@ -88,7 +88,7 @@ type AccountData = {
   game: Game | null;
   recording: string | null;
   queue: Queued[];
-  next: { script: string; at_ms: number } | null;
+  next: { scripts: string[]; at_ms: number } | null;
   gear: string[];
 };
 
